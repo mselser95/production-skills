@@ -52,6 +52,17 @@ are allowed only as commentary AROUND a structured artifact, never instead of
 one. If no format exists for what you produced, that is a gap to report, not a
 license to improvise.
 
+## 4b. Verify the effect, never the report
+
+An agent's evidence block is a CLAIM. Before reporting any work as done —
+yours or a dispatched agent's — run the probe that proves the effect exists in
+the running system and read its output (`probes/verify-standard.sh`; the
+catalog and its anti-patterns live in `verification-probes.md`). Probe the
+wiring in the entrypoints, not the definition; run the tool, don't check for
+its config. "The port exists" is not "the tracer is wired"; "the job exists"
+is not "the scan passes". A probe you did not execute is a dimension you did
+not deliver.
+
 ## 5. Bail honestly
 
 When you cannot complete the task, say so with state:

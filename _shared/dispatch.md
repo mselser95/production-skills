@@ -38,9 +38,14 @@ dispatch bug.
    context (or checklist), its ONE task, the output format, and its bail
    conditions — never "figure it out". The quality of the dispatch message is
    what makes the cheap model sufficient.
-5. **Results come back as data.** Scouts return structured reports;
-   implementers return the IMPLEMENTED evidence block or a BAIL; mechanics
-   return operation outputs. The orchestrator synthesizes — it never re-does.
+5. **Results come back as data, and claims get probed.** Scouts return
+   structured reports; implementers return the IMPLEMENTED evidence block or a
+   BAIL; mechanics return operation outputs. The orchestrator synthesizes — it
+   never re-does the work, and it never RELAYS a claim as a fact: every
+   dimension a dispatch touched is re-verified by the orchestrator with
+   `probes/verify-standard.sh` before it appears in any report. Relaying an
+   agent's block verbatim is how a no-op port and an empty profiling section
+   both shipped as "done".
 6. **No recursive expensive spawns.** A cheap agent never spawns another
    agent; if its task needs judgment, it bails back to the orchestrator
    (that IS the routing working).

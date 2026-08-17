@@ -202,9 +202,14 @@ Rules for this phase:
   orchestrator consolidates into ONE pull request unless told otherwise, runs
   the gates on the consolidated result, and reviews the diffs against their
   contracts before opening it.
-- Report at the end: what was implemented, what was declined with its reason,
-  and the short list of open decisions — nothing else should be left for the
-  human to remember.
+- **Completion gate:** run `references/probes/verify-standard.sh` and make its
+  output the report. A dimension is done when its probe passes; a probe that
+  fails is a finding you fix or declare, never a line you soften. You may not
+  claim completion from the dispatched agents' evidence blocks — probe the
+  effect yourself (preamble §4b).
+- Report at the end: the probe table, what was declined with its reason, and
+  the short list of open decisions — nothing else should be left for the human
+  to remember.
 
 ## Guardrails
 
