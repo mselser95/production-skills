@@ -368,10 +368,29 @@ printf 'PASS %d   FAIL %d   NA %d\n' "$passes" "$fails" "$nas"
 # Evidence record (dimension 11, reproducibility): one file per commit so the
 # question "under what standard was this commit held?" is answerable later
 # without archaeology. Ephemeral stdout is not a record.
+#
+# The filename is an ATTESTATION, so it must not be able to lie. Stamping
+# `git rev-parse HEAD` onto a run measured on a DIRTY tree produces a record
+# named after a commit it was never measured on — and that is not theoretical:
+# a committed record named <sha>.json once claimed a PASS for a probe row that
+# did not exist in that commit's tree, on a commit whose workflow file was
+# invalid and would have FAILED it. A plausible-looking green attestation for a
+# state that never passed is worse than no record at all.
+#
+# So: a record named <sha>.json means "measured on exactly that commit". A dirty
+# tree gets a name that cannot be mistaken for one, and carries tree_clean:false.
 sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+  tree_clean=false
+  record=".prod/evidence/dirty-${sha}-$(date -u +%Y%m%dT%H%M%SZ).json"
+else
+  tree_clean=true
+  record=".prod/evidence/$sha.json"
+fi
 mkdir -p .prod/evidence
 {
   printf '{\n  "commit": "%s",\n' "$sha"
+  printf '  "tree_clean": %s,\n' "$tree_clean"
   printf '  "generated_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "spec": "%s",\n' "$SPEC"
   printf '  "tier": "%s",\n' "$(grep -m1 -E '^[[:space:]]*tier:' "$SPEC" 2>/dev/null | tr -d ' ' | cut -d: -f2)"
@@ -385,7 +404,8 @@ mkdir -p .prod/evidence
       "$(printf '%s' "$e" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
   done
   printf '\n  ]\n}\n'
-} > ".prod/evidence/$sha.json"
-echo "evidence record: .prod/evidence/$sha.json"
+} > "$record"
+echo "evidence record: $record${tree_clean:+}"
+[[ "$tree_clean" == true ]] || echo "  (working tree DIRTY: this record is NOT an attestation for commit $sha)"
 (( fails == 0 )) || { echo "VERDICT: INCOMPLETE — $fails probe(s) failed; each is a finding, not a reason to soften the probe."; exit 1; }
 echo "VERDICT: COMPLETE — every dimension probed; N/A entries are ratified declines."
