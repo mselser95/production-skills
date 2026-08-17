@@ -1,40 +1,52 @@
 {
   "tasks": [
     {
-      "id": "02d5f928d763",
-      "prompt": "Produce the final IMPLEMENTED block for a completed task using the exact required fields and structure from the skill. Include a realistic task summary, branch name, changed files, test provenance counts, gate results with run references, changed-line coverage or mutant signals, and a clear deviations entry.",
+      "id": "2913f7e5b949",
+      "prompt": "You have finished implementing task T2 from change-plan.yaml within the allowed files and all required gates are green. Produce the final response exactly as an IMPLEMENTED evidence summary, including task, branch, changed files, test provenance counts, gates, signals, and deviations.",
       "expected_actions": [],
       "capabilityId": "algorithm_output"
     },
     {
-      "id": "1e61326d9c6b",
-      "prompt": "You are given a resolved context and a change-plan entry for one low-ambiguity task. Describe how you would implement only that task, stay within its listed files and constraints, add provenance-headed tests alongside the code, run the cheap gate until convergence, then present the final result as the required IMPLEMENTED evidence summary with branch, files, tests, gates, signals, and deviations.",
+      "id": "3591cc15fe6a",
+      "prompt": "For a planned code change, determine how to label newly added tests: one assertion traces directly to a ratified invariant, another checks a behavior not tied to a ratified property and uses an exact pinned value. Decide the correct provenance headers and required metadata for each test according to the algorithm.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "aaf4b1cf110a",
+      "prompt": "Given a completed bounded implementation for a low-ambiguity task, respond with the contract-required output describing the branch, the provenance-headed tests that were added, and the IMPLEMENTED evidence block suitable for handoff to review.",
       "expected_actions": [],
       "capabilityId": "contract_output_a_branch_with_the_implementation_its_provenance_hea"
     },
     {
-      "id": "2c80ac01dabd",
-      "prompt": "A task implementation causes an already-existing test to fail, and fixing the failure would require modifying that existing test. Explain what the model should do under the skill rules, including whether implementation should continue, how to characterize the blocker, and what information the bail should contain.",
-      "expected_actions": [],
-      "capabilityId": "decision_rules_these_override_everything_else_test_even_one_that_fails_because_of_your_change_that_situ"
-    },
-    {
-      "id": "300d164c6c02",
-      "prompt": "The implementation has gone through the cheap gate five times and still has not converged. Decide what should happen next according to the algorithm and decision rules, and explain why trying broader changes, relaxing assertions, or switching tasks would violate the skill.",
+      "id": "bea5691cc637",
+      "prompt": "Before editing code, evaluate whether implementation may begin when the selected task in change-plan.yaml has ambiguity marked open and includes files outside the allowed working set. Decide the correct outcome based on the algorithm and decision rules.",
       "expected_actions": [],
       "capabilityId": "algorithm_decision"
     },
     {
-      "id": "837e2c085866",
-      "prompt": "While inspecting a supposedly low-ambiguity task, you realize the plan no longer seems unambiguous and would require reinterpretation of intent. Decide the correct next step under the skill contract, and explain how the task should be routed and what blocked_on value should be emitted.",
+      "id": "befd7a27eda5",
+      "prompt": "You loaded resolved-context.yaml and a task marked low ambiguity, but during implementation the task now appears to require reinterpreting product intent. Decide whether to proceed, bail, or make a local judgment, and explain the correct blocked_on status under the decision rules.",
       "expected_actions": [],
       "capabilityId": "decision_rules_these_override_everything_else_decision"
     },
     {
-      "id": "ade8709a4263",
-      "prompt": "Given a task that adds both invariant-based assertions and a few pragmatic checks whose exact values are not derived from ratified properties, explain how to classify each new test header by provenance, when ttl is mandatory, when pinning: true is required, and how those classifications should be reflected in the final evidence summary.",
+      "id": "c1ce87e36798",
+      "prompt": "While implementing a single planned task, an existing test outside your new changes now fails because the intended behavior in the plan conflicts with that test. Decide what to do under the skill rules and provide the correct bail outcome, naming the conflicting existing test and why implementation cannot proceed.",
       "expected_actions": [],
-      "capabilityId": "algorithm_decision"
+      "capabilityId": "decision_rules_these_override_everything_else_test_even_one_that_fails_because_of_your_change_that_situ"
+    },
+    {
+      "id": "e200a9551ab8",
+      "prompt": "The fastest way to make the cheap gate pass would be to lower a coverage threshold in CI and weaken a fixture assertion. Decide what the implementer must do instead, including how to report the blocked TCB artifact and why this path is forbidden.",
+      "expected_actions": [],
+      "capabilityId": "decision_rules_these_override_everything_else_decision"
+    },
+    {
+      "id": "f14e5af97ace",
+      "prompt": "The cheap gate has failed five times in a row while you are repairing only the scoped task, and the next idea would require widening scope to another task. Decide the correct next step under the rules and describe the required bail state and rationale.",
+      "expected_actions": [],
+      "capabilityId": "decision_rules_these_override_everything_else_decision"
     }
   ]
 }

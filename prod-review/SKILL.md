@@ -44,6 +44,10 @@ change is production-grade.
 
 ## Algorithm
 
+Dispatch per `references/dispatch.md`: on large diffs, Phase 0's conventions
+recon and full-file reading fan out to `prod-scout` agents (cheap); judgment
+(phases 1–5 verdicts, calibration) stays on the session model.
+
 ### Phase 0 — Recon (before any finding exists)
 Read the repo's conventions: agent/contributor docs, linter config, and the
 dominant patterns in the untouched code around the diff. This feeds the idiom

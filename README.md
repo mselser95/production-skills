@@ -37,6 +37,16 @@ Two rules bind every skill (see the preamble for the rest):
   A weakened skill prompt is another path to green; changes to this repo go
   through the same approval flow as a ratified invariant.
 
+## The dispatch layer
+
+The economics run through `_shared/dispatch.md` (the routing table: session
+model thinks, pinned agents execute) and three agent definitions in
+`agents/`: `prod-scout` (haiku, read-only recon), `prod-implementer` (sonnet,
+one bounded task under the write-mask), `prod-mechanic` (haiku, prod-ops
+operations and curation screening). Orchestrator skills dispatch; they do not
+do mechanical work inline. Model pins live in the agent frontmatter —
+retargeting a tier is a one-line change there, never a skill edit.
+
 ## Install
 
 Skills load from `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/`. Symlink the ones
@@ -52,6 +62,8 @@ for s in prod-spec prod-review prod-incident prod-implement prod-test-synth prod
   ln -s "$(pwd)/$s" "$CFG/skills/$s"
   cp "$s/config.example.yml" "$s/config.sh"
 done
+mkdir -p "$CFG/agents"
+for a in agents/*.md; do ln -s "$(pwd)/$a" "$CFG/agents/$(basename "$a")"; done
 $EDITOR */config.sh
 ```
 

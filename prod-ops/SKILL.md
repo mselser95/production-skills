@@ -19,6 +19,10 @@ description: >
 
 # prod-ops — the mechanical layer
 
+This skill is normally EXECUTED BY the `prod-mechanic` agent (pinned to the
+cheapest model — see `references/dispatch.md`); each dispatch names ONE
+operation below.
+
 Read `references/preamble.md` first. Test provenance rules:
 `references/test-provenance.md`. Registry paths come from `config.sh`
 (`PROD_FLAGS_REGISTRY`, `PROD_WAIVERS_REGISTRY`, `PROD_QUARANTINE_REGISTRY`,

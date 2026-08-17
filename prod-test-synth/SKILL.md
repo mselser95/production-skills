@@ -19,6 +19,10 @@ description: >
 
 # prod-test-synth — candidates at volume, truth untouched
 
+This skill is normally EXECUTED BY the `prod-implementer` agent (cheap tier —
+see `references/dispatch.md`); batch fan-outs over many clauses go one agent
+per clause-group.
+
 Read `references/preamble.md` first. Every test follows
 `references/test-provenance.md` — that spec is this skill's contract.
 

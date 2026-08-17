@@ -24,6 +24,10 @@ Read `references/preamble.md` first. Output format:
 `references/incident-fixture.md`. An incident close-out that produces only a
 fix is a discarded lesson.
 
+Dispatch per `references/dispatch.md`: log/trace sweeps and minimization
+search runs can go to `prod-scout`/`prod-mechanic`; the analysis, the
+candidate invariant, and the gate attribution stay on the session model.
+
 ## Contract
 
 - **Input:** the incident's finished analysis — timeline, logs/traces, the

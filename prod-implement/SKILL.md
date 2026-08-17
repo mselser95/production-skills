@@ -16,6 +16,10 @@ description: >
 
 # prod-implement — one task, inside the contract
 
+This skill is normally EXECUTED BY the `prod-implementer` agent (pinned to a
+cheap model — see `references/dispatch.md`); an orchestrator dispatches one
+task per agent with the full contract in the dispatch message.
+
 Read `references/preamble.md` first. Inputs are artifacts in
 `references/resolved-context.md` and `references/change-plan.md` formats
 (found under `PROD_CONTEXT_DIR` from `config.sh`); tests you write follow

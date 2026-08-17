@@ -32,6 +32,11 @@ Two corpora are this skill's working capital (paths in `config.sh`):
 Maintain both: every sweep, add newly-identified refactor commits and any kata
 gap you found. A stale corpus screens nothing.
 
+Dispatch per `references/dispatch.md`: the mechanical runs (steps 2–4 —
+corpus replays, mutation dedup, kata runs) go to `prod-mechanic` agents;
+eligibility decisions, sampling, and ratification packages stay on the
+session model.
+
 ## Algorithm — test promotion (batch)
 
 1. **Collect eligibles:** candidate-lane tests inside their TTL that have run

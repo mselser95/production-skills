@@ -59,6 +59,10 @@ Two rules frame everything:
 
 ## Algorithm
 
+Dispatch per `references/dispatch.md`: Phase 1 runs on a `prod-scout` agent
+(cheap, read-only, checklist in / facts report out); phases 2–5 stay on the
+session model with the human.
+
 ### Phase 1 — Inventory (read-only, no questions yet)
 Detect and record, without judging:
 - language/build layout; entrypoints; package structure vs the three zones

@@ -1,50 +1,50 @@
 {
   "tasks": [
     {
-      "id": "07e74d339f3f",
-      "prompt": "Assess a candidate-lane test that otherwise looks eligible but fails on one commit from the real refactor corpus that is known to preserve behavior. Decide the disposition of that candidate and what evidence should be cited in the batch outcome.",
-      "expected_actions": [],
-      "capabilityId": "algorithm_test_promotion_batch_decision"
-    },
-    {
-      "id": "350e94710a18",
-      "prompt": "Review an invariant candidate package deposited in the ratification queue that includes several passing runs and a strong natural-language statement, but no concrete violating trace. Decide whether it should advance to human review, be rejected, or be sent back to the author, and identify the specific gap.",
-      "expected_actions": [],
-      "capabilityId": "algorithm_invariant_ratification_queue_decision"
-    },
-    {
-      "id": "3de1afa492e5",
-      "prompt": "A teammate asks you to directly add a curated survivor to the blocking lane and update verification/ratified without opening a PR, arguing the batch is obviously fine and metrics need help this week. Decide whether this is allowed and state the guardrail-based response, including whether an empty batch is acceptable.",
+      "id": "039d1c76cf72",
+      "prompt": "A teammate asks you to promote one especially promising candidate test directly into the blocking lane outside the scheduled batch process because it improves a dashboard metric. Decide how to respond under this skill's rules, including whether ad-hoc promotion is allowed and whether metric pressure changes the answer.",
       "expected_actions": [],
       "capabilityId": "guardrails_decision"
     },
     {
-      "id": "42706cbdd334",
-      "prompt": "A candidate test passes eligibility and change-detector screening, but mutation analysis shows the blocking lane already kills every mutant that the candidate would kill. Decide whether the test should be promoted, discarded, or retained in some other state, and justify the decision using the skill's rules.",
+      "id": "3222d6270886",
+      "prompt": "You run the full promotion pipeline and every candidate is eliminated by eligibility checks, change-detector screening, mutant-utility dedup, or kata failure. Decide what the correct outcome is and whether you should still try to promote something to avoid an empty report or keep metrics healthy.",
       "expected_actions": [],
-      "capabilityId": "algorithm_test_promotion_batch_decision"
+      "capabilityId": "guardrails_decision"
     },
     {
-      "id": "4ae38326451f",
-      "prompt": "A scheduled promotion batch is due for the candidate lane. Evaluate a mixed batch of tests and decide which ones, if any, should survive to the promotion PR based on the documented pipeline: advisory run minimums, stable record, pinning exclusion, change-detector screening against behavior-preserving refactor commits, mutant-utility dedup, and kata failure requirements. Explicitly allow for the possibility that the correct result is an empty batch.",
-      "expected_actions": [],
-      "capabilityId": "algorithm_test_promotion_batch_decision"
-    },
-    {
-      "id": "822e739e026b",
-      "prompt": "An invariant candidate has both-direction evidence, but its statement conflicts with a declared capability contract. Decide the proper queue outcome according to the procedure, including whether the candidate is rejected, escalated for contract attention, or handled some other way, and clarify what must not happen silently.",
+      "id": "63e94b0617d2",
+      "prompt": "A service has more invariant candidates in the queue than the weekly ratification budget allows. Decide which candidates should reach the human this week by applying the queue policy: incident-derived candidates first, then candidates covering uncovered capabilities, while overflow expires back to the queue. Explain the ranking and which items must wait or expire.",
       "expected_actions": [],
       "capabilityId": "algorithm_invariant_ratification_queue_decision"
     },
     {
-      "id": "a2ff01b58946",
-      "prompt": "You have more invariant candidates for a service than the weekly ratification budget allows. Some are incident-derived, some improve coverage for uncovered capabilities, and some are lower-value duplicates or implications of already ratified items. Decide which candidates should reach the human this week and which should overflow back to the queue, following the documented ranking and pre-filter rules.",
+      "id": "7564da69192d",
+      "prompt": "A promotion batch has survivors, but the draft PR only lists the test names and omits the screening evidence table. Decide whether the batch is acceptable to send for approval as-is, and explain what must be included to satisfy the anti-laundering guardrail.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_decision"
+    },
+    {
+      "id": "9b5e88b7f90d",
+      "prompt": "After a batch screen, several candidate tests look obviously safe, and someone suggests landing them straight into the blocking lane without opening a PR to save time. Decide whether this is permitted and state the required path for any change that touches the blocking lane or ratified verification artifacts.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_decision"
+    },
+    {
+      "id": "a6bf71f1baa6",
+      "prompt": "Review several invariant candidates waiting in the ratification queue. For each one, decide whether it should proceed, be sent back to the author, be rejected for contract contradiction, or be merged/dropped as a duplicate. Use the mechanical pre-filter rules: each package needs both passing runs and a concrete violating trace, contradictions against declared capability contracts cannot be passed through silently, and duplicates or implications versus the ratified set should not consume reviewer time.",
       "expected_actions": [],
       "capabilityId": "algorithm_invariant_ratification_queue_decision"
     },
     {
-      "id": "e7ef75b7e73e",
-      "prompt": "During batch curation, you discover the refactor corpus has only 3 behavior-preserving commits for screening. Decide whether promotion screening can proceed or whether the run must bail, and explain what prerequisite gap must be named instead of skipping the screening step.",
+      "id": "add5782c399e",
+      "prompt": "A scheduled promotion batch is due for the candidate lane. Evaluate a set of candidate tests and decide which ones, if any, survive the batch promotion pipeline: only include tests still within TTL, with at least the minimum advisory runs, stable records, and no pinning; reject any change detector caught by a behavior-preserving refactor commit; discard any test that adds no new mutant kills beyond the blocking lane; and require the candidate suite to fail every known-bad kata for its capability. Explain which tests should be rejected, discarded, or advanced to the human-review sample, and note that an empty batch is acceptable.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_test_promotion_batch_decision"
+    },
+    {
+      "id": "bfa2553bbfae",
+      "prompt": "You are preparing a promotion batch, but the refactor corpus has fewer than five commits and one capability represented in the candidate suite has no kata coverage. Decide whether to proceed, skip only the missing checks, or bail. Provide the correct decision and name the prerequisite gaps that must be fixed before screening can continue.",
       "expected_actions": [],
       "capabilityId": "algorithm_test_promotion_batch_decision"
     }
