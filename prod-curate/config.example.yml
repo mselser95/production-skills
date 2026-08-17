@@ -1,0 +1,11 @@
+# prod-curate configuration — copy to `config.sh` and edit. Live file is plain shell.
+# File listing known behavior-preserving commits (one SHA per line).
+PROD_REFACTOR_CORPUS=".prod/refactor-corpus.txt"
+# Directory of known-bad kata implementations, one subdir per capability class.
+PROD_KATA_DIR=".prod/katas"
+# Minimum advisory-lane runs before a candidate is promotion-eligible.
+PROD_MIN_ADVISORY_RUNS="20"
+# Percent of screening survivors sampled for human review.
+PROD_PROMOTION_SAMPLE_PCT="20"
+# Max invariant candidates per service per week that reach the human.
+PROD_RATIFY_BUDGET_PER_WEEK="3"

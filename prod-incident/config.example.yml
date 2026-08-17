@@ -1,0 +1,3 @@
+# prod-incident configuration — copy to `config.sh` and edit. Live file is plain shell.
+# Repo-relative directory for regression fixtures.
+PROD_REGRESSIONS_DIR="regressions"

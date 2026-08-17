@@ -1,0 +1,10 @@
+# prod-ops configuration — copy to `config.sh` and edit. Live file is plain shell.
+# Human veto window (minutes) before an agent-culprit revert auto-merges.
+PROD_REVERT_VETO_MINUTES="15"
+# Quarantine TTLs (days).
+PROD_QUARANTINE_TTL_DAYS="14"
+# Paths (repo-relative) of the liability registries this skill sweeps.
+PROD_FLAGS_REGISTRY="registries/flags.yaml"
+PROD_WAIVERS_REGISTRY="registries/waivers.yaml"
+PROD_QUARANTINE_REGISTRY="registries/quarantine.yaml"
+PROD_CONTRACT_DEBT_REGISTRY="registries/contract-debt.yaml"

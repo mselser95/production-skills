@@ -1,0 +1,13 @@
+# prod-spec configuration — copy to `config.sh` and edit.
+#   cp config.example.yml config.sh
+# Despite the `.yml` name on the EXAMPLE, the live file is `config.sh` and is
+# plain shell `KEY="value"`. This is the ONLY place org/repo-specific facts
+# live; SKILL.md names no org, repo, team, or channel.
+
+# Path (repo-relative) of the production spec. REQUIRED.
+PROD_SPEC_FILE="production.yaml"
+# Where task artifacts (resolved-context.yaml, change-plan.yaml) are written.
+PROD_CONTEXT_DIR=".prod/context"
+# Optional: command that emits resolved context JSON (the deterministic policy
+# engine, when it exists). Empty = parse PROD_SPEC_FILE directly (v0).
+PROD_CONTEXT_CMD=""

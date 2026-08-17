@@ -1,0 +1,3 @@
+# prod-test-synth configuration — copy to `config.sh` and edit. Live file is plain shell.
+# Max TTL (days) for candidate tests. Mandatory on every generated test.
+PROD_CANDIDATE_TTL_DAYS="30"

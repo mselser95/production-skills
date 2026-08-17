@@ -1,0 +1,5 @@
+# prod-review configuration — copy to `config.sh` and edit. Live file is plain shell.
+PROD_SPEC_FILE="production.yaml"
+PROD_CONTEXT_DIR=".prod/context"
+# Post findings to the PR (true) or print in chat only (false).
+PROD_REVIEW_POST="false"

@@ -1,0 +1,8 @@
+# prod-implement configuration — copy to `config.sh` and edit. Live file is plain shell.
+PROD_CONTEXT_DIR=".prod/context"
+# The cheap gate the loop iterates against (compile affected + lint + changed units).
+PROD_CHEAP_GATE_CMD="make check-fast"
+# The full presubmit run once converged.
+PROD_PRESUBMIT_CMD="make presubmit"
+# Hard iteration cap against the cheap gate before bailing.
+PROD_MAX_ITERATIONS="5"
