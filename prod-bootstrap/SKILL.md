@@ -26,13 +26,21 @@ Read `references/preamble.md` first. Outputs use
 `references/change-plan.md` for the refactor plan. Registry and path names
 come from `config.sh`.
 
-Two rules frame everything:
+Three rules frame everything:
 
-- **Semantic facts come from the human, never from inference.** You may
-  PROPOSE (detected boundaries, suggested classes, candidate invariants);
-  the human ratifies each one. A bootstrap that guesses the tier or invents
-  capability semantics produces a wrong contract with institutional
-  authority — worse than no spec.
+- **DERIVE, DON'T INTERROGATE.** Every threshold, obligation, scenario list,
+  and plan task comes from `references/tier-policy.yaml` (org decisions, made
+  once) and `references/dimensions.md` (the completeness checklist). The human
+  is NEVER asked for a number, a checklist, or anything a class implies. If
+  you find yourself about to ask "what coverage threshold do you want?", the
+  policy file already answered it.
+- **ONE batched confirmation, defaults pre-filled.** The only human-only input
+  is irreducibly semantic: the tier (proposed from consequence), the
+  capability set + their semantics (proposed from the inventory), the "what
+  must never happen" invariants, and any declines. Present them together with
+  your proposal for each so a single "yes" completes the bootstrap. Silence or
+  "dale" = accept the proposal; never block on a question whose default is
+  already sound and reversible.
 - **The plan is a ratchet, never a rewrite.** Brownfield repos get compliant
   at the frontier (new/changed code) plus a leverage-ordered backlog; nothing
   in the plan blocks current work on day one.
@@ -51,11 +59,16 @@ Two rules frame everything:
      future agent request in this repo pass through the pipeline
      (spec → implement → review) and validate against the standard; merged,
      never overwritten, if one already exists;
+  2c. the **failure-mode matrix** (`.prod/failure-modes.md`), auto-expanded
+     from each declared capability's class checklist in tier-policy.yaml,
+     with every scenario marked tested / untested / not-applicable;
   3. the **gap report** (format below);
   4. the **refactor plan** in change-plan format, tasks tagged
      `ambiguity: none|low|open`, ordered by leverage;
   5. per-skill `config.sh` value suggestions for this repo (gate commands,
-     paths) — printed, not written to skill dirs.
+     paths) — printed, not written to skill dirs;
+  6. **the implemented work itself** (Phase 6): branches/commits closing every
+     non-open gap, consolidated into one PR with its gates green.
 
 ## Algorithm
 
@@ -75,23 +88,43 @@ Detect and record, without judging:
   clock/random/ID injection vs direct calls in core paths, outbox/journal
   patterns on external effects, reconciliation jobs, registries.
 
-### Phase 2 — The Q&A (one question at a time, propose-then-ratify)
-Ask ONLY what cannot be derived; propose a default with evidence for each:
-1. **Tier** — propose from consequence ("this service moves X / stores Y;
-   irreversible effects found at Z ⇒ T0?"); human decides.
-2. **Capabilities** — walk the candidate list from Phase 1 one by one:
-   confirm/rename, assign class (external_effect / source_of_truth /
-   event_consumer / external_read / connection), and for each class ask its
-   semantic facts (ambiguous outcome possible? duplicates possible? staleness
-   bound? source of truth for what?). Detected-but-declined candidates are
-   recorded as explicitly out of scope.
-3. **Seed invariants** — ask the domain question directly: "what must never
-   happen in this system?" Convert each answer to a falsifiable statement;
-   these become candidate invariants in `PROD_RATIFY_QUEUE_DIR` (ratification
-   is its own moment — bootstrap never writes `verification/ratified/`).
-4. **Hot path** — is there a latency budget that excludes durable
-   orchestration? Where does it run?
-5. **Commands** — the cheap gate and presubmit commands for this repo.
+### Phase 1b — Derive everything derivable (no human involved)
+Before formulating a single question, resolve from the policy files:
+- tier requirements, thresholds, and gate/signal/trend labels →
+  `references/tier-policy.yaml` (`tiers.<k>`);
+- per-capability obligations AND the scenario denominator →
+  `tier-policy.yaml` `capability_classes.<class>` (checklists are the
+  denominator; the author never supplies scenario lists);
+- which dimensions need a gap row and which need a human answer →
+  `references/dimensions.md`;
+- the cheap-gate and presubmit commands → read the repo's build files;
+  propose, don't ask.
+Anything still unresolved after this step is either a Phase-2 semantic
+question or a Phase-1 inventory gap you must go back and fill.
+
+### Phase 2 — ONE batched confirmation (proposal-first)
+Present a single message containing your PROPOSAL for each item below, each
+with its evidence, phrased so that "yes/dale" completes it. Never a
+question-per-item interrogation; never a question whose answer the policy
+already holds.
+1. **Tier** — proposed from consequence (irreversible external effects +
+   unreconstructable data integrity ⇒ T0; feeds a T0 consumer ⇒ T1 with the
+   T0 invariant-flake rule; else T2), with the evidence that drove it.
+2. **Capabilities** — the inventory's candidate list with class assignments
+   AND the class-implied semantics pre-filled; the human confirms or corrects.
+   Detected-but-declined candidates are recorded as explicitly out of scope.
+3. **Invariants** — the one genuinely open question: "what must never happen
+   in this system?" Seed it with candidates you inferred from declared
+   metrics, doc invariants, and the code's own fail-closed checks, so the
+   human is editing a list rather than authoring one. These become packages in
+   `PROD_RATIFY_QUEUE_DIR` (ratification is its own later moment — bootstrap
+   never writes `verification/ratified/`).
+4. **Declines** — anything the inventory suggests is N/A for this system
+   (e.g. reconciliation where no durable state exists), each with the
+   rationale that will be recorded in `out_of_scope`.
+Everything else — coverage numbers, mutation policy, fuzz requirements,
+scenario lists, benchmark policy, security gates, delivery/runbook
+requirements — is DERIVED and merely REPORTED in the gap report. Do not ask.
 
 ### Phase 3 — Scaffold
 Write the spec, directories, and the AGENTS.md routing contract (Contract
@@ -101,21 +134,29 @@ additive — bootstrap never edits existing code, tests, or CI config
 (preamble §3 applies; CI wiring for new lanes is a plan task for a human or
 prod-implement under review, not a bootstrap side effect).
 
-### Phase 4 — Gap report
-One row per standard requirement, honest and complete:
+### Phase 4 — Gap report (completeness-enforced)
+Walk `references/dimensions.md` and emit a row for EVERY dimension — all ten,
+every sub-item each dimension's "Row:" line names. A missing row is a broken
+bootstrap, not a shorter report.
 
 ```
 GAP REPORT — <repo> (tier T<k>)
-| requirement | current state | gap | severity |
+| dimension | requirement (from policy) | current state | gap | severity |
 ```
-Cover at minimum: spec present; zones separation; fitness checks; clock/rand
-injection; provenance lanes; cheap gate; incident fixtures dir; registries;
-invariants ratified; reconciliation; observability of critical transitions.
-Severity is impact-based (a T0 repo without invariants outranks a missing
-registry). No row is omitted because it is embarrassing.
+Also emit, as their own rows because they are the ones humans forget:
+coverage today vs the tier signal, **tests/prod LOC ratio (informational)**,
+mutation baseline, fuzz coverage of decode boundaries, the failure-mode matrix
+completeness per capability, integration fidelity (any real dependency?),
+compatibility/breaking-change detection, benchmark baseline + capacity margin,
+recovery/reconciliation/restore, observability contract, every supply-chain
+gate, and delivery/rollback/runbooks.
+Severity is impact-based for the tier. Nothing is omitted for being
+embarrassing, and "not applicable" is a legal state ONLY with its reason.
 
-### Phase 5 — Refactor plan (the ratchet)
-Emit change-plan tasks ordered by leverage, each bounded and routable:
+### Phase 5 — Refactor plan (the ratchet, auto-populated)
+Every dimension whose Phase-4 row shows a gap MUST produce a task — the plan
+is generated from the gap report, not from recollection. Baseline task set,
+ordered by leverage:
 1. fitness checks (import bans, forbidden calls in core) — days of work,
    permanent payoff, zero behavior change;
 2. clock/random/ID injection on critical paths;
@@ -135,6 +176,35 @@ human should never have to ask "where is the fuzzing?". Tasks a cheap model
 can do are tagged `ambiguity: none` and handed to `prod-implement`; design
 decisions stay `open` with the human. State explicitly which gaps the plan
 does NOT cover and why.
+
+### Phase 6 — EXECUTE (the default; planning alone is not a deliverable)
+A gap identified and left as a plan item is a bootstrap that did half its job.
+Every task from Phase 5 whose `ambiguity` is `none` or `low` is DISPATCHED and
+driven to completion in this same run, per `references/dispatch.md`: one
+`prod-implementer` per task in its own git worktree branched from the default
+branch (parallel where independent), `prod-mechanic` for the mechanical
+baselines. What is missing gets BUILT — the scenario tests for every untested
+checklist entry, the fuzz targets on every decode boundary, the mutation
+baseline, the missing security gates, the benchmark baseline and its versioned
+workload, the tracing/observability wiring, the integration lane, the
+compatibility check, the runbooks.
+
+Rules for this phase:
+- **Only `ambiguity: open` reaches the human**, and only as a decision with a
+  recommendation ("adding a tracing dependency to a 3-dependency repo — port
+  with a no-op default, or the full library?"), never as a chore to schedule.
+- Additive capabilities the repo lacks entirely (event sourcing / replay
+  corpus, effect journaling, reconciliation, tracing) are IMPLEMENTED when the
+  dimension's policy says required for the tier — unless the system's ratified
+  semantics make them N/A (no durable state ⇒ reconciliation N/A), which is a
+  recorded decline, not a silent skip.
+- Each dispatched task lands as its own commit on its own branch; the
+  orchestrator consolidates into ONE pull request unless told otherwise, runs
+  the gates on the consolidated result, and reviews the diffs against their
+  contracts before opening it.
+- Report at the end: what was implemented, what was declined with its reason,
+  and the short list of open decisions — nothing else should be left for the
+  human to remember.
 
 ## Guardrails
 

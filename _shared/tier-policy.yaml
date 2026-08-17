@@ -1,0 +1,118 @@
+# Tier policy — the org's answers, so nobody is ever asked for a threshold.
+#
+# This file exists so bootstrap DERIVES instead of interrogating. Every value
+# here is an org-level decision made once; a repo inherits it from its tier and
+# only records DEVIATIONS. Skills read this; humans edit it deliberately.
+#
+# Read together with dimensions.md (the completeness checklist) and the
+# capability class checklists below (the scenario denominators).
+
+version: v1
+
+defaults: &defaults
+  # Correctness — structural (SIGNAL, never a hard gate: gameable)
+  changed_line_coverage_signal: 85
+  global_coverage_policy: ratchet        # never below high-water minus 2 points
+  tests_per_prod_loc: informational      # recorded, never a target. ever.
+
+  # Fault sensitivity — always advisory, all tiers (tooling immaturity + Goodhart)
+  mutation: { mode: advisory, scope: changed_code, cap_mutants_per_pr: 20 }
+
+  # Behavioral
+  property_tests: required_on_core
+  fuzz: required_on_decode_boundaries    # every parse/decode boundary, seed corpus checked in
+  metamorphic: recommended
+
+  # Scenarios — denominator comes from class checklists, NEVER from the author
+  scenario_coverage: { denominator: class_checklists, gate_at: null }
+
+  # Integration / contracts
+  integration_fidelity: hermetic_plus_one_real   # ≥1 lane against a real dependency
+  compatibility: { policy: n_minus_1, schema: expand_contract, breaking_check: required }
+
+  # Performance
+  benchmarks: { baseline: required, comparison: statistical_relative_only,
+                absolute_slo: dedicated_hardware_only, profiling: periodic }
+  capacity: { margin_target: 2x, measured: required }
+
+  # Resilience / recovery
+  fault_injection: required_per_capability_class
+  recovery: { effect_journal: required_if_durable_effects,
+              tabular_recovery_tests: required,
+              real_crash_tests: sampled_by_risk }
+  reconciliation: required_if_durable_state
+  backup_restore_test: required_if_durable_state
+
+  # Observability
+  observability_contract: required        # checked in CI, not documentation
+  invariant_counters: required            # ratified invariants mirrored to prod
+
+  # Security
+  supply_chain: { secret_scan: all_triggers, vuln_scan: required, sbom: required,
+                  artifact_provenance: required, secretless_presubmit: required }
+  authz_invariants: required_if_multi_tenant
+
+  # Deployability / operability
+  delivery: { progressive: required, analysis: automated_plus_invariant_gates,
+              rollback: artifact_repin, rehearsed: required }
+  runbooks: { required: true, exercise_cadence: quarterly }
+  liability_registries: required          # flags, waivers, quarantine, contract debt
+
+tiers:
+  "0":
+    <<: *defaults
+    changed_line_coverage_signal: 90
+    invariant_flake_rule: incident        # never quarantine
+    human_gates: [resolved_context, semantic_declarations, ratification, waivers]
+    delivery: { progressive: required, analysis: automated_plus_invariant_gates,
+                rollback: artifact_repin, rehearsed: required, human_ack_before_full: true }
+  "1":
+    <<: *defaults
+    invariant_flake_rule: incident        # data-correctness tiers keep the T0 rule
+    human_gates: [ratification, waivers]
+  "2":
+    <<: *defaults
+    changed_line_coverage_signal: 70
+    fuzz: recommended
+    benchmarks: { baseline: recommended, comparison: statistical_relative_only }
+    fault_injection: recommended
+    invariant_flake_rule: quarantine_allowed
+    human_gates: [waivers]
+
+# Capability class checklists — THE scenario denominators. Bootstrap expands
+# these into the repo's failure-mode matrix automatically; the author never
+# supplies the list.
+capability_classes:
+  external_effect:
+    obligations: [timeout, retry_policy, failure_model, idempotency_strategy,
+                  reconciliation, observability]
+    scenarios: [rejected, timeout_before_acceptance, timeout_after_acceptance,
+                duplicate_response, malformed_response, unavailable,
+                extreme_latency, crash_between_decision_and_effect,
+                retry_on_unknown_state]
+  source_of_truth:
+    obligations: [consistency_semantics, recovery, backup, reconciliation]
+    scenarios: [deadlock, serialization_conflict, timeout,
+                commit_ok_response_lost, connection_dies_before_commit,
+                connection_dies_after_commit, restore_from_backup]
+  event_consumer:
+    obligations: [delivery_semantics, ordering_semantics, duplicate_handling,
+                  poison_handling, backpressure]
+    scenarios: [duplicate, delay, reorder, drop, poison_message, partition,
+                upstream_backpressure]
+  event_producer:
+    obligations: [delivery_semantics, ordering_guarantee, observability]
+    scenarios: [slow_consumer, consumer_disconnect, publish_failure, replay]
+  external_read:
+    obligations: [max_age_declared, staleness_observable, unavailable_fallback,
+                  timeout]
+    scenarios: [stale_data, gap, malformed_response, unavailable, slow_response]
+  connection:
+    obligations: [reconnect_policy, liveness_detection, resubscribe_semantics,
+                  readiness_gating]
+    scenarios: [disconnect, sequence_gap, missed_heartbeat, reconnect_storm,
+                half_open_socket, resubscribe_failure, scheduled_recycle]
+  signer:
+    obligations: [key_custody, policy_enforcement, audit_trail, quorum]
+    scenarios: [unauthorized_request, policy_violation, key_unavailable,
+                partial_quorum]
