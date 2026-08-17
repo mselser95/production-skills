@@ -123,10 +123,18 @@ Emit change-plan tasks ordered by leverage, each bounded and routable:
 4. outbox/journal on external effects + table-driven recovery tests;
 5. provenance headers + advisory lane wiring;
 6. seed the incident-fixture corpus from the last known incidents;
-7. reconciliation job for the primary source-of-truth pair.
-Tasks a cheap model can do are tagged `ambiguity: none` and handed to
-`prod-implement`; design decisions stay `open` with the human. State
-explicitly which gaps the plan does NOT cover and why.
+7. reconciliation job for the primary source-of-truth pair;
+8. fuzz targets on every decode/parse boundary (checked-in seed corpus,
+   wired into the repo's fuzz lane);
+9. mutation advisory baseline over the core packages (TREND, never a gate);
+10. benchmark baseline of the hot path with a versioned workload (relative
+    regression only — SIGNAL).
+This list is the MINIMUM: a plan that omits any dimension without an
+explicit declined-with-rationale entry is an incomplete bootstrap — the
+human should never have to ask "where is the fuzzing?". Tasks a cheap model
+can do are tagged `ambiguity: none` and handed to `prod-implement`; design
+decisions stay `open` with the human. State explicitly which gaps the plan
+does NOT cover and why.
 
 ## Guardrails
 
