@@ -1,0 +1,8 @@
+# contract-debt registry — liability entries with owner + expiry.
+# Every entry: {id, owner, created, expires, evidence}. The ops sweep
+# escalates expired entries; it never silently extends one.
+#
+# Records known API/schema-migration debt (e.g. an N-1 compatibility shim
+# kept alive past its natural retirement date). Empty: this scaffold has
+# shipped no contract yet to owe debt against.
+entries: []

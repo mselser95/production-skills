@@ -1,0 +1,15 @@
+# flags registry — liability entries with owner + expiry.
+# Every entry: {id, owner, created, expires, evidence}. The ops sweep
+# escalates expired entries; it never silently extends one.
+#
+# These are the live kill switches this service documents. They are
+# registered because an unregistered flag is an untested production code
+# path with a remote trigger, and both arms of a flag on a critical path
+# must be tested.
+#
+# This scaffold ships with zero entries because it has zero flags yet --
+# config.Config's own rollback levers (INVARIANT_COOLDOWN_S=0,
+# OUTBOX_MAX_ATTEMPTS, PPROF_PORT unset) are ordinary config, not runtime
+# behavioral flags with two divergent code arms; register the first REAL
+# flag here the moment one is added, with both arms' tests named.
+entries: []

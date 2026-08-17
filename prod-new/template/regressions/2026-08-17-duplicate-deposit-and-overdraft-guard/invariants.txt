@@ -1,0 +1,21 @@
+This fixture's replay is checked against domain.ConservationHolds at EVERY
+step (not only at the end), plus a final-balance assertion. Both invariants
+this template ratifies are exercised:
+
+  units_conserved
+    Checked at every step via domain.ConservationHolds(before, event, after)
+    -- an independent recomputation of what the after-state SHOULD be, not
+    a tautological re-check of Apply's own output. Also checked once at the
+    end: final balance must equal fixture.yaml's expect_final_balance
+    (12.00000000 = 10 - 3 + 5, the two admitted deposits minus the one
+    admitted withdrawal; the overdraft attempt at step 4 is rejected and
+    contributes nothing).
+
+  duplicate_event_single_effect
+    Step 3 resubmits event ID "d1" (already applied at step 1) with the
+    SAME amount. The harness asserts this step's effect is
+    EffectDuplicateIgnored and that Balance/Version are unchanged from
+    step 2's result.
+
+See fixture.yaml's `# counterexample:` for the mutation that turns this
+fixture red, and regressions/README.md for the empirical verification log.

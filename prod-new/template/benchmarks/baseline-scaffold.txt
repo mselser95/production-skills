@@ -1,0 +1,17 @@
+# Baseline benchmark recording — scaffold commit (no git SHA yet: this
+# file predates the template's first real commit in a standalone repo).
+# Regenerate after the first real commit:
+#   go test -run=^$ -bench=. -benchmem -count=1 ./... > benchmarks/baseline-<sha>.txt
+# Comparison is ALWAYS statistical/relative (tier-policy.yaml:
+# benchmarks.comparison = statistical_relative_only) — this file is a
+# recorded reference for `benchstat` against a later run, never an
+# absolute pass/fail gate. See benchmarks/README.md.
+
+goos: darwin
+goarch: arm64
+pkg: github.com/example/svc/internal/domain
+cpu: Apple M4 Max
+BenchmarkParseAmount-16      	 6858597	       154.3 ns/op	      96 B/op	       4 allocs/op
+BenchmarkAddAmounts-16       	 3638962	       332.4 ns/op	     264 B/op	      12 allocs/op
+BenchmarkApply_Deposit-16    	   10000	    114419 ns/op	  233572 B/op	      38 allocs/op
+PASS

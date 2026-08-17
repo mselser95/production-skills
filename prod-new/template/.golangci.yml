@@ -1,0 +1,18 @@
+version: "2"
+
+# Pins golangci-lint's behavior explicitly so a future golangci-lint
+# release cannot silently change which linters run. Enabled set below is
+# golangci-lint v2's default ("standard") linter set, listed explicitly
+# (default: none + enable) rather than relying on the "standard" alias, so
+# an upgrade can't silently add or drop a linter out from under this repo.
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused

@@ -1,0 +1,14 @@
+# CODEOWNERS — <OWNER> owns everything by default; the trusted-set paths
+# below are called out explicitly so a review requirement on them is never
+# accidental.
+
+*                            @<OWNER>
+
+# Trusted set: human-ratified invariants and the verification-probe
+# machinery. Changes here go through the ratification flow, never an
+# ordinary PR review.
+/verification/ratified/     @<OWNER>
+/.prod/ratify-queue/        @<OWNER>
+/production.yaml            @<OWNER>
+/registries/                @<OWNER>
+/.github/workflows/         @<OWNER>

@@ -1,0 +1,81 @@
+# change-plan.yaml — this scaffold's OWN first commit.
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - introduces_state
+  - introduces_external_effect
+  - introduces_dependency
+
+files:
+  - path: internal/domain
+    action: create
+    zone: core
+  - path: internal/app
+    action: create
+    zone: orchestration
+  - path: internal/adapter/in/healthhttp
+    action: create
+    zone: shell
+  - path: internal/adapter/in/pprofhttp
+    action: create
+    zone: shell
+  - path: internal/adapter/out/store
+    action: create
+    zone: shell
+  - path: internal/platform
+    action: create
+    zone: shell
+  - path: cmd/<SERVICE>
+    action: create
+    zone: shell
+
+new_states: [State]
+new_effects: [EffectDeposited, EffectWithdrawn, EffectWithdrawalRejected, EffectDuplicateIgnored]
+new_dependencies: []   # zero non-stdlib deps by design
+
+recovery:
+  - state: State (in-memory, internal/app.Ledger)
+    crash_here: rebuild from internal/platform/eventlog via Rebuild(Replay(path))
+    retry: idempotent (event ID keyed)
+    reconciled_by: eventlog replay at boot; outbox Reconcile for pending effect deliveries
+
+observability:
+  - svc_units_conserved_violations_total
+  - svc_duplicate_event_violations_total
+  - svc_readyz_stale_never_ready_audits_total
+  - svc_eventlog_writable
+  - svc_build_info
+  - spans svc.deposit / svc.withdraw
+
+compatibility:
+  schema: expand   # eventlog record schema_version:1, additive-only going forward
+  api: unchanged    # first commit; nothing to be compatible WITH yet
+
+candidate_invariants: []   # both seed invariants went straight to
+                            # verification/ratified/ with non-vacuity
+                            # evidence at scaffold time, per RULE
+                            # EMPTY-BUT-REAL -- see .prod/ratify-queue/ for
+                            # their provenance packages and PENDING-HUMAN
+                            # status
+
+tasks:
+  - id: T1
+    summary: Pure core (money math, event-sourced Apply, effects)
+    files: [internal/domain]
+    ambiguity: none
+    depends_on: []
+  - id: T2
+    summary: Orchestration (Ledger state machine, invariant counters, ports)
+    files: [internal/app]
+    ambiguity: none
+    depends_on: [T1]
+  - id: T3
+    summary: Adapters (healthhttp, pprofhttp, store/outbox) + platform ports
+    files: [internal/adapter, internal/platform]
+    ambiguity: none
+    depends_on: [T2]
+  - id: T4
+    summary: Composition root, verification (ratified + conformance + regressions), governance, gates
+    files: [cmd/<SERVICE>, verification, regressions, production.yaml, Makefile, scripts, .github]
+    ambiguity: none
+    depends_on: [T3]

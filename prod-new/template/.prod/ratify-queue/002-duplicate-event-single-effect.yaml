@@ -1,0 +1,42 @@
+# Ratification package for: duplicate_event_single_effect
+
+candidate_invariant:
+  statement: >
+    For any State and Event, calling internal/domain.Apply(state, event)
+    twice with the SAME Event.ID produces, on the second call, a State
+    identical to the first call's result (same Balance, same Version) and
+    an EffectDuplicateIgnored -- the ledger's economic effect of an event is
+    applied exactly once regardless of how many times that event ID is
+    resubmitted.
+  evidence_for:
+    passing_runs: >
+      verification/ratified/invariants_test.go:TestInvariant_DuplicateEventAppliedOnce,
+      internal/domain/ledger_test.go:TestApply_DuplicateEventIDIsANoOp,
+      internal/domain/ledger_property_test.go's generator (~15% of every
+      200x60-event run deliberately replays a prior ID and asserts the
+      no-op), and internal/app/ledger_test.go:TestLedger_Deposit_SameEventIDTwiceHasEffectOnce
+      (through the full orchestration + outbox pipeline, not just the pure
+      core) all green.
+  evidence_against:
+    violation_trace: >
+      internal/domain/ledger.go, Apply's idempotency guard: mutating
+      `if state.Applied[event.ID] {` to `if false {` (guard disabled,
+      every event re-applied regardless of prior admission) turns
+      TestInvariant_DuplicateEventAppliedOnce RED -- verified empirically
+      2026-08-17, mutation applied, test run, failure observed ("balance
+      after re-applying the SAME event ID: 10.00000000 -> 20.00000000,
+      want unchanged"), mutation reverted.
+  contradiction_check:
+    result: clean
+    detail: >
+      No declared capability allows at-least-once economic effects; the
+      outbox's own idempotency-key discipline (internal/adapter/out/store)
+      is a SEPARATE, complementary guarantee at the delivery layer, not a
+      contradiction of this one at the ledger layer.
+  prod_soak:
+    counter: svc_duplicate_event_violations_total
+    window: n/a (scaffold has no production history yet)
+    firings: 0
+
+status: PENDING-HUMAN
+# See 001-units-conserved.yaml's status note -- same reasoning applies here.

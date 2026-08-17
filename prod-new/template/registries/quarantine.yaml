@@ -1,0 +1,11 @@
+# quarantine registry — liability entries with owner + expiry.
+# Every entry: {id, owner, created, expires, evidence}. The ops sweep
+# escalates expired entries; it never silently extends one.
+#
+# A quarantined test KEEPS RUNNING and stops GATING. T0-invariant tests
+# (verification/ratified/**) are never eligible: a nondeterministic
+# failure there is an incident, never a quarantine
+# (tier-policy.yaml: invariant_flake_rule).
+#
+# Empty: this scaffold has no flaky test to record yet.
+entries: []

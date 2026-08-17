@@ -1,0 +1,64 @@
+# Checked-in manifest of every Prometheus series this service emits.
+#
+# Contract: this file is the source of truth internal/adapter/in/healthhttp's
+# TestMetricsContract_ScrapeMatchesManifestBothDirections diffs the REAL
+# /metrics scrape against, in both directions. Adding a metric to the code
+# without a matching entry here fails that test -- so keep this in lockstep
+# with internal/adapter/in/healthhttp/health.go's MetricNames().
+#
+# Fields:
+#   name   - the Prometheus series name (exactly as emitted)
+#   type   - counter | gauge
+#   labels - closed label set, [] if none
+#   note   - anything an alert-rule author needs to know
+
+- name: svc_build_info
+  type: gauge
+  labels: [revision, config_digest]
+  note: >
+    Standard Prometheus build_info convention: the value is ALWAYS 1 and the
+    whole signal lives in the labels. `revision` is the git SHA this binary
+    was built from (internal/platform/buildinfo); `config_digest` is
+    Config.Digest(), a fingerprint of this pod's entire resolved config
+    (internal/platform/config.Config.Digest). Both are bounded by DEPLOY --
+    one distinct value per running process -- so this can never become a
+    cardinality source.
+
+- name: svc_units_conserved_violations_total
+  type: counter
+  labels: []
+  note: >
+    Ratified invariant units_conserved
+    (verification/ratified/invariants_test.go). Must stay 0 in production;
+    internal/app.Ledger's checkInvariants runs domain.ConservationHolds
+    after every command and increments this the instant it disagrees with
+    what actually happened. See internal/app/ledger_invariants_test.go for
+    the deliberate-violation proof that this counter is wired to something
+    that can fire.
+
+- name: svc_duplicate_event_violations_total
+  type: counter
+  labels: []
+  note: >
+    Ratified invariant duplicate_event_single_effect
+    (verification/ratified/invariants_test.go). Must stay 0 in production --
+    domain.Apply's own idempotency-by-ID guard is what keeps a legitimate
+    duplicate submission from ever incrementing this.
+
+- name: svc_readyz_stale_never_ready_audits_total
+  type: counter
+  labels: []
+  note: >
+    Runtime self-audit of /readyz's own gate formula
+    (internal/adapter/in/healthhttp/invariant_counters.go). Must stay 0 --
+    ReadinessAt's `ready := logOK && violationOK` can never disagree with
+    itself in real operation; this exists so the audit is proven wired
+    rather than dead code (see invariant_counters_test.go).
+
+- name: svc_eventlog_writable
+  type: gauge
+  labels: []
+  note: >
+    1 if the durable event log (internal/platform/eventlog.Log) is
+    currently open for writing, 0 otherwise. Mirrors the `log_writable`
+    readiness gate.

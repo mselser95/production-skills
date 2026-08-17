@@ -1,0 +1,44 @@
+# Per-package coverage ratchet.
+#
+# Each line is `<package> <min%>`. `<package>` is the module-relative
+# directory, matching what scripts/coverage.sh derives from the coverage
+# profile. `<min%>` is the floor scripts/coverage.sh enforces for that
+# package on every run.
+#
+# Generated from the measured per-package coverage on the scaffold's first
+# commit (2026-08-17) minus 2.0 points, so ordinary coverage noise from a
+# single added/removed branch does not trip the ratchet, but no package can
+# quietly regress underneath a healthy global average. Raise a floor by
+# hand when a package's real coverage goes up and stays up; lower one only
+# with a reason in the commit message (a genuine, reviewed regression),
+# never to silence a failing gate.
+
+# cmd/<SERVICE> note: low by design, like every cmd/* composition root in this
+# framework -- run()'s body is process-wiring glue (listener setup, signal
+# handling, graceful shutdown) that is 0%-coverable without either an
+# actual running process or padding tests against main() itself (coverage
+# theater the standard forbids). The two EXTRACTABLE, meaningfully-testable
+# pieces (portAddr, adaptTracer) are tested directly; internal/e2e's
+# integration-tagged test exercises the same wiring pattern end to end
+# instead.
+cmd/<SERVICE> 11.00
+
+internal/adapter/in/healthhttp 91.00
+internal/adapter/in/pprofhttp 80.00
+internal/adapter/out/store 94.00
+internal/app 93.00
+# internal/architecture and verification/ratified carry no floor lines:
+# both are test-only packages (no non-test .go source), so -coverpkg=./...
+# never instruments any statement for them -- there is nothing for a
+# per-package percentage to measure. Their own tests still run and gate
+# via `make check-fast`/`make verify` (TestHexagonalBoundaries etc.,
+# verification/ratified's invariant tests) -- coverage is simply not the
+# metric that applies to them.
+internal/domain 88.00
+internal/platform/buildinfo 98.00
+internal/platform/clock 98.00
+internal/platform/config 92.00
+internal/platform/eventlog 82.00
+internal/platform/ids 83.00
+internal/platform/observability 98.00
+verification/conformance 94.00

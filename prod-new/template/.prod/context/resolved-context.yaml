@@ -1,0 +1,63 @@
+# resolved-context.yaml — this scaffold's OWN first commit.
+#
+# Produced by prod-new's Phase 2 (scaffold generation), not by prod-spec --
+# the four questions this document's answers derive from are prod-new's own
+# Phase 1, not a task against an already-governed repo. Recorded in the
+# standard format regardless, so verify-standard.sh's contract-artifacts
+# probe (dimension 17) has something real to audit and so the very first
+# commit already demonstrates the pattern every later task follows.
+
+task: >
+  Scaffold <SERVICE> as a repo born at the production-verifiability
+  standard: three architectural zones, injected clock/random/ID,
+  event-sourced replay with a durable append-only log, the outbox pattern
+  on the one example external effect, invariant counters, conformance
+  kits, liability registries with expiry enforcement, and every gate wired
+  into CI and the Makefile from the first commit. Example domain: an
+  append-only units ledger (deposit/withdraw).
+tier: 1
+services: [<SERVICE>]
+
+capabilities:
+  touched:
+    - id: units_notification
+      class: external_effect
+      declared: NEW
+    - id: units_ledger
+      class: source_of_truth
+      declared: NEW
+    - id: health_metrics_surface
+      class: external_read
+      declared: NEW
+  obligations:
+    - timeout: internal/adapter/out/store's slowSink conformance scenario (extreme_latency)
+    - retry_policy: internal/adapter/out/store.Outbox.Publish (bounded by OutboxMaxAttempts)
+    - failure_model: internal/adapter/out/store's conformance_kit_test.go (full ExternalEffectScenarios checklist)
+    - idempotency_strategy: idempotency key minted inside Outbox.Publish's retry closure
+    - reconciliation: internal/adapter/out/store.Outbox.Reconcile
+    - observability: observability/emitted-metrics.yaml + spans.yaml, both contract-tested against the real scrape/spans
+    - consistency_semantics: internal/app.Ledger single-writer in-memory State
+    - recovery: internal/platform/eventlog.Rebuild (replay-from-log at boot)
+
+invariants:
+  - units_conserved
+  - duplicate_event_single_effect
+
+required_evidence:
+  gates: [make check-fast, make verify, make verify-standard, make check-registries]
+  signals: [changed-line coverage, per-package coverage ratchet, benchmark baseline]
+
+constraints:
+  - internal/domain: no I/O, no clock, no random, no goroutines, no internal imports
+  - internal/app: forbids internal/adapter and internal/platform imports (ports declared locally)
+  - internal/adapter/in: forbids internal/adapter/out imports
+  - internal/adapter/out, internal/platform: forbid internal/app and internal/adapter imports
+
+do_not_touch:
+  - verification/ratified/**
+  - .github/workflows/**
+  - registries/**
+
+approval:
+  approved_by: n/a (tier 1; human_gates = [ratification, waivers] per tier-policy.yaml, not resolved_context)
+  date: 2026-08-17

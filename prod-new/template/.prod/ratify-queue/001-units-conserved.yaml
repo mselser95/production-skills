@@ -1,0 +1,56 @@
+# Ratification package for: units_conserved
+#
+# Format: see production-skills _shared/formats/incident-fixture.md's
+# "Candidate invariant package" section for the shape this mirrors (this
+# invariant was authored directly during scaffolding, not derived from an
+# incident, so there is no incident/fixture section -- only the falsifiability
+# package a human needs to ratify it).
+
+candidate_invariant:
+  statement: >
+    For any sequence of events admitted by internal/domain.Apply against a
+    units ledger starting from domain.NewState(): initial balance plus the
+    sum of every admitted deposit's amount, minus the sum of every admitted
+    withdrawal's amount, equals the final balance. A rejected withdrawal
+    (insufficient balance) and a duplicate event ID contribute zero to this
+    sum.
+  evidence_for:
+    passing_runs: >
+      verification/ratified/invariants_test.go:TestInvariant_UnitsConserved
+      (fixed example sequence, independently tracked via math/big) and
+      internal/domain/ledger_property_test.go:TestPropertyLedgerConservation_RandomEventSequences
+      (200 runs x 60 events, independently tracked, with generator-adequacy
+      floors on state diversity and discard rate) both green.
+  evidence_against:
+    violation_trace: >
+      internal/domain/ledger.go, Apply's EventDeposited branch: mutating
+      `AddAmounts(state.Balance, event.Amount)` to
+      `AddAmounts(state.Balance, state.Balance)` (doubling the balance
+      instead of adding the deposit) turns TestInvariant_UnitsConserved RED
+      -- verified empirically 2026-08-17, mutation applied, test run,
+      failure observed ("effects[0] = EffectWithdrawalRejected ..., want
+      EffectWithdrawn" -- the corrupted balance made a legitimate withdrawal
+      look insufficient), mutation reverted. See invariants_test.go's
+      package doc for the exact record.
+  contradiction_check:
+    result: clean
+    detail: >
+      No declared capability contract (production.yaml) asserts an
+      ambiguous or eventually-consistent balance; the ledger's sole
+      source_of_truth capability declares in-memory, single-writer,
+      immediately-consistent semantics, which this invariant is a direct
+      consequence of.
+  prod_soak:
+    counter: svc_units_conserved_violations_total
+    window: n/a (scaffold has no production history yet)
+    firings: 0
+
+status: PENDING-HUMAN
+# This invariant is exercised, non-vacuity-proven, and green at scaffold
+# time (see verification/ratified/invariants_test.go's header) -- it heads
+# `ratified` there deliberately, since RULE EMPTY-BUT-REAL requires the
+# scaffold's example invariant to be real and load-bearing from the first
+# commit rather than sitting in a permanently-pending queue. Recorded here
+# so the provenance package this framework requires exists alongside it;
+# a human owner should confirm this status at the first real ratification
+# review rather than treating the scaffold's own authorship as ratification.

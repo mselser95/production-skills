@@ -1,0 +1,33 @@
+schema_version: 1
+incident: scaffold-seed-fixture
+date: 2026-08-17
+summary: >
+  A minimized event sequence exercising the two ratified invariants
+  together through the real decode(none)->core(domain.Apply)->serve(replay)
+  path this template ships: a deposit, a withdrawal, a DUPLICATE
+  resubmission of the deposit's event ID (must have zero additional
+  effect), a withdrawal that overdraws the remaining balance (must be
+  rejected, not admitted), and a final deposit. Final balance must equal
+  10 - 3 + 5 = 12.00000000.
+minimized_from: >
+  Hand-shaped for this template at scaffold time (not minimized from a real
+  incident capture -- there is no production history yet). Mirrors the
+  exact scenario internal/domain/ledger_property_test.go's generator
+  exercises statistically; this fixture pins ONE concrete instance of it as
+  a permanent regression.
+expect_final_balance: "12.00000000"
+#
+# counterexample: in domain.Apply's EventWithdrawn branch
+#   (internal/domain/ledger.go), the admitted-withdrawal arithmetic is
+#     newBalance, err := SubAmounts(state.Balance, event.Amount)
+#   Mutating the second argument to `state.Balance` (subtracting the
+#   balance from itself instead of the withdrawn amount) corrupts step 2's
+#   withdrawal (3 units) into zeroing the balance instead. This fixture's
+#   harness catches it at TWO independent points: domain.ConservationHolds
+#   (called after every step) disagrees with the corrupted result
+#   immediately at step 2, and the final-balance assertion at the end
+#   would also disagree (5.00000000 instead of 12.00000000, since step 4's
+#   rejection is unaffected by this particular mutation). Empirically
+#   verified red by applying this exact mutation, running this fixture's
+#   test, observing the failure, and reverting -- see
+#   regressions/README.md's verification log.

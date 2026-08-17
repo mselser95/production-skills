@@ -1,0 +1,149 @@
+name: PR
+on:
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Staged presubmit, stage 1: compile + vet + a plain `go test ./...`
+  # (no -race) + architecture. Runs first and stays cheap (seconds) so a
+  # trivially broken PR fails before it pays for the full -race + fuzz
+  # lane in `production-gates`. It is a strict subset of `make verify`, so
+  # it can never be red while production-gates is green -- only the other
+  # way around, which is the point.
+  check-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make check-fast
+
+  production-gates:
+    needs: check-fast
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - run: make verify
+
+  e2e-real:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make e2e
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+      - run: govulncheck ./...
+
+  # Secret scanning on every trigger (PR here, push in ci.yaml) --
+  # tier-policy.yaml: supply_chain.secret_scan = all_triggers.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Advisory (candidate-provenance) lane: `continue-on-error: true` means a
+  # red run shows a yellow warning on the PR check list but never blocks
+  # merge and is never a required context. Exists so unratified candidate
+  # tests (prod-test-synth output) can be watched without gating anything --
+  # promotion to the blocking lane is prod-curate's job.
+  advisory:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make test-advisory
+
+  # Changed-line coverage: a NON-BLOCKING PR signal (see
+  # scripts/changed-line-coverage.sh), not a gate.
+  changed-line-coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: bash scripts/coverage.sh || true
+      - run: bash scripts/changed-line-coverage.sh
+
+  # The standard verifies ITSELF here. Runs the dimension probes --
+  # coverage+ratchet, ratified invariants and their non-vacuity evidence,
+  # the scenario matrix denominator, the real-dependency lane, fuzz
+  # targets, tracing WIRED in the entrypoints, the observability
+  # contracts, the security scanners, the ops artifacts and their
+  # citations -- and fails on any FAIL.
+  verify-standard:
+    runs-on: ubuntu-latest
+    needs: check-fast
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install probe tooling
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - name: Verify every dimension of the production standard
+        run: make verify-standard
+
+  # Real build-provenance attestation via GitHub's own OIDC-based action --
+  # no stored signing key, no external service, a genuine SLSA-style
+  # attestation of the binary this PR would ship (tier-policy.yaml:
+  # supply_chain.artifact_provenance = required). Runs on every PR so a
+  # broken build step is caught before merge, not just on release.
+  attest-build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: CGO_ENABLED=0 go build -trimpath -o svc-bin ./cmd/<SERVICE>
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: svc-bin

@@ -1,0 +1,14 @@
+# .git is DELIBERATELY NOT excluded: Go's -buildvcs stamping reads it, and
+# it is the only mechanism that puts a real revision into the image without
+# a --build-arg path (docker/Dockerfile has a GIT_SHA fallback for a
+# build-arg-driven pipeline, but the org-standard build path
+# (actions/attest-build-provenance + a plain `docker build .`) does not
+# pass one). Excluding .git is exactly the mistake that makes
+# svc_build_info{revision=""} true in every image a real CI would produce
+# while every gate keeps reporting the dimension delivered — see
+# internal/platform/buildinfo/buildinfo_test.go's
+# TestDockerignore_DoesNotExcludeGitWithoutAnLdflagsPath, which fails the
+# build if this line is ever restored without also adding the ldflags path.
+data
+*.md
+coverage.out

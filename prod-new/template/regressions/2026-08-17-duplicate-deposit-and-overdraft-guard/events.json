@@ -1,0 +1,7 @@
+[
+  {"id": "d1", "type": "deposited", "amount": "10", "note": "opening deposit"},
+  {"id": "w1", "type": "withdrawn", "amount": "3", "note": "ordinary withdrawal, leaves 7"},
+  {"id": "d1", "type": "deposited", "amount": "10", "note": "DUPLICATE of the opening deposit's event ID -- must be a strict no-op (duplicate_event_single_effect)"},
+  {"id": "w2", "type": "withdrawn", "amount": "999", "note": "overdraft attempt against a balance of 7 -- must be rejected, not admitted"},
+  {"id": "d2", "type": "deposited", "amount": "5", "note": "closing deposit, leaves 12"}
+]

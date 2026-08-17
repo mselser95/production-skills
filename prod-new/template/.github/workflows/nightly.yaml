@@ -1,0 +1,79 @@
+name: Nightly trends
+# Heavy, slow-signal lanes that must never gate a PR or a push to main:
+# extended fuzz time, a higher-count race lane (this scaffold's "chaos"
+# placeholder), a soak run, and the mutation-testing baseline. Scheduled +
+# manually dispatchable only -- deliberately no `pull_request` / `push`
+# trigger here.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  extended-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make fuzz FUZZTIME=5m
+
+  extended-chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make chaos CHAOS_COUNT=100
+
+  # Soak: repeat the full race-detected suite for an extended duration to
+  # catch a rare, timing-dependent flake the normal count=1/3 lanes would
+  # miss. `-timeout` bounds the whole job so a genuine hang fails loudly
+  # instead of the job silently running past its scheduled window.
+  soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -count=25 -timeout=20m ./...
+
+  # Mutation testing baseline -- ALWAYS advisory (tier-policy.yaml:
+  # mutation.mode = advisory, ALL tiers: tooling immaturity + Goodhart's
+  # law), never a PR gate. `continue-on-error: true` reflects that
+  # directly in the check list.
+  mutation-baseline:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install gremlins
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@latest
+      - name: Run mutation testing baseline
+        run: |
+          mkdir -p .prod/mutation
+          gremlins unleash ./internal/domain \
+            --workers 2 --timeout-coefficient 2 \
+            --output .prod/mutation/domain_mutations.json
+          gremlins unleash ./internal/app \
+            --workers 2 --timeout-coefficient 2 \
+            --output .prod/mutation/app_mutations.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-baseline
+          path: .prod/mutation/
+          retention-days: 30

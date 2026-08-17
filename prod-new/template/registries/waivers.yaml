@@ -1,0 +1,16 @@
+# waivers registry — an unmet REQUIRED obligation lives here or nowhere.
+#
+# The framework forbids inventing policy: an obligation the tier policy
+# marks `required` and this repo does not meet is a WAIVER with an owner
+# and an expiry, never a new production.yaml key that quietly holds it.
+# Expiry is enforced by scripts/check-registries.sh (a presubmit gate):
+# when a waiver expires the obligation returns to force and the gate
+# reddens.
+#
+# This scaffold ships with zero entries: every REQUIRED obligation the
+# tier policy names is either implemented (see production.yaml's
+# capabilities) or a ratified decline with a genuine reason
+# (production.yaml's out_of_scope) -- including artifact provenance, which
+# is implemented for real via actions/attest-build-provenance in
+# .github/workflows/pr.yaml, not waived.
+entries: []

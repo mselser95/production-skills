@@ -1,0 +1,22 @@
+# Checked-in manifest of every tracing span this service emits.
+#
+# Contract: internal/app's TestSpansYAML_MatchesLedgerSpanNames diffs this
+# file against the real `l.spanStart(...)` call sites in
+# internal/app/ledger.go, in both directions -- adding or renaming a span in
+# code without updating this file fails that test.
+#
+# A span fires only when a real Tracer is wired (Config.Tracing != "off",
+# the default) -- see internal/platform/observability.
+
+- name: svc.deposit
+  emitted_by: internal/app/ledger.go (Ledger.Deposit -> process)
+  attrs: [event_type]
+  note: >
+    Wraps the full command pipeline: journal append, domain.Apply, and the
+    outbox handoff for the resulting effect. RecordError is called with the
+    first stage that failed, if any.
+
+- name: svc.withdraw
+  emitted_by: internal/app/ledger.go (Ledger.Withdraw -> process)
+  attrs: [event_type]
+  note: Same pipeline as svc.deposit, for the withdrawal command.
