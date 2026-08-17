@@ -63,7 +63,12 @@ unmeasured.
 ## 7. Resilience and recovery
 Inventory: fault-injection harness, crash/restart tests, outbox/journal on
 effects, recovery functions and their tests, reconciliation jobs, backup and
-its restore test, backpressure and isolation behavior.
+its restore test, plus the two the framework wants FIRST-CLASS and that are
+easy to lose: **backpressure** (what happens when input rate > processing
+rate — queue/drop/reject/slow-producer must be an explicit, tested decision)
+and **resource isolation** (one tenant/venue/partition going pathological
+must not starve the others: bulkheads, per-partition pools, quotas — with
+the canonical test "stall partition X completely; does Y still serve?").
 Ask: what the system must guarantee across a restart (what may be retried,
 what must NOT, what is reconciled); whether durable state exists at all (if
 none, record reconciliation as N/A with that reason).
@@ -73,9 +78,13 @@ missing; restore test cadence.
 ## 8. Observability
 Inventory: metrics/traces/logs inventory, correlation ids, cardinality
 discipline, invariant counters, whether an observability contract is checked
-in CI.
+in CI, and **operational determinism**: are code, config, schema and flag
+versions surfaced in the signals? (`Output = F(code, config, state, inputs)`
+— without all four versioned, a replay cannot reproduce production, so this
+is a precondition of dimension 7, not a nicety.)
 Ask: which state transitions MUST be observable for 3am debugging.
-Row: contract checked mechanically or documentation-only.
+Row: contract checked mechanically or documentation-only; build/config
+identity surfaced or absent.
 
 ## 9. Security
 Inventory: authz/authn surface, policy-as-invariant candidates, secret
@@ -93,3 +102,20 @@ Ask: the promotion gate for this tier (automatic? human ack?); what an
 operator must be able to do at 3am without reading the code.
 Row: canary analysis automated or manual, rollback rehearsed or assumed,
 runbooks tested or stale.
+
+## 11. Reproducibility
+Inventory: are code, config, data/schema and environment each versioned and
+recoverable for a past run? Is there an evidence record per commit (which
+policy version, which gates, which seeds, which waivers applied)? Can the
+question "under what standard was this commit written?" be answered without
+archaeology?
+Ask: nothing — this is derived from what exists.
+Row: the four versions and the per-commit evidence record, present or absent.
+(The framework's own v0 is a flat JSON per commit; anything less means the
+standard a commit was held to is unknowable later.)
+
+## Cross-dimension metrics worth computing because they are nearly free
+- **Oracle gap** per package: structural coverage MINUS mutation score. A big
+  gap localizes weak assertions better than either number alone; both inputs
+  already exist (coverage as SIGNAL, mutation as TREND). Report per package in
+  the trend lane, never as a gate.

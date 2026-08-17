@@ -54,7 +54,10 @@ if [[ -x scripts/coverage.sh ]]; then
     if grep -q "ratchet: all packages at/above" <<<"$out"; then
       row "coverage-ratchet" PASS "per-package floors enforced"
     else row "coverage-ratchet" FAIL "no per-package ratchet in the gate"; fi
-  else row "coverage" FAIL "$(grep -m1 -iE 'below|fail' <<<"$out")"; fi
+  else
+    viol=$(grep -cE 'below its floor' <<<"$out")
+    row "coverage" FAIL "$viol floor violation(s): $(grep -oE '[a-z/]+ is [0-9.]+%, below its floor of [0-9.]+%' <<<"$out" | paste -sd' ; ' -)"
+  fi
 else row "coverage" FAIL "no scripts/coverage.sh"; fi
 
 # tests/prod LOC ratio — recorded, never a gate
@@ -211,7 +214,10 @@ if [[ -d $wf ]]; then
   grep -rqi "sbom\|syft\|cyclonedx" $wf && row "sbom" PASS "SBOM step present" || row "sbom" FAIL "no SBOM"
   # Match only real attestation mechanisms, never the English word "provenance"
   # (it appears in benchmark baseline headers — that was a false PASS before).
-  if grep -rqE "cosign|--provenance=|attest(ation)?s?:|actions/attest" $wf 2>/dev/null; then
+  # Strip comments before matching: an earlier version PASSed on a comment
+  # that explained why provenance is impossible. Only executable lines count.
+  if grep -rhE "^[^#]*" $wf/*.yaml 2>/dev/null | sed 's/#.*//' \
+       | grep -qE "cosign|--provenance=|actions/attest|attestations:"; then
     row "artifact-provenance" PASS "signing/attestation step present"
   elif grep -q "artifact_provenance_signing" "$SPEC" 2>/dev/null; then
     row "artifact-provenance" NA "recorded open decision in $SPEC"
@@ -236,6 +242,53 @@ for r in flags waivers quarantine contract-debt; do
   [[ -f registries/$r.yaml ]] || { row "registries" FAIL "registries/$r.yaml missing"; break; }
 done
 [[ -f registries/contract-debt.yaml ]] && row "registries" PASS "4 liability registries present"
+
+# --- 17. contract artifacts exist for the work (audit finding: never written) --
+ctxdir="${PROD_CONTEXT_DIR:-.prod/context}"
+if ls "$ctxdir"/*resolved-context*.y*ml >/dev/null 2>&1 && ls "$ctxdir"/*change-plan*.y*ml >/dev/null 2>&1; then
+  row "contract-artifacts" PASS "resolved-context + change-plan present in $ctxdir"
+else row "contract-artifacts" FAIL "no resolved-context/change-plan in $ctxdir — nothing to audit the diff against"; fi
+
+# --- 18. ratification packages back every ratified invariant -----------------
+if ls verification/ratified/*_test.go >/dev/null 2>&1; then
+  inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null || echo 0)
+  pkgs=$(ls .prod/ratify-queue/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
+  if (( pkgs > 0 && pkgs >= inv )); then row "ratification-packages" PASS "$pkgs packages for $inv ratified invariants"
+  else row "ratification-packages" FAIL "$pkgs ratification packages for $inv ratified invariants — the queue is the evidence trail"; fi
+fi
+
+# --- 19. candidate tests are segregated OUT of the blocking lane -------------
+cand=$(grep -rl "provenance: candidate" --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+tagged=$(grep -rl "go:build candidate" --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+if (( cand == 0 )); then row "candidate-lane-segregated" NA "no candidate tests"
+elif (( tagged >= cand )); then row "candidate-lane-segregated" PASS "$cand candidate files, all build-tagged"
+else row "candidate-lane-segregated" FAIL "$((cand-tagged)) of $cand candidate files run in the BLOCKING lane"; fi
+
+# --- 20. provenance headers on every ADDED test func ------------------------
+# Only functions the diff ADDS are in scope: pre-existing tests in a touched
+# file predate the convention and are not this change's debt.
+if base=$(git merge-base HEAD origin/main 2>/dev/null); then
+  added=$(git diff "$base"..HEAD -- '*_test.go' 2>/dev/null | grep -cE '^\+func (Test|Fuzz|Benchmark)' || true)
+  # an added func is "headed" when a provenance line is added within the diff too
+  heads=$(git diff "$base"..HEAD -- '*_test.go' 2>/dev/null | grep -cE '^\+.*provenance:' || true)
+  if (( added == 0 )); then row "provenance-headers" NA "no test funcs added"
+  elif (( heads >= added )); then row "provenance-headers" PASS "$added added test funcs, $heads provenance lines"
+  else row "provenance-headers" FAIL "$added added test funcs but only $heads provenance headers ($((added-heads)) unheaded)"; fi
+fi
+
+# --- 21. CI actually runs what the standard requires ------------------------
+nfuzz=${#fuzzes[@]}
+inmake=$(grep -c 'Fuzz[A-Za-z0-9_]*' Makefile 2>/dev/null || echo 0)
+(( inmake >= nfuzz )) && row "ci-runs-fuzz" PASS "$inmake fuzz names wired in Makefile"   || row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets wired into make/CI — the rest run nowhere"
+if [[ -n "${real_tag:-}" ]]; then
+  grep -rq -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null     && row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into make/CI"     || row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
+fi
+grep -rq "diff-cover\|patch coverage\|changed-line" Makefile $wf scripts 2>/dev/null   && row "changed-line-coverage" PASS "changed-line signal wired"   || row "changed-line-coverage" FAIL "changed-line coverage (every tier's SIGNAL) is measured nowhere"
+
+# --- 22. reproducibility / operational determinism (restored dimension) -----
+if grep -rqE "commit|git_sha|config_version|schema_version|build_info" observability/*.yaml observability/*.md 2>/dev/null; then
+  row "operational-determinism" PASS "code/config/schema version surfaced in signals"
+else row "operational-determinism" FAIL "Output=F(code,config,state,inputs): the four versions are not surfaced — replay cannot reproduce prod"; fi
 
 # --- report --------------------------------------------------------------
 printf '\n%-34s %-5s %s\n' "DIMENSION" "VERDICT" "EVIDENCE"

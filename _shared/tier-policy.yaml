@@ -46,6 +46,12 @@ defaults: &defaults
   # Observability
   observability_contract: required        # checked in CI, not documentation
   invariant_counters: required            # ratified invariants mirrored to prod
+  operational_determinism: required       # code+config+schema+flag versions in signals
+  isolation_and_backpressure: required    # explicit, tested, per-partition
+
+  # Reproducibility (dimension 11)
+  evidence_record: required               # one record per commit: policy version,
+                                          # gates, seeds, waivers
 
   # Security
   supply_chain: { secret_scan: all_triggers, vuln_scan: required, sbom: required,
@@ -62,6 +68,10 @@ tiers:
   "0":
     <<: *defaults
     changed_line_coverage_signal: 90
+    # The framework marks scenario coverage a GATE at T0 (100% of the class
+    # checklists). The shared default leaves gate_at null for T1/T2; T0 must
+    # override it or a T0 repo silently loses a declared gate.
+    scenario_coverage: { denominator: class_checklists, gate_at: 100 }
     invariant_flake_rule: incident        # never quarantine
     human_gates: [resolved_context, semantic_declarations, ratification, waivers]
     delivery: { progressive: required, analysis: automated_plus_invariant_gates,
