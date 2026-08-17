@@ -53,6 +53,17 @@ defaults: &defaults
   evidence_record: required               # one record per commit: policy version,
                                           # gates, seeds, waivers
 
+  # Deployability / gate integrity
+  #
+  # The gates must be RUNNABLE, checked from outside CI. An invalid workflow
+  # file does not produce a red check — GitHub produces a zero-second run with
+  # no jobs and no check runs, so the PR reports "no checks reported", every
+  # required context stays unfulfilled, and no signal anywhere says why. CI
+  # cannot catch this, because there is no CI: the check belongs in the local
+  # cheap gate and in the probe. This entry exists because a repo shipped a
+  # full day of work with every gate green and zero presubmit actually running.
+  workflow_definitions_valid: required
+
   # Security
   supply_chain: { secret_scan: all_triggers, vuln_scan: required, sbom: required,
                   artifact_provenance: required, secretless_presubmit: required }

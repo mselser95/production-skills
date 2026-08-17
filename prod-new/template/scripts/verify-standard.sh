@@ -237,6 +237,26 @@ else row "vuln-scan" FAIL "govulncheck not installed — gate unproven"; fi
 
 wf=".github/workflows"
 if [[ -d $wf ]]; then
+  # --- the CI definitions themselves must be VALID -------------------------
+  # This probe exists because of a real outage, and it is the one check that
+  # provably cannot live inside CI. A job missing `steps:` makes the whole
+  # workflow file invalid, and GitHub's response is not a red job: it creates a
+  # zero-second failed run with NO jobs and NO check runs, so the PR reports
+  # "no checks reported", every required context stays unfulfilled forever, and
+  # nothing turns red to explain why. Every other gate in this file was green
+  # while the repo had no presubmit at all. An unrunnable gate is indis-
+  # tinguishable from a passing one unless something OUTSIDE it looks.
+  if have actionlint || [[ -x "$(gobin)/actionlint" ]]; then
+    # Self-hosted runner labels are unknown to actionlint. Ignore ONLY that
+    # rule: on the real defect its 8 label warnings buried the one line that
+    # mattered, which is how the syntax error shipped in the first place.
+    if alout=$(PATH="$(gobin):$PATH" actionlint -ignore 'label ".+" is unknown' "$wf"/*.y*ml 2>&1); then
+      row "workflow-definitions-valid" PASS "actionlint clean on $(ls "$wf"/*.y*ml 2>/dev/null | wc -l | tr -d ' ') workflow file(s)"
+    else
+      row "workflow-definitions-valid" FAIL "$(grep -m1 -E '\.ya?ml:[0-9]+:[0-9]+:' <<<"$alout")"
+    fi
+  else row "workflow-definitions-valid" FAIL "actionlint not installed — CI definitions unvalidated, and an invalid one yields NO checks at all"; fi
+
   sc=$(grep -rl "secret-scan" $wf 2>/dev/null | wc -l | tr -d ' ')
   (( sc >= 2 )) && row "secret-scan-all-triggers" PASS "in $sc workflows" || row "secret-scan-all-triggers" FAIL "only $sc workflow(s) — PR-only is the known gap"
   grep -rqi "sbom\|syft\|cyclonedx" $wf && row "sbom" PASS "SBOM step present" || row "sbom" FAIL "no SBOM"

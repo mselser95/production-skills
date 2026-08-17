@@ -103,6 +103,17 @@ operator must be able to do at 3am without reading the code.
 Row: canary analysis automated or manual, rollback rehearsed or assumed,
 runbooks tested or stale.
 
+**Gate integrity — the gates must be RUNNABLE, and only something outside CI
+can say so.** Ask of every gate: if this could not run at all, what would go
+red? On GitHub the honest answer is often "nothing": an invalid workflow file
+yields a zero-second run with no jobs and no check runs, so the PR reports "no
+checks reported", the required contexts stay unfulfilled forever, and no red
+signal exists to investigate. A gate that cannot run is indistinguishable from
+a gate that passes, which makes this the same failure as a vacuous test — the
+oracle has to sit outside the thing it judges. Validate the CI definitions in
+the local cheap gate and in the probe, never only in CI. Row: gates proven
+runnable from outside, or assumed runnable because nothing was red.
+
 ## 11. Reproducibility
 Inventory: are code, config, data/schema and environment each versioned and
 recoverable for a past run? Is there an evidence record per commit (which
