@@ -33,6 +33,30 @@ case "${1:-install}" in
     current=$(hash_tree "$cfg/skills" "${skills[@]}"; hash_tree "$cfg/agents" . 2>/dev/null)
     if diff -q <(sort "$manifest") <(echo "$current" | sort) >/dev/null; then
       echo "TCB verified: $(wc -l <"$manifest" | tr -d ' ') files match the manifest"
+      # Integrity is not currency. The check above answers "has the INSTALLED
+      # copy been altered", which is the tamper question — but a clean answer
+      # there says nothing about whether the installed copy is the CURRENT one.
+      # Fix a probe in this repo, forget to reinstall, and every skill keeps
+      # running the old probe while --verify reports a spotless TCB. That is a
+      # false all-clear about the very component that decides what passes, so
+      # it is reported here rather than left for someone to notice.
+      stale=$(comm -13 \
+        <(hash_tree "$cfg/skills" "${skills[@]}" | awk '{print $1}' | sort) \
+        <(for s in "${skills[@]}"; do
+            # -L is load-bearing: in the source repo the shared material reaches
+            # each skill through a references/ SYMLINK, and plain `find -type f`
+            # skips symlinks — which would silently exclude _shared/ from the
+            # source side and make this whole check blind to the files most
+            # worth watching (the probes). Verified: without -L, editing
+            # _shared/probes/verify-standard.sh went undetected.
+            [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f \( -name '*.md' -o -name '*.yaml' -o -name '*.sh' \) \
+                ! -name 'config.sh' -exec shasum -a 256 {} + 2>/dev/null )
+          done | awk '{print $1}' | sort) | wc -l | tr -d ' ')
+      if (( stale > 0 )); then
+        echo "STALE INSTALL — ${stale} source file(s) in $src are not present in the installed copy." >&2
+        echo "The manifest is intact but describes an OLDER trusted set. Re-run install.sh." >&2
+        exit 2
+      fi
       exit 0
     fi
     echo "TCB DRIFT — the installed skills no longer match the manifest:" >&2

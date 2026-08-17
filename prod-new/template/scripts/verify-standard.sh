@@ -211,24 +211,28 @@ fi
 # --- 14. security: RUN the scanners ---------------------------------------
 if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
   vout=$(PATH="$(gobin):$PATH" govulncheck ./... 2>&1)
-  # govulncheck@v1.7.0 (the version this repo's own CI pins) prints
-  # "Your code is affected by 0 vulnerabilities" only when the scan found
-  # SOME vulnerability in a dependency that turned out not to be called;
-  # a module with ZERO non-stdlib dependencies and a clean stdlib (this
-  # template's own go.mod, by design — see the root README) instead gets
-  # the tool's OTHER zero-findings message, "No vulnerabilities found."
-  # Verified empirically against the exact pinned version 2026-08-17: a
-  # module with a vulnerable indirect dependency printed the "affected by
-  # 0" form; this module (no non-stdlib deps at all) printed "No
-  # vulnerabilities found." instead. Both are the SAME verdict (zero
-  # vulnerabilities apply to this code) in two different, real phrasings
-  # from one tool version — matching only the first would false-FAIL every
-  # dependency-free module, which is exactly the module shape the
-  # standard's own "zero non-stdlib dependencies is achievable" guidance
-  # aims for.
-  if grep -qE "affected by 0 vulnerabilities|^No vulnerabilities found\.$" <<<"$vout"; then
+  # govulncheck has TWO clean phrasings and the difference is not cosmetic: a
+  # module with non-stdlib dependencies gets "Your code is affected by 0
+  # vulnerabilities", while one with none at all gets "No vulnerabilities
+  # found." A match on only the first turns every zero-dependency module — the
+  # exact shape of a freshly scaffolded service — into a FAIL whose evidence
+  # string is EMPTY, because the count grep finds nothing either. An
+  # evidence-free FAIL is the worst output this probe can produce: it names no
+  # defect, so the only available "fix" is to soften the probe.
+  #
+  # Verified empirically against govulncheck v1.7.0 on 2026-08-17: a module with
+  # a vulnerable-but-uncalled indirect dependency printed the "affected by 0"
+  # form, and a module with no non-stdlib dependencies at all printed "No
+  # vulnerabilities found." Both are clean verdicts; only the phrasing differs.
+  if grep -qE "affected by 0 vulnerabilities|No vulnerabilities found" <<<"$vout"; then
     row "vuln-scan" PASS "govulncheck: 0 called vulnerabilities"
-  else row "vuln-scan" FAIL "$(grep -m1 -E 'affected by [0-9]+ vulnerabilit' <<<"$vout")"; fi
+  elif found=$(grep -m1 -E 'affected by [0-9]+ vulnerabilit' <<<"$vout"); then
+    row "vuln-scan" FAIL "$found"
+  else
+    # Neither a clean verdict nor a count: the scanner did not complete (module
+    # resolution, network, toolchain). That is an unproven gate, not a clean one.
+    row "vuln-scan" FAIL "govulncheck produced no verdict — gate unproven: $(head -1 <<<"$vout")"
+  fi
 else row "vuln-scan" FAIL "govulncheck not installed — gate unproven"; fi
 
 wf=".github/workflows"
