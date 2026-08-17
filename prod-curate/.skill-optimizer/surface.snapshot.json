@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "algorithm_test_promotion_batch_decision",
+        "name": "algorithm_test_promotion_batch_decision",
+        "description": "Decision point in \"Algorithm — test promotion (batch)\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_invariant_ratification_queue_decision",
+        "name": "algorithm_invariant_ratification_queue_decision",
+        "description": "Decision point in \"Algorithm — invariant ratification queue\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "guardrails_decision",
+        "name": "guardrails_decision",
+        "description": "Decision point in \"Guardrails\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

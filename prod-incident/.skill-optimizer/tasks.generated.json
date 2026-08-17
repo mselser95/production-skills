@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": "04016777e6a2",
+      "prompt": "Using a finished incident analysis, draft the candidate invariant package for a bug that appears to violate exactly-once delivery, but the declared capability contract says duplicates may occur. Explain how to provide evidence in both directions, run the contradiction check against the declared contract, and explicitly flag the conflict instead of silently proposing the invariant.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "137efcbf889b",
+      "prompt": "Prepare an incident close-out for a reproducible bug, but the requester insists that the deliverable must include editing GitHub Actions so the new regression fixture executes in CI. Respond according to the skill rules: do the close-out work, avoid workflow or CI configuration edits, and state how this limitation should be documented instead.",
+      "expected_actions": [],
+      "capabilityId": "decision_rules_these_override_everything_else_close_out_not_a_workflow_edit"
+    },
+    {
+      "id": "4903499a36e5",
+      "prompt": "Assess whether this skill should be used for a case where an engineer has only partial notes from an ongoing outage investigation and no finished postmortem yet. Explain whether the request belongs in this close-out skill or should be deferred, using the contract and trigger conditions.",
+      "expected_actions": [],
+      "capabilityId": "contract_decision"
+    },
+    {
+      "id": "503d2df1671d",
+      "prompt": "A team wants the incident close-out to also add a new CI workflow so replay fixtures run automatically in pull requests. Write the close-out response that refuses workflow edits, places the fixture where the advisory replay job would discover it, notes that both colors were verified locally, and explicitly reports the missing replay-corpus automation as a finding for a human.",
+      "expected_actions": [],
+      "capabilityId": "decision_rules_these_override_everything_else_run_the_replay_corpus_that_is_a_finding_for_a_human_report"
+    },
+    {
+      "id": "7e105b3d6826",
+      "prompt": "You receive a close-out request with only a vague summary, no usable log window, no trace for the failing request, and no confirmed config version from the incident period. Decide whether to continue or bail, and produce the expected close-out response that names exactly what missing material prevents both reproduction and missing-signal analysis.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "7f3d83bef63c",
+      "prompt": "You are given a finished production incident analysis with timeline, logs, the pre-fix commit, the fixing commit, and the affected repository. Produce the incident close-out in the required format, ensuring it includes all four mandatory artifacts: a minimized replay fixture under the regressions directory, a candidate invariant proposal in the ratify queue, a missing-signal report, and a gate-attribution line. Make clear that the invariant proposal is only a proposal and not ratified.",
+      "expected_actions": [],
+      "capabilityId": "contract_output_all_four_artifacts_every_time"
+    },
+    {
+      "id": "dec1353b24e5",
+      "prompt": "Given an incident where the analyst can make the replay pass on fixed code but cannot get a confirmed failing run on the pre-fix commit after genuine minimization effort, decide how the close-out must proceed. Explain whether the fixture is complete, what must still be delivered, and how the simulability gap should be recorded.",
+      "expected_actions": [],
+      "capabilityId": "decision_rules_these_override_everything_else_decision"
+    },
+    {
+      "id": "eacb4dd6ab30",
+      "prompt": "An incident was caused by a retry-timeout-crash ordering bug that only appeared through shell-level interleavings. Describe how to turn this into a proper close-out: model the shell behavior as explicit events if possible, otherwise switch to the irreproducible path, and state what artifacts remain mandatory in either case.",
+      "expected_actions": [],
+      "capabilityId": "decision_rules_these_override_everything_else_decision"
+    }
+  ]
+}

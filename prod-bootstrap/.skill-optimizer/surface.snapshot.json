@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "contract_output",
+        "name": "contract_output",
+        "description": "Output:",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_ask_only_what_cannot_be_derived_propose_a_default_with_evid",
+        "name": "algorithm_ask_only_what_cannot_be_derived_propose_a_default_with_evid",
+        "description": "Ask ONLY what cannot be derived; propose a default with evidence for each:",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_write_the_spec_and_directories_contract_output_1_2_everyt",
+        "name": "algorithm_write_the_spec_and_directories_contract_output_1_2_everyt",
+        "description": "Write the spec and directories (Contract output 1–2). Everything written is",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_emit_change_plan_tasks_ordered_by_leverage_each_bounded_and",
+        "name": "algorithm_emit_change_plan_tasks_ordered_by_leverage_each_bounded_and",
+        "description": "Emit change-plan tasks ordered by leverage, each bounded and routable:",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_output",
+        "name": "algorithm_output",
+        "description": "Expected output format: GAP REPORT — <repo> (tier T<k>)",
+        "args": [
+          {
+            "name": "content",
+            "required": true,
+            "type": "string",
+            "description": "The content to format into the expected output"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_decision",
+        "name": "algorithm_decision",
+        "description": "Decision point in \"Algorithm\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "guardrails_decision",
+        "name": "guardrails_decision",
+        "description": "Decision point in \"Guardrails\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

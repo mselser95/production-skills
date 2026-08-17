@@ -1,0 +1,44 @@
+{
+  "name": "prod-ops",
+  "target": {
+    "surface": "prompt",
+    "repoPath": "/Users/matiasselser/dev/personal/production-skills/prod-ops",
+    "skill": {
+      "source": "/Users/matiasselser/dev/personal/production-skills/prod-ops/SKILL.md",
+      "cache": true
+    },
+    "scope": {
+      "include": [
+        "*"
+      ],
+      "exclude": []
+    }
+  },
+  "benchmark": {
+    "format": "openai",
+    "authMode": "codex",
+    "timeout": 240000,
+    "models": [
+      {
+        "id": "openai/gpt-5.4",
+        "name": "GPT-5.4",
+        "tier": "flagship"
+      }
+    ],
+    "tasks": "/Users/matiasselser/dev/personal/production-skills/prod-ops/.skill-optimizer/tasks.generated.json",
+    "surfaceSnapshot": "/Users/matiasselser/dev/personal/production-skills/prod-ops/.skill-optimizer/surface.snapshot.json",
+    "verdict": {
+      "perModelFloor": 0.6000000000000001,
+      "targetWeightedAverage": 0.8
+    },
+    "taskGeneration": {
+      "enabled": false,
+      "maxTasks": 8,
+      "seed": 1,
+      "outputDir": "/Users/matiasselser/dev/personal/production-skills/prod-ops/.skill-optimizer"
+    },
+    "output": {
+      "dir": "/Users/matiasselser/dev/personal/production-skills/prod-ops/benchmark-results"
+    }
+  }
+}

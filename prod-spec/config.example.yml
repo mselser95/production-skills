@@ -11,3 +11,5 @@ PROD_CONTEXT_DIR=".prod/context"
 # Optional: command that emits resolved context JSON (the deterministic policy
 # engine, when it exists). Empty = parse PROD_SPEC_FILE directly (v0).
 PROD_CONTEXT_CMD=""
+# Where candidate-invariant packages are deposited for ratification.
+PROD_RATIFY_QUEUE_DIR=".prod/ratify-queue"

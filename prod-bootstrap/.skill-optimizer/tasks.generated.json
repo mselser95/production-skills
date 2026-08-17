@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": "2f6990b28714",
+      "prompt": "A service has no fitness checks, uses direct UUID and clock calls on critical paths, lacks provenance lanes, has no incident-fixture corpus, and talks to an external payment processor without an outbox. Emit a RATCHET-style change plan ordered by leverage, with bounded tasks routed to implementation rather than a rewrite. Include ambiguity tags, keep tasks small enough for incremental adoption, and state explicitly which gaps are not covered yet and why.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_emit_change_plan_tasks_ordered_by_leverage_each_bounded_and"
+    },
+    {
+      "id": "4eb946dddd4d",
+      "prompt": "A repository already contains a production spec file and the user asks, 'Can you bootstrap this repo to the standard?' Decide whether the bootstrap skill should proceed or bail, and explain the correct routing based on the skill's decision logic and bail conditions.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "51bc50dc9765",
+      "prompt": "The request comes from a non-interactive CI job with no human available, asking to set up production.yaml automatically for a service. Decide the correct guardrail outcome, including whether any semantic facts may be inferred, whether partial work should be parked, and what blocked_on state applies.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_decision"
+    },
+    {
+      "id": "a59227b043e3",
+      "prompt": "Given an inventory of a repository showing a Postgres database, a Stripe client, a Kafka consumer, direct clock usage in core code, and a nightly reconciliation job, continue the bootstrap by asking the human only the semantic questions that cannot be derived. Ask one question at a time, propose a default with concrete evidence for tier, each candidate capability and its class, seed invariants, hot-path latency constraints, and cheap gate commands, and explicitly record any declined capabilities as out of scope.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_ask_only_what_cannot_be_derived_propose_a_default_with_evid"
+    },
+    {
+      "id": "bac3718b0548",
+      "prompt": "For a repo being brought to standard, write the additive scaffold only: create the spec-lite production.yaml from already ratified answers, create verification/ratified/ as an empty skeleton with a README, create the regressions directory, the ratify queue directory, and the empty liability registries with headers. Preserve the rule that bootstrap never writes ratified invariants into verification/ratified/ and never changes existing code, tests, or CI wiring.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_write_the_spec_and_directories_contract_output_1_2_everyt"
+    },
+    {
+      "id": "ce505a786026",
+      "prompt": "You are onboarding a brownfield service repo to the production standard with a human available to answer questions. Produce the full bootstrap deliverable: a spec-lite production.yaml with only human-ratified tier, invariants, and capabilities; the additive scaffold directories and empty registry files; an honest gap report; a leverage-ordered ratchet refactor plan with ambiguity tags; and printed suggestions for repo-specific gate commands and paths. Do not edit existing code or CI, and make clear which items are proposed versus ratified.",
+      "expected_actions": [],
+      "capabilityId": "contract_output"
+    },
+    {
+      "id": "e535da219be4",
+      "prompt": "Generate the gap report for a tier-0 repo after inventory and Q&A. Use the required table format beginning with 'GAP REPORT — <repo> (tier T<k>)' and include at minimum rows for spec present, zones separation, fitness checks, clock/random injection, provenance lanes, cheap gate, incident fixtures directory, registries, invariants ratified, reconciliation, and observability of critical transitions. Severity must be impact-based and no embarrassing gap may be omitted.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_output"
+    },
+    {
+      "id": "efc7f86e1d03",
+      "prompt": "During bootstrap, the human confirms one capability but then stops responding before tier and invariants are ratified. Determine the correct next step under the skill's guardrails: what to preserve, what not to treat as final, whether to continue guessing, and how to bail with state.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_decision"
+    }
+  ]
+}

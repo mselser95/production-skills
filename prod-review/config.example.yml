@@ -3,3 +3,9 @@ PROD_SPEC_FILE="production.yaml"
 PROD_CONTEXT_DIR=".prod/context"
 # Post findings to the PR (true) or print in chat only (false).
 PROD_REVIEW_POST="false"
+# The blocker bar for this domain — the single most important review input.
+# Example: "silent money/data corruption, irreversible external effects,
+# security exposure, or state left inconsistent after an error path".
+PROD_BLOCKER_CALIBRATION="silent data corruption, irreversible external effects, security exposure, or inconsistent state after errors"
+# One line on what the product does, for impact reasoning.
+PROD_DOMAIN_CONTEXT="describe your product here"

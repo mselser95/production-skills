@@ -3,95 +3,119 @@ name: prod-ops
 description: >
   Implementer skill (cheapest-model tier, highest frequency): the mechanical
   operations layer of a trunk-based pipeline — bisect a red trunk, author
-  revert PRs (aggressive threshold for agent-authored culprits, human veto
-  window), reproduce and classify flakes (isolated rerun + changed-code
-  intersection), manage the quarantine registry, sweep expired liabilities
-  (flags, waivers, quarantines, contract-migration debt), and rebase/re-task
-  PRs ejected from the merge queue. Every operation is bounded, verifiable,
-  and safe to run unattended within its rules. The one absolute exception:
-  a flaky T0 invariant test is an INCIDENT, never a quarantine.
+  revert PRs with a human veto window, classify flakes (isolated rerun +
+  changed-code intersection), manage quarantine, sweep expired liabilities
+  (flags, waivers, quarantines, contract-migration debt), and rebase PRs
+  ejected from the merge queue. Every operation is bounded, evidenced, and
+  safe to run unattended within its rules. Absolute exception: a flaky T0
+  invariant test is an INCIDENT, never a quarantine.
   TRIGGER when: trunk is red ("bisect and revert"), a test flaked ("classify
-  this flake"), the liability registries need their sweep ("clean up expired
-  flags/waivers"), a queue-ejected PR needs rebasing, or on a schedule as the
-  pipeline's standing maintenance loop.
+  this flake"), registries need their sweep ("clean up expired flags"), an
+  ejected PR needs rebasing, or on schedule as the standing maintenance loop.
   DO NOT TRIGGER when: the failure is a T0 invariant test (escalate as
-  incident — prod-incident territory once analyzed), the fix requires judgment
-  about intended behavior (orchestrator work), or the ask is feature work.
+  incident), the fix requires judgment about intended behavior (orchestrator
+  work), or the ask is feature work.
 ---
 
 # prod-ops — the mechanical layer
 
-Read `references/preamble.md` first. Registry entries follow the liability
-convention: every entry has `owner`, `created`, `expires`.
+Read `references/preamble.md` first. Test provenance rules:
+`references/test-provenance.md`. Registry paths come from `config.sh`
+(`PROD_FLAGS_REGISTRY`, `PROD_WAIVERS_REGISTRY`, `PROD_QUARANTINE_REGISTRY`,
+`PROD_CONTRACT_DEBT_REGISTRY`); every entry has `owner`, `created`, `expires`.
 
 Reverting an agent's PR has zero social cost — that asymmetry is the design.
 Act fast on solid signal, leave the veto window to humans, and never confuse
 "mechanical" with "silent": every action lands as a PR or a registry change
-with a paper trail.
+with its evidence attached.
+
+## Decision rules (these override everything else)
+
+- **RULE T0-FLAKE:** a nondeterministic failure in a T0 invariant test is an
+  INCIDENT. Do not quarantine, do not rerun-until-green, do not proceed —
+  escalate with your reproduction evidence. Nondeterminism in a critical
+  invariant test is as likely a product race as a test race.
+- **RULE NO-DIRECT-DISABLE:** you never disable, delete, or weaken a test
+  yourself. Quarantine expiry without a fix → open a DISABLE PR that requires
+  the owner's approval (preamble §3), escalate, log. Never extend an expiry.
+- **RULE ONE-REVERT:** one revert in flight per repo. A second red while one
+  is open → escalate to a human, never stack reverts.
+- **RULE NO-JUDGMENT:** any operation that turns out to need intent
+  interpretation (which behavior is correct, which side of a semantic
+  conflict wins) → BAIL with `blocked_on: judgment`. You execute defined
+  operations; you never arbitrate meaning.
+- **RULE EVIDENCE-FIRST:** no evidence, no action. Every revert, disable PR,
+  quarantine entry, and closure carries its reproduction/bisect evidence
+  inline.
+- **RULE REGISTRY-ENTRIES-ONLY:** you operate on registry ENTRIES via the
+  operations below. The registries' rules, TCB paths, CI config, and
+  thresholds are never yours to change (preamble §3).
 
 ## Operations
 
-### 1. Bisect a red trunk
-- Span: last-green..HEAD (short, on a queue-fed trunk).
-- Reproduce the failure at HEAD first; a non-reproducing failure goes to the
-  flake path (op 3), not to bisection.
-- Bisect to the culprit; confidence requires a clean non-flaky reproduction at
-  the culprit and green at its parent.
-- Output: `CULPRIT <sha> <pr> confidence: high|low` + hand-off to op 2 (high)
-  or a human (low).
+### OP-1 Bisect a red trunk
+- When: postsubmit red on trunk.
+- Do: reproduce at HEAD first — if it does not reproduce in a fresh process,
+  this is OP-3, not a bisect. Then bisect last-green..HEAD (short span on a
+  queue-fed trunk). Confidence is `high` only with a clean non-flaky
+  reproduction at the culprit AND green at its parent; anything less is `low`.
+- Output: `CULPRIT <sha> <pr> confidence: high|low` + evidence.
+- Handoff: `high` → OP-2. `low` → a human, with both runs attached; never
+  open a revert on a low-confidence bisect.
 
-### 2. Author a revert
-- Open the revert PR into the priority lane with the bisect evidence in the
-  body. Never push directly — the merge queue is the only writer.
-- Agent-authored culprit + high confidence: mark for auto-merge after the
-  veto window (`PROD_REVERT_VETO_MINUTES`, default 15). Human-authored or
-  T0-touching culprit: request human approval, no auto-merge.
-- Re-task the original author (agent: structured re-task with the failure;
-  human: notify) — cap re-lands at 2, then require a human.
+### OP-2 Author a revert
+- When: OP-1 handed off `high`, and RULE ONE-REVERT allows it.
+- Do: open the revert PR into the priority lane — never push directly; the
+  merge queue is the only writer. Body must contain: culprit SHA/PR, bisect
+  evidence, failing job link, reproduction commands.
+- Auto-merge policy: agent-authored culprit + high confidence → arm
+  auto-merge after the veto window `PROD_REVERT_VETO_MINUTES` (default 15).
+  Human-authored culprit OR any T0 path touched → request human approval,
+  no auto-merge.
+- Handoff: re-task the original author with the revert context. Re-land cap:
+  2 attempts (fixed by design), then require a human.
 
-### 3. Reproduce and classify a flake
-- Isolated rerun (fresh process, same commit). Then the DeFlaker check: did
-  the failing test execute ANY line changed by the blamed commit? No ⇒ flake.
-- Stress the hypothesis: `-race`, `-count=N`, shuffle. Record the evidence.
-- **T0 invariant test: STOP.** Nondeterminism in a critical-invariant test is
-  as likely a product race as a test race. Escalate as an incident with your
-  reproduction evidence; do not quarantine, do not rerun-until-green.
-- Otherwise: quarantine entry (op 4) + a reproduction report the owner can
-  act on (the suspected class: async-wait, ordering, isolation, timing).
+### OP-3 Classify a flake
+- When: a failure that does not reproduce, or fails-then-passes on the same
+  commit.
+- Do, in order: (1) isolated rerun — fresh process, same commit; (2) the
+  changed-code intersection check: did the failing test execute ANY line the
+  blamed commit changed? No ⇒ flake by construction; (3) stress the
+  hypothesis — race detector, repeated runs, randomized order (Go example:
+  `-race -count=N -shuffle=on`; adapt to the repo's language).
+- Check RULE T0-FLAKE before anything else.
+- Output: classification + evidence + suspected class (async-wait, ordering,
+  isolation, timing) → OP-4 entry + owner notification.
 
-### 4. Quarantine registry
-- Entry: test id, evidence link, `owner` (the test's owner per the repo's
-  ownership map), `expires` (`PROD_QUARANTINE_TTL_DAYS`, default 14; 3 for
-  T1-critical). Quarantined = keeps running, stops gating.
-- On expiry without a fix: disable the test, escalate to the owner, log it.
-  You never silently extend an expiry.
+### OP-4 Quarantine registry
+- When: OP-3 classified a non-T0 flake.
+- Do: add entry to `PROD_QUARANTINE_REGISTRY` — test id, evidence link,
+  `owner` from the repo's ownership map, `expires` = now +
+  `PROD_QUARANTINE_TTL_DAYS` (default 14; use 3 for tests guarding critical
+  paths — fixed by design). Quarantined = keeps running, stops gating.
+- On expiry without a fix: RULE NO-DIRECT-DISABLE.
 
-### 5. Liability sweep (flags, waivers, contract debt, stale PRs)
-- For each registry: list entries past `expires`.
-- Expired flag → open the removal PR (both arms' tests updated per the flag's
-  documented default — the safe state stays; the dead arm goes).
-- Expired waiver → the gate it suppressed goes back into force; notify owner.
-- Expired contract-migration debt (expand without contract) → open the ticket
-  with the pending destructive step; never author destructive DDL yourself.
-- Agent PR stale >48h or ejected twice → close with a state dump comment.
+### OP-5 Liability sweep
+- When: scheduled, or on request.
+- Do, per registry, for each entry past `expires`:
+  - flag (`PROD_FLAGS_REGISTRY`) → open the removal PR: dead arm deleted,
+    safe default kept, both arms' tests updated.
+  - waiver (`PROD_WAIVERS_REGISTRY`) → the suppressed gate returns to force;
+    notify owner.
+  - contract-migration debt (`PROD_CONTRACT_DEBT_REGISTRY`) → open the
+    ticket for the pending destructive step; NEVER author destructive DDL.
+  - agent PR stale >48h or ejected twice (fixed by design) → close with a
+    state-dump comment.
+- Output: sweep report — entries actioned, entries escalated, owners pinged.
 
-### 6. Rebase an ejected PR
-- Mechanical rebase onto current trunk; on textual conflict, re-task the
-  authoring agent with the conflict context (2 retries then close per op 5).
-- Never resolve a semantic conflict by choosing sides — that is judgment.
-
-## Guardrails
-
-- Preamble §3: CI config, thresholds, and the registries' RULES are TCB. You
-  execute the defined operations on registry ENTRIES; you never change what
-  the registry enforces.
-- Every destructive-looking action (revert, disable, close) carries its
-  evidence inline. No evidence, no action.
-- Rate-limit yourself: one revert in flight per repo at a time; a second red
-  while one is open means escalate, not stack reverts.
+### OP-6 Rebase an ejected PR
+- When: the merge queue ejected a PR (stale base or textual conflict).
+- Do: mechanical rebase onto trunk. Textual conflict → re-task the authoring
+  agent with the conflict context, cap 2 retries, then OP-5 closure.
+  Semantic conflict (both sides changed behavior) → RULE NO-JUDGMENT.
 
 ## Bail
 
-Preamble format. The common one: `blocked_on: judgment` — the operation turned
-out to need intent interpretation (whose behavior is correct, which side of a
-conflict wins). Park the evidence, name the human or orchestrator skill.
+Preamble format. The expected `blocked_on` values: `judgment`,
+`t0-flake-incident` (with the escalation already sent), `registry-missing`
+(a configured registry path does not exist — name it).

@@ -1,0 +1,8 @@
+# prod-bootstrap configuration — copy to `config.sh` and edit. Live file is plain shell.
+PROD_SPEC_FILE="production.yaml"
+PROD_REGRESSIONS_DIR="regressions"
+PROD_RATIFY_QUEUE_DIR=".prod/ratify-queue"
+PROD_FLAGS_REGISTRY="registries/flags.yaml"
+PROD_WAIVERS_REGISTRY="registries/waivers.yaml"
+PROD_QUARANTINE_REGISTRY="registries/quarantine.yaml"
+PROD_CONTRACT_DEBT_REGISTRY="registries/contract-debt.yaml"

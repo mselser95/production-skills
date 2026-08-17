@@ -21,62 +21,80 @@ description: >
 # prod-incident — from incident to permanent verification
 
 Read `references/preamble.md` first. Output format:
-`references/incident-fixture.md` — all four artifacts, every time. An incident
-close-out that produces only a fix is a discarded lesson.
+`references/incident-fixture.md`. An incident close-out that produces only a
+fix is a discarded lesson.
 
 ## Contract
 
-- **Input:** the incident's analysis material — timeline, logs/traces,
-  the culprit change if known, the fix if merged — plus the affected repo(s).
-- **Output:** under `regressions/<yyyy-mm-dd>-<slug>/` in the affected repo:
-  `fixture.yaml`, `events.json`, `invariants.txt`; plus the candidate
-  invariant package and missing-signal report as a ratification proposal
-  (NOT committed into `verification/ratified/` — that is the human's merge).
+- **Input:** the incident's finished analysis — timeline, logs/traces, the
+  culprit change if known, the fix if merged — plus the affected repo(s).
+- **Output:** ALL FOUR artifacts, every time:
+  1. minimized fixture under `<PROD_REGRESSIONS_DIR>/<yyyy-mm-dd>-<slug>/`
+     (default `regressions/`);
+  2. candidate invariant package → written to `PROD_RATIFY_QUEUE_DIR`
+     (default `.prod/ratify-queue/`), NEVER into `verification/ratified/`;
+  3. missing-signal report (same queue dir, same proposal file);
+  4. gate-attribution line.
+
+## Decision rules (these override everything else)
+
+- **RULE TWO-COLORS:** a fixture is valid only when demonstrated BOTH ways —
+  red on the pre-fix commit, green on fixed code. A fixture that never turned
+  red proves nothing; a close-out missing either color is incomplete, and you
+  say so rather than accept it.
+- **RULE NOT-REPRODUCIBLE:** if the failure cannot be reproduced after real
+  minimization effort, the close-out does NOT stall and does NOT get waved
+  through: the MANDATORY outputs become (a) the missing-signal report and
+  (b) a `gate_attribution` that records the simulability gap — what the
+  harness lacked to reproduce this. "Irreproducible" is never a way to skip
+  the work; it changes which artifacts are the deliverable.
+- **RULE SHELL-INTERLEAVING:** if the failure lived in shell-level
+  interleavings (retries, timeouts, crash windows), model the shell's part as
+  explicit events (effect-result events, timeout events) so the core replay
+  exhibits it. If that modeling is impossible, apply RULE NOT-REPRODUCIBLE —
+  the simulability gap is itself the finding.
+- **RULE NO-RATIFIED-WRITES:** candidate invariants and conformance material
+  are PROPOSALS into `PROD_RATIFY_QUEUE_DIR`. You never write into
+  `verification/ratified/` — however strong the invariant looks (preamble §3).
+- **RULE NO-CI-EDITS:** you never edit CI/workflow configuration. Place the
+  fixture where the advisory replay job discovers it
+  (`<PROD_REGRESSIONS_DIR>/`), verify both colors LOCALLY; if CI does not yet
+  run the replay corpus, that is a finding for a human, reported in the
+  close-out — not a workflow edit.
+- **RULE SPARSE-INPUT:** if the analysis material is too sparse both to
+  reproduce AND to identify missing signals → BAIL listing exactly what is
+  missing (which log window, which trace, which config version).
 
 ## Algorithm
 
-1. **Reproduce minimally.** From the incident material, construct the shortest
-   event sequence that exhibits the failure against the current code with the
-   fix reverted (or the pre-fix commit). Target 10–50 events. Minimization is
-   the deliverable — a raw capture is fixture rot on a timer.
-   If the failure cannot be reproduced in the core (it lived in the shell's
-   interleavings), model the shell's part as explicit events (effect-result
-   events, timeout events) — if THAT is impossible, record it honestly in
-   `gate_attribution`: the simulability gap is itself the finding.
-2. **Assert invariants, not snapshots.** `invariants.txt` names which ratified
-   invariants must hold at every transition of the replay. If the incident
-   violated something no ratified invariant captures — that IS the candidate
-   invariant.
-3. **Build the candidate invariant package** with evidence in both directions:
-   N passing runs on fixed code AND the concrete violating trace (the fixture
-   itself usually is it). Run the contradiction-check against the declared
-   capability contracts: a candidate that contradicts a declared clause
-   (e.g. "exactly once" vs `may_be_duplicate: true`) is wrong or the contract
-   is — flag the conflict, propose nothing that contradicts silently.
-4. **Missing-signal report.** For each behavior in the incident that was
-   invisible or ambiguous in production telemetry: what it looked like, what
-   signal would have distinguished it, the proposed metric/attribute/event.
+1. **Reproduce minimally.** From the analysis, construct the shortest event
+   sequence exhibiting the failure against the pre-fix code. Target 10–50
+   events — minimization is the deliverable; a raw capture is fixture rot on
+   a timer. Apply RULE SHELL-INTERLEAVING / RULE NOT-REPRODUCIBLE as needed.
+2. **Assert invariants, not snapshots.** `invariants.txt` names which
+   ratified invariants must hold at every transition of the replay. If the
+   incident violated something no ratified invariant captures — that IS the
+   candidate invariant.
+3. **Build the candidate invariant package** (format spec, all fields):
+   evidence in BOTH directions — N passing runs on fixed code AND the
+   concrete violating trace (usually the fixture itself). Run the
+   contradiction-check against declared capability contracts: a candidate
+   contradicting a declared clause (e.g. "exactly once" vs
+   `may_be_duplicate: true`) means the candidate is wrong or the contract is
+   — flag the CONFLICT explicitly; never propose past it silently.
+4. **Missing-signal report.** For each behavior that was invisible or
+   ambiguous in production telemetry: what it looked like, what would have
+   distinguished it, the proposed metric/attribute/event.
 5. **Gate attribution.** One honest paragraph: which declared gate would have
-   caught this before production — or none, and why. This line is the
-   framework's accounting; write it even when (especially when) the answer is
-   embarrassing.
-6. **Wire the fixture into CI** (advisory first): the replay runs green on
-   current code. Confirm it runs red on the pre-fix commit — a fixture that
-   never turned red proves nothing.
-
-## Guardrails
-
-- Preamble applies; §3 especially — the candidate invariant and any new
-  conformance material are PROPOSALS. You never write into
-  `verification/ratified/`.
-- No fixture without both colors: green on fixed code, red on broken code,
-  both demonstrated in the close-out.
-- Do not classify the incident "irreproducible" to escape the work — if it is
-  truly irreproducible, the missing-signal report and the simulability-gap
-  line are the mandatory outputs instead.
+   caught this before production — or none, and why. Write it even when
+   (especially when) the answer is embarrassing.
+6. **Verify and place.** Both colors demonstrated locally (RULE TWO-COLORS);
+   fixture directory complete (`fixture.yaml` with `schema_version`,
+   `events.json`, `invariants.txt`); proposals in the ratify queue; RULE
+   NO-CI-EDITS respected.
 
 ## Bail
 
-Preamble format. Mandatory bail: analysis material is insufficient to
-reproduce AND to identify missing signals → list exactly what is missing
-(which log window, which trace, which config version).
+Preamble format. Expected `blocked_on` values: `sparse-input` (RULE
+SPARSE-INPUT, with the missing-material list), `no-prefix-commit` (cannot
+identify a pre-fix state to demonstrate red on — name what you tried).

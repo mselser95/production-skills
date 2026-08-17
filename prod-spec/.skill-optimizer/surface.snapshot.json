@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "contract_output_resolved_context_yaml_change_plan_yaml_in_the",
+        "name": "contract_output_resolved_context_yaml_change_plan_yaml_in_the",
+        "description": "Output: `resolved-context.yaml` + `change-plan.yaml` in the task",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "contract_decision",
+        "name": "contract_decision",
+        "description": "Decision point in \"Contract\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_decision",
+        "name": "algorithm_decision",
+        "description": "Decision point in \"Algorithm\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "guardrails_ask_don_t_guess_if_the_intent_is_ambiguous_in_a_way_that_c",
+        "name": "guardrails_ask_don_t_guess_if_the_intent_is_ambiguous_in_a_way_that_c",
+        "description": "Ask, don't guess: if the intent is ambiguous in a way that changes the",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "guardrails_decision",
+        "name": "guardrails_decision",
+        "description": "Decision point in \"Guardrails\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

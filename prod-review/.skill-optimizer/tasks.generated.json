@@ -1,0 +1,46 @@
+{
+  "tasks": [
+    {
+      "id": "40ecadcbe412",
+      "prompt": "Given a multi-file PR, perform the review only after reading every changed file in full rather than relying on patch hunks, so architecture, logic, observability, tests, and completeness can be audited against full context.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_read_every_changed_file_in_full_not_hunks"
+    },
+    {
+      "id": "65177b76fe80",
+      "prompt": "You are asked to review a code change, but the branch has no resolved-context artifact in PROD_CONTEXT_DIR. Decide whether this skill applies, and state what should happen instead according to the skill contract.",
+      "expected_actions": [],
+      "capabilityId": "contract_decision"
+    },
+    {
+      "id": "6e1f78838439",
+      "prompt": "Before producing findings on a diff, inspect the repository's contributor guidance, agent docs, linter configuration, and surrounding untouched code patterns so the review follows house style and avoids false positives based on local idioms.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_read_the_repo_s_conventions_agent_contributor_docs_linter"
+    },
+    {
+      "id": "924120d1394f",
+      "prompt": "Produce the final review result in the required format: FINDINGS entries with class, severity, where, claim, actual, and required fields; a NOT VALIDATED section listing unchecked areas with reasons; and a VERDICT line stating either contract-satisfied or blocked with blocker count.",
+      "expected_actions": [],
+      "capabilityId": "output_format_output"
+    },
+    {
+      "id": "a85ec47808ef",
+      "prompt": "A change-plan claims only shell-tier work, but the actual diff modifies orchestration code and introduces a semantic event not declared in the plan. Decide whether this is a divergence and how severe it must be under the review algorithm.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "def2222cc248",
+      "prompt": "Review a change that replaces a constant-time lookup with a loop over a collection in a hot path. Determine whether the PR provides an appropriate benchmark scenario and, if not, raise the relevant gap in the findings report.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_loop_fanout_over_a_collection_that_used_to_be_o_1_benchma"
+    },
+    {
+      "id": "f9968e41708e",
+      "prompt": "Review a production PR against its resolved-context.yaml and change-plan.yaml, recompute obligations from the actual diff, identify any divergence between claimed and actual touched capabilities or semantic events, and return a classified findings report with file:line citations plus a NOT VALIDATED section and final verdict.",
+      "expected_actions": [],
+      "capabilityId": "contract_output_a_classified_findings_report_format_below_no_comm"
+    }
+  ]
+}

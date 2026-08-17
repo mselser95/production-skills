@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": "04ca089471f1",
+      "prompt": "The repository production spec sets tier to 0. The user asks: 'Resolve what implementing email change verification requires.' Generate the resolved context and change plan in the normal format, but make the response stop at the human approval moment, clearly presenting the compact resolved context and recording that downstream work must wait for approval.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "05a3daab3e48",
+      "prompt": "The repo has a valid production.yaml with tier 1, several inline capabilities, and no separate capabilities directory. The user asks: 'Prepare the resolved context and change plan for adding CSV export to the existing reporting API.' Produce the two required artifacts only, mapping the request to an existing declared capability first, pulling all ratified invariants for every touched service, deriving obligations from the capability classes, and avoiding implementation details.",
+      "expected_actions": [],
+      "capabilityId": "contract_output_resolved_context_yaml_change_plan_yaml_in_the"
+    },
+    {
+      "id": "12166d625c86",
+      "prompt": "The repo contains multiple policy documents that seem to suggest a touched capability does not need reconciliation, but production.yaml declares it as a source_of_truth capability. The user asks: 'Plan support for account merge recovery.' Produce an auditable resolved context and change plan that rely on the production spec rather than precedent-guessing from policy files, include all class-implied obligations, and if reconciliation seems unnecessary, propose a waiver instead of silently skipping it.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_decision"
+    },
+    {
+      "id": "6e333433dbba",
+      "prompt": "The user request is: 'Make partner sync more reliable.' In the repo, this could either mean improving an existing external_read capability or adding retries and reconciliation to an external_effect capability, and the choice would change the capability mapping and obligations. Instead of guessing, ask exactly one precise clarifying question that resolves the ambiguity.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_ask_don_t_guess_if_the_intent_is_ambiguous_in_a_way_that_c"
+    },
+    {
+      "id": "731339bdb971",
+      "prompt": "A declared capability touched by the request is classed as external_effect. The change intent is: 'Add automatic refund calls to the payment provider when an order is canceled.' Produce the resolved context and change plan so that they explicitly include the full class-derived obligations such as timeout, retry policy, failure model, ambiguous-outcome scenarios, and observability, plus any semantic-event evidence required by the change.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "7d933fc24d82",
+      "prompt": "The repo checkout does not contain production.yaml and no context script is configured. The user asks: 'Prepare the context for adding SSO login.' Respond using the skill's mandatory bail behavior, including the minimal spec-lite structure the repo owner must add, rather than inventing context or proceeding without the production spec.",
+      "expected_actions": [],
+      "capabilityId": "contract_decision"
+    },
+    {
+      "id": "e517facea010",
+      "prompt": "A repository defines PROD_CONTEXT_CMD and its script returns JSON containing tier, invariants, and capabilities. The user says: 'Plan the change required to support webhook retries for failed partner notifications.' Respond as this skill should: consume the context script output instead of manually parsing production.yaml, identify touched capabilities, detect semantic events like retries or external effects, and emit only resolved-context.yaml and change-plan.yaml.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "fcaf6d4d76de",
+      "prompt": "The intent is: 'Add a fraud-review queue for suspicious orders,' but none of the declared capabilities in production.yaml plausibly match that behavior. Generate the skill output by explicitly marking the capability as declared: NEW, explaining that this is a semantic declaration and human moment, including over-inclusive invariants and any required evidence triggered by new dependency, queue, background worker, or state introduction.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    }
+  ]
+}

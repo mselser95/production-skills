@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "contract_output_a_branch_with_the_implementation_its_provenance_hea",
+        "name": "contract_output_a_branch_with_the_implementation_its_provenance_hea",
+        "description": "Output: a branch with the implementation, its provenance-headed tests,",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "decision_rules_these_override_everything_else_test_even_one_that_fails_because_of_your_change_that_situ",
+        "name": "decision_rules_these_override_everything_else_test_even_one_that_fails_because_of_your_change_that_situ",
+        "description": "test — even one that fails because of your change. That situation is a",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "decision_rules_these_override_everything_else_decision",
+        "name": "decision_rules_these_override_everything_else_decision",
+        "description": "Decision point in \"Decision rules (these override everything else)\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_output",
+        "name": "algorithm_output",
+        "description": "Expected output format: IMPLEMENTED",
+        "args": [
+          {
+            "name": "content",
+            "required": true,
+            "type": "string",
+            "description": "The content to format into the expected output"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_decision",
+        "name": "algorithm_decision",
+        "description": "Decision point in \"Algorithm\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

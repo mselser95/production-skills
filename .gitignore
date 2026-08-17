@@ -1,4 +1,5 @@
 config.sh
 .skill-optimizer/runs/
+benchmark-results/
 node_modules/
 .DS_Store

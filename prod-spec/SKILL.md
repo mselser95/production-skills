@@ -39,9 +39,11 @@ plan's task list for `prod-implement`.
 ## Algorithm
 
 1. **Read the spec, not the org policy.** Load `production.yaml`
-   (`{tier, invariants[], capabilities[]}`) and each capability file. If the
-   repo has a context script (`PROD_CONTEXT_CMD`), run it and consume its JSON
-   instead of parsing YAML yourself.
+   (`{tier, invariants[], capabilities[]}`); in v0 the capability entries live
+   INLINE in that file — a separate capabilities directory is a later
+   hardening, not an assumption. If the repo has a context script
+   (`PROD_CONTEXT_CMD`), run it and consume its JSON instead of parsing YAML
+   yourself.
 2. **Map intent → capabilities, existing first.** The question is "which
    declared capability does this touch?", not "what new thing do I build?".
    Only when no declared capability fits, mark `declared: NEW` — that is a
@@ -53,10 +55,12 @@ plan's task list for `prod-implement`.
    copy the obligations its class implies (external_effect ⇒ timeout, retry
    policy, failure model, ambiguous-outcome scenarios, observability;
    source_of_truth ⇒ recovery, reconciliation, backup semantics;
-   event_consumer ⇒ duplicate/reorder/poison handling; connection ⇒
-   reconnect/sequence-gap/resubscribe). You derive; you never invent or skip.
+   event_consumer ⇒ duplicate/reorder/poison handling; external_read ⇒
+   declared staleness bound, staleness observable, unavailability fallback,
+   timeout; connection ⇒ reconnect/sequence-gap/resubscribe). You derive; you never invent or skip.
 5. **Detect semantic events** in what the task will require:
    `introduces_dependency`, `introduces_state`, `introduces_external_effect`,
+   `introduces_retry`, `introduces_queue`, `introduces_background_worker`,
    `changes_schema`, `changes_public_api`, `changes_hot_path`,
    `changes_critical_calculation`. Each event pulls its requirement set into
    `required_evidence`.
@@ -67,7 +71,9 @@ plan's task list for `prod-implement`.
    the full class checklist.
 7. **Candidate invariants.** If the change implies a new guarantee, propose it
    in `candidate_invariants` with how it could be falsified. It goes to
-   ratification via `prod-curate` — never into the blocking lane from here.
+   ratification via `prod-curate` — write the package into
+   `PROD_RATIFY_QUEUE_DIR` (default `.prod/ratify-queue/`), never into the
+   blocking lane from here.
 8. **Stop at the human moment.** If `tier == 0`, present the resolved context
    (it fits on one screen — that is the point) and wait for approval before
    any downstream skill runs. Record the approval in the artifact.

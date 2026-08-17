@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "contract_output_all_four_artifacts_every_time",
+        "name": "contract_output_all_four_artifacts_every_time",
+        "description": "Output: ALL FOUR artifacts, every time:",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "contract_decision",
+        "name": "contract_decision",
+        "description": "Decision point in \"Contract\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "decision_rules_these_override_everything_else_run_the_replay_corpus_that_is_a_finding_for_a_human_report",
+        "name": "decision_rules_these_override_everything_else_run_the_replay_corpus_that_is_a_finding_for_a_human_report",
+        "description": "run the replay corpus, that is a finding for a human, reported in the",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "decision_rules_these_override_everything_else_close_out_not_a_workflow_edit",
+        "name": "decision_rules_these_override_everything_else_close_out_not_a_workflow_edit",
+        "description": "close-out — not a workflow edit.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "decision_rules_these_override_everything_else_decision",
+        "name": "decision_rules_these_override_everything_else_decision",
+        "description": "Decision point in \"Decision rules (these override everything else)\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_decision",
+        "name": "algorithm_decision",
+        "description": "Decision point in \"Algorithm\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

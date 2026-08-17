@@ -35,12 +35,13 @@ gap you found. A stale corpus screens nothing.
 ## Algorithm — test promotion (batch)
 
 1. **Collect eligibles:** candidate-lane tests inside their TTL that have run
-   ≥ `PROD_MIN_ADVISORY_RUNS` times with a stable record, `pinning: false`.
+   ≥ `PROD_MIN_ADVISORY_RUNS` times with a stable record and without
+   `pinning: true`.
 2. **Change-detector screening:** run each against every commit in the
    refactor corpus. A test that fails on ANY behavior-preserving commit is a
    change detector → reject, note the commit that caught it.
-3. **Mutant-utility dedup:** run the mutation set with blocking lane alone,
-   then blocking + candidate. A candidate that kills no mutant the blocking
+3. **Mutant-utility dedup:** run the mutation set (`PROD_MUTATION_CMD`) with
+   the blocking lane alone, then blocking + candidate. A candidate that kills no mutant the blocking
    lane misses adds risk without signal → discard (recorded, not deleted
    early — TTL handles deletion).
 4. **Kata check:** the candidate suite must FAIL on every kata for its
@@ -54,8 +55,8 @@ gap you found. A stale corpus screens nothing.
 
 ## Algorithm — invariant ratification queue
 
-1. Collect candidates (from prod-spec plans, prod-incident packages,
-   counterexample-search runs).
+1. Collect candidates from `PROD_RATIFY_QUEUE_DIR` (where prod-spec plans,
+   prod-incident packages, and counterexample-search runs deposit them).
 2. **Mechanical pre-filter, before any human sees them:**
    - falsifiability: package has BOTH passing runs and a concrete violating
      trace; missing either ⇒ back to author with the gap named.
@@ -82,5 +83,5 @@ gap you found. A stale corpus screens nothing.
 ## Bail
 
 Preamble format. Common: corpora too thin to screen (`PROD_REFACTOR_CORPUS`
-< 5 commits or a capability with no katas) → the bail names the corpus gap;
+< 5 commits — floor fixed by design — or a capability with no katas) → the bail names the corpus gap;
 building corpus is the prerequisite task, not a reason to skip screening.

@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": "47698fca0609",
+      "prompt": "Given a mixed target containing both enumerable scenario checklists and property-oriented invariants, decide which cases should be table-driven enumeration and which should be property tests with adequacy self-checks for state diversity and precondition rejection ceilings. Present the resulting test plan in line with the skill's algorithm.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    },
+    {
+      "id": "5c70e38cadf3",
+      "prompt": "Create candidate tests for a transformation function, but do not snapshot the implementation's current outputs. Instead, use contract clauses, ratified properties, metamorphic relations, or enumerated failure outcomes as oracles, ensuring the tests verify behavior rather than merely detect future changes.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_output_and_asserting_it_is_change_detection_not_verificatio"
+    },
+    {
+      "id": "70349bc2cfe9",
+      "prompt": "After generating advisory-lane candidate tests for a package with both clause-cited and invariant-cited coverage, output the required synthesis report in the exact skill format, including target, files, counts, adequacy status per generator, and an honest uncovered section.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_output"
+    },
+    {
+      "id": "b5dc250c9f24",
+      "prompt": "Generate candidate tests for a service workflow, but avoid tests whose only value is asserting an internal call sequence to kill a mutant. Focus on externally meaningful assertions that curation would keep, and exclude brittle sequencing checks likely to be discarded during screening.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_call_sequence_assertion_will_be_discarded_by_curation_s_scre"
+    },
+    {
+      "id": "cb461b859529",
+      "prompt": "You are asked to synthesize tests for code that has no contract clauses or ratified invariants to cite. Produce the appropriate response for this skill: any proposed tests must be treated as pinning and explicitly marked pinning:true, and the result should clearly report that the verification gap is upstream in the spec.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_test_and_must_be_marked_pinning_true"
+    },
+    {
+      "id": "d34e676fd3d2",
+      "prompt": "Synthesize scenario-based candidate tests for failure modes like duplicate delivery and timeout-after-accept, using assertions that would still hold after internal refactors. Prefer stable behavioral outcomes and contract-level guarantees over implementation-shaped checks.",
+      "expected_actions": [],
+      "capabilityId": "guardrails_write_assertions_that_would_survive_a_refactor"
+    },
+    {
+      "id": "d75c8d5f9e5b",
+      "prompt": "Given a capability contract with several explicit clauses for a broadcaster component, generate candidate test files only in the ADVISORY lane. Each test function must include a full provenance header with candidate status, ttl, and a verifies citation or pinning:true where applicable, and include a synthesis report listing files, counts, adequacy, and uncovered clauses.",
+      "expected_actions": [],
+      "capabilityId": "contract_output_test_files_in_the_advisory_lane_only_each_function"
+    },
+    {
+      "id": "e3b46883a17a",
+      "prompt": "For each proposed test idea derived from a target capability, decide whether it can be tied to a specific contract clause or ratified invariant, or whether it must instead be treated as a pinning test. Explain the classification logic and ensure unverifiable ideas are not presented as verified tests.",
+      "expected_actions": [],
+      "capabilityId": "algorithm_decision"
+    }
+  ]
+}

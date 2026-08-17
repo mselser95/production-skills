@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "contract_output_a_classified_findings_report_format_below_no_comm",
+        "name": "contract_output_a_classified_findings_report_format_below_no_comm",
+        "description": "Output: a classified findings report (format below). No commits; no",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "contract_decision",
+        "name": "contract_decision",
+        "description": "Decision point in \"Contract\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_read_the_repo_s_conventions_agent_contributor_docs_linter",
+        "name": "algorithm_read_the_repo_s_conventions_agent_contributor_docs_linter",
+        "description": "Read the repo's conventions: agent/contributor docs, linter config, and the",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_read_every_changed_file_in_full_not_hunks",
+        "name": "algorithm_read_every_changed_file_in_full_not_hunks",
+        "description": "read EVERY changed file in full, not hunks.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_loop_fanout_over_a_collection_that_used_to_be_o_1_benchma",
+        "name": "algorithm_loop_fanout_over_a_collection_that_used_to_be_o_1_benchma",
+        "description": "loop/fanout over a collection that used to be O(1) → benchmark scenario?",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_decision",
+        "name": "algorithm_decision",
+        "description": "Decision point in \"Algorithm\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "output_format_output",
+        "name": "output_format_output",
+        "description": "Expected output format: FINDINGS",
+        "args": [
+          {
+            "name": "content",
+            "required": true,
+            "type": "string",
+            "description": "The content to format into the expected output"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

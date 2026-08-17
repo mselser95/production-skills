@@ -6,7 +6,8 @@ discarded, however good it looks.
 
 ## 1. You consume resolved context, never raw policy
 
-Your input is the resolved context (`formats/resolved-context.md`) produced by
+Your input is the resolved context (the resolved-context format, shipped beside this file as
+`resolved-context.md` where a skill consumes it) produced by
 `prod-spec` (or, in v0, dumped from the repo's `production.yaml` by the context
 script named in `config.sh`). You never read org policy files and resolve
 precedence yourself — the policy engine is deterministic; you are not.
@@ -69,7 +70,8 @@ result.
 
 ## 6. Provenance discipline
 
-Every test you write carries a provenance header (`formats/test-provenance.md`).
+Every test you write carries a provenance header (the test-provenance format, shipped beside this file as
+`test-provenance.md` where a skill authors tests).
 You write to the candidate lane unless the assertion cites a ratified invariant
 or derives mechanically from a contract clause. You never launder a candidate
 into the blocking lane by omitting the header.

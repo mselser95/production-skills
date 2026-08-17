@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "operations_output_culprit_sha_pr_confidence_high_low_evidence",
+        "name": "operations_output_culprit_sha_pr_confidence_high_low_evidence",
+        "description": "Output: `CULPRIT <sha> <pr> confidence: high|low` + evidence.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "operations_open_a_revert_on_a_low_confidence_bisect",
+        "name": "operations_open_a_revert_on_a_low_confidence_bisect",
+        "description": "open a revert on a low-confidence bisect.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "operations_merge_queue_is_the_only_writer_body_must_contain_culprit_s",
+        "name": "operations_merge_queue_is_the_only_writer_body_must_contain_culprit_s",
+        "description": "merge queue is the only writer. Body must contain: culprit SHA/PR, bisect",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "operations_check_rule_t0_flake_before_anything_else",
+        "name": "operations_check_rule_t0_flake_before_anything_else",
+        "description": "Check RULE T0-FLAKE before anything else.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "operations_output_classification_evidence_suspected_class_async_w",
+        "name": "operations_output_classification_evidence_suspected_class_async_w",
+        "description": "Output: classification + evidence + suspected class (async-wait, ordering,",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "operations_notify_owner",
+        "name": "operations_notify_owner",
+        "description": "notify owner.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "operations_output_sweep_report_entries_actioned_entries_escalated",
+        "name": "operations_output_sweep_report_entries_actioned_entries_escalated",
+        "description": "Output: sweep report — entries actioned, entries escalated, owners pinged.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "operations_decision",
+        "name": "operations_decision",
+        "description": "Decision point in \"Operations\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

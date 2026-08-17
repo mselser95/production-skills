@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "catalog": {
+    "surface": "prompt",
+    "actions": [
+      {
+        "key": "contract_output_test_files_in_the_advisory_lane_only_each_function",
+        "name": "contract_output_test_files_in_the_advisory_lane_only_each_function",
+        "description": "Output: test files in the ADVISORY lane only, each function carrying a",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_test_and_must_be_marked_pinning_true",
+        "name": "algorithm_test_and_must_be_marked_pinning_true",
+        "description": "test and must be marked `pinning: true`.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_output_and_asserting_it_is_change_detection_not_verificatio",
+        "name": "algorithm_output_and_asserting_it_is_change_detection_not_verificatio",
+        "description": "output and asserting it is change-detection, not verification. Allowed",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_output",
+        "name": "algorithm_output",
+        "description": "Expected output format: SYNTHESIZED",
+        "args": [
+          {
+            "name": "content",
+            "required": true,
+            "type": "string",
+            "description": "The content to format into the expected output"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "algorithm_decision",
+        "name": "algorithm_decision",
+        "description": "Decision point in \"Algorithm\" — evaluate conditional logic",
+        "args": [
+          {
+            "name": "condition",
+            "required": true,
+            "type": "string",
+            "description": "The condition or context to evaluate"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "string",
+            "description": "Additional context for the decision"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "guardrails_call_sequence_assertion_will_be_discarded_by_curation_s_scre",
+        "name": "guardrails_call_sequence_assertion_will_be_discarded_by_curation_s_scre",
+        "description": "call-sequence assertion will be discarded by curation's screening anyway.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      },
+      {
+        "key": "guardrails_write_assertions_that_would_survive_a_refactor",
+        "name": "guardrails_write_assertions_that_would_survive_a_refactor",
+        "description": "Write assertions that would survive a refactor.",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "type": "string",
+            "description": "The input to process for this instruction"
+          }
+        ],
+        "source": "prompt"
+      }
+    ]
+  }
+}

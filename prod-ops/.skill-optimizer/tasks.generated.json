@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": "048e46d3bab7",
+      "prompt": "A non-T0 test failed on trunk but passed in a fresh isolated rerun on the same commit. The blamed commit did execute lines inside the failing test's code path, and repeated stress runs with randomized order show intermittent failures only when run alongside a neighboring suite. Produce a flake-classification result with evidence, name the suspected class, and summarize why this is treated as a flake rather than a bisect target.",
+      "expected_actions": [],
+      "capabilityId": "operations_output_classification_evidence_suspected_class_async_w"
+    },
+    {
+      "id": "06f0249eba8f",
+      "prompt": "A critical invariant test in the T0 suite failed nondeterministically: it failed once, passed on rerun, and appears race-like. Describe the correct first response under the prod-ops rules, making clear what must not be done and what evidence-backed escalation should be produced before any quarantine or further flake workflow is considered.",
+      "expected_actions": [],
+      "capabilityId": "operations_check_rule_t0_flake_before_anything_else"
+    },
+    {
+      "id": "534a21c98484",
+      "prompt": "You reproduced a trunk failure once at HEAD, but the suspected culprit commit does not fail consistently and the parent was not cleanly green in follow-up verification. Explain what should happen next under the skill rules, specifically whether a revert should be opened, and summarize the evidence package that must be handed to a human instead.",
+      "expected_actions": [],
+      "capabilityId": "operations_open_a_revert_on_a_low_confidence_bisect"
+    },
+    {
+      "id": "5f79663a8445",
+      "prompt": "A high-confidence bisect identified culprit SHA 19ac44d from PR #8421 as the cause of a red trunk. No other revert is in flight. Write the content for a revert-PR plan that follows the skill rules: do not push directly, route through the merge queue, and include all required body elements such as culprit SHA/PR, bisect evidence, failing job link, and reproduction commands. Also state whether auto-merge should be armed if the culprit PR was agent-authored and touched no T0 paths.",
+      "expected_actions": [],
+      "capabilityId": "operations_merge_queue_is_the_only_writer_body_must_contain_culprit_s"
+    },
+    {
+      "id": "83483e48bee5",
+      "prompt": "A postsubmit job on trunk started failing after a short merge-queue span. The failure reproduces reliably at HEAD in a fresh process, and your bisect over last-green..HEAD shows commit 8f3c2ab is the first bad revision while its parent is green. Draft the operator-facing result in the required culprit format, including the culprit SHA, associated PR number, confidence level, and concise evidence from the reproduction and bisect runs.",
+      "expected_actions": [],
+      "capabilityId": "operations_output_culprit_sha_pr_confidence_high_low_evidence"
+    },
+    {
+      "id": "afcb574b2ac2",
+      "prompt": "Prepare a concise owner notification for a flaky non-T0 test that has just been classified and added to the quarantine registry with evidence attached and a 14-day expiry. The message should identify the test, link the evidence, explain that it keeps running but no longer gates trunk, and tell the owner what follow-up is expected before expiry.",
+      "expected_actions": [],
+      "capabilityId": "operations_notify_owner"
+    },
+    {
+      "id": "b3fead690399",
+      "prompt": "Generate a sweep summary for a scheduled maintenance run where one expired feature flag was actioned with a removal PR, two expired waivers were returned to force and their owners pinged, one contract-migration debt entry was escalated into a ticket because destructive DDL cannot be authored by the agent, and one stale agent PR older than 48 hours was closed with a state-dump comment. Output a clear report of entries actioned, entries escalated, and owners notified.",
+      "expected_actions": [],
+      "capabilityId": "operations_output_sweep_report_entries_actioned_entries_escalated"
+    },
+    {
+      "id": "f1c1cca711db",
+      "prompt": "Evaluate this situation and decide the correct operational path: trunk is red on a postsubmit job, but a fresh-process rerun at HEAD passes; the failing test is not T0, and the blamed commit did not touch any lines executed by that test. State whether this should proceed as bisect, flake classification, quarantine follow-up, or human escalation, and justify the decision from the skill's conditional rules.",
+      "expected_actions": [],
+      "capabilityId": "operations_decision"
+    }
+  ]
+}

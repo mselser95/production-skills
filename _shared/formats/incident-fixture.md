@@ -7,7 +7,7 @@ hygiene matters more than its size.
 ## Directory
 
 ```
-regressions/
+<PROD_REGRESSIONS_DIR>/          # default: regressions/
   <yyyy-mm-dd>-<slug>/
     fixture.yaml          # metadata
     events.json           # MINIMIZED input sequence (10–50 events, hand-blessed)

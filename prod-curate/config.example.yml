@@ -9,3 +9,7 @@ PROD_MIN_ADVISORY_RUNS="20"
 PROD_PROMOTION_SAMPLE_PCT="20"
 # Max invariant candidates per service per week that reach the human.
 PROD_RATIFY_BUDGET_PER_WEEK="3"
+# Where candidate-invariant packages arrive from prod-spec / prod-incident.
+PROD_RATIFY_QUEUE_DIR=".prod/ratify-queue"
+# Command that runs the mutation set and reports killed/surviving mutants.
+PROD_MUTATION_CMD="make mutants"
