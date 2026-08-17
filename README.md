@@ -1,6 +1,8 @@
 # production-skills
 
-The skills that operate a production-verifiability framework: an
+The skills that operate a production-verifiability framework — one to CREATE a
+repo at the standard (`prod-new`), one to bring an existing one to it
+(`prod-bootstrap`), and seven to work inside it: an
 intelligence-arbitrage loop where **expensive models orchestrate, cheap models
 implement, and a deterministic verifier decides**. Each skill removes a class
 of ambiguity so the work downstream of it becomes obvious enough for a smaller
@@ -26,6 +28,7 @@ contracts of the whole system — skills are replaceable, the formats are not.
 | [`prod-implement/`](prod-implement/) | implementer | One bounded task inside its contract; iterates against the cheap gate under a TCB write-mask; bounded iterations; honest bail with state. |
 | [`prod-test-synth/`](prod-test-synth/) | implementer | Candidate-lane tests at volume, provenance-headed and TTL'd, with generator adequacy self-checks. Cannot touch the blocking lane. |
 | [`prod-ops/`](prod-ops/) | implementer | The mechanical pipeline layer: bisect, revert, flake classification, quarantine, liability sweeps, rebases. T0-invariant flakes escalate as incidents. |
+| [`prod-new/`](prod-new/) | orchestrator (interactive) | **Greenfield**: create a NEW repo born at the standard — three zones, tracing, event sourcing, metrics + contracts, outbox, invariant counters, conformance kits, registries with expiry, every lane wired. Four questions, everything else derived. |
 | [`prod-bootstrap/`](prod-bootstrap/) | orchestrator (interactive) | Bring a repo to standard: inventory → human Q&A → spec + scaffold + AGENTS.md routing contract + gap report + ratchet refactor plan. |
 | [`prod-curate/`](prod-curate/) | curation (mixed) | Batch promotion (change-detector screening, mutant-utility dedup, known-bad katas) + ratification packages so human adjudication takes minutes. |
 
@@ -58,7 +61,7 @@ cd production-skills
 
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "$CFG/skills"
-for s in prod-spec prod-review prod-incident prod-implement prod-test-synth prod-ops prod-curate prod-bootstrap; do
+for s in prod-spec prod-review prod-incident prod-implement prod-test-synth prod-ops prod-curate prod-bootstrap prod-new; do
   ln -s "$(pwd)/$s" "$CFG/skills/$s"
   cp "$s/config.example.yml" "$s/config.sh"
 done

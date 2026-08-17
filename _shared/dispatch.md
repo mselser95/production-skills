@@ -13,6 +13,8 @@ dispatch bug.
 |---|---|---|---|
 | Intent interpretation, resolved context, change plan (`prod-spec`) | main session | the user's session model (expensive) | inline |
 | Bootstrap Q&A + synthesis (`prod-bootstrap` phases 2–5) | main session | session model | inline |
+| Greenfield four questions + slot instantiation (`prod-new`) | main session | session model | inline |
+| Greenfield template body generation (large scaffold builds) | `prod-implementer` agent | sonnet | Agent tool |
 | Review judgment: divergence, calibration, verdicts (`prod-review` phases 1–5) | main session | session model | inline |
 | Incident analysis + invariant candidates (`prod-incident` steps 2–5) | main session | session model | inline |
 | Ratification packages, screening interpretation (`prod-curate` judgment) | main session | session model | inline |

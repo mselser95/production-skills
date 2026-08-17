@@ -33,6 +33,15 @@ row() { # row <dimension> <verdict> <evidence>
 declined() { # declined <key> -> 0 if the spec ratifies this decline
   [[ -f "$SPEC" ]] && grep -qE "^[[:space:]]*-[[:space:]]*$1:" "$SPEC"
 }
+waived() { # waived <id> -> 0 if a NON-EXPIRED waiver covers this obligation.
+  # An unmet required obligation is legal only as a live waiver with an owner
+  # and an expiry — never as a spec key invented to hold it, and never once the
+  # expiry has passed (check-registries.sh gates that separately).
+  local w=registries/waivers.yaml
+  [[ -f $w ]] || return 1
+  grep -qE "^[[:space:]]*-[[:space:]]*id:[[:space:]]*$1[[:space:]]*$" "$w" || return 1
+  bash scripts/check-registries.sh >/dev/null 2>&1
+}
 have() { command -v "$1" >/dev/null 2>&1; }
 gobin() { echo "$(go env GOPATH)/bin"; }
 
@@ -219,9 +228,9 @@ if [[ -d $wf ]]; then
   if grep -rhE "^[^#]*" $wf/*.yaml 2>/dev/null | sed 's/#.*//' \
        | grep -qE "cosign|--provenance=|actions/attest|attestations:"; then
     row "artifact-provenance" PASS "signing/attestation step present"
-  elif grep -q "artifact_provenance_signing" "$SPEC" 2>/dev/null; then
-    row "artifact-provenance" NA "recorded open decision in $SPEC"
-  else row "artifact-provenance" FAIL "no provenance and not recorded as a decision"; fi
+  elif waived artifact-provenance-signing; then
+    row "artifact-provenance" NA "live waiver with owner+expiry in registries/waivers.yaml"
+  else row "artifact-provenance" FAIL "no provenance and no live waiver (an expired or missing waiver is not an exemption)"; fi
 fi
 
 # --- 15. CI lanes ---------------------------------------------------------
@@ -242,6 +251,11 @@ for r in flags waivers quarantine contract-debt; do
   [[ -f registries/$r.yaml ]] || { row "registries" FAIL "registries/$r.yaml missing"; break; }
 done
 [[ -f registries/contract-debt.yaml ]] && row "registries" PASS "4 liability registries present"
+if [[ -x scripts/check-registries.sh ]]; then
+  if out=$(bash scripts/check-registries.sh 2>&1); then
+    row "registries-expiry-gated" PASS "$(grep -oE '[0-9]+ entries checked[^,]*' <<<"$out" | head -1); expiry gates the build"
+  else row "registries-expiry-gated" FAIL "$(grep -m1 EXPIRED <<<"$out")"; fi
+else row "registries-expiry-gated" FAIL "registries are recorded but nothing enforces expiry — a stale waiver is a permanent silent exemption"; fi
 
 # --- 17. contract artifacts exist for the work (audit finding: never written) --
 ctxdir="${PROD_CONTEXT_DIR:-.prod/context}"
@@ -268,7 +282,10 @@ else row "candidate-lane-segregated" FAIL "$((cand-tagged)) of $cand candidate f
 # Only functions the diff ADDS are in scope: pre-existing tests in a touched
 # file predate the convention and are not this change's debt.
 if base=$(git merge-base HEAD origin/main 2>/dev/null); then
-  added=$(git diff "$base"..HEAD -- '*_test.go' 2>/dev/null | grep -cE '^\+func (Test|Fuzz|Benchmark)' || true)
+  # Benchmarks are excluded: they are neither blocking nor candidate — they
+  # live in their own non-gating lane, so a provenance header would claim a
+  # lane membership they do not have.
+  added=$(git diff "$base"..HEAD -- '*_test.go' 2>/dev/null | grep -cE '^\+func (Test|Fuzz)' || true)
   # an added func is "headed" when a provenance line is added within the diff too
   heads=$(git diff "$base"..HEAD -- '*_test.go' 2>/dev/null | grep -cE '^\+.*provenance:' || true)
   if (( added == 0 )); then row "provenance-headers" NA "no test funcs added"
@@ -286,8 +303,20 @@ fi
 grep -rq "diff-cover\|patch coverage\|changed-line" Makefile $wf scripts 2>/dev/null   && row "changed-line-coverage" PASS "changed-line signal wired"   || row "changed-line-coverage" FAIL "changed-line coverage (every tier's SIGNAL) is measured nowhere"
 
 # --- 22. reproducibility / operational determinism (restored dimension) -----
+# Probe the EFFECT: a revision that CAN be non-empty in the shipped artifact.
+# An earlier version passed on the mere presence of the wiring while every image
+# CI built shipped revision="" — .dockerignore excluded .git, so -buildvcs had
+# nothing to stamp and no --build-arg path existed. That false green is exactly
+# what this dimension is now checked against.
 if grep -rqE "commit|git_sha|config_version|schema_version|build_info" observability/*.yaml observability/*.md 2>/dev/null; then
-  row "operational-determinism" PASS "code/config/schema version surfaced in signals"
+  stampable="unknown"
+  if [[ -f .dockerignore ]] && grep -qxE '\.git/?' .dockerignore; then
+    grep -rq "GIT_SHA\|ldflags" docker/ 2>/dev/null && stampable="ldflags" || stampable="no"
+  else stampable="buildvcs"; fi
+  case "$stampable" in
+    no) row "operational-determinism" FAIL "signals declare a revision but .dockerignore excludes .git and no ldflags path exists — every image ships revision=\"\"" ;;
+    *)  row "operational-determinism" PASS "versions surfaced; revision stampable via $stampable" ;;
+  esac
 else row "operational-determinism" FAIL "Output=F(code,config,state,inputs): the four versions are not surfaced — replay cannot reproduce prod"; fi
 
 # --- report --------------------------------------------------------------
@@ -296,5 +325,28 @@ printf '%s\n' "$(printf '%0.s-' {1..96})"
 for r in "${ROWS[@]}"; do IFS='|' read -r d v e <<<"$r"; printf '%-34s %-5s %s\n' "$d" "$v" "$e"; done
 printf '%s\n' "$(printf '%0.s-' {1..96})"
 printf 'PASS %d   FAIL %d   NA %d\n' "$passes" "$fails" "$nas"
+
+# Evidence record (dimension 11, reproducibility): one file per commit so the
+# question "under what standard was this commit held?" is answerable later
+# without archaeology. Ephemeral stdout is not a record.
+sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+mkdir -p .prod/evidence
+{
+  printf '{\n  "commit": "%s",\n' "$sha"
+  printf '  "generated_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "spec": "%s",\n' "$SPEC"
+  printf '  "tier": "%s",\n' "$(grep -m1 -E '^[[:space:]]*tier:' "$SPEC" 2>/dev/null | tr -d ' ' | cut -d: -f2)"
+  printf '  "totals": { "pass": %d, "fail": %d, "na": %d },\n' "$passes" "$fails" "$nas"
+  printf '  "probes": [\n'
+  first=1
+  for r in "${ROWS[@]}"; do IFS='|' read -r d v e <<<"$r"
+    [[ $first -eq 1 ]] || printf ',\n'; first=0
+    printf '    { "dimension": %s, "verdict": "%s", "evidence": %s }' \
+      "$(printf '%s' "$d" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" "$v" \
+      "$(printf '%s' "$e" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
+  done
+  printf '\n  ]\n}\n'
+} > ".prod/evidence/$sha.json"
+echo "evidence record: .prod/evidence/$sha.json"
 (( fails == 0 )) || { echo "VERDICT: INCOMPLETE — $fails probe(s) failed; each is a finding, not a reason to soften the probe."; exit 1; }
 echo "VERDICT: COMPLETE — every dimension probed; N/A entries are ratified declines."

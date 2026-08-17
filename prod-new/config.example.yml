@@ -1,0 +1,14 @@
+# prod-new configuration — copy to `config.sh` and edit. Live file is plain shell.
+# Only facts prod-new cannot derive from the tier policy or the human's answers.
+
+# Git owner (org or user) that will host the new repo. REQUIRED.
+PROD_GIT_OWNER="your-org"
+# Default language/stack for the scaffold. The template is Go today.
+PROD_LANGUAGE="go"
+# Where the new repo is created on disk (the service name is appended).
+PROD_NEW_REPO_ROOT="$HOME/dev"
+# Runner label for the generated CI workflows (org-specific).
+PROD_CI_RUNNER="ubuntu-latest"
+# Default CODEOWNERS handle for the new repo. A placeholder gates nothing, so
+# this must be a REAL, resolvable handle.
+PROD_DEFAULT_OWNER="@your-handle"
