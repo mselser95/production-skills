@@ -25,7 +25,7 @@ cmd/<SERVICE> 11.00
 
 internal/adapter/in/healthhttp 91.00
 internal/adapter/in/pprofhttp 80.00
-internal/adapter/out/store 94.00
+internal/adapter/out/store 95.00
 internal/app 93.00
 # internal/architecture and verification/ratified carry no floor lines:
 # both are test-only packages (no non-test .go source), so -coverpkg=./...
@@ -39,6 +39,7 @@ internal/platform/buildinfo 98.00
 internal/platform/clock 98.00
 internal/platform/config 92.00
 internal/platform/eventlog 82.00
+internal/platform/outboxlog 78.00
 internal/platform/ids 83.00
 internal/platform/observability 98.00
 verification/conformance 94.00

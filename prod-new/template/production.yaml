@@ -33,11 +33,23 @@ capabilities:
     verified:
       outbox_journal_then_deliver_then_mark: internal/adapter/out/store TestOutbox_JournalThenPublish_MarksDelivered
       idempotency_key_stable_across_retries: TestOutbox_Publish_ReusesTheSameIdempotencyKeyAcrossRetries
+      durable_intent_survives_restart: TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey (store.OpenDurable replays internal/platform/outboxlog at boot)
+      journal_refuses_unencodable_effect: TestOutbox_JournalRefusesAnUnencodableEffect (an intent a restart could not replay is never accepted)
       idempotency_key_stable_across_publish_invocations: TestOutbox_IdempotencyKeyIsStableAcrossPublishInvocations (the key belongs to the ENTRY, so a Reconcile pass re-delivers under the SAME key rather than re-keying)
       max_attempts_never_retries_forever: TestOutbox_Publish_ExhaustsMaxAttemptsAndMarksFailed
       reconciliation_resumes_pending_entries: TestOutbox_Reconcile_ResumesPendingEntries
       conformance_kit: TestOutbox_PassesExternalEffectConformanceKit (verification/conformance.ExternalEffectKit)
     assumed:
+      fsync_reaches_stable_storage:
+        detector: >
+          NOT VERIFIED HERE. internal/platform/outboxlog fsyncs every record
+          before Append returns, but removing that Sync call STAYED GREEN
+          under mutation on 2026-08-18: no in-process test can distinguish
+          fsync from no-fsync, because a normally-exiting process flushes its
+          writes anyway. Durability against a MACHINE kill is therefore
+          assumed, not proven. The line carries a NO TEST GUARDS THIS LINE
+          marker and registries/contract-debt.yaml holds the owned, expiring
+          entry for the docker-kill test that would close it.
       sink_receiver_dedups_by_idempotency_key:
         detector: internal/adapter/out/store's own ackLostOnceSink test double
           proves the CONTRACT this assumption depends on; a real Sink
@@ -78,20 +90,6 @@ capabilities:
 # Ratified declines. Each is a recorded decision with its reason -- never a
 # silent omission.
 out_of_scope:
-  - effect_journal_outbox: >
-      NARROW decline, scoped precisely: the outbox PATTERN itself (journal
-      intent -> deliver -> mark, one idempotency key per ENTRY minted by
-      Journal, table-driven Reconcile) is fully implemented and conformance-
-      kitted at internal/adapter/out/store -- see the units_notification
-      capability above, RULE EMPTY-BUT-REAL. What is declined is full
-      production reconciliation against a LIVE external system: this
-      scaffold's composition root (cmd/<SERVICE>) wires store.LogSink, a real,
-      working, dependency-free Sink that "delivers" via a structured log
-      line, not a real payment processor / webhook / queue. There is
-      nothing outside this process yet to reconcile against. The next real
-      external_effect capability this service grows plugs into the SAME
-      Outbox and Reconcile machinery already proven here; this decline
-      lapses the moment a real Sink is wired in.
   - backup_restore_test: >
       This scaffold's only durable store is a local append-only file
       (internal/platform/eventlog) -- there is no managed backup/restore
@@ -113,3 +111,9 @@ gates:
   cheap: "make check-fast"
   presubmit: "make verify"
   advisory: "make test-advisory"
+
+# Dimensions the probe checks by EXECUTING the test named here (see
+# scripts/verify-standard.sh). A dimension listed here is implemented and
+# proven, not declined.
+implemented:
+  effect_journal_outbox: ./internal/adapter/out/store TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey

@@ -80,6 +80,9 @@ fuzz:
 	@name='FuzzDecodeRecord'; \
 	go test -list "^$${name}$$" ./internal/platform/eventlog | grep -qx "$$name" || { echo "missing fuzz target: $$name" >&2; exit 1; }; \
 	go test -run='^$$' -fuzz="$${name}" -fuzztime=$(FUZZTIME) ./internal/platform/eventlog
+	@name='FuzzDecodeOutboxRecord'; \
+	go test -list "^$${name}$$" ./internal/platform/outboxlog | grep -qx "$$name" || { echo "missing fuzz target: $$name" >&2; exit 1; }; \
+	go test -run='^$$' -fuzz="$${name}" -fuzztime=$(FUZZTIME) ./internal/platform/outboxlog
 
 verify: lint architecture race coverage chaos e2e fuzz
 

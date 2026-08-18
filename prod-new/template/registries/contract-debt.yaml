@@ -3,6 +3,23 @@
 # escalates expired entries; it never silently extends one.
 #
 # Records known API/schema-migration debt (e.g. an N-1 compatibility shim
-# kept alive past its natural retirement date). Empty: this scaffold has
-# shipped no contract yet to owe debt against.
-entries: []
+# kept alive past its natural retirement date), and durability/verification
+# gaps whose closing test does not exist yet.
+entries:
+  - id: outbox-fsync-unproven-against-machine-kill
+    owner: "@<OWNER>"
+    created: 2026-08-18
+    expires: 2026-11-16
+    evidence: >
+      internal/platform/outboxlog.Append fsyncs every record before
+      returning, and NO TEST GUARDS THAT LINE. Removing the Sync call stayed
+      GREEN under mutation on 2026-08-18: no in-process test can distinguish
+      fsync from no-fsync, because a normally-exiting process flushes its
+      writes anyway. Durability against a process restart IS proven
+      (TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey);
+      durability against a MACHINE kill is assumed. Closing this needs a
+      container-level test -- write an intent, `docker kill` the container
+      without a graceful stop, restart it, and assert the intent replays --
+      which belongs in the integration lane, not the unit lane. Until then
+      production.yaml records it under the units_notification capability's
+      `assumed:` block rather than claiming the guarantee.

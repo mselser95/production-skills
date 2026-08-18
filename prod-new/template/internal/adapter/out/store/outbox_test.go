@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -251,5 +253,187 @@ func TestOutbox_IdempotencyKeyIsStableAcrossPublishInvocations(t *testing.T) {
 	entry, ok := ob.Entry(id)
 	if !ok || entry.IdempotencyKey != sink.keys[0] {
 		t.Fatalf("entry.IdempotencyKey = %q, want the delivered key %q", entry.IdempotencyKey, sink.keys[0])
+	}
+}
+
+// provenance: derived
+// verifies: recovery (tier-policy: recovery.effect_journal =
+// required_if_durable_effects) -- an intent journaled but NOT delivered
+// survives a process restart and is resumed by Reconcile under the SAME
+// idempotency key.
+//
+// This is the whole reason the outbox pattern exists. A first "process"
+// journals an intent against a down sink; that process goes away entirely
+// (its Outbox is closed and dropped); a second process opens the SAME path
+// and must find the pending intent waiting.
+func TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outbox.jsonl")
+
+	// --- process 1: journal against a down sink, then die ---------------
+	down := &keyRecordingSink{fail: true}
+	first, err := OpenDurable(path, down, testIDs(), 2)
+	if err != nil {
+		t.Fatalf("OpenDurable: %v", err)
+	}
+	id, err := first.Journal(domain.EffectDeposited{EventID: "d1", Amount: "10"})
+	if err != nil {
+		t.Fatalf("Journal: %v", err)
+	}
+	if err := first.Publish(context.Background(), id); err == nil {
+		t.Fatal("Publish against a down sink returned nil")
+	}
+	keyBefore, _ := first.Entry(id)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	first = nil // the process is gone; nothing in memory survives
+
+	// --- process 2: open the same path, find the intent ------------------
+	up := &keyRecordingSink{}
+	second, err := OpenDurable(path, up, testIDs(), 2)
+	if err != nil {
+		t.Fatalf("OpenDurable (restart): %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	recovered, ok := second.Entry(id)
+	if !ok {
+		t.Fatalf("entry %q did not survive the restart -- the outbox is not durable", id)
+	}
+	if recovered.State != StateFailed {
+		t.Errorf("recovered state = %q, want %q", recovered.State, StateFailed)
+	}
+	if recovered.Effect != (domain.EffectDeposited{EventID: "d1", Amount: "10"}) {
+		t.Errorf("recovered effect = %#v, want the journaled deposit", recovered.Effect)
+	}
+	if recovered.IdempotencyKey != keyBefore.IdempotencyKey {
+		t.Fatalf("recovered key %q != pre-restart key %q -- a restart that re-keys "+
+			"double-delivers exactly when it cannot know whether the sink already had it",
+			recovered.IdempotencyKey, keyBefore.IdempotencyKey)
+	}
+
+	// --- and the recovery pass actually delivers it ----------------------
+	if got := second.Reconcile(context.Background()); got.Delivered != 1 {
+		t.Fatalf("Reconcile after restart delivered %d, want 1", got.Delivered)
+	}
+	if len(up.keys) == 0 {
+		t.Fatal("the sink saw no delivery after the restart")
+	}
+	if up.keys[0] != keyBefore.IdempotencyKey {
+		t.Errorf("post-restart delivery used key %q, want the original %q",
+			up.keys[0], keyBefore.IdempotencyKey)
+	}
+}
+
+// provenance: derived
+// verifies: Journal REFUSES an effect the durable format cannot encode,
+// rather than returning an id for an intent a restart would silently lose.
+func TestOutbox_JournalRefusesAnUnencodableEffect(t *testing.T) {
+	ob := NewOutbox(NewLogSink(nil), testIDs(), 3)
+	id, err := ob.Journal(domain.EffectWithdrawalRejected{EventID: "x"})
+	if err == nil {
+		t.Fatal("Journal accepted an effect the durable format cannot represent")
+	}
+	if id != "" {
+		t.Errorf("Journal returned id %q alongside an error -- the caller will think it was accepted", id)
+	}
+	if len(ob.Pending()) != 0 {
+		t.Errorf("a refused effect left %d pending entries", len(ob.Pending()))
+	}
+}
+
+// provenance: derived
+// verifies: the NON-durable constructor is still fully functional -- the
+// durability work must not have made the in-memory form a second-class path,
+// since it is what every test in this package uses.
+func TestOutbox_NonDurableFormStillWorks(t *testing.T) {
+	ob := NewOutbox(NewLogSink(nil), testIDs(), 3)
+	id, err := ob.Journal(domain.EffectDeposited{EventID: "d1", Amount: "1"})
+	if err != nil {
+		t.Fatalf("Journal: %v", err)
+	}
+	if err := ob.Publish(context.Background(), id); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if entry, _ := ob.Entry(id); entry.State != StateDelivered {
+		t.Errorf("state = %q, want delivered", entry.State)
+	}
+	if err := ob.Close(); err != nil {
+		t.Errorf("Close on a non-durable outbox: %v", err)
+	}
+}
+
+// provenance: derived
+// verifies: OpenDurable surfaces a corrupt or unreadable journal as an ERROR
+// at boot rather than starting with a silently-empty outbox. A process that
+// comes up "clean" because it could not read its own intents has lost them
+// without saying so.
+func TestOpenDurable_RefusesToStartOnAnUnreadableJournal(t *testing.T) {
+	t.Run("corrupt line", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "outbox.jsonl")
+		if err := os.WriteFile(path, []byte("{not json at all}\n"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if _, err := OpenDurable(path, NewLogSink(nil), testIDs(), 3); err == nil {
+			t.Fatal("OpenDurable started on a corrupt journal")
+		}
+	})
+
+	t.Run("transition with no intent", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "outbox.jsonl")
+		line := `{"schema_version":1,"entry_id":"e-1","state":"delivered"}` + "\n"
+		if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if _, err := OpenDurable(path, NewLogSink(nil), testIDs(), 3); err == nil {
+			t.Fatal("OpenDurable started on a truncated journal")
+		}
+	})
+
+	t.Run("path is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := OpenDurable(dir, NewLogSink(nil), testIDs(), 3); err == nil {
+			t.Fatal("OpenDurable accepted a directory as its journal path")
+		}
+	})
+}
+
+// provenance: derived
+// verifies: an empty/absent journal is a legitimate cold start, not an error
+// -- the very first boot of a service must not fail on a file it has not
+// written yet.
+func TestOpenDurable_ColdStartOnAnAbsentJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist-yet.jsonl")
+	ob, err := OpenDurable(path, NewLogSink(nil), testIDs(), 3)
+	if err != nil {
+		t.Fatalf("OpenDurable on a fresh path: %v", err)
+	}
+	defer func() { _ = ob.Close() }()
+	if len(ob.Pending()) != 0 {
+		t.Errorf("cold start found %d pending entries", len(ob.Pending()))
+	}
+	if _, err := ob.Journal(domain.EffectDeposited{EventID: "d1", Amount: "1"}); err != nil {
+		t.Fatalf("Journal after cold start: %v", err)
+	}
+}
+
+// provenance: derived
+// verifies: Reconcile reports entries it could NOT deliver rather than
+// counting them as resumed-and-done -- the StillDown branch.
+func TestOutbox_Reconcile_ReportsEntriesItCouldNotDeliver(t *testing.T) {
+	sink := &keyRecordingSink{fail: true}
+	ob := NewOutbox(sink, testIDs(), 1)
+	if _, err := ob.Journal(domain.EffectDeposited{EventID: "d1", Amount: "1"}); err != nil {
+		t.Fatalf("Journal: %v", err)
+	}
+	got := ob.Reconcile(context.Background())
+	if got.Resumed != 1 {
+		t.Errorf("Resumed = %d, want 1", got.Resumed)
+	}
+	if got.StillDown != 1 {
+		t.Errorf("StillDown = %d, want 1 -- a still-failing entry was counted as delivered", got.StillDown)
+	}
+	if got.Delivered != 0 {
+		t.Errorf("Delivered = %d, want 0", got.Delivered)
 	}
 }
