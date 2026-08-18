@@ -484,7 +484,14 @@ else row "contract-artifacts" FAIL "no resolved-context/change-plan in $ctxdir â
 
 # --- 18. ratification packages back every ratified invariant -----------------
 if ls verification/ratified/*_test.go >/dev/null 2>&1; then
-  inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null || echo 0)
+  # Same class of bug as the fuzz counter above, and it survived that fix
+  # because I repaired the instance that bit instead of sweeping the pattern:
+  # `grep -c` prints "0" AND exits non-zero on zero matches, so `|| echo 0`
+  # appends a SECOND line and every later (( )) throws. This one only fires when
+  # the spec exists with an EMPTY invariants list -- a freshly bootstrapped repo,
+  # precisely the state this probe is pointed at first.
+  inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null | head -1)
+  inv=${inv:-0}
   pkgs=$(ls .prod/ratify-queue/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
   if (( pkgs > 0 && pkgs >= inv )); then row "ratification-packages" PASS "$pkgs packages for $inv ratified invariants"
   else row "ratification-packages" FAIL "$pkgs ratification packages for $inv ratified invariants â€” the queue is the evidence trail"; fi
