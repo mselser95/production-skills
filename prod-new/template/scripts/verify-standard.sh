@@ -514,8 +514,21 @@ fi
 
 # --- 21. CI actually runs what the standard requires ------------------------
 nfuzz=${#fuzzes[@]}
-inmake=$(grep -c 'Fuzz[A-Za-z0-9_]*' Makefile 2>/dev/null || echo 0)
-(( inmake >= nfuzz )) && row "ci-runs-fuzz" PASS "$inmake fuzz names wired in Makefile"   || row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets wired into make/CI — the rest run nowhere"
+# NOT `grep -c ... || echo 0`. grep -c on a file that EXISTS with zero matches
+# prints "0" AND exits non-zero, so the fallback fires too and the variable
+# becomes "0\n0" -- which makes (( )) throw an arithmetic syntax error and
+# leaves the row's evidence as a bare "0". Found the first time this probe ran
+# against a repo that had a Makefile with no fuzz targets, which is the ordinary
+# case for any repo not yet on the standard.
+inmake=$(grep -c 'Fuzz[A-Za-z0-9_]*' Makefile 2>/dev/null | head -1)
+inmake=${inmake:-0}
+if (( nfuzz == 0 )); then
+  row "ci-runs-fuzz" FAIL "no fuzz targets exist, so nothing is wired: $inmake fuzz name(s) in Makefile"
+elif (( inmake >= nfuzz )); then
+  row "ci-runs-fuzz" PASS "$inmake fuzz names wired in Makefile"
+else
+  row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets wired into make/CI — the rest run nowhere"
+fi
 if [[ -n "${real_tag:-}" ]]; then
   grep -rq -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null     && row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into make/CI"     || row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
 fi
