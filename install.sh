@@ -83,6 +83,14 @@ case "${1:-install}" in
 esac
 
 mkdir -p "$cfg/skills" "$cfg/agents"
+# The installed copy is left READ-ONLY at the end of this script, so make it
+# writable again before rewriting it. install.sh is the only legitimate writer:
+# any other in-place edit of an installed skill is tampering by definition,
+# which is what makes read-only the right protection HERE and the wrong one on
+# a repo's registries/ or verification/ratified/ (those receive legitimate
+# edits constantly, and a guard that blocks normal work is a guard that gets
+# turned off).
+chmod -R u+w "$cfg/skills" "$cfg/agents" 2>/dev/null || true
 for s in "${skills[@]}"; do
   rm -rf "$cfg/skills/$s"
   cp -R "$src/$s" "$cfg/skills/$s"
@@ -112,6 +120,15 @@ for a in "$src"/agents/*.md; do
 done
 
 { hash_tree "$cfg/skills" "${skills[@]}"; hash_tree "$cfg/agents" . 2>/dev/null; } | sort > "$manifest"
+
+# Read-only, AFTER the manifest is written. This does not stop a determined
+# writer -- it can be undone with one chmod -- and it is not meant to. It
+# removes the SILENT case: an accidental or incidental write to the trusted copy
+# now fails loudly at the moment it happens, instead of being discovered later by
+# the drift check, or not at all. Prevention is impossible under
+# bypassPermissions; making the act explicit is not.
+for s in "${skills[@]}"; do chmod -R a-w "$cfg/skills/$s" 2>/dev/null || true; done
+chmod -R a-w "$cfg"/agents/prod-*.md 2>/dev/null || true
 echo "installed ${#skills[@]} skills + $(ls "$src"/agents/*.md 2>/dev/null | wc -l | tr -d ' ') agents as verified copies"
 echo "manifest: $manifest ($(wc -l <"$manifest" | tr -d ' ') files)"
 echo
