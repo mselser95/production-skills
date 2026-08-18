@@ -58,6 +58,15 @@ for reg in registries/*.yaml; do
     id=""; owner=""; expires=""
   }
   while IFS= read -r line; do
+    # Skip comment lines FIRST. The patterns below match anywhere on the
+    # line, so a commented-out entry -- the natural way to record what a
+    # registry used to hold, or to stage one before it is real -- was parsed
+    # as a LIVE entry. Its long-past expiry then failed the build, and the
+    # only way to describe a retired waiver was to delete every trace of it.
+    # Trailing comments after a value are already handled per-field.
+    if [[ "$line" =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
     case "$line" in
       *-\ id:*)      flush; id="${line#*id:}";      id="${id// /}" ;;
       *owner:*)      owner="${line#*owner:}";      owner="${owner// /}" ;;
