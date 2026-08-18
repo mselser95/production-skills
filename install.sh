@@ -19,12 +19,22 @@ set -uo pipefail
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 manifest="$cfg/prod-skills.manifest"
-skills=(prod-spec prod-review prod-incident prod-implement prod-test-synth prod-ops prod-curate prod-bootstrap)
+# prod-new belongs here like every other skill. It was previously symlinked into
+# the config dir by hand, which put it OUTSIDE the manifest entirely: --verify
+# reported the whole trusted set as intact while the skill that scaffolds brand
+# new repositories sat unhashed and unverified next to it. A skill absent from
+# this array is a skill nothing protects.
+skills=(prod-spec prod-review prod-incident prod-implement prod-test-synth prod-ops prod-curate prod-bootstrap prod-new)
 
 hash_tree() { # print "<sha256>  <relative path>" for every tracked TCB file
   local base="$1"; shift
-  ( cd "$base" && find "$@" -type f \( -name '*.md' -o -name '*.yaml' -o -name '*.sh' \) \
-      ! -name 'config.sh' -print0 2>/dev/null | sort -z | xargs -0 shasum -a 256 )
+  # EVERY regular file, not just *.md/*.yaml/*.sh. prod-new ships a template/
+  # tree of Go sources, a Dockerfile, a Makefile and workflows that get copied
+  # verbatim into new repositories -- tampering there injects code into every
+  # repo the skill ever scaffolds, and the old extension filter did not hash a
+  # single one of them.
+  ( cd "$base" && find "$@" -type f ! -name 'config.sh' -print0 2>/dev/null \
+      | sort -z | xargs -0 shasum -a 256 )
 }
 
 case "${1:-install}" in
@@ -49,8 +59,12 @@ case "${1:-install}" in
             # source side and make this whole check blind to the files most
             # worth watching (the probes). Verified: without -L, editing
             # _shared/probes/verify-standard.sh went undetected.
-            [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f \( -name '*.md' -o -name '*.yaml' -o -name '*.sh' \) \
-                ! -name 'config.sh' -exec shasum -a 256 {} + 2>/dev/null )
+            # Same file set as hash_tree above -- every regular file. Filtering
+            # by extension here while hash_tree hashes everything would leave the
+            # staleness check blind to exactly the files the manifest just
+            # started protecting (prod-new's template sources).
+            [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' \
+                -exec shasum -a 256 {} + 2>/dev/null )
           done | awk '{print $1}' | sort) | wc -l | tr -d ' ')
       if (( stale > 0 )); then
         echo "STALE INSTALL — ${stale} source file(s) in $src are not present in the installed copy." >&2
@@ -85,7 +99,17 @@ for s in "${skills[@]}"; do
   # per-skill config stays LOCAL and unhashed: it holds org facts, not policy
   [[ -f "$src/$s/config.sh" ]] && cp "$src/$s/config.sh" "$cfg/skills/$s/config.sh"
 done
-cp -f "$src"/agents/*.md "$cfg/agents/" 2>/dev/null || true
+# Remove first, then copy. `cp -f` onto an existing SYMLINK follows it and
+# writes through to the target, so a hand-made symlink survives every install --
+# and `find -type f` skips symlinks, which kept the three agent definitions out
+# of the manifest entirely in one config dir while they were hashed in the
+# other. Agent definitions carry the write-masks that bound what a cheap model
+# may touch; an unhashed one is an unverified security instruction.
+for a in "$src"/agents/*.md; do
+  [[ -e "$a" ]] || continue
+  rm -f "$cfg/agents/$(basename "$a")"
+  cp "$a" "$cfg/agents/$(basename "$a")"
+done
 
 { hash_tree "$cfg/skills" "${skills[@]}"; hash_tree "$cfg/agents" . 2>/dev/null; } | sort > "$manifest"
 echo "installed ${#skills[@]} skills + $(ls "$src"/agents/*.md 2>/dev/null | wc -l | tr -d ' ') agents as verified copies"
