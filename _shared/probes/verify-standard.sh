@@ -19,7 +19,20 @@ cd "$root" || exit 2
 # reporting a false FAIL.
 LOCK="${TMPDIR:-/tmp}/prod-probe-$(echo "$root" | shasum | cut -c1-12).lock"
 for _ in $(seq 1 120); do mkdir "$LOCK" 2>/dev/null && break; sleep 5; done
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+# Restore any in-flight mutation before anything else. The non-vacuity check
+# below deliberately edits PRODUCTION source files, and a probe killed between
+# the edit and its restore would otherwise leave the working tree holding a file
+# with a ratified invariant switched off -- plus an untracked backup -- where a
+# routine `git add -A` would commit both. The tool that makes the mess has to be
+# the tool that cleans it, on every exit path, not just the happy one.
+restore_mutations() {
+  local bak
+  while IFS= read -r bak; do
+    [[ -n "$bak" ]] || continue
+    mv -f "$bak" "${bak%.nvbak}" 2>/dev/null
+  done < <(find . -name '*.nvbak' -type f 2>/dev/null)
+}
+trap 'restore_mutations; rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 
 SPEC="${PROD_SPEC_FILE:-production.yaml}"
 fails=0; passes=0; nas=0
@@ -93,11 +106,101 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   n=$(grep -h '^func Test' verification/ratified/*_test.go 2>/dev/null | wc -l | tr -d ' ')
   if (( n == 0 )); then row "invariants-ratified" FAIL "verification/ratified/ has files but zero Test funcs"
   elif go test ./verification/... -count=1 >/dev/null 2>&1; then
-    row "invariants-ratified" PASS "$n ratified tests green"
+    # Count from the SPEC, not from the directory listing. Counting `func Test`
+    # in verification/ratified/ and calling the total "ratified" conflated
+    # ratified invariants with ones still PENDING HUMAN RATIFICATION whose test
+    # simply lives alongside them -- and then wrote that inflated number into
+    # every evidence record. Ratification is a human act recorded in the spec;
+    # a test file cannot confer it on itself.
+    ratified_n=$(awk '/^invariants:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
+    pending_n=$(awk '/^invariants_pending_ratification:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
+    row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $n test func(s) green"
   else row "invariants-ratified" FAIL "ratified tests red"; fi
-  if grep -rqi "counterexample\|verified red\|mutation" verification/ratified/ .prod/ratify-queue/ 2>/dev/null; then
-    row "invariants-non-vacuity" PASS "counterexamples documented/verified"
-  else row "invariants-non-vacuity" FAIL "no counterexample evidence — never proven red"; fi
+  # --- non-vacuity: EXECUTE the mutations, do not grep for the word ----------
+  #
+  # This row used to be `grep -qi "counterexample\|verified red\|mutation"` over
+  # verification/ratified/ and .prod/ratify-queue/ -- a keyword search over prose
+  # the change under review had just written. Any repo could satisfy the
+  # standard's central claim by typing the word "mutation" in a comment. A
+  # reviewer caught it, and they were right: it is the exact defect this whole
+  # framework exists to name, sitting in the framework.
+  #
+  # Now each ratification package may carry an executable `non_vacuity_check`:
+  # a file, an exact source string to replace, and the test that MUST go red
+  # when it is. The probe applies it, runs that test, requires FAILURE, and
+  # restores the file. Keyed by source text rather than line number, because the
+  # prose evidence this replaces cited three line numbers that had all moved.
+  nv_total=0; nv_proven=0; nv_missing=0; nv_broken=""
+  for pkg in .prod/ratify-queue/*.yaml; do
+    [[ -f "$pkg" ]] || continue
+    # Parsed as YAML, not with sed. The find/replace strings are Go SOURCE, so
+    # they routinely contain quotes, backslashes and colons; a sed expression
+    # delimited by single quotes silently mis-extracts a rune literal or an
+    # apostrophe in a comment, and a mutation that is quietly wrong reports
+    # find-string-gone rather than admitting it could not read the field.
+    nv_fields=$(PKG="$pkg" python3 - <<'PYNV'
+import os, sys, yaml
+try:
+    d = yaml.safe_load(open(os.environ["PKG"])) or {}
+except Exception:
+    sys.exit(0)
+nv = d.get("non_vacuity_check") or {}
+for k in ("file", "expect_red", "find", "replace"):
+    v = nv.get(k)
+    print("" if v is None else str(v))
+PYNV
+)
+    nv_file=$(sed -n 1p <<<"$nv_fields")
+    nv_test=$(sed -n 2p <<<"$nv_fields")
+    nv_find=$(sed -n 3p <<<"$nv_fields")
+    nv_repl=$(sed -n 4p <<<"$nv_fields")
+    nv_total=$((nv_total+1))
+    if [[ -z "$nv_file" || -z "$nv_test" || -z "$nv_find" ]]; then
+      # A package with no executable check is UNVERIFIED, and unverified is not
+      # a softer kind of verified. Tolerating it with a PASS meant three of four
+      # invariants could carry nothing at all and the row would still be green
+      # as long as one worked -- the same "some evidence exists somewhere"
+      # reasoning the keyword grep used.
+      nv_missing=$((nv_missing+1))
+      nv_broken="${nv_broken} $(basename "$pkg"):no-executable-check"
+      continue
+    fi
+    if [[ ! -f "$nv_file" ]]; then
+      nv_broken="${nv_broken} $(basename "$pkg"):no-such-file"; continue
+    fi
+    # The mutation must still APPLY. A find-string that no longer matches means
+    # the evidence has silently decayed -- report it rather than skip it.
+    if ! FIND="$nv_find" python3 -c 'import os,sys; sys.exit(0 if os.environ["FIND"] in open(sys.argv[1]).read() else 1)' "$nv_file"; then
+      nv_broken="${nv_broken} $(basename "$pkg"):find-string-gone"; continue
+    fi
+    cp "$nv_file" "${nv_file}.nvbak"
+    FIND="$nv_find" REPL="$nv_repl" python3 -c 'import os,sys
+path=sys.argv[1]; src=open(path).read()
+open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$nv_file"
+    # A mutation must make the TEST fail, not the BUILD. `go test` exits
+    # non-zero for both, so counting any non-zero as "detected" would let a
+    # mutation that merely breaks compilation certify the invariant as
+    # non-vacuous -- which is the same class of self-deception this row exists
+    # to remove. Compile first, and treat a build break as a decayed mutation.
+    nv_out=$(go test ./verification/... -run "^${nv_test}\$" -count=1 2>&1)
+    if grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$nv_out"; then
+      nv_broken="${nv_broken} ${nv_test}:MUTATION-BREAKS-BUILD"
+    elif grep -q "^ok" <<<"$nv_out"; then
+      nv_broken="${nv_broken} ${nv_test}:STAYED-GREEN"   # applied, compiled, undetected
+    elif grep -qE "^(--- )?FAIL" <<<"$nv_out"; then
+      nv_proven=$((nv_proven+1))
+    else
+      nv_broken="${nv_broken} ${nv_test}:NO-VERDICT"
+    fi
+    mv "${nv_file}.nvbak" "$nv_file"
+  done
+  if (( nv_total == 0 )); then
+    row "invariants-non-vacuity" FAIL "no ratification packages to check"
+  elif [[ -n "$nv_broken" ]]; then
+    row "invariants-non-vacuity" FAIL "mutation(s) not detected or decayed:${nv_broken}"
+  else
+    row "invariants-non-vacuity" PASS "$nv_proven/$nv_total mutations RE-VERIFIED red this run"
+  fi
 else row "invariants-ratified" FAIL "verification/ratified/ has no tests"; fi
 
 # --- 5. properties + fuzz (each target actually executed) -------------------
