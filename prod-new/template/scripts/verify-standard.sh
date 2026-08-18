@@ -55,6 +55,27 @@ waived() { # waived <id> -> 0 if a NON-EXPIRED waiver covers this obligation.
   grep -qE "^[[:space:]]*-[[:space:]]*id:[[:space:]]*$1[[:space:]]*$" "$w" || return 1
   bash scripts/check-registries.sh >/dev/null 2>&1
 }
+# classify_mutation_result turns `go test` output into one of DETECTED /
+# MUTATION-BREAKS-BUILD / STAYED-GREEN / NO-VERDICT.
+#
+# A named function on purpose: it is the part of the non-vacuity check that
+# decides whether an invariant has teeth, so a selftest has to exercise THIS,
+# not a copy of it. It already regressed once as a copy -- the FAIL test used to
+# sit after the ok test, so a sibling package's "ok" line matched first and every
+# mutation was reported STAYED-GREEN.
+classify_mutation_result() {
+  local out="$1"
+  if grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
+    echo "MUTATION-BREAKS-BUILD"
+  elif grep -qE "^(--- )?FAIL" <<<"$out"; then
+    echo "DETECTED"
+  elif grep -q "^ok" <<<"$out"; then
+    echo "STAYED-GREEN"
+  else
+    echo "NO-VERDICT"
+  fi
+}
+
 have() { command -v "$1" >/dev/null 2>&1; }
 gobin() { echo "$(go env GOPATH)/bin"; }
 
@@ -182,16 +203,20 @@ open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$
     # mutation that merely breaks compilation certify the invariant as
     # non-vacuous -- which is the same class of self-deception this row exists
     # to remove. Compile first, and treat a build break as a decayed mutation.
-    nv_out=$(go test ./verification/... -run "^${nv_test}\$" -count=1 2>&1)
-    if grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$nv_out"; then
-      nv_broken="${nv_broken} ${nv_test}:MUTATION-BREAKS-BUILD"
-    elif grep -q "^ok" <<<"$nv_out"; then
-      nv_broken="${nv_broken} ${nv_test}:STAYED-GREEN"   # applied, compiled, undetected
-    elif grep -qE "^(--- )?FAIL" <<<"$nv_out"; then
-      nv_proven=$((nv_proven+1))
-    else
-      nv_broken="${nv_broken} ${nv_test}:NO-VERDICT"
-    fi
+    # Scope the run to the package that OWNS the expect_red test, and test for
+    # FAIL before ok. Both matter, and the second one bit: `./verification/...`
+    # spans more than one package, so as soon as a sibling package gained tests
+    # its own "ok" line matched first and every mutation was classified
+    # STAYED-GREEN -- the probe reporting all four invariants as vacuous when
+    # they were not. A classifier that reads a neighbour's verdict is the same
+    # defect as a gate that reads a report instead of an effect.
+    nv_pkg=./verification/ratified/
+    [[ -d verification/ratified ]] || nv_pkg=./verification/...
+    nv_out=$(go test "$nv_pkg" -run "^${nv_test}\$" -count=1 2>&1)
+    case "$(classify_mutation_result "$nv_out")" in
+      DETECTED)              nv_proven=$((nv_proven+1)) ;;
+      *)                     nv_broken="${nv_broken} ${nv_test}:$(classify_mutation_result "$nv_out")" ;;
+    esac
     mv "${nv_file}.nvbak" "$nv_file"
   done
   if (( nv_total == 0 )); then
