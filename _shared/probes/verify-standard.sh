@@ -462,9 +462,41 @@ for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
   [[ -f $f ]] && row "ops:$(basename "$f")" PASS "present" || row "ops:$(basename "$f")" FAIL "missing"
 done
 if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
-  bad=0
-  while read -r m; do grep -q "$m" observability/emitted-metrics.yaml || bad=$((bad+1)); done < <(grep -ohE '\b(clc[a-z]*_[a-z0-9_]+)\b' docs/RUNBOOK.md | sort -u)
-  (( bad == 0 )) && row "runbook-citations-resolve" PASS "every cited series exists" || row "runbook-citations-resolve" FAIL "$bad cited series do not exist"
+  # Derive the series-name pattern from the MANIFEST, never from one org's
+  # hardcoded prefix.
+  #
+  # This row used to grep for `clc[a-z]*_[a-z0-9_]+`. For any repo whose
+  # series are not clc-prefixed that matched nothing, counted zero failures,
+  # and reported "every cited series exists" having checked NOTHING -- a
+  # green row that had verified precisely zero citations. The template's own
+  # metrics are svc_*, so the standard shipped this row passing vacuously
+  # against ITSELF, which is the exact defect class the whole framework
+  # exists to catch.
+  #
+  # Second defect in the same two lines: the membership test was
+  # `grep -q "$m" <manifest>`, a SUBSTRING search. A truncated or misspelled
+  # citation like `svc_units_conserved` matched the manifest line for
+  # `svc_units_conserved_violations_total` and resolved happily. The test is
+  # now an exact match against the declared names.
+  mapfile -t declared_series < <(grep -oE '^[[:space:]]*-[[:space:]]*name:[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*' observability/emitted-metrics.yaml | awk '{print $NF}' | sort -u)
+  # The prefixes actually in use (token up to and including the first "_").
+  mapfile -t series_prefixes < <(printf '%s\n' "${declared_series[@]}" | sed -E 's/^([a-zA-Z]+_).*/\1/' | sort -u)
+  cited=0; bad=0; missing=""
+  if ((${#series_prefixes[@]})); then
+    _pat="$(printf '%s|' "${series_prefixes[@]}")"; _pat="(${_pat%|})"
+    while read -r m; do
+      [[ -n "$m" ]] || continue
+      cited=$((cited+1))
+      printf '%s\n' "${declared_series[@]}" | grep -qx "$m" || { bad=$((bad+1)); missing="${missing} $m"; }
+    done < <(grep -ohE "\\b${_pat}[a-z0-9_]+\\b" docs/RUNBOOK.md | sort -u)
+  fi
+  if (( bad > 0 )); then
+    row "runbook-citations-resolve" FAIL "$bad of $cited cited series do not exist:${missing}"
+  elif (( cited == 0 )); then
+    row "runbook-citations-resolve" FAIL "RUNBOOK cites ZERO of the ${#declared_series[@]} declared series -- nothing was checked, and nothing-checked is not everything-resolves"
+  else
+    row "runbook-citations-resolve" PASS "$cited/${#declared_series[@]} declared series cited, all resolve"
+  fi
 fi
 for r in flags waivers quarantine contract-debt; do
   [[ -f registries/$r.yaml ]] || { row "registries" FAIL "registries/$r.yaml missing"; break; }
