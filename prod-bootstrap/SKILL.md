@@ -127,6 +127,13 @@ scenario lists, benchmark policy, security gates, delivery/runbook
 requirements — is DERIVED and merely REPORTED in the gap report. Do not ask.
 
 ### Phase 3 — Scaffold
+
+**`chmod u+w` anything copied out of the installed skill directory.** The
+installed TCB is read-only (install.sh leaves it that way so an incidental write
+fails loudly instead of silently), and `cp` preserves mode — so a template
+copied into the target repo arrives read-only and the very next edit to fill its
+slots fails with EACCES. Copy, then make writable, then fill.
+
 Write the spec, directories, and the AGENTS.md routing contract (Contract
 output 1–2b) — every `<slot>` in the template filled from a ratified Phase-2
 answer, per the template's instantiation rules. Everything written is

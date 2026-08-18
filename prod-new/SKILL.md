@@ -178,3 +178,10 @@ from `references/agents-template.md`, `CODEOWNERS` with a real owner,
 Preamble format. Expected `blocked_on`: `headless` (no human for the four
 questions), `repo-exists` (use prod-bootstrap), `language-unsupported` (the
 template is Go today — say so rather than improvising a half-scaffold).
+
+**`chmod u+w` everything copied out of the installed skill directory.** The
+installed TCB is left read-only by `install.sh` (so an incidental write to a
+trusted file fails loudly instead of silently), and `cp` preserves mode — so a
+template copied into the target repo arrives read-only and the first edit that
+fills its slots dies with EACCES. Copy, make writable, then fill. This is not
+hypothetical: it broke the first bootstrap run after read-only landed.
