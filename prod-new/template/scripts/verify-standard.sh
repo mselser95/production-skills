@@ -159,16 +159,53 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # delimited by single quotes silently mis-extracts a rune literal or an
     # apostrophe in a comment, and a mutation that is quietly wrong reports
     # find-string-gone rather than admitting it could not read the field.
+    # Extracted with the stdlib only. An earlier version imported yaml and was
+    # correct on a dev box and useless in CI, where PyYAML is not installed: the
+    # parse returned nothing, every package reported no-executable-check, and
+    # the row failed. It failed LOUDLY, which is the only reason this was a
+    # ten-minute fix instead of a silent "0/4 verified" -- but a gate that needs
+    # a dependency the runner lacks is a gate that does not run.
+    #
+    # The grammar here is fixed and tiny: four keys under one top-level block,
+    # each a single-quoted or bare scalar. That is parseable without a library,
+    # and unlike the sed version it handles the quotes and colons that Go source
+    # is full of, because it strips exactly one layer of quoting rather than
+    # pattern-matching the line.
     nv_fields=$(PKG="$pkg" python3 - <<'PYNV'
-import os, sys, yaml
-try:
-    d = yaml.safe_load(open(os.environ["PKG"])) or {}
-except Exception:
-    sys.exit(0)
-nv = d.get("non_vacuity_check") or {}
-for k in ("file", "expect_red", "find", "replace"):
-    v = nv.get(k)
-    print("" if v is None else str(v))
+import os, sys
+
+want = ("file", "expect_red", "find", "replace")
+found = {}
+inblock = False
+for raw in open(os.environ["PKG"], encoding="utf-8"):
+    line = raw.rstrip("\n")
+    if line.startswith("non_vacuity_check:"):
+        inblock = True
+        continue
+    if inblock:
+        # any new top-level key ends the block
+        if line and not line[0].isspace():
+            break
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        if key not in want:
+            continue
+        value = value.strip()
+        # strip exactly one layer of matching quotes, then unescape a doubled
+        # single quote (YAML's own escape inside single-quoted scalars)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            quote = value[0]
+            value = value[1:-1]
+            if quote == "'":
+                value = value.replace("''", "'")
+        found[key] = value
+for k in want:
+    print(found.get(k, ""))
 PYNV
 )
     nv_file=$(sed -n 1p <<<"$nv_fields")
