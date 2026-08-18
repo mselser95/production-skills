@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -181,5 +182,74 @@ func TestNewOutbox_DefaultsNonPositiveMaxAttempts(t *testing.T) {
 	}
 	if err := ob.Publish(context.Background(), id); err != nil {
 		t.Fatalf("Publish: %v (want the default attempt budget to cover 4 attempts)", err)
+	}
+}
+
+// keyRecordingSink records every idempotency key it is handed, so a test can
+// assert on the sequence across MULTIPLE Publish invocations rather than only
+// within one.
+type keyRecordingSink struct {
+	keys []string
+	fail bool
+}
+
+func (s *keyRecordingSink) Deliver(_ context.Context, key string, _ Entry) error {
+	s.keys = append(s.keys, key)
+	if s.fail {
+		return errors.New("sink down")
+	}
+	return nil
+}
+
+// provenance: derived
+// verifies: idempotency_strategy (capability class external_effect) --
+// the key identifies the ENTRY, so every delivery of one logical effect
+// carries the same key even ACROSS separate Publish invocations.
+//
+// TestOutbox_Publish_ReusesTheSameIdempotencyKeyAcrossRetries covers retries
+// WITHIN one Publish call. This one covers the case that actually broke: a
+// Publish that exhausts its attempts against a down sink, then a Reconcile
+// pass once the sink is back. Reconcile calls Publish afresh, so an
+// implementation that mints the key per-invocation re-keys here and the
+// receiver sees two unrelated effects instead of one repeated.
+//
+// Measured against the pre-fix implementation, which minted inside Publish's
+// retry loop: the sink saw [id-2 id-2 id-3] for a single effect. No crash was
+// required -- an ordinary recovery pass was enough.
+func TestOutbox_IdempotencyKeyIsStableAcrossPublishInvocations(t *testing.T) {
+	sink := &keyRecordingSink{fail: true}
+	ob := NewOutbox(sink, testIDs(), 2)
+
+	id, err := ob.Journal(domain.EffectDeposited{EventID: "e1", Amount: "10"})
+	if err != nil {
+		t.Fatalf("Journal: %v", err)
+	}
+	// First delivery: the sink is down, so this exhausts maxAttempts and
+	// marks the entry failed -- a Reconcile candidate.
+	if err := ob.Publish(context.Background(), id); err == nil {
+		t.Fatal("Publish against a down sink returned nil")
+	}
+
+	sink.fail = false
+	if got := ob.Reconcile(context.Background()); got.Delivered != 1 {
+		t.Fatalf("Reconcile delivered %d, want 1", got.Delivered)
+	}
+
+	if len(sink.keys) < 2 {
+		t.Fatalf("sink saw %d deliveries, want at least 2 (the scenario did not set up)", len(sink.keys))
+	}
+	for i, k := range sink.keys {
+		if k != sink.keys[0] {
+			t.Fatalf("delivery %d used key %q but delivery 0 used %q -- one logical effect "+
+				"was delivered under two keys, so the receiver cannot collapse them and a "+
+				"recovery pass double-delivers (keys: %v)", i, k, sink.keys[0], sink.keys)
+		}
+	}
+
+	// And the key the entry reports must be that same one, so an operator
+	// reading the outbox can correlate it with what the receiver saw.
+	entry, ok := ob.Entry(id)
+	if !ok || entry.IdempotencyKey != sink.keys[0] {
+		t.Fatalf("entry.IdempotencyKey = %q, want the delivered key %q", entry.IdempotencyKey, sink.keys[0])
 	}
 }
