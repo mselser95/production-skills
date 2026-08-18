@@ -86,6 +86,15 @@ Ask: which state transitions MUST be observable for 3am debugging.
 Row: contract checked mechanically or documentation-only; build/config
 identity surfaced or absent.
 
+**Wiring cannot be grepped.** A tracer, a metric or a hook that is imported,
+constructed, or merely defined satisfies every text search you can write and
+still never runs: a discarded variable, a helper nobody calls, and a contract
+test's own call sites all match. Three successive tightenings of this check were
+each fooled by the next shape. Treat a grep as an existence signal and nothing
+more — the only evidence that instrumentation REACHES production is a test that
+exercises the entrypoint's own construction path, or the signal appearing in a
+real environment. Say which one you have.
+
 ## 9. Security
 Inventory: authz/authn surface, policy-as-invariant candidates, secret
 scanning (on which triggers), dependency vulnerability scanning, SBOM,

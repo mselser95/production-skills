@@ -444,8 +444,42 @@ if grep -rql "emitted-metrics\|spans.yaml" --include='*_test.go' . 2>/dev/null; 
 else row "observability-contract-checked" FAIL "manifest is documentation — nothing verifies it"; fi
 
 # THE probe that catches the no-op-port trap: wiring lives in the entrypoints
-if grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
-  row "tracing-wired-in-prod" PASS "tracer injected in cmd/ entrypoints"
+# Look for the INJECTION SITE, not the identifier.
+#
+# This row used to match "Tracer|tracer|SpanFunc" anywhere under cmd/ and report
+# "tracer injected". A tracer that is constructed and thrown away -- literally
+# `tracer := New(...)` followed by `_ = tracer` -- matches that grep, compiles,
+# and leaves every package-level span test green, because those tests build
+# their own recording tracer and never touch cmd/. Demonstrated by removing
+# every real SetTracer/interceptor call from a working service: the build stayed
+# green, the whole test suite stayed green, and this row still said PASS.
+#
+# So the row that exists to catch "instrumented but never wired" was itself
+# fooled by "constructed but never wired". Requiring a call site where the
+# tracer is PASSED or ASSIGNED closes the demonstrated hole. It is still an
+# existence check and cannot prove the wiring reaches production -- only a
+# contract test exercising the entrypoint can -- and the evidence now says so
+# instead of claiming "injected".
+# --include='*.go' --exclude='*_test.go': a contract test living under cmd/ is
+# GOOD -- it is the only thing that can prove the wiring end to end -- but it is
+# not the wiring. Counting it here let a repo pass with every real injection
+# commented out and only the test's own call sites remaining, which is how the
+# first attempt at tightening this row was still fooled.
+tracer_sites=$(grep -rn --include='*.go' --exclude='*_test.go' \
+  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null | wc -l | tr -d ' ')
+if [[ "${tracer_sites:-0}" -gt 0 ]]; then
+  # The evidence string says what was OBSERVED and what it does not prove.
+  #
+  # Three attempts at this row were fooled in turn: matching the identifier
+  # anywhere (a discarded `_ = tracer` passes), counting call sites (a contract
+  # test's own calls pass), and excluding tests (a helper function that is
+  # defined but never called passes). A grep can establish that wiring code
+  # EXISTS; it cannot establish that it RUNS. Claiming "injected" was the defect
+  # -- the row asserted more than it measured, which is the same failure it was
+  # written to catch one level down.
+  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; only a contract test exercising the entrypoint proves it runs"
+elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
+  row "tracing-wired-in-prod" FAIL "cmd/ names a tracer but never passes or assigns it — constructed and discarded is a no-op in production"
 else
   grep -rql "StartSpan" --include='*.go' internal/ 2>/dev/null \
     && row "tracing-wired-in-prod" FAIL "spans instrumented but NO tracer in cmd/ — no-op in production" \
