@@ -98,8 +98,41 @@ if [[ -x scripts/coverage.sh ]]; then
       row "coverage-ratchet" PASS "per-package floors enforced"
     else row "coverage-ratchet" FAIL "no per-package ratchet in the gate"; fi
   else
-    viol=$(grep -cE 'below its floor' <<<"$out")
-    row "coverage" FAIL "$viol floor violation(s): $(grep -oE '[a-z/]+ is [0-9.]+%, below its floor of [0-9.]+%' <<<"$out" | paste -sd' ; ' -)"
+    # coverage.sh fails FOUR ways and this branch used to assume one.
+    #
+    # It reported "$viol floor violation(s): <list>" unconditionally, so when
+    # the failure was anything else -- the TOTAL below threshold, a floor
+    # naming a package that no longer exists, or the test run itself dying --
+    # viol was 0, the list grep matched nothing, and the row rendered exactly
+    #
+    #     coverage  FAIL  0 floor violation(s):
+    #
+    # An evidence-free FAIL is the worst output a probe can produce: it names
+    # no defect, so the only available "fix" is to soften the probe. Same
+    # defect the govulncheck row was already repaired for, and the real cause
+    # was sitting in $out the whole time, captured and unused. Reproduced with
+    # COVERAGE_MIN=99.9.
+    #
+    # `| head -1` + `${viol:-0}`: grep -c prints 0 AND exits non-zero on zero
+    # matches, so the count needs the same guard the other counting rows in
+    # this file carry.
+    viol=$(grep -cE 'below its floor' <<<"$out" | head -1); viol=${viol:-0}
+    if (( viol > 0 )); then
+      row "coverage" FAIL "$viol floor violation(s): $(grep -oE '[a-z/]+ is [0-9.]+%, below its floor of [0-9.]+%' <<<"$out" | paste -sd' ; ' -)"
+    elif below=$(grep -m1 -oE 'coverage [0-9.]+% is below [0-9.]+%' <<<"$out"); then
+      row "coverage" FAIL "$below"
+    elif missing=$(grep -m1 -oE "package '[^']+' has a floor [^,]*but no measured coverage" <<<"$out"); then
+      row "coverage" FAIL "$missing (renamed or removed package? update scripts/coverage-floors.txt)"
+    else
+      # A gate that did not COMPLETE is an unproven gate, not a clean one,
+      # so the row has to carry whatever evidence exists. Prefer a real
+      # file:line diagnostic -- go test ends a build failure with a bare
+      # "FAIL", so "the last non-noise line" alone reported exactly that and
+      # was barely better than the empty evidence this branch replaced.
+      detail=$(grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$out")
+      [[ -n "$detail" ]] || detail=$(grep -vE '^(ok|---|FAIL$|[[:space:]]*$)' <<<"$out" | tail -1)
+      row "coverage" FAIL "coverage gate did not complete: $(cut -c1-110 <<<"${detail:-<no output captured>}")"
+    fi
   fi
 else row "coverage" FAIL "no scripts/coverage.sh"; fi
 

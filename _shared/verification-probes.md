@@ -40,3 +40,29 @@ claim.
    carries the ratified reason — the probe reads the spec, so a silent
    omission cannot masquerade as N/A.
 6. **A failing probe is a finding, not a reason to soften the probe.**
+7. **Every FAIL must name the defect.** A verdict with empty evidence is worse
+   than no row at all: it points at nothing, so the only available "fix" is to
+   weaken the check. When a gate can fail several ways, give each one its own
+   branch and its own evidence string — and give "the gate did not complete"
+   a branch too, because an unproven gate is not a clean one. This rule exists
+   because three rows in `verify-standard.sh` shipped without it: govulncheck
+   producing no verdict, `coverage FAIL "0 floor violation(s):"` whenever the
+   failure was anything but a floor, and a real-lane row that blamed the lane
+   for a failure elsewhere in the repo.
+
+## Known-unreliable inputs
+
+**Go's test cache can decide a coverage verdict.** `scripts/coverage.sh` reads
+whatever `go test` returns, and `go test` will serve a CACHED coverage profile.
+A profile cached from a degraded run therefore gates a tree it was never
+measured against: on 2026-08-18 the same commit reported `pprofhttp 64.71%,
+below its floor of 80.00%` in one working copy and `85.6%, all packages
+at/above their floor` in another, with the only difference being cache state —
+`go clean -testcache` made it deterministic. A second agent could not reproduce
+it in their tree, so it is real but intermittent and not yet understood.
+
+Until it is: a coverage FAIL that cannot be reproduced after
+`go clean -testcache` is a cache artifact, not a finding about the code. Do not
+lower a floor to make one go away. This is recorded rather than fixed because
+neither the mechanism nor the trigger is pinned down, and a gate whose failures
+are sometimes fictional is itself the finding.
