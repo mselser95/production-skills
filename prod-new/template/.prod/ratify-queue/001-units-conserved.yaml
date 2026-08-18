@@ -45,6 +45,22 @@ candidate_invariant:
     window: n/a (scaffold has no production history yet)
     firings: 0
 
+# EXECUTABLE non-vacuity check. scripts/verify-standard.sh APPLIES this
+# mutation to the real production file, runs expect_red, REQUIRES a test
+# failure (a BUILD failure is classified as a decayed mutation, not a
+# detection), and restores the file on every exit path.
+#
+# The prose in evidence_against above DESCRIBES this check; it does not
+# substitute for it. That distinction is the whole point: prose evidence
+# cites line numbers that move, and a keyword grep over it can be satisfied
+# by typing the word "mutation" in a comment. This block is re-executed on
+# every probe run instead.
+non_vacuity_check:
+  file: 'internal/domain/ledger.go'
+  expect_red: 'TestInvariant_UnitsConserved'
+  find: 'AddAmounts(state.Balance, event.Amount)'
+  replace: 'AddAmounts(state.Balance, state.Balance)'
+
 status: PENDING-HUMAN
 # This invariant is exercised, non-vacuity-proven, and green at scaffold
 # time (see verification/ratified/invariants_test.go's header) -- it heads

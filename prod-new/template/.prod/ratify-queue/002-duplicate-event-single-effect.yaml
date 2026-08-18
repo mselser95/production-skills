@@ -38,5 +38,13 @@ candidate_invariant:
     window: n/a (scaffold has no production history yet)
     firings: 0
 
+# EXECUTABLE non-vacuity check -- see 001-units-conserved.yaml's block for
+# why this exists alongside the prose above rather than instead of it.
+non_vacuity_check:
+  file: 'internal/domain/ledger.go'
+  expect_red: 'TestInvariant_DuplicateEventAppliedOnce'
+  find: 'if state.Applied[event.ID] {'
+  replace: 'if false {'
+
 status: PENDING-HUMAN
 # See 001-units-conserved.yaml's status note -- same reasoning applies here.
