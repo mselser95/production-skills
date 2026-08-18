@@ -75,6 +75,13 @@ Everything else is derived. Ask:
 2. **Tier**, proposed from consequence: irreversible external effects +
    unreconstructable data integrity ⇒ T0; feeds a T0 consumer ⇒ T1 with the
    T0 invariant-flake rule; internal tooling ⇒ T2.
+   The human may pick LOWER than your proposal. That answer is ratified and
+   you do not argue it — but do not quietly shrink the build to match either.
+   The tier sets the THRESHOLDS (coverage signal, which lanes gate, whether a
+   flaky invariant may be quarantined); it does not cap what you implement.
+   Ship the full machine, and record the over-delivery in `production.yaml`
+   as a deliberate fact, so the next reader sees a T2 repo that runs fuzz and
+   benchmarks on purpose rather than a repo whose tier looks mislabelled.
 3. **Boundaries**, proposed as a capability list with classes from the purpose
    line: which external systems it calls, is called by, reads, consumes, or
    holds state in. Each gets a class (`external_effect`, `source_of_truth`,
@@ -85,6 +92,9 @@ Everything else is derived. Ask:
    purpose (conservation, at-most-once effect, no stale-as-fresh, authz
    boundaries). These become the seed invariants; they are the reason the repo
    has a `verification/ratified/` at all.
+   The human ratifies a SUBSET. What they did not ratify is not discarded and
+   not silently promoted: it is a CANDIDATE, and candidates have their own
+   home (see "Two homes for an invariant" under Phase 2).
 
 Two things you DERIVE and merely state (never ask): whether durable
 orchestration is needed (a multi-step saga with external effects ⇒ yes; a
@@ -132,6 +142,40 @@ property/metamorphic tests over the core, a fuzz target per decode boundary
 with a seed corpus, and the `.prod/ratify-queue/` packages behind each
 invariant.
 
+**Two homes for an invariant, and they are not interchangeable.** The probe
+treats every file in `.prod/ratify-queue/` as backing a RATIFIED invariant: it
+applies that package's `non_vacuity_check` and runs `expect_red` SCOPED TO
+`verification/ratified/`. So a package whose evidence is a property test in
+`internal/domain` cannot live there — the scoped run finds no such test,
+prints `ok [no tests to run]`, and the probe classifies that as
+STAYED-GREEN, i.e. a vacuous invariant, i.e. a FAIL. Therefore:
+
+- **Ratified** ⇒ an executable test in `verification/ratified/`, a package in
+  `.prod/ratify-queue/` carrying a real `non_vacuity_check` (file /
+  expect_red / find / replace), and an entry under `invariants:` in
+  `production.yaml`. The mutation must make the TEST fail, not the BUILD —
+  the probe reads a compile break as a decayed mutation, not a detection.
+- **Candidate** ⇒ an entry under `invariants_pending_ratification:` in
+  `production.yaml` (the probe already reads that key and reports its count
+  separately), with its evidence package anywhere that is NOT the
+  ratify-queue — `.prod/candidates/` with a README explaining the split works
+  well. Exercise it continuously as a property; it gates nothing until a
+  human ratifies it, at which point the test moves into the trusted set and
+  the package moves into the queue.
+
+Writing a candidate into the ratify-queue to "keep them together" turns a
+green probe red for a reason nobody will diagnose. Writing an unratified test
+into `verification/ratified/` is worse: it launders scaffold-time authorship
+into ratification, which is the one thing the human gate exists to prevent.
+
+**If the harness write-masks `verification/ratified/`, that is expected.** The
+preamble puts the trusted set out of reach of every prod-* skill, and this
+skill is the exception that CREATES it — a greenfield repo has no invariants
+until Phase 2 writes them. If a write is refused there, do not route around it
+silently: say plainly which file you are creating and why this skill is
+allowed to, or bail. Creating the seed invariants is in-contract; editing an
+existing repo's ratified set never is.
+
 **Gates and lanes** — `make check-fast` (seconds), `make verify` (the full
 lane), `make test-advisory` (candidate build tag), `make bench`,
 `make verify-standard` (the standard's own probe), `make check-registries`
@@ -155,9 +199,19 @@ from `references/agents-template.md`, `CODEOWNERS` with a real owner,
    under its recorded mutation, each fuzz target executed, the replay fixture
    red on a deliberately broken variant. Record the evidence where the
    artifact lives.
-3. Emit the first `.prod/evidence/<sha>.json`.
-4. Report: the four answers as ratified, what was declined and why, the probe
-   table, and the ONE command the next engineer runs to add their first
+3. **RUN every gate script you authored, then break what it guards and watch
+   it go red.** Phase 2 ships a whole `scripts/` directory, and a shell gate
+   is the easiest thing in this repo to ship broken: `bash -n` parses it and
+   executes nothing, so a script that dies on its first line still "passes
+   validation" and then prints a confident wrong verdict. Execute it, read
+   its output, and confirm it FAILS when it should — including when its input
+   set is empty (see preamble §4b). An unrun gate is an ungated dimension.
+4. Emit the first `.prod/evidence/<sha>.json`. Delete any evidence record the
+   template shipped: a record naming another commit, produced by an older
+   probe with different row names, is a green attestation for a state this
+   repo was never in.
+5. Report: the four answers as ratified, what was declined and why, what was
+   ratified vs left CANDIDATE, the probe table, and the ONE command the next engineer runs to add their first
    feature (`prod-spec`). Nothing else should be left for the human to
    remember.
 

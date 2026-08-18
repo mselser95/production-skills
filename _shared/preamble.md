@@ -63,6 +63,31 @@ its config. "The port exists" is not "the tracer is wired"; "the job exists"
 is not "the scan passes". A probe you did not execute is a dimension you did
 not deliver.
 
+**A gate script you only parsed is an UNRUN gate.** `bash -n` checks syntax
+and executes not one line; `shellcheck` reads code and runs none of it. Every
+gate you author — a CI runner, a citation checker, a registry sweep — gets
+EXECUTED before you report it, and then gets the same non-vacuity treatment a
+ratified invariant gets: break the thing it guards on purpose, watch it go
+RED, revert. A gate that has only ever been observed green has not been
+observed at all. This is not hypothetical: three scripts once shipped
+"validated" with `bash -n`, all three broken identically at their first line
+by `cd "$(git rev-parse --show-toplevel || dirname "$0")/.."` — git already
+returns the ROOT, so the `/..` landed one level ABOVE the repo and every file
+read failed. The fallback branch was the only one that behaved, and it is the
+branch nobody exercises.
+
+**A check that checked NOTHING must FAIL, not pass.** Zero-findings and
+zero-inputs are different outcomes and must be different exit codes: a
+citation checker that finds no citations, a scan whose file list came back
+empty, a matrix with no rows. Otherwise an empty run is indistinguishable
+from a clean one, and the gate reports green for the case where it did the
+least work. This is one defect wearing many costumes — the `runbook-citations-
+resolve` row that PASSed having grepped a prefix no repo used, the
+non-vacuity row satisfied by the word "mutation" appearing in a comment, and
+the invalid workflow file that yields zero checks rather than a red one
+(tier-policy.yaml documents that last one). When you write a gate, ask what
+it prints when its input set is empty, and make that answer non-zero.
+
 ## 5. Bail honestly
 
 When you cannot complete the task, say so with state:
