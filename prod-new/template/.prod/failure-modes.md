@@ -47,3 +47,19 @@ build on any).
 ## Totals
 
 tested = 11, N/A = 10, blocked = 0.
+
+## Status vocabulary, and one constraint on this file
+
+Every scenario row carries exactly one status: `tested`, `N/A` (with the
+reason on the row), or `blocked`. `scripts/verify-standard.sh` counts them by
+matching a whole status CELL, and **any row whose status cell is `blocked`
+fails the build** — that is the point: a blocked scenario is one that needs a
+production change before it can be tested, and it should stop the line rather
+than sit in a document.
+
+The constraint that follows: do not add a summary or totals table whose rows
+put a status word in a cell of its own (`| blocked | 0 |`). The counter cannot
+tell that row apart from a real scenario row and will fail the build while
+reporting the absence of blocked scenarios. Put totals in prose, or in a row
+whose first cell names the metric (`| blocked scenarios | 0 |` is fine — the
+status word is not alone in its cell).

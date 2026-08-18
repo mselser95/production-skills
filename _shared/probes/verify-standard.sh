@@ -293,7 +293,14 @@ else row "mutation-baseline (TREND)" FAIL "no baseline artifact"; fi
 if [[ -f .prod/failure-modes.md ]]; then
   tested=$(grep -cE '^\|.*\b(tested|TESTED)\b' .prod/failure-modes.md || true)
   na=$(grep -cE '^\|.*\bN/?A\b' .prod/failure-modes.md || true)
-  blocked=$(grep -cE '^\|.*\bblocked\b' .prod/failure-modes.md || true)
+  # Anchored to a whole STATUS CELL, not "the word appears anywhere on the
+  # line". The substring form failed the build for any repo that added a
+  # summary table to this file, because a header cell or a totals row
+  # containing the word "blocked" counted as a blocked scenario. Note this is
+  # tighter, not bulletproof: a totals row like `| blocked | 0 |` still
+  # matches, which is why the template's own failure-modes.md documents the
+  # constraint instead of this comment claiming the regex handles everything.
+  blocked=$(grep -cE '^\|.*\|[[:space:]]*\**blocked\**[[:space:]]*\|' .prod/failure-modes.md || true)
   if (( blocked > 0 )); then row "scenario-matrix" FAIL "$blocked checklist entries blocked (need production changes)"
   else row "scenario-matrix" PASS "tested=$tested N/A=$na blocked=0"; fi
 else row "scenario-matrix" FAIL "no .prod/failure-modes.md — denominator unknown"; fi
@@ -364,14 +371,71 @@ else
     || row "replay-corpus" FAIL "no replay corpus and no ratified decline"
 fi
 
+# implemented_test reads an OPTIONAL `implemented:` block from the spec:
+#
+#   implemented:
+#     effect_journal_outbox: ./internal/adapter/out/store TestOutbox_SurvivesARestart
+#
+# i.e. a package and the test that PROVES the dimension. The probe then RUNS
+# that test and requires it green. Same design as a ratification package's
+# non_vacuity_check: the artifact names an executable check and the probe
+# executes it, rather than the probe guessing from a keyword.
+implemented_test() {
+  awk -v key="$1" '
+    /^implemented:/ { inblock=1; next }
+    inblock && /^[a-z_]+:/ { inblock=0 }
+    inblock {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); print line; exit }
+    }
+  ' "$SPEC" 2>/dev/null
+}
+
+# Three dimensions whose only non-FAIL path used to be a ratified DECLINE.
+#
+# effect_journal_outbox and backup_restore_test had NO implementation branch
+# at all: a repo that genuinely built a durable outbox could either declare it
+# declined -- a lie that turns the row NA -- or take a FAIL. The probe could
+# not record the good outcome, which pressured every repo toward writing a
+# false decline to get green. A gate whose output stops corresponding to
+# reality is the defect this file exists to prevent.
+#
+# reconciliation had a branch, but it was `grep -rqi "reconcil"` -- a keyword
+# search over the code under review, satisfied by a comment saying
+# reconciliation is NOT implemented. It is kept as a fallback so existing
+# repos do not go red, but the evidence string now says it was a keyword
+# match, so the weakness is visible in the report instead of reading as proof.
 for k in effect_journal_outbox reconciliation backup_restore_test; do
-  if declined "$k"; then row "$k" NA "ratified decline in $SPEC"
-  else
-    case "$k" in
-      reconciliation) grep -rqi "reconcil" --include='*.go' . && row "$k" PASS "reconciliation code present" || row "$k" FAIL "no reconciliation and no ratified decline";;
-      *) row "$k" FAIL "not implemented and not declined in $SPEC";;
-    esac
+  if declined "$k"; then row "$k" NA "ratified decline in $SPEC"; continue; fi
+
+  spec_test="$(implemented_test "$k")"
+  if [[ -n "$spec_test" ]]; then
+    it_pkg="${spec_test%% *}"; it_name="${spec_test##* }"
+    if [[ -z "$it_pkg" || "$it_pkg" == "$it_name" ]]; then
+      row "$k" FAIL "spec's implemented.$k must be '<package> <TestName>', got '$spec_test'"
+    # NOT `go test ... | grep -qx`. This file runs under `set -o pipefail`,
+    # and `grep -q` exits the moment it matches, closing the pipe; go test
+    # then dies of SIGPIPE and pipefail reports the PIPELINE as failed even
+    # though the grep succeeded. Measured: exit 0 without pipefail, 255 with.
+    # A found test would have been reported as decayed evidence on every run.
+    elif ! grep -qx "$it_name" <<<"$(go test "$it_pkg" -list "^${it_name}$" 2>/dev/null)"; then
+      row "$k" FAIL "spec names $it_name in $it_pkg but no such test exists -- the evidence has decayed"
+    elif go test "$it_pkg" -run "^${it_name}$" -count=1 >/dev/null 2>&1; then
+      row "$k" PASS "proven by $it_name ($it_pkg), executed this run"
+    else
+      row "$k" FAIL "$it_name ($it_pkg) is RED -- the dimension it proves is not implemented"
+    fi
+    continue
   fi
+
+  case "$k" in
+    reconciliation)
+      grep -rqi "reconcil" --include='*.go' . \
+        && row "$k" PASS "keyword match only (no implemented.$k in $SPEC naming a test to execute)" \
+        || row "$k" FAIL "no reconciliation and no ratified decline";;
+    *) row "$k" FAIL "not implemented, not declined, and no implemented.$k in $SPEC naming the test that proves it";;
+  esac
 done
 
 # --- 13. observability: contract CHECKED, tracer WIRED --------------------
