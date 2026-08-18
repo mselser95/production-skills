@@ -306,10 +306,25 @@ real_tag=$(grep -rho 'go:build [a-z_]*' --include='*_test.go' . 2>/dev/null | aw
            | grep -vE '^(candidate|ignore)$' | sort -u | head -1)
 live_gate=$(grep -rlE 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
 if [[ -n "$real_tag" ]]; then
-  if go test -tags="$real_tag" ./... -count=1 >/dev/null 2>&1; then
+  # Scope the run to the packages that actually CONTAIN the tagged files, and
+  # keep the output.
+  #
+  # This used to be `go test -tags=$real_tag ./... >/dev/null 2>&1`, which is
+  # wrong twice. It ran the WHOLE repo under the tag, so any unrelated flake
+  # anywhere failed this row -- and then reported "the lane did not run green",
+  # blaming a lane that was fine. And it discarded the output, so the FAIL
+  # carried no evidence at all: the one thing a finding must always do is name
+  # the defect.
+  real_pkgs=$(grep -rl "go:build $real_tag" --include='*_test.go' . 2>/dev/null \
+              | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|' | tr '\n' ' ')
+  [[ -n "$real_pkgs" ]] || real_pkgs=./...
+  # shellcheck disable=SC2086
+  if rl_out=$(go test -tags="$real_tag" $real_pkgs -count=1 2>&1); then
     extra=""; [[ -n "$live_gate" ]] && extra=" + env-gated live lane"
-    row "integration-real-lane" PASS "lane '-tags=$real_tag' runs green$extra"
-  else row "integration-real-lane" FAIL "lane '-tags=$real_tag' declared but did not run green"; fi
+    row "integration-real-lane" PASS "lane '-tags=$real_tag' runs green in $(wc -w <<<"$real_pkgs" | tr -d ' ') pkg(s)$extra"
+  else
+    row "integration-real-lane" FAIL "lane '-tags=$real_tag': $(grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$rl_out" | cut -c1-120)"
+  fi
 elif [[ -n "$live_gate" ]]; then
   row "integration-real-lane" PASS "env-gated live lane only ($live_gate)"
 else row "integration-real-lane" FAIL "every test is hermetic — no real-dependency lane"; fi
