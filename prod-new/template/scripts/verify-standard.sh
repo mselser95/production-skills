@@ -65,7 +65,16 @@ waived() { # waived <id> -> 0 if a NON-EXPIRED waiver covers this obligation.
 # mutation was reported STAYED-GREEN.
 classify_mutation_result() {
   local out="$1"
-  if grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
+  # A test that did not RUN is not a verdict, in either direction. Two live
+  # traps, both observed: an integration-tagged invariant test without the tag
+  # yields "[no test files]" (neither ok nor FAIL -> NO-VERDICT), and WITH the
+  # tag but without a database it self-skips and the package prints a bare
+  # "ok" -- which would classify the mutation STAYED-GREEN and accuse a
+  # perfectly good invariant of being vacuous. Checking for the skip first is
+  # what keeps "not run" from masquerading as either answer.
+  if grep -qE "^--- SKIP|no tests to run|\[no test files\]" <<<"$out"; then
+    echo "NOT-RE-VERIFIED"
+  elif grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
     echo "MUTATION-BREAKS-BUILD"
   elif grep -qE "^(--- )?FAIL" <<<"$out"; then
     echo "DETECTED"
@@ -241,6 +250,7 @@ for k in want:
     print(found.get(k, ""))
 PYNV
 )
+    nv_reqtags=$(sed -n 5p <<<"$nv_fields")
     nv_file=$(sed -n 1p <<<"$nv_fields")
     nv_test=$(sed -n 2p <<<"$nv_fields")
     nv_find=$(sed -n 3p <<<"$nv_fields")
@@ -282,7 +292,12 @@ open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$
     # defect as a gate that reads a report instead of an effect.
     nv_pkg=./verification/ratified/
     [[ -d verification/ratified ]] || nv_pkg=./verification/...
-    nv_out=$(go test "$nv_pkg" -run "^${nv_test}\$" -count=1 2>&1)
+    # -v so a SKIP is visible: without it a fully-skipped package prints only
+    # "ok", which is indistinguishable from a mutation that went undetected.
+    nv_tags=""
+    [[ -n "${nv_reqtags:-}" ]] && nv_tags="-tags=${nv_reqtags}"
+    # shellcheck disable=SC2086
+    nv_out=$(go test $nv_tags -v "$nv_pkg" -run "^${nv_test}\$" -count=1 2>&1)
     case "$(classify_mutation_result "$nv_out")" in
       DETECTED)              nv_proven=$((nv_proven+1)) ;;
       *)                     nv_broken="${nv_broken} ${nv_test}:$(classify_mutation_result "$nv_out")" ;;

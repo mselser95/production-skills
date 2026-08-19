@@ -52,17 +52,30 @@ claim.
 
 ## Known-unreliable inputs
 
-**Go's test cache can decide a coverage verdict.** `scripts/coverage.sh` reads
-whatever `go test` returns, and `go test` will serve a CACHED coverage profile.
-A profile cached from a degraded run therefore gates a tree it was never
-measured against: on 2026-08-18 the same commit reported `pprofhttp 64.71%,
-below its floor of 80.00%` in one working copy and `85.6%, all packages
-at/above their floor` in another, with the only difference being cache state —
-`go clean -testcache` made it deterministic. A second agent could not reproduce
-it in their tree, so it is real but intermittent and not yet understood.
+**Go's test cache could decide a coverage verdict — FIXED 2026-08-19.**
+`scripts/coverage.sh` reads whatever `go test` returns, and `go test` will serve
+a CACHED coverage profile. A profile cached from a degraded run therefore gated
+a tree it was never measured against: on 2026-08-18 the same commit reported
+`pprofhttp 64.71%, below its floor of 80.00%` in one working copy and `85.6%,
+all packages at/above their floor` in another, with the only difference being
+cache state — `go clean -testcache` made it deterministic.
 
-Until it is: a coverage FAIL that cannot be reproduced after
-`go clean -testcache` is a cache artifact, not a finding about the code. Do not
-lower a floor to make one go away. This is recorded rather than fixed because
-neither the mechanism nor the trigger is pinned down, and a gate whose failures
-are sometimes fictional is itself the finding.
+The fix is `-count=1` on every `go test` invocation that a gate reads, which
+tells the toolchain to run rather than to recall. It is now on `coverage.sh`
+(the one that decides a verdict) and on `test`, `race`, `architecture`,
+`test-advisory` and `e2e` in the Makefile. It is deliberately NOT on the
+`-list` and `-fuzz` invocations, which do not consume cached results.
+
+Verified on a real repo: cold cache, warm cache and a third run all report the
+same total with every package floor green — the point being that they AGREE,
+not the number itself.
+
+Two things worth keeping from how this was found. It was reported by one agent
+and NOT reproducible by another, which is exactly the shape a report gets
+dismissed for; it was real anyway. And the mechanism never had to be fully
+understood to be closed — "a gate must not be able to read a cache" is a
+property worth enforcing whether or not you can explain the day it bit.
+
+The operational rule still stands for any gate that has not been converted: a
+coverage FAIL that disappears after `go clean -testcache` is a cache artifact,
+not a finding about the code, and it is never answered by lowering a floor.

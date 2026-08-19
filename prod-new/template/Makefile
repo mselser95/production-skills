@@ -18,9 +18,9 @@ check-fast:
 	@echo "Running go vet..."
 	go vet ./...
 	@echo "Running tests (no race)..."
-	go test ./...
+	go test -count=1 ./...
 	@echo "Running architecture checks..."
-	go test ./internal/architecture
+	go test -count=1 ./internal/architecture
 
 # test-advisory runs the candidate-provenance test lane: tests behind the
 # `candidate` build tag that are not yet ratified/derived invariants. This
@@ -29,23 +29,23 @@ check-fast:
 # prod-test-synth yet); this target still runs so the lane is proven wired
 # from the first commit rather than added later and forgotten.
 test-advisory:
-	go test -tags=candidate ./...
+	go test -count=1 -tags=candidate ./...
 
 lint:
 	@echo "Running golangci-lint..."
 	golangci-lint run --timeout=5m
 
 test:
-	go test ./...
+	go test -count=1 ./...
 
 race:
-	go test -race ./...
+	go test -count=1 -race ./...
 
 coverage:
 	./scripts/coverage.sh
 
 architecture:
-	go test ./internal/architecture
+	go test -count=1 ./internal/architecture
 
 # chaos is a placeholder lane name kept wired from the first commit (the
 # gate list every service born from this template must keep, per
@@ -62,7 +62,7 @@ chaos:
 e2e:
 	@name='TestSvc_RealEventLogAndRealTCP_DepositAndWithdrawSurviveARestart'; \
 	go test -tags=integration -list "^$${name}$$" ./internal/e2e | grep -qx "$$name" || { echo "missing e2e test: $$name" >&2; exit 1; }; \
-	go test -tags=integration -race -run="^$${name}$$" ./internal/e2e
+	go test -count=1 -tags=integration -race -run="^$${name}$$" ./internal/e2e
 
 # CHAOS_COUNT / FUZZTIME are overridable so the nightly trends lane
 # (.github/workflows/nightly.yaml) can run the same targets at a much

@@ -7,7 +7,13 @@ coverage_min="${COVERAGE_MIN:-85.0}"
 coverage_out="${COVERAGE_OUT:-coverage.out}"
 floors_file="${COVERAGE_FLOORS:-scripts/coverage-floors.txt}"
 
-go test -coverpkg=./... ./... -coverprofile="${coverage_out}"
+# -count=1 is load-bearing, not habit. Without it `go test` may serve a CACHED
+# result, and the coverage profile written from a cached run reflects whatever
+# was cached rather than this tree -- so the ratchet can pass or fail on
+# identical source depending only on cache state. Measured: 64.71% vs 85.6% on
+# one package, same tree, differing only in whether the cache was warm. A gate
+# whose verdict depends on a cache is not a gate.
+go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
 total="$(go tool cover -func="${coverage_out}" | tail -n1 | grep -oE '[0-9]+\.[0-9]+%$' | tr -d '%')"
 echo "TOTAL COVERAGE: ${total}% (threshold ${coverage_min}%)"
 
