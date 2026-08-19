@@ -23,3 +23,24 @@ entries:
       which belongs in the integration lane, not the unit lane. Until then
       production.yaml records it under the units_notification capability's
       `assumed:` block rather than claiming the guarantee.
+
+  - id: outbox-log-grows-without-compaction
+    owner: "@<OWNER>"
+    created: 2026-08-19
+    expires: 2026-11-17
+    evidence: >
+      internal/adapter/out/store.Limits bounds the PENDING set and the
+      in-memory entry map, so a sink outage can no longer grow this service
+      without limit. The durable log underneath is NOT bounded by any of
+      that: internal/platform/outboxlog is append-only with no compaction,
+      so every transition -- including every dead-letter eviction the bounds
+      perform -- is retained forever, and a long-running service's outbox log
+      grows monotonically even while its pending set sits at zero.
+      This is the same shape as the event log's own recovery cost, and the
+      same answer applies: fold the terminal transitions away and keep only
+      what an unfinished entry needs. Closing this needs a compaction pass
+      that is safe against a concurrent Append and that provably never drops
+      a transition an entry still depends on -- the ordering is the hard
+      part, exactly as it is for a snapshot, and getting it backwards loses
+      intents irrecoverably. Recorded rather than improvised: a compaction
+      that races its own writer is worse than an oversized file.

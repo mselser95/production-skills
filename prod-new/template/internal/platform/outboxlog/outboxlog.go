@@ -29,9 +29,16 @@ import (
 	"github.com/<OWNER>/<SERVICE>/internal/domain"
 )
 
-// SchemaVersion is the current on-disk record schema. Bump it, and add a
-// migration branch to DecodeRecord, on any incompatible change.
-const SchemaVersion = 1
+// SchemaVersion is the current on-disk record schema WRITTEN by this build.
+// Bump it, and widen SupportedSchemaVersions, on any incompatible change.
+const SchemaVersion = 2
+
+// SupportedSchemaVersions is every schema this build can READ. Writing one
+// version while reading several is what makes a rolling upgrade safe: a
+// build that refused the previous version would discard the pending intents
+// of the process it replaced -- losing exactly the effects this log exists
+// to protect, at exactly the moment nobody is watching.
+var SupportedSchemaVersions = []int{1, 2}
 
 // Entry states, mirroring internal/adapter/out/store's own vocabulary. They
 // are duplicated as plain strings rather than imported: internal/platform
@@ -42,6 +49,12 @@ const (
 	StateIntent    = "intent"
 	StateDelivered = "delivered"
 	StateFailed    = "failed"
+	// StateDeadLettered is an entry evicted by a bound (see
+	// internal/adapter/out/store.Limits). It is NOT a delivery outcome: the
+	// effect was never delivered and may still be deliverable. It exists so
+	// an overflowing outbox has somewhere to put an entry that is neither
+	// lost nor still consuming the bound.
+	StateDeadLettered = "dead_lettered"
 )
 
 // Effect kind tags. These strings are the wire contract: renaming one is a
@@ -69,6 +82,13 @@ type Record struct {
 	IdempotencyKey string          `json:"idempotency_key,omitempty"`
 	Attempts       int             `json:"attempts,omitempty"`
 	Effect         *EffectEnvelope `json:"effect,omitempty"`
+	// JournaledAtUnixNano is when the intent was accepted. Added in schema
+	// 2 for the age bound: without it, an entry restored at boot is
+	// indistinguishable from one journaled a moment ago, so an age bound
+	// would reset on every restart and a crash-looping service would never
+	// evict anything. Zero on a schema-1 record, which is why age carries
+	// an explicit unknown (see Snapshot.AgeKnown).
+	JournaledAtUnixNano int64 `json:"journaled_at_unix_nano,omitempty"`
 }
 
 // ErrUnencodableEffect is returned for an effect this durable format has no
@@ -81,7 +101,7 @@ var ErrUnencodableEffect = fmt.Errorf("outboxlog: effect has no durable encoding
 // this build cannot read. Failing loudly is deliberate: a best-effort parse
 // of a shape a future migration changed is how an outbox quietly loses
 // intents.
-var ErrUnknownSchemaVersion = fmt.Errorf("outboxlog: unknown schema_version (want %d)", SchemaVersion)
+var ErrUnknownSchemaVersion = fmt.Errorf("outboxlog: unknown schema_version (readable: %v)", SupportedSchemaVersions)
 
 // EncodeEffect renders a routable effect into its durable envelope, or
 // ErrUnencodableEffect if this format cannot represent it.
@@ -206,18 +226,27 @@ func DecodeRecord(line []byte) (Record, error) {
 	if err := json.Unmarshal(line, &rec); err != nil {
 		return Record{}, fmt.Errorf("decode: %w", err)
 	}
-	if rec.SchemaVersion != SchemaVersion {
+	if !readableSchema(rec.SchemaVersion) {
 		return Record{}, ErrUnknownSchemaVersion
 	}
 	if rec.EntryID == "" {
 		return Record{}, fmt.Errorf("outboxlog: record with empty entry_id")
 	}
 	switch rec.State {
-	case StateIntent, StateDelivered, StateFailed:
+	case StateIntent, StateDelivered, StateFailed, StateDeadLettered:
 	default:
 		return Record{}, fmt.Errorf("outboxlog: unknown state %q", rec.State)
 	}
 	return rec, nil
+}
+
+func readableSchema(v int) bool {
+	for _, ok := range SupportedSchemaVersions {
+		if v == ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Snapshot is one entry's reconstructed current state, the output of folding
@@ -230,6 +259,19 @@ type Snapshot struct {
 	IdempotencyKey string
 	Attempts       int
 	Effect         domain.Effect
+	// JournaledAtUnixNano is when the intent was accepted, or zero when the
+	// record predates schema 2.
+	JournaledAtUnixNano int64
+	// AgeKnown is false for an entry replayed from a schema-1 record, whose
+	// journaling time was never written down.
+	//
+	// It is a separate field rather than "zero means unknown" because the
+	// two readings demand opposite reactions and a caller must be forced to
+	// notice which one it has: "nothing here is old" and "I cannot tell you
+	// whether anything here is old" are different claims, and collapsing
+	// them into one number is how a metric starts lying in the reassuring
+	// direction.
+	AgeKnown bool
 }
 
 // Rebuild folds transitions into one Snapshot per entry, in first-seen
@@ -254,11 +296,13 @@ func Rebuild(records []Record) ([]Snapshot, error) {
 				return nil, fmt.Errorf("outboxlog: entry %q: %w", rec.EntryID, err)
 			}
 			out = append(out, Snapshot{
-				EntryID:        rec.EntryID,
-				State:          rec.State,
-				IdempotencyKey: rec.IdempotencyKey,
-				Attempts:       rec.Attempts,
-				Effect:         effect,
+				EntryID:             rec.EntryID,
+				State:               rec.State,
+				IdempotencyKey:      rec.IdempotencyKey,
+				Attempts:            rec.Attempts,
+				Effect:              effect,
+				JournaledAtUnixNano: rec.JournaledAtUnixNano,
+				AgeKnown:            rec.JournaledAtUnixNano != 0,
 			})
 			index[rec.EntryID] = len(out) - 1
 			continue

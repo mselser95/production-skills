@@ -27,7 +27,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/<OWNER>/<SERVICE>/internal/domain"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/outboxlog"
@@ -40,6 +42,11 @@ const (
 	StateIntent    EntryState = "intent"
 	StateDelivered EntryState = "delivered"
 	StateFailed    EntryState = "failed" // exhausted MaxAttempts; a Reconcile candidate
+	// StateDeadLettered is an entry evicted by a bound. It is NOT a delivery
+	// outcome: the effect was never delivered and may well still be
+	// deliverable. Reconcile ignores it, so it stops consuming the bound,
+	// and Requeue is the explicit way back.
+	StateDeadLettered EntryState = "dead_lettered"
 )
 
 // Entry is one outbox record.
@@ -53,6 +60,103 @@ type Entry struct {
 	// only thing that lets a receiver collapse repeated deliveries of the
 	// SAME effect into one, and "the same effect" is an entry, not a call.
 	IdempotencyKey string
+	// JournaledAt is when the intent was accepted. Zero, with AgeKnown
+	// false, for an entry replayed from a schema-1 record written before
+	// the timestamp existed.
+	JournaledAt time.Time
+	// AgeKnown distinguishes "this entry is new" from "I cannot tell how
+	// old this entry is". See outboxlog.Snapshot.AgeKnown.
+	AgeKnown bool
+}
+
+// Clock reports the current time, mirroring internal/platform/clock.Clock.Now
+// as a plain func so this package need not import it -- the same local-port
+// idiom IDGenerator already uses.
+type Clock func() time.Time
+
+// Limits bound how much UNDELIVERED work the outbox may hold.
+//
+// Two bounds, because they protect different failures and neither implies
+// the other:
+//
+//   - MaxPending bounds MEMORY. A fast producer against a dead sink piles up
+//     entries that are all brand new, so an age bound would not fire until
+//     long after the process died.
+//   - MaxPendingAge bounds STALENESS. One entry stuck forever never trips a
+//     count bound, and an ancient delivery that is finally resurrected lands
+//     outside whatever dedup window the receiver keeps -- so it is stored
+//     twice, which is the failure the idempotency key was supposed to
+//     prevent.
+//
+// Zero means "use the default", never "unbounded": an outbox that grows
+// without limit because nobody filled in a field is the defect this type
+// exists to remove.
+type Limits struct {
+	MaxPending    int
+	MaxPendingAge time.Duration
+	// MaxRetained bounds the TOTAL in-memory entry map, evicting TERMINAL
+	// entries (delivered, dead-lettered) oldest-first once it is exceeded.
+	//
+	// Bounding only the pending set would have left this outbox with its own
+	// leak in two places: dead-lettered entries would accumulate forever as
+	// the very bound that evicted them filled memory, and -- a leak that
+	// predates any bound here -- every successfully DELIVERED entry was
+	// retained for the life of the process, so a healthy high-throughput
+	// service grew without limit precisely because nothing was going wrong.
+	//
+	// Evicting a terminal entry loses nothing: its transitions are already
+	// in the durable log, which is the record. What it costs is the ability
+	// to Entry() or Requeue() that id from memory afterwards.
+	MaxRetained int
+}
+
+// Bound defaults. Deliberately generous: they are a backstop against
+// unbounded growth, not a tuning knob, and a bound that evicts during normal
+// operation would train operators to raise it until it is gone.
+const (
+	DefaultMaxPending    = 10_000
+	DefaultMaxPendingAge = 24 * time.Hour
+	// Ten pending sets' worth of history kept for inspection. Terminal
+	// entries are cheap and useful to have around; they are simply not
+	// allowed to be infinite.
+	DefaultMaxRetained = 100_000
+)
+
+func (l Limits) withDefaults() Limits {
+	if l.MaxPending <= 0 {
+		l.MaxPending = DefaultMaxPending
+	}
+	if l.MaxPendingAge <= 0 {
+		l.MaxPendingAge = DefaultMaxPendingAge
+	}
+	if l.MaxRetained <= 0 {
+		l.MaxRetained = DefaultMaxRetained
+	}
+	if l.MaxRetained < l.MaxPending {
+		// A retention bound below the pending bound would evict entries that
+		// are still waiting to be delivered, which is the one thing neither
+		// bound may ever do.
+		l.MaxRetained = l.MaxPending
+	}
+	return l
+}
+
+// Option configures an Outbox at construction. Variadic options rather than
+// more positional parameters, so adding a bound did not change either
+// constructor's signature and every existing call site kept working -- while
+// still getting the defaults.
+type Option func(*Outbox)
+
+// WithLimits sets the pending bounds.
+func WithLimits(l Limits) Option { return func(o *Outbox) { o.limits = l.withDefaults() } }
+
+// WithClock injects the clock used for entry ages.
+func WithClock(c Clock) Option {
+	return func(o *Outbox) {
+		if c != nil {
+			o.clock = c
+		}
+	}
 }
 
 // Sink is the external system this outbox delivers to. The template ships
@@ -73,14 +177,18 @@ type IDGenerator func() string
 
 var errMaxAttemptsExhausted = errors.New("store: max delivery attempts exhausted")
 
-// Outbox is the in-process outbox implementation. It is durable only for
-// the lifetime of this process (an in-memory map) -- this template's
-// composition root wires it against LogSink to demonstrate the full
-// pattern end to end without requiring a real external dependency; a
-// production fork backs Entry storage with the same durable
-// internal/platform/eventlog-style append-only log the ledger itself uses,
-// and swaps Sink for a real HTTP/queue client. See production.yaml's
-// effect_journal_outbox decline for the precise scope line.
+// Outbox is the outbox implementation. Constructed via OpenDurable it
+// journals every state transition to an append-only log and rebuilds its
+// pending set from that log at boot; constructed via NewOutbox it keeps
+// entries in memory only, which is a deliberate and separately-named choice
+// rather than a default.
+//
+// It is BOUNDED (see Limits). An outbox without a bound is not a smaller
+// problem than no outbox at all -- it is a queue that grows for exactly as
+// long as the thing it feeds is broken, on a service that reports itself
+// healthy throughout, because nothing about an unbounded queue looks wrong
+// until the process dies. Entries evicted by a bound are dead-lettered:
+// durable, listable, countable and requeueable, never dropped.
 type Outbox struct {
 	mu          sync.Mutex
 	entries     map[string]*Entry
@@ -91,6 +199,10 @@ type Outbox struct {
 	// the explicitly-chosen non-durable form -- see NewOutbox vs
 	// OpenDurable.
 	journal *outboxlog.Log
+
+	limits      Limits
+	clock       Clock
+	deadLetters int
 }
 
 // NewOutbox constructs a NON-DURABLE Outbox: entries live in memory only, so
@@ -103,11 +215,121 @@ type Outbox struct {
 // OpenDurable, and choosing this one is a visible decision in the
 // composition root rather than a forgotten default -- which is also why it
 // is a separate constructor and not a nil-able option on this one.
-func NewOutbox(sink Sink, ids IDGenerator, maxAttempts int) *Outbox {
+func NewOutbox(sink Sink, ids IDGenerator, maxAttempts int, opts ...Option) *Outbox {
 	if maxAttempts <= 0 {
 		maxAttempts = 5
 	}
-	return &Outbox{entries: map[string]*Entry{}, sink: sink, ids: ids, maxAttempts: maxAttempts}
+	o := &Outbox{
+		entries:     map[string]*Entry{},
+		sink:        sink,
+		ids:         ids,
+		maxAttempts: maxAttempts,
+		limits:      Limits{}.withDefaults(),
+		clock:       time.Now,
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
+}
+
+// evictForBounds dead-letters whatever must go for the bounds to hold, and
+// returns the ids evicted. Caller must NOT hold o.mu.
+//
+// Order is deliberate: stale first, then oldest-to-make-room. Doing it the
+// other way could evict a fresh entry to make room while a week-old one sat
+// beside it untouched.
+func (o *Outbox) evictForBounds(headroom int) []string {
+	now := o.clock()
+
+	o.mu.Lock()
+	pending := make([]*Entry, 0, len(o.entries))
+	for _, e := range o.entries {
+		if e.State == StateIntent || e.State == StateFailed {
+			pending = append(pending, e)
+		}
+	}
+	// Oldest first, deterministically. Map iteration order is random, and an
+	// eviction rule that picks a different victim on every run is not a rule.
+	// Unknown-age entries sort as oldest: they have survived at least one
+	// restart, so they are the least likely to be the freshest thing here.
+	sort.Slice(pending, func(i, j int) bool {
+		a, b := pending[i], pending[j]
+		if a.AgeKnown != b.AgeKnown {
+			return !a.AgeKnown
+		}
+		if !a.JournaledAt.Equal(b.JournaledAt) {
+			return a.JournaledAt.Before(b.JournaledAt)
+		}
+		return a.ID < b.ID
+	})
+
+	var victims []*Entry
+	keep := pending[:0:0]
+	for _, e := range pending {
+		// Age bound applies only to entries whose age we actually know. An
+		// entry replayed from schema 1 has no journaling time, and evicting
+		// it on a guess would make a version bump look like an outage.
+		if e.AgeKnown && now.Sub(e.JournaledAt) > o.limits.MaxPendingAge {
+			victims = append(victims, e)
+			continue
+		}
+		keep = append(keep, e)
+	}
+	// Count bound, leaving `headroom` slots free for the caller about to
+	// journal.
+	for len(keep) > o.limits.MaxPending-headroom && len(keep) > 0 {
+		victims = append(victims, keep[0])
+		keep = keep[1:]
+	}
+	// Retention bound: forget terminal entries, oldest first. They are
+	// durable in the log; only the in-memory copy goes.
+	var forget []string
+	// headroom is reserved here too: without it the map settles at
+	// MaxRetained+1, because eviction runs BEFORE Journal adds its entry and
+	// a bound that is off by one is a bound that does not mean what it says.
+	if len(o.entries)+headroom > o.limits.MaxRetained {
+		terminal := make([]*Entry, 0, len(o.entries))
+		for _, e := range o.entries {
+			if e.State == StateDelivered || e.State == StateDeadLettered {
+				terminal = append(terminal, e)
+			}
+		}
+		sort.Slice(terminal, func(i, j int) bool {
+			a, b := terminal[i], terminal[j]
+			if !a.JournaledAt.Equal(b.JournaledAt) {
+				return a.JournaledAt.Before(b.JournaledAt)
+			}
+			return a.ID < b.ID
+		})
+		over := len(o.entries) + headroom - o.limits.MaxRetained
+		for i := 0; i < over && i < len(terminal); i++ {
+			forget = append(forget, terminal[i].ID)
+		}
+	}
+	for _, id := range forget {
+		delete(o.entries, id)
+	}
+	o.mu.Unlock()
+
+	var evicted []string
+	for _, e := range victims {
+		if err := o.record(outboxlog.Record{
+			EntryID: e.ID, State: outboxlog.StateDeadLettered,
+			IdempotencyKey: e.IdempotencyKey,
+		}); err != nil {
+			// Durable first. If the transition cannot be recorded the entry
+			// stays pending: an in-memory-only eviction would vanish on the
+			// next restart, resurrecting an effect the bound had retired.
+			continue
+		}
+		o.mu.Lock()
+		e.State = StateDeadLettered
+		o.deadLetters++
+		o.mu.Unlock()
+		evicted = append(evicted, e.ID)
+	}
+	return evicted
 }
 
 // Journal durably records the intent to deliver effect and returns the new
@@ -123,22 +345,33 @@ func (o *Outbox) Journal(effect domain.Effect) (string, error) {
 		return "", err
 	}
 
+	// Enforce the bounds BEFORE accepting, asking for one slot of headroom.
+	// Doing it here rather than on a sweep means the invariant "pending never
+	// exceeds MaxPending" holds at every observable moment, instead of being
+	// true only between ticks of some background loop.
+	o.evictForBounds(1)
+
+	now := o.clock()
 	o.mu.Lock()
 	id := o.ids()
 	// The idempotency key is minted HERE, once, and belongs to the ENTRY for
 	// the rest of its life -- see the Entry.IdempotencyKey doc for why it
 	// cannot be minted per-Publish.
-	entry := &Entry{ID: id, Effect: effect, State: StateIntent, IdempotencyKey: o.ids()}
+	entry := &Entry{
+		ID: id, Effect: effect, State: StateIntent, IdempotencyKey: o.ids(),
+		JournaledAt: now, AgeKnown: true,
+	}
 	o.mu.Unlock()
 
 	// Durable BEFORE in-memory. If the append fails the entry never existed,
 	// which is the only honest outcome: an accepted intent that is not on
 	// disk is exactly the loss this pattern exists to prevent.
 	if err := o.record(outboxlog.Record{
-		EntryID:        id,
-		State:          outboxlog.StateIntent,
-		IdempotencyKey: entry.IdempotencyKey,
-		Effect:         &envelope,
+		EntryID:             id,
+		State:               outboxlog.StateIntent,
+		IdempotencyKey:      entry.IdempotencyKey,
+		Effect:              &envelope,
+		JournaledAtUnixNano: now.UnixNano(),
 	}); err != nil {
 		return "", err
 	}
@@ -294,7 +527,7 @@ func (o *Outbox) Reconcile(ctx context.Context) ReconcileResult {
 // Entries replayed in state delivered are kept rather than dropped: their
 // idempotency key is the evidence an operator needs to correlate this
 // service's record with what the receiver actually saw.
-func OpenDurable(path string, sink Sink, ids IDGenerator, maxAttempts int) (*Outbox, error) {
+func OpenDurable(path string, sink Sink, ids IDGenerator, maxAttempts int, opts ...Option) (*Outbox, error) {
 	records, err := outboxlog.Replay(path)
 	if err != nil {
 		return nil, err
@@ -307,16 +540,29 @@ func OpenDurable(path string, sink Sink, ids IDGenerator, maxAttempts int) (*Out
 	if err != nil {
 		return nil, err
 	}
-	o := NewOutbox(sink, ids, maxAttempts)
+	o := NewOutbox(sink, ids, maxAttempts, opts...)
 	o.journal = log
 	for _, snap := range snapshots {
-		o.entries[snap.EntryID] = &Entry{
+		e := &Entry{
 			ID:             snap.EntryID,
 			Effect:         snap.Effect,
 			State:          EntryState(snap.State),
 			Attempts:       snap.Attempts,
 			IdempotencyKey: snap.IdempotencyKey,
+			AgeKnown:       snap.AgeKnown,
 		}
+		if snap.AgeKnown {
+			// Restored from the ORIGINAL journaling time, not from now. This
+			// is the whole point of persisting it: an entry stamped at boot
+			// comes back looking freshly journaled, so an age bound would
+			// reset on every restart and a crash-looping service would never
+			// evict anything.
+			e.JournaledAt = time.Unix(0, snap.JournaledAtUnixNano)
+		}
+		if e.State == StateDeadLettered {
+			o.deadLetters++
+		}
+		o.entries[snap.EntryID] = e
 	}
 	return o, nil
 }
@@ -338,4 +584,102 @@ func (o *Outbox) record(rec outboxlog.Record) error {
 		return nil
 	}
 	return o.journal.Append(rec)
+}
+
+// DeadLettered returns every entry a bound evicted. They are durable and
+// auditable: an eviction that could not be listed would be a deletion with
+// extra steps.
+func (o *Outbox) DeadLettered() []Entry {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []Entry
+	for _, e := range o.entries {
+		if e.State == StateDeadLettered {
+			out = append(out, *e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// DeadLetterCount returns how many entries bounds have evicted over this
+// outbox's life, including any replayed from the journal.
+func (o *Outbox) DeadLetterCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.deadLetters
+}
+
+// PendingStats summarises the undelivered backlog: how many entries are
+// waiting, how old the oldest one whose age is KNOWN is, and how many have
+// an age nobody can state.
+//
+// unknownAge is reported separately rather than folded into oldestAge
+// because the two support opposite conclusions. "The oldest pending entry is
+// 5 seconds old" and "I cannot tell you how old anything here is" are
+// different claims, and a single number that quietly means both is a metric
+// that reassures precisely when it should not.
+func (o *Outbox) PendingStats() (count int, oldestAge time.Duration, unknownAge int) {
+	now := o.clock()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, e := range o.entries {
+		if e.State != StateIntent && e.State != StateFailed {
+			continue
+		}
+		count++
+		if !e.AgeKnown {
+			unknownAge++
+			continue
+		}
+		if age := now.Sub(e.JournaledAt); age > oldestAge {
+			oldestAge = age
+		}
+	}
+	return count, oldestAge, unknownAge
+}
+
+// ErrNotDeadLettered is returned by Requeue for an entry that is not in
+// StateDeadLettered.
+var ErrNotDeadLettered = errors.New("store: entry is not dead-lettered")
+
+// Requeue returns a dead-lettered entry to the pending set so a later
+// Reconcile will attempt it again.
+//
+// Deliberately manual. Nothing requeues automatically, because an automatic
+// path would defeat the bound it just enforced: the entry would be evicted,
+// requeued, evicted again, forever. This is the operator's answer to "the
+// sink was down for a day, I want that work back", and its existence is what
+// makes dead-lettering a pause rather than a deletion.
+//
+// The idempotency key survives, so a requeued delivery is still the SAME
+// logical effect to any receiver that dedupes -- though note that if the
+// entry has been sitting longer than that receiver's dedup window, the key
+// no longer helps, which is the reason the age bound exists at all.
+func (o *Outbox) Requeue(id string) error {
+	o.mu.Lock()
+	entry, ok := o.entries[id]
+	if !ok {
+		o.mu.Unlock()
+		return fmt.Errorf("store: unknown outbox entry %q", id)
+	}
+	if entry.State != StateDeadLettered {
+		o.mu.Unlock()
+		return fmt.Errorf("%w: %q is %q", ErrNotDeadLettered, id, entry.State)
+	}
+	key := entry.IdempotencyKey
+	o.mu.Unlock()
+
+	// Durable before in-memory, as everywhere else here: a requeue that only
+	// happened in memory would un-happen on the next restart, and the entry
+	// would be dead-lettered again with no record of the operator's decision.
+	if err := o.record(outboxlog.Record{
+		EntryID: id, State: outboxlog.StateIntent, IdempotencyKey: key,
+	}); err != nil {
+		return err
+	}
+	o.mu.Lock()
+	entry.State = StateIntent
+	o.mu.Unlock()
+	return nil
 }

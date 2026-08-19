@@ -145,7 +145,58 @@ func TestOutboxlog_GoldenRecordFormatIsStillReadable(t *testing.T) {
 		t.Errorf("entry 1 state = %q, want intent (still pending)", snapshots[1].State)
 	}
 	if snapshots[1].Effect != (domain.EffectWithdrawn{EventID: "w1", Amount: "3"}) {
-		t.Errorf("entry 1 effect = %#v -- the wire format has drifted from schema_version %d",
-			snapshots[1].Effect, SchemaVersion)
+		t.Errorf("entry 1 effect = %#v -- the wire format has drifted from schema_version 1",
+			snapshots[1].Effect)
+	}
+	// A schema-1 record carries no journaling time, and the rebuild must say
+	// so rather than reporting a zero that reads as "journaled at the epoch"
+	// or, worse, as "brand new".
+	for i, snap := range snapshots {
+		if snap.AgeKnown {
+			t.Errorf("golden v1 entry %d reports AgeKnown -- a record written before the "+
+				"timestamp existed cannot have a known age", i)
+		}
+	}
+}
+
+// provenance: derived
+// verifies: compatibility -- the CURRENT schema round-trips, including the
+// dead-letter transition and the journaling timestamp that schema 1 lacked.
+//
+// This fixture exists beside golden_v1.jsonl rather than replacing it. The
+// v1 file is evidence of what the format used to be; editing it to make a
+// test pass would erase the only proof that a build claiming to read v1 can
+// actually do so.
+func TestOutboxlog_GoldenV2RecordFormatRoundTrips(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "golden_v2.jsonl"))
+	if err != nil {
+		t.Fatalf("read golden v2 fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "replay_v2.jsonl")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write temp copy: %v", err)
+	}
+	records, err := Replay(path)
+	if err != nil {
+		t.Fatalf("Replay(golden v2): %v", err)
+	}
+	snapshots, err := Rebuild(records)
+	if err != nil {
+		t.Fatalf("Rebuild(golden v2): %v", err)
+	}
+	if len(snapshots) != 3 {
+		t.Fatalf("golden v2 rebuilt %d entries, want 3", len(snapshots))
+	}
+
+	byID := map[string]Snapshot{}
+	for _, s := range snapshots {
+		byID[s.EntryID] = s
+	}
+	if got := byID["e-2"]; !got.AgeKnown || got.JournaledAtUnixNano != 1750000001000000000 {
+		t.Errorf("e-2 = %+v, want a KNOWN journaling time -- the timestamp did not survive the round trip", got)
+	}
+	if got := byID["e-3"].State; got != StateDeadLettered {
+		t.Errorf("e-3 state = %q, want %q -- a dead-lettered entry must replay as dead-lettered, "+
+			"or a restart resurrects work a bound deliberately retired", got, StateDeadLettered)
 	}
 }

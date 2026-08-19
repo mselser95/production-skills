@@ -1,0 +1,5 @@
+{"schema_version":2,"entry_id":"e-1","state":"intent","idempotency_key":"k-1","effect":{"kind":"deposited","event_id":"d1","amount":"10"},"journaled_at_unix_nano":1750000000000000000}
+{"schema_version":2,"entry_id":"e-1","state":"delivered","idempotency_key":"k-1","attempts":2}
+{"schema_version":2,"entry_id":"e-2","state":"intent","idempotency_key":"k-2","effect":{"kind":"withdrawn","event_id":"w1","amount":"3"},"journaled_at_unix_nano":1750000001000000000}
+{"schema_version":2,"entry_id":"e-3","state":"intent","idempotency_key":"k-3","effect":{"kind":"deposited","event_id":"d2","amount":"7"},"journaled_at_unix_nano":1750000002000000000}
+{"schema_version":2,"entry_id":"e-3","state":"dead_lettered","idempotency_key":"k-3"}
