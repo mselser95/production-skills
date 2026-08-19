@@ -475,6 +475,9 @@ implemented_test() {
 # would be this file's oldest mistake for the fourth time -- and it would be
 # especially useless here, since the defect this checks for is present in code
 # that says "outbox" everywhere. The proving test has a specific shape: crash
+# between the state commit and the effect journal, recover, and assert the
+# effect is still delivered.
+#
 # implemented_row runs the shared "the spec names a test and the probe EXECUTES
 # it" check for one key, and emits a row under the given label. Every dimension
 # added after scalability uses this rather than copying the loop, because the
@@ -513,8 +516,6 @@ implemented_row() { # implemented_row <label> <spec-key> <extra-fail-hint>
   fi
 }
 
-# between the state commit and the effect journal, recover, and assert the
-# effect is still delivered.
 for k in effect_journal_outbox effect_journal_atomic reconciliation backup_restore_test; do
   if [[ -n "$(implemented_test "$k")" ]] || declined "$k"; then
     implemented_row "$k" "$k"
