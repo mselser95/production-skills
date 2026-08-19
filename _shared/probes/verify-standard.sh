@@ -775,7 +775,15 @@ if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
   # nothing and silently counts every test file. That mistake made this row
   # report 80 call sites where the repo has 35, and flipped the handler row
   # below from FAIL to PASS on a handler that only a test constructs.
-  slog_plain=$(grep -rhoE '\.(Info|Warn|Error|Debug)\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  # `\(([^)]|$)` -- NOT a bare `\(`. `err.Error()` is the error interface's
+  # own method, not a log call, and a bare paren counts every one of them: in
+  # the repo this row was built against, 7 of 15 `.Error(` hits were
+  # `err.Error()`. That inflated the denominator and made a healthy level
+  # distribution (7 error logs, 14 info, 11 warn) read as "more ERROR than
+  # everything else combined". The discriminator is arguments: a log call
+  # always has some, `err.Error()` never does. The `|$` arm keeps a call whose
+  # arguments start on the NEXT line from being dropped.
+  slog_plain=$(grep -rhoE '\.(Info|Warn|Error|Debug)\(([^)]|$)' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
   slog_ctx=$(grep -rhoE '\.(Info|Warn|Error|Debug)Context\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
   if (( slog_plain + slog_ctx == 0 )); then
     row "observability:logs_correlate" NA "slog is imported but no log call sites found"
