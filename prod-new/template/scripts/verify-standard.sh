@@ -245,6 +245,14 @@ for raw in open(os.environ["PKG"], encoding="utf-8"):
             value = value[1:-1]
             if quote == "'":
                 value = value.replace("''", "'")
+            else:
+                # DOUBLE-quoted YAML scalars carry escapes, and Go source is
+                # full of tabs -- a find-string written as "\t\tif err != nil {"
+                # arrives as a literal backslash-t and never matches, which the
+                # probe then reports as find-string-gone: a true verdict for a
+                # false reason, and the most confusing kind of finding.
+                value = (value.replace("\\t", "\t").replace("\\n", "\n")
+                              .replace('\\"', '"').replace("\\\\", "\\"))
         found[key] = value
 for k in want:
     print(found.get(k, ""))
