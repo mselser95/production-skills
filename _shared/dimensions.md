@@ -1,4 +1,4 @@
-# The ten dimensions — the completeness checklist
+# The dimensions — the completeness checklist
 
 Every dimension below MUST be walked by `prod-bootstrap` in Phase 2 (asked, if
 it needs a human semantic answer) and Phase 4 (a gap-report row, always). The
@@ -69,9 +69,29 @@ rate — queue/drop/reject/slow-producer must be an explicit, tested decision)
 and **resource isolation** (one tenant/venue/partition going pathological
 must not starve the others: bulkheads, per-partition pools, quotas — with
 the canonical test "stall partition X completely; does Y still serve?").
+**An outbox whose journal is not atomic with the state change is not an
+outbox.** The pattern's entire value is that the intent and the state commit
+either both survive a crash or neither does; the classic implementation gets
+that by writing the outbox row in the SAME transaction as the state change.
+Copy the shape without the atomicity and you have a queue with extra steps,
+plus a silent failure mode: this framework's own template shipped
+`journal.Append(event)` -> commit state -> unlock -> `outbox.Journal(effects)`,
+three separate steps across two files with two independent fsyncs. A crash in
+the window leaves the event durable and replayable while the effect is lost
+forever -- and replay cannot recover it, because the fold discards effects
+(`state, _ = Apply(...)`). The blast radius is the worst available: an effect
+folded durably and correctly that never reaches the outside world, with no
+signal anywhere saying so.
+Two honest resolutions: a real transaction where a database exists; or, in an
+event-sourced design without one, rebuild the outbox at boot as a PROJECTION of
+the event log plus a delivery watermark -- legitimate precisely because `Apply`
+is deterministic, so the effects of any event are re-derivable from the event
+itself.
+
 Ask: what the system must guarantee across a restart (what may be retried,
 what must NOT, what is reconciled); whether durable state exists at all (if
-none, record reconciliation as N/A with that reason).
+none, record reconciliation as N/A with that reason); and whether the effect
+journal is ATOMIC with the state change or merely adjacent to it.
 Row: recovery semantics tested or assumed; reconciliation present, N/A, or
 missing; restore test cadence.
 
@@ -133,6 +153,68 @@ Ask: nothing — this is derived from what exists.
 Row: the four versions and the per-commit evidence record, present or absent.
 (The framework's own v0 is a flat JSON per commit; anything less means the
 standard a commit was held to is unknowable later.)
+
+## 12. Scalability — vertical and horizontal
+
+**This dimension is REQUIRED BY DEFAULT.** Unless a repo records a ratified
+decline with a reason, assume the system must scale both vertically (more work
+on one instance) and horizontally (more instances). "It is fine at current
+volume" is not an answer — it is the assumption this dimension exists to make
+explicit, because it is always true right up until it is catastrophically not.
+
+Inventory: **boot time as a function of history** (does recovery replay from
+genesis, or from a snapshot?); the **snapshot/compaction story** for every
+append-only store; **what grows without bound** — every log, queue, buffer and
+in-memory index needs an answer, and "nothing prunes it" is an answer that
+must be written down; **backpressure at every boundary in BOTH directions**
+(dimension 7 and the tier policy's `isolation_and_backpressure` cover ingress
+rate only, which leaves the common hole: egress accumulating without limit
+while a downstream is absent); the **partition key**, or the reason there is
+none; and **which side of the durability/throughput trade** the hot path sits
+on.
+
+Ask: what is the partition key for this workload — and if the answer is "there
+isn't one", is the state genuinely single-writer or merely single-writer *so
+far*? What is the acceptable loss window on a crash (that answer chooses
+between fsync-per-event and group commit, and both are correct answers to
+different questions)? What is the largest history this system should still boot
+from, and how long may that take?
+
+Row: bounded boot (snapshot mechanism present, or replay-from-genesis with the
+history bound stated); bounded storage (every append-only store has a retention
+or compaction policy, or a declared decline); egress backpressure (bounded, or
+declined); partition key declared, or single-writer ratified as a decline with
+its reason; durability trade stated.
+
+**Four defects that motivated making this a gate**, all shipped by a service
+built from this framework's own template, each defensible at 2 messages/second
+and none surviving real volume:
+
+- **Boot was O(N) from genesis.** The event log replayed from the first event
+  on every start and never compacted. 172k events/day boots in seconds; a
+  billion takes hours. Nobody had written down which of those the system was
+  expected to survive.
+- **Backpressure existed on one side only.** Consumption was pull-based, so it
+  self-paced — correct, and partly by accident. The outbox had no bound at all:
+  a downstream outage accumulated entries forever, and the only thing that
+  would eventually stop it was the disk.
+- **Horizontal scale was declared away in prose.** The spec said "no
+  concurrent-writer conflict resolution exists or is needed *at this scale*".
+  Honest, and the qualifier was doing all the work: nothing recorded what would
+  change if the scale did, and no one had to justify it.
+- **fsync per event on the hot path, under the mutex**, bought a zero-loss
+  window at ~45ms p99. A real venue does group commit and accepts a bounded
+  loss window instead. Either is defensible; shipping without saying which
+  question you were answering is not.
+
+**Partitionable is not the same as partitioned.** A system does not need to run
+sharded today, but its state must be *decomposable* along a key, and that is
+cheap to preserve and expensive to retrofit. In the service above the order
+books were already per-symbol and fully independent — the obstacle to
+partitioning was not the domain, it was a single shared monotonic cursor
+threaded through everything. That coupling cost nothing to avoid at design time
+and would cost a rewrite to remove. Notice it early; that is most of the value
+of asking.
 
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big

@@ -142,7 +142,9 @@ additive — bootstrap never edits existing code, tests, or CI config
 prod-implement under review, not a bootstrap side effect).
 
 ### Phase 4 — Gap report (completeness-enforced)
-Walk `references/dimensions.md` and emit a row for EVERY dimension — all ten,
+Walk `references/dimensions.md` and emit a row for EVERY dimension — all of
+them, whatever the file currently lists (it has grown, and a count hardcoded
+here would silently retire whichever dimension was added last),
 every sub-item each dimension's "Row:" line names. A missing row is a broken
 bootstrap, not a shorter report.
 

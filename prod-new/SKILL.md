@@ -117,12 +117,37 @@ real implementations at the composition root and deterministic fakes in tests;
 (build revision + config digest in a `build_info` metric, the health body, and
 as base attributes on every span).
 
-**Event sourcing / replay** — an append-only event log for the owned
-aggregates when the human declares durable state, with `Apply(state, event) ->
-(state, effects)` in the core; and, always, the `regressions/` replay corpus
-harness that drives fixtures through the real decode→core→serve path asserting
-invariants at every transition. If there is no durable state, the log is a
-ratified decline and the corpus remains.
+**Event sourcing / replay** — with `Apply(state, event) -> (state, effects)`
+in the core; and, ALWAYS, the `regressions/` replay corpus harness that drives
+fixtures through the real decode→core→serve path asserting invariants at every
+transition.
+
+Do not assume the event LOG applies. Whether it does is DERIVED from observable
+properties of the workload, and asked only where the derivation is genuinely
+ambiguous. Durable state is not the test — a CRUD service has durable state and
+wants no event log:
+
+- Is the state a function of an ORDERED STREAM of inputs, or of arbitrary
+  writes? A fold over a stream is what an event log models; "whatever the last
+  writer said" is not.
+- Does the history have value of its own — audit, replay, reconstruction — or
+  does only the latest value matter?
+- Is there an external source that already owns the ordering (an upstream feed
+  with monotonic ids, a broker's partition offsets), or would this service have
+  to invent an order to have one?
+- Does any declared obligation require reproducing a PAST decision — an
+  incident replay, a dispute, a regulator?
+
+Two or more yes-es and the log earns its cost; mostly no-es and it is ceremony,
+because every write then pays journal + replay for a history nobody reads.
+When it does not apply, that is a RATIFIED DECLINE with its reason in the
+spec's `out_of_scope`, never a silence.
+
+**The corpus is not derived — only the log is.** `regressions/` stays required
+either way: it is fixtures driven through the real path asserting invariants,
+which is valuable whether or not those fixtures came from a durable log. A
+repo that declines event sourcing still owes its regression corpus, and the
+probe must not let one excuse the other.
 
 **Effects** — the outbox: intent is journaled before any external effect, and
 the recovery function is table-driven over the full "journal says X, world

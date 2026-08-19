@@ -423,8 +423,15 @@ if ls regressions/*/events.json >/dev/null 2>&1; then
     row "replay-corpus" PASS "$n fixtures, harness green"
   else row "replay-corpus" FAIL "$n fixtures but the harness did not run"; fi
 else
-  declined "event_sourcing" && row "replay-corpus" NA "event sourcing declined in spec" \
-    || row "replay-corpus" FAIL "no replay corpus and no ratified decline"
+  # NOT excusable by declining event_sourcing, which this row used to allow.
+  # The two are different things: the event LOG is derived from whether the
+  # workload is a fold over an ordered stream, while the CORPUS is fixtures
+  # driven through the real decode->core->serve path asserting invariants at
+  # every transition. That is worth having whether or not the fixtures came
+  # from a durable log -- so a repo that declines event sourcing still owes
+  # its regression corpus, and letting one excuse the other turned a
+  # derivation into an escape hatch.
+  row "replay-corpus" FAIL "no replay corpus -- required regardless of whether event sourcing applies (the LOG is derived, the CORPUS is not)"
 fi
 
 # implemented_test reads an OPTIONAL `implemented:` block from the spec:
@@ -462,7 +469,15 @@ implemented_test() {
 # reconciliation is NOT implemented. It is kept as a fallback so existing
 # repos do not go red, but the evidence string now says it was a keyword
 # match, so the weakness is visible in the report instead of reading as proof.
-for k in effect_journal_outbox reconciliation backup_restore_test; do
+# effect_journal_atomic joins this loop deliberately: it uses the same
+# implemented:/declined machinery, so the only way to claim it is to name a
+# test the probe then EXECUTES. A row that grepped for "outbox" or "atomic"
+# would be this file's oldest mistake for the fourth time -- and it would be
+# especially useless here, since the defect this checks for is present in code
+# that says "outbox" everywhere. The proving test has a specific shape: crash
+# between the state commit and the effect journal, recover, and assert the
+# effect is still delivered.
+for k in effect_journal_outbox effect_journal_atomic reconciliation backup_restore_test; do
   if declined "$k"; then row "$k" NA "ratified decline in $SPEC"; continue; fi
 
   spec_test="$(implemented_test "$k")"
@@ -493,6 +508,78 @@ for k in effect_journal_outbox reconciliation backup_restore_test; do
     *) row "$k" FAIL "not implemented, not declined, and no implemented.$k in $SPEC naming the test that proves it";;
   esac
 done
+
+# --- 12b. scalability (dimension 12) --------------------------------------
+#
+# REQUIRED BY DEFAULT, every tier: a system must scale vertically AND
+# horizontally unless the spec ratifies a decline saying why not.
+#
+# The three testable sub-dimensions reuse implemented_test above, so the probe
+# EXECUTES the named test rather than guessing. A row here that grepped for
+# "snapshot" or "compact" would repeat this file's own worst habit -- the
+# `grep -qi "reconcil"` satisfied by a comment saying reconciliation is absent,
+# and the `mutation` keyword search satisfied by typing the word. Both shipped.
+for k in bounded_boot bounded_storage egress_backpressure; do
+  if declined "$k"; then row "scalability:$k" NA "ratified decline in $SPEC"; continue; fi
+
+  spec_test="$(implemented_test "$k")"
+  if [[ -z "$spec_test" ]]; then
+    row "scalability:$k" FAIL "not declined, and no implemented.$k in $SPEC naming the test that proves it"
+    continue
+  fi
+  it_pkg="${spec_test%% *}"; it_name="${spec_test##* }"
+  if [[ -z "$it_pkg" || "$it_pkg" == "$it_name" ]]; then
+    row "scalability:$k" FAIL "spec's implemented.$k must be '<package> <TestName>', got '$spec_test'"
+  elif ! grep -qx "$it_name" <<<"$(go test "$it_pkg" -list "^${it_name}$" 2>/dev/null)"; then
+    row "scalability:$k" FAIL "spec names $it_name in $it_pkg but no such test exists -- the evidence has decayed"
+  elif go test "$it_pkg" -run "^${it_name}$" -count=1 >/dev/null 2>&1; then
+    row "scalability:$k" PASS "proven by $it_name ($it_pkg), executed this run"
+  else
+    row "scalability:$k" FAIL "$it_name ($it_pkg) is RED -- the dimension it proves is not implemented"
+  fi
+done
+
+# scalability_field reads one scalar from the spec's `scalability:` block.
+# Declarations, not tests: no test can tell you what a workload's partition key
+# SHOULD be, and pretending otherwise would be a worse gate than an honest
+# declaration check.
+scalability_field() {
+  awk -v key="$1" '
+    /^scalability:/ { inblock=1; next }
+    inblock && /^[a-z_]+:/ { inblock=0 }
+    inblock {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
+    }
+  ' "$SPEC" 2>/dev/null
+}
+
+# A presence check is weak, so both fields below are constrained rather than
+# free text. partition_key rejects the placeholders someone types to get green,
+# and the honest "there is no key" answer is routed to the DECLINE path, which
+# costs a written reason in out_of_scope. durability_trade takes a closed
+# vocabulary: a fixed set is far harder to satisfy accidentally than prose.
+if declined "partition_key"; then
+  row "scalability:partition_key" NA "single-writer ratified as a decline in $SPEC"
+else
+  pk="$(scalability_field partition_key)"
+  pk_norm="$(printf '%s' "$pk" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  case "$pk_norm" in
+    ""|todo|tbd|none|n/a|na|null|"-"|unknown|fixme)
+      row "scalability:partition_key" FAIL "scalability.partition_key in $SPEC is '${pk:-<absent>}' -- name the key, or ratify a decline explaining why the workload is genuinely single-writer";;
+    *) row "scalability:partition_key" PASS "partitions on '$pk'";;
+  esac
+fi
+
+dt="$(scalability_field durability_trade)"
+dt_norm="$(printf '%s' "$dt" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+case "$dt_norm" in
+  fsync_per_event|group_commit|no_durable_writes)
+    row "scalability:durability_trade" PASS "declared: $dt_norm";;
+  *)
+    row "scalability:durability_trade" FAIL "scalability.durability_trade in $SPEC is '${dt:-<absent>}' -- must be one of fsync_per_event | group_commit | no_durable_writes, so the hot path's loss window is a stated choice rather than an accident";;
+esac
 
 # --- 13. observability: contract CHECKED, tracer WIRED --------------------
 if grep -rql "emitted-metrics\|spans.yaml" --include='*_test.go' . 2>/dev/null; then

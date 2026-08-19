@@ -98,6 +98,21 @@ out_of_scope:
       its own backup policy, or a durable log shipped to object storage)
       determines what a real backup_restore_test looks like; that choice is
       deployment-specific, not something this scaffold can decide.
+  - partition_key: >
+      The scaffold's example aggregate is a SINGLE units ledger: one balance,
+      one applied-set, one version counter. There is no key to partition on,
+      because there is only one instance of the thing -- and inventing a
+      partition key for a single aggregate would be a fabricated answer to a
+      real question, which is worse than the decline.
+
+      What this decline does NOT mean: that horizontal scale was waved away.
+      It means the EXAMPLE domain is genuinely single-writer. A real service
+      replaces this entry with its own key the moment its state has one
+      (per-account, per-symbol, per-tenant), and the framework's own
+      experience is that the state usually IS decomposable long before anyone
+      partitions it -- the obstacle is normally a shared counter or cursor
+      threaded through the design, which is cheap to avoid now and expensive
+      to remove later. See dimensions.md §12.
   - authz_invariants: >
       No tenants and no credentials exist in this scaffold's example flow;
       the units ledger has no multi-tenant boundary to enforce.
@@ -107,6 +122,25 @@ out_of_scope:
 # scripts/check-registries.sh -- a spec key invented to hold them would be
 # the exact escape the framework forbids.
 
+# Scalability (dimension 12) -- REQUIRED BY DEFAULT at every tier. A system is
+# assumed to need vertical AND horizontal scale unless a decline below says
+# otherwise. The three testable sub-dimensions (bounded_boot, bounded_storage,
+# egress_backpressure) are proven the same way every other executable claim in
+# this file is: `implemented:` names a test and the probe RUNS it.
+scalability:
+  # fsync_per_event | group_commit | no_durable_writes.
+  #
+  # This scaffold fsyncs every Append (internal/platform/eventlog), buying a
+  # ZERO loss window at the cost of a per-event disk round trip -- roughly
+  # 5ms mean, tens of ms at the tail, and a hard ceiling of one fold per
+  # fsync no matter how much CPU you add. That is the right trade for a
+  # ledger and the wrong one for a high-rate venue, which would batch and
+  # accept a bounded loss window instead. Stated here so the choice is
+  # visible rather than inherited: a service that copies this scaffold and
+  # then needs throughput must change this line deliberately, not discover
+  # the ceiling in production.
+  durability_trade: fsync_per_event
+
 gates:
   cheap: "make check-fast"
   presubmit: "make verify"
@@ -115,5 +149,10 @@ gates:
 # Dimensions the probe checks by EXECUTING the test named here (see
 # scripts/verify-standard.sh). A dimension listed here is implemented and
 # proven, not declined.
+#
+# Naming a test here is a CLAIM the probe cashes: it lists the test, runs it,
+# and fails the row if the test is missing or red. So an entry added
+# optimistically -- before the test exists -- reports as decayed evidence
+# rather than as progress. Add the entry when the test does.
 implemented:
   effect_journal_outbox: ./internal/adapter/out/store TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey

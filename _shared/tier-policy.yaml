@@ -37,7 +37,12 @@ defaults: &defaults
 
   # Resilience / recovery
   fault_injection: required_per_capability_class
+  # effect_journal_atomic: the outbox row must commit ATOMICALLY with the state
+  # change it belongs to -- same transaction, or a boot-time projection of the
+  # event log. Journaling the effect AFTER the state commit is the shape
+  # without the property, and it loses effects in a window nothing reports.
   recovery: { effect_journal: required_if_durable_effects,
+              effect_journal_atomic: required_if_durable_effects,
               tabular_recovery_tests: required,
               real_crash_tests: sampled_by_risk }
   reconciliation: required_if_durable_state
@@ -52,6 +57,41 @@ defaults: &defaults
   # Reproducibility (dimension 11)
   evidence_record: required               # one record per commit: policy version,
                                           # gates, seeds, waivers
+
+  # Scalability (dimension 12) — REQUIRED BY DEFAULT, every tier.
+  #
+  # The standing rule is that a system must scale vertically AND horizontally
+  # unless a repo ratifies a decline explaining why not. This is deliberately
+  # NOT relaxed at T2: a T2 repo that is honestly single-writer owes one line
+  # in out_of_scope saying so, which costs nothing and is exactly the mechanism
+  # working. The alternative -- letting low tiers skip the question -- is how
+  # every one of the defects in dimensions.md's §12 shipped, since each was in
+  # a component nobody had classified as needing scale yet.
+  #
+  # bounded_boot and bounded_storage are `required_if_durable_state` rather
+  # than flatly required because a stateless transform has neither a boot
+  # history nor a store to grow; the condition is the same one reconciliation
+  # and backup_restore_test already use, so a repo answers it once.
+  scalability:
+    bounded_boot: required_if_durable_state       # recovery time bounded by a
+                                                  # snapshot, or the history
+                                                  # bound stated explicitly
+    bounded_storage: required_if_durable_state    # every append-only store has
+                                                  # retention or compaction
+    egress_backpressure: required                 # bounded queue/journal per
+                                                  # EGRESS boundary. The
+                                                  # isolation_and_backpressure
+                                                  # entry above covers ingress
+                                                  # rate only, and egress
+                                                  # accumulation is the hole it
+                                                  # leaves.
+    partition_key: required_or_ratified_decline   # a named key, or the reason
+                                                  # the workload is genuinely
+                                                  # single-writer
+    durability_trade: declared                    # fsync-per-event vs group
+                                                  # commit, and why -- both are
+                                                  # correct answers to
+                                                  # different questions
 
   # Deployability / gate integrity
   #
