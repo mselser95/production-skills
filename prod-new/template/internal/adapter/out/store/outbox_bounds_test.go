@@ -514,3 +514,76 @@ func TestOutbox_PendingStatsIgnoresTerminalEntries(t *testing.T) {
 		t.Errorf("PendingStats = (%d, %v, %d), want (1, 90s, 0)", count, oldest, unknown)
 	}
 }
+
+// provenance: derived
+// verifies: JournalDerived is idempotent on IDENTITY, and the identity
+// becomes the entry's idempotency key.
+//
+// Both halves are load-bearing for the boot-time reconstruction that closes
+// the window between the state commit and the effect journal. If a repeated
+// identity created a second entry, every restart would redeliver the whole
+// deliverable history; if the identity were not the key, a resumed delivery
+// would reach the sink as a brand-new effect and the deduplication that makes
+// at-least-once tolerable would do nothing.
+func TestOutbox_JournalDerivedIsIdempotentOnIdentity(t *testing.T) {
+	ob := NewOutbox(&downSink{}, testIDs(), 3)
+
+	first, err := ob.JournalDerived("ev1#0", domain.EffectDeposited{EventID: "ev1", Amount: "1"})
+	if err != nil {
+		t.Fatalf("first JournalDerived: %v", err)
+	}
+	second, err := ob.JournalDerived("ev1#0", domain.EffectDeposited{EventID: "ev1", Amount: "1"})
+	if err != nil {
+		t.Fatalf("second JournalDerived: %v", err)
+	}
+
+	if first != second {
+		t.Fatalf("the same identity produced two entries (%s, %s) -- every restart "+
+			"would re-journal the whole deliverable history", first, second)
+	}
+	if got := len(ob.Pending()); got != 1 {
+		t.Fatalf("pending = %d, want 1", got)
+	}
+	if got := ob.Pending()[0].IdempotencyKey; got != "ev1#0" {
+		t.Fatalf("idempotency key = %q, want the identity %q", got, "ev1#0")
+	}
+}
+
+// provenance: derived
+// verifies: JournalDerived refuses an empty identity rather than minting one.
+// An entry with no identity cannot be recognised on the next boot, so it would
+// be re-journaled forever.
+func TestOutbox_JournalDerivedRefusesAnEmptyIdentity(t *testing.T) {
+	ob := NewOutbox(&downSink{}, testIDs(), 3)
+	if _, err := ob.JournalDerived("", domain.EffectDeposited{EventID: "e", Amount: "1"}); err == nil {
+		t.Fatal("JournalDerived accepted an empty identity")
+	}
+}
+
+// provenance: derived
+// verifies: KnowsIdentity recognises an entry in ANY state, including
+// delivered. Recognising only PENDING entries would make the boot-time
+// reconstruction re-journal everything the sink had already received --
+// trading a rare lost effect for a guaranteed redelivery storm on every
+// restart.
+func TestOutbox_KnowsIdentityRecognisesDeliveredEntriesToo(t *testing.T) {
+	ob := NewOutbox(&downSink{}, testIDs(), 3)
+
+	id, err := ob.JournalDerived("ev9#0", domain.EffectDeposited{EventID: "ev9", Amount: "1"})
+	if err != nil {
+		t.Fatalf("JournalDerived: %v", err)
+	}
+	if !ob.KnowsIdentity("ev9#0") {
+		t.Fatal("KnowsIdentity = false for an entry it just journaled")
+	}
+	if err := ob.Publish(context.Background(), id); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if !ob.KnowsIdentity("ev9#0") {
+		t.Fatal("KnowsIdentity = false once the entry was DELIVERED -- the rebuild " +
+			"would re-journal effects the sink already has")
+	}
+	if ob.KnowsIdentity("never-journaled#0") {
+		t.Fatal("KnowsIdentity = true for an identity nobody journaled")
+	}
+}

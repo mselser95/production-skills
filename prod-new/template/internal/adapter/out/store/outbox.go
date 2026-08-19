@@ -683,3 +683,83 @@ func (o *Outbox) Requeue(id string) error {
 	o.mu.Unlock()
 	return nil
 }
+
+// JournalDerived accepts an effect under a caller-supplied IDENTITY rather
+// than a minted id, and is idempotent on it: journaling the same identity
+// twice records the intent once.
+//
+// It exists for the boot-time reconstruction that closes the window between
+// the state commit and the effect journal (see internal/app's
+// effect_identity.go). A crash in that window leaves an event that replays and
+// an effect that was never journaled; recovery re-derives the effect from the
+// event log and offers it here. Offering one that WAS already journaled must
+// be a no-op, or every restart would redeliver the entire deliverable history.
+//
+// The identity IS the idempotency key, deliberately. A recovered effect has to
+// present the key its first attempt would have presented, or a resumed
+// delivery arrives at the sink as a brand-new one and the deduplication that
+// makes at-least-once tolerable does nothing.
+func (o *Outbox) JournalDerived(identity string, effect domain.Effect) (string, error) {
+	if identity == "" {
+		return "", errors.New("store: JournalDerived requires a non-empty identity")
+	}
+
+	// Already known? Then this is a recovery pass re-offering something the
+	// log already has, and the honest answer is the existing entry.
+	o.mu.Lock()
+	for id, e := range o.entries {
+		if e.IdempotencyKey == identity {
+			o.mu.Unlock()
+			return id, nil
+		}
+	}
+	o.mu.Unlock()
+
+	envelope, err := outboxlog.EncodeEffect(effect)
+	if err != nil {
+		return "", err
+	}
+	o.evictForBounds(1)
+
+	now := o.clock()
+	o.mu.Lock()
+	id := o.ids()
+	entry := &Entry{
+		ID: id, Effect: effect, State: StateIntent, IdempotencyKey: identity,
+		JournaledAt: now, AgeKnown: true,
+	}
+	o.mu.Unlock()
+
+	if err := o.record(outboxlog.Record{
+		EntryID:             id,
+		State:               outboxlog.StateIntent,
+		IdempotencyKey:      identity,
+		Effect:              &envelope,
+		JournaledAtUnixNano: now.UnixNano(),
+	}); err != nil {
+		return "", err
+	}
+
+	o.mu.Lock()
+	o.entries[id] = entry
+	o.mu.Unlock()
+	return id, nil
+}
+
+// KnowsIdentity reports whether an entry with this identity has ever been
+// journaled -- in any state, including delivered and dead-lettered.
+//
+// "In any state" is the load-bearing part. A DELIVERED entry must still be
+// recognised, or the boot-time reconstruction would re-journal effects the
+// sink already received and turn every restart into a redelivery storm.
+// OpenDurable keeps delivered entries for exactly this reason.
+func (o *Outbox) KnowsIdentity(identity string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, e := range o.entries {
+		if e.IdempotencyKey == identity {
+			return true
+		}
+	}
+	return false
+}

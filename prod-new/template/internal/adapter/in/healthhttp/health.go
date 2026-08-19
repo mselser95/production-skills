@@ -49,12 +49,29 @@ type LedgerHealth interface {
 	LastInvariantViolationAt() time.Time
 }
 
+// OutboxHealth is the narrow port for outbox drain health, satisfied
+// structurally by internal/adapter/out/store.(*Outbox).
+//
+// Declared here rather than importing internal/adapter/out, which
+// internal/architecture/boundaries_test.go forbids adapter/in from doing.
+//
+// DeadLetterCount is the one that matters most. An entry the outbox gave up
+// on is an effect that will never happen unless a human intervenes, and
+// without a series for it the dead-letter store is a deletion with extra
+// steps -- durable, countable, and invisible to everyone outside the process.
+type OutboxHealth interface {
+	PendingStats() (count int, oldestAge time.Duration, unknownAge int)
+	DeadLetterCount() int
+}
+
 // Options configures optional collaborators. Every field is optional; a
 // Server built with the zero Options still serves /healthz, /readyz (with
 // the log-writable gate reporting false, since there is no log) and
 // /metrics.
 type Options struct {
 	Log EventLogHealth
+	// Outbox supplies outbox drain health. Nil is legal and reports zeroes.
+	Outbox OutboxHealth
 	// ViolationCooldown bounds how long a detected invariant violation
 	// keeps /readyz failing after the last one observed. Zero means "use
 	// DefaultViolationCooldown".
@@ -196,6 +213,30 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		logOK = 1
 	}
 	writeMetric(w, "svc_eventlog_writable", "gauge", "1 if the durable event log is open for writing.", "", logOK)
+
+	// -- outbox drain health ------------------------------------------------
+	var pending, unknownAge, deadLettered int
+	var oldest time.Duration
+	if s.opts.Outbox != nil {
+		pending, oldest, unknownAge = s.opts.Outbox.PendingStats()
+		deadLettered = s.opts.Outbox.DeadLetterCount()
+	}
+
+	writeMetric(w, "svc_outbox_pending_entries", "gauge",
+		"Effects journaled but not yet delivered. Rising is NORMAL during a brief sink outage; what matters is whether it DRAINS, so alert on the age below rather than on this count.",
+		"", float64(pending))
+
+	writeMetric(w, "svc_outbox_oldest_pending_age_seconds", "gauge",
+		"Age of the oldest pending entry. This is the one worth paging on: a lost publish is silent and unrecoverable, unlike a lost submit which fails safe.",
+		"", oldest.Seconds())
+
+	writeMetric(w, "svc_outbox_unknown_age_entries", "gauge",
+		"Pending entries restored from a schema-1 record that carried no timestamp, so their age is genuinely unknown. Counted separately because \"nothing here is old\" and \"I cannot tell you if anything is old\" support opposite conclusions.",
+		"", float64(unknownAge))
+
+	writeMetric(w, "svc_outbox_dead_lettered_total", "gauge",
+		"Entries the outbox gave up on after exhausting its bounds. Each is an effect that will NOT happen without a human requeueing it. Must stay 0; non-zero is an incident, not a warning.",
+		"", float64(deadLettered))
 }
 
 // writeMetric renders one Prometheus text-exposition series (HELP, TYPE,
@@ -218,6 +259,10 @@ func MetricNames() []string {
 		"svc_duplicate_event_violations_total",
 		"svc_readyz_stale_never_ready_audits_total",
 		"svc_eventlog_writable",
+		"svc_outbox_pending_entries",
+		"svc_outbox_oldest_pending_age_seconds",
+		"svc_outbox_unknown_age_entries",
+		"svc_outbox_dead_lettered_total",
 	}
 	sort.Strings(names)
 	return names

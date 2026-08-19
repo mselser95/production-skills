@@ -585,3 +585,28 @@ func RebuildFrom(base domain.State, events []domain.Event) domain.State {
 	}
 	return state
 }
+
+// RebuildFromVisit folds events onto base exactly as RebuildFrom does, and
+// additionally hands each event's effects to visit as it goes.
+//
+// It exists so the boot-time outbox reconstruction can see the effects that
+// RebuildFrom discards, WITHOUT a second pass. A second pass would be subtly
+// wrong rather than merely wasteful: it would re-apply every event against a
+// state it built independently, so the caller would hold effects derived from
+// one fold and a state derived from another. They would agree today, because
+// domain.Apply is deterministic -- and they would stop agreeing the first time
+// anyone made Apply depend on anything the two passes could see differently.
+//
+// visit is called once per event, in log order, with the effects that event
+// produced. It may be nil, which makes this exactly RebuildFrom.
+func RebuildFromVisit(base domain.State, events []domain.Event, visit func(domain.Event, []domain.Effect)) domain.State {
+	state := base
+	for _, event := range events {
+		var effects []domain.Effect
+		state, effects = domain.Apply(state, event)
+		if visit != nil {
+			visit(event, effects)
+		}
+	}
+	return state
+}

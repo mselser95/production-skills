@@ -107,3 +107,35 @@ func TestConfig_Identity(t *testing.T) {
 		t.Fatalf("Identity().Digest = %q, want c.Digest() = %q", id.Digest, c.Digest())
 	}
 }
+
+// provenance: derived
+// verifies: OUTBOX_LOG_PATH is read, and its default is a real path rather
+// than empty.
+//
+// An empty default would be worse than a wrong one: store.OpenDurable on an
+// empty path fails at boot, so a scaffolded service would refuse to start for
+// a reason that reads like a code bug rather than a missing setting.
+func TestLoad_OutboxLogPath(t *testing.T) {
+	t.Setenv("OUTBOX_LOG_PATH", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OutboxLogPath == "" {
+		t.Fatal("OutboxLogPath defaults to empty -- OpenDurable would fail the boot")
+	}
+	if cfg.OutboxLogPath == cfg.EventLogPath {
+		t.Fatalf("the outbox and event logs share the path %q -- they have different "+
+			"retention needs and compacting one must not require understanding the other",
+			cfg.OutboxLogPath)
+	}
+
+	t.Setenv("OUTBOX_LOG_PATH", "/tmp/custom-outbox.jsonl")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load with an override: %v", err)
+	}
+	if cfg.OutboxLogPath != "/tmp/custom-outbox.jsonl" {
+		t.Errorf("OutboxLogPath = %q, want the override", cfg.OutboxLogPath)
+	}
+}

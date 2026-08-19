@@ -62,3 +62,54 @@
     1 if the durable event log (internal/platform/eventlog.Log) is
     currently open for writing, 0 otherwise. Mirrors the `log_writable`
     readiness gate.
+
+# ---------------------------------------------------------------------------
+# OUTBOX DRAIN HEALTH. The outbox bounds what it holds, and dead-letters what
+# crosses those bounds. Without these series that dead-letter store is durable,
+# countable and completely invisible from outside the process -- a deletion
+# with extra steps.
+# ---------------------------------------------------------------------------
+
+- name: svc_outbox_pending_entries
+  type: gauge
+  labels: []
+  note: >
+    Effects journaled but not yet delivered. Rising is NORMAL during a brief
+    sink outage and says nothing on its own -- what matters is whether it
+    DRAINS. Alert on svc_outbox_oldest_pending_age_seconds instead; a count
+    that climbs and falls is the pattern working.
+
+- name: svc_outbox_oldest_pending_age_seconds
+  type: gauge
+  labels: []
+  note: >
+    Age of the oldest pending entry, and the series worth paging on. The
+    asymmetry is the reason: a lost SUBMIT fails safe (the effect never
+    happened and nobody believes it did), while a lost PUBLISH does not -- the
+    state committed durably and the notification never left, with no other
+    signal that would notice.
+    Entries whose age is unknown are excluded here and counted in
+    svc_outbox_unknown_age_entries, so this series only ever reports ages it
+    actually knows.
+
+- name: svc_outbox_unknown_age_entries
+  type: gauge
+  labels: []
+  note: >
+    Pending entries restored from a schema-1 durable record, written before
+    the journaling timestamp existed. Their age is genuinely UNKNOWN rather
+    than zero. Counted separately on purpose: "nothing here is old" and "I
+    cannot tell you whether anything here is old" support opposite decisions,
+    and folding the second into the first would let a long-stuck effect read
+    as fresh.
+
+- name: svc_outbox_dead_lettered_total
+  type: gauge
+  labels: []
+  note: >
+    Entries the outbox gave up on after exhausting its bounds. Each one is an
+    effect that will NOT happen unless a human requeues it (store.Requeue is
+    deliberately manual -- an automatic path would undo the bound that just
+    fired). Must stay 0 in normal operation; non-zero is an incident, not a
+    warning. A gauge rather than a counter because it reflects what is
+    currently held, and requeueing legitimately decreases it.

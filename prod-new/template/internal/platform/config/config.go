@@ -24,6 +24,13 @@ type Config struct {
 	// INVARIANT_COOLDOWN_S (seconds); "0" disables the readiness gate
 	// entirely (still counted, never gates).
 	InvariantViolationCooldown time.Duration
+	// OutboxLogPath is where the outbox's durable journal lives. Env
+	// OUTBOX_LOG_PATH.
+	//
+	// Separate from EventLogPath on purpose: the two have different
+	// retention needs (the event log is history, the outbox is in-flight
+	// work) and compacting one must not require understanding the other.
+	OutboxLogPath string
 	// OutboxMaxAttempts bounds how many delivery attempts the outbox makes
 	// per entry before giving up and marking it failed (still counted;
 	// never retried forever). Env OUTBOX_MAX_ATTEMPTS.
@@ -49,6 +56,7 @@ func Load() (Config, error) {
 		PodID:                      os.Getenv("HOSTNAME"),
 		EventLogPath:               "data/eventlog.jsonl",
 		InvariantViolationCooldown: 30 * time.Second,
+		OutboxLogPath:              "data/outbox.jsonl",
 		OutboxMaxAttempts:          5,
 		Tracing:                    "off",
 	}
@@ -68,6 +76,9 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("INVARIANT_COOLDOWN_S: %w", err)
 		}
 		c.InvariantViolationCooldown = time.Duration(n) * time.Second
+	}
+	if v := strings.TrimSpace(os.Getenv("OUTBOX_LOG_PATH")); v != "" {
+		c.OutboxLogPath = v
 	}
 	if v := os.Getenv("OUTBOX_MAX_ATTEMPTS"); v != "" {
 		n, err := strconv.Atoi(v)

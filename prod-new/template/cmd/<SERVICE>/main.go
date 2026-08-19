@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -84,7 +85,43 @@ func run() error {
 	}
 
 	// -- outbox (external_effect adapter) ----------------------------------
-	outbox := store.NewOutbox(store.NewLogSink(logger), ids.Real{}.NewID, cfg.OutboxMaxAttempts)
+	// OpenDurable, not NewOutbox. The durable form is the whole point of the
+	// pattern: journaling an intent before performing the effect only helps
+	// if the journal outlives the process. Shipping the in-memory constructor
+	// here would have been a durable mechanism nobody ran -- the same defect
+	// as a tracer that is instrumented and never injected.
+	if dir := filepath.Dir(cfg.OutboxLogPath); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	outbox, err := store.OpenDurable(
+		cfg.OutboxLogPath, store.NewLogSink(logger), ids.Real{}.NewID, cfg.OutboxMaxAttempts)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = outbox.Close() }()
+
+	// Close the window between the state commit and the effect journal.
+	//
+	// process() appends the event, commits the state, unlocks, and only THEN
+	// journals the effects -- two durable writes with no transaction between
+	// them. A crash in that window used to lose the effect permanently,
+	// because the event replays and RebuildFrom discards effects.
+	//
+	// domain.Apply is pure, so the effects are DERIVABLE. Re-derive them from
+	// the log and journal whatever the outbox does not already know about.
+	// The outbox is thus a projection of the event log plus a delivery
+	// watermark, and the hot path keeps exactly one durable write.
+	rebuilt, err := rebuildOutboxFromLog(cfg.EventLogPath, outbox)
+	if err != nil {
+		return err
+	}
+	if rebuilt > 0 {
+		logger.Warn("svc: recovered effects the outbox never journaled",
+			"effects", rebuilt,
+			"cause", "crash between the state commit and the effect journal")
+	}
 
 	// -- orchestration core --------------------------------------------------
 	ledger := app.NewLedger(initial, log, outbox, clock.Real{}.Now, ids.Real{}.NewID)
@@ -96,6 +133,11 @@ func run() error {
 		PodID:             cfg.PodID,
 		ConfigIdentity:    cfg.Identity(),
 		ViolationCooldown: cfg.InvariantViolationCooldown,
+		// Without this the outbox series report 0 forever: a dead-lettered
+		// effect -- one that will never happen without a human -- would be
+		// durable, countable, and invisible to every operator. Instrumented
+		// but never injected is the same defect as a tracer nobody constructs.
+		Outbox: outbox,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -195,6 +237,45 @@ func snapshotLoop(
 				"records_before", stats.RecordsBefore, "records_after", stats.RecordsAfter)
 		}
 	}
+}
+
+// rebuildOutboxFromLog re-derives every deliverable effect from the durable
+// event log and journals the ones the outbox has no record of, returning how
+// many it recovered.
+//
+// Extracted from run() rather than left inline so it is reachable by a test.
+// Inline it would be untestable, which is exactly how a recovery path ships as
+// decoration -- present, plausible, and never once exercised.
+//
+// A journaling failure here ABORTS THE BOOT. An effect that cannot be
+// journaled is one this process would never deliver and never mention again,
+// and starting anyway would mean serving traffic while silently holding a lost
+// effect. Refusing to start is the louder and safer of the two.
+func rebuildOutboxFromLog(eventLogPath string, outbox *store.Outbox) (int, error) {
+	events, err := eventlog.Replay(eventLogPath)
+	if err != nil {
+		return 0, err
+	}
+
+	var recovered int
+	var visitErr error
+	eventlog.RebuildFromVisit(domain.NewState(), events, func(event domain.Event, effects []domain.Effect) {
+		if visitErr != nil {
+			return
+		}
+		for i, effect := range app.DeliverableEffects(effects) {
+			identity := app.EffectIdentity(event.ID, i)
+			if outbox.KnowsIdentity(identity) {
+				continue
+			}
+			if _, err := outbox.JournalDerived(identity, effect); err != nil {
+				visitErr = fmt.Errorf("rebuild outbox for %s: %w", identity, err)
+				return
+			}
+			recovered++
+		}
+	})
+	return recovered, visitErr
 }
 
 // adaptTracer bridges internal/platform/observability.Tracer (this

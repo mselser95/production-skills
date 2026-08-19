@@ -539,13 +539,18 @@ for k in bounded_boot bounded_storage egress_backpressure; do
   fi
 done
 
-# scalability_field reads one scalar from the spec's `scalability:` block.
+# spec_field reads one scalar from a named top-level block of the spec:
+#
+#   spec_field scalability partition_key   ->  the value, or empty
+#
 # Declarations, not tests: no test can tell you what a workload's partition key
-# SHOULD be, and pretending otherwise would be a worse gate than an honest
-# declaration check.
-scalability_field() {
-  awk -v key="$1" '
-    /^scalability:/ { inblock=1; next }
+# SHOULD be, or how long history ought to be kept, and pretending otherwise
+# would be a worse gate than an honest declaration check. What a declaration
+# check CAN do is refuse the placeholder someone types to get green, which is
+# what every caller below does.
+spec_field() {
+  awk -v block="$1" -v key="$2" '
+    $0 ~ "^" block ":" { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
       line=$0
@@ -553,6 +558,45 @@ scalability_field() {
       if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
     }
   ' "$SPEC" 2>/dev/null
+}
+
+# scalability_field is spec_field pinned to the scalability block, kept so the
+# rows below read the way they did when they were written.
+scalability_field() { spec_field scalability "$1"; }
+
+# placeholder_value reports whether a declaration is one of the words people
+# type to make a required field go green without answering it. Shared by every
+# declaration row, because otherwise each grows its own drifting list.
+placeholder_value() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')" in
+    ""|todo|tbd|none|n/a|na|null|"-"|unknown|fixme|xxx) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# implemented_row runs the shared "the spec names a test and the probe EXECUTES
+# it" check for one key, and emits a row under the given label. Every dimension
+# added after scalability uses this rather than copying the loop, because the
+# copy is where the keyword-grep habit creeps back in: this helper cannot be
+# satisfied by a word appearing anywhere.
+implemented_row() { # implemented_row <label> <spec-key> <extra-fail-hint>
+  local label="$1" key="$2" hint="${3:-}"
+  if declined "$key"; then row "$label" NA "ratified decline in $SPEC"; return; fi
+  local spec_test; spec_test="$(implemented_test "$key")"
+  if [[ -z "$spec_test" ]]; then
+    row "$label" FAIL "not declined, and no implemented.$key in $SPEC naming the test that proves it${hint:+ -- $hint}"
+    return
+  fi
+  local it_pkg="${spec_test%% *}" it_name="${spec_test##* }"
+  if [[ -z "$it_pkg" || "$it_pkg" == "$it_name" ]]; then
+    row "$label" FAIL "spec's implemented.$key must be '<package> <TestName>', got '$spec_test'"
+  elif ! grep -qx "$it_name" <<<"$(go test "$it_pkg" -list "^${it_name}$" 2>/dev/null)"; then
+    row "$label" FAIL "spec names $it_name in $it_pkg but no such test exists -- the evidence has decayed"
+  elif go test "$it_pkg" -run "^${it_name}$" -count=1 >/dev/null 2>&1; then
+    row "$label" PASS "proven by $it_name ($it_pkg), executed this run"
+  else
+    row "$label" FAIL "$it_name ($it_pkg) is RED -- the dimension it proves is not implemented"
+  fi
 }
 
 # A presence check is weak, so both fields below are constrained rather than
@@ -579,6 +623,117 @@ case "$dt_norm" in
     row "scalability:durability_trade" PASS "declared: $dt_norm";;
   *)
     row "scalability:durability_trade" FAIL "scalability.durability_trade in $SPEC is '${dt:-<absent>}' -- must be one of fsync_per_event | group_commit | no_durable_writes, so the hot path's loss window is a stated choice rather than an accident";;
+esac
+
+# --- 12c. bounded auto-recovery (dimension 13) ----------------------------
+#
+# Dimension 8 asks whether a failure is VISIBLE. This asks whether the system
+# comes BACK. Both defects that motivated it were counted, logged and panelled,
+# and neither ever recovered without a human: an undecodable message wedged a
+# consumer forever because the cursor could not advance past it, and an
+# upstream that restarted its own history left the consumer polling a position
+# that no longer existed, receiving nothing, silently, indefinitely.
+#
+# The proving test has a specific shape and it is worth stating, because a test
+# that merely asserts "the error is counted" would satisfy a lazier reading:
+# INDUCE the failure, then assert the system returns to normal operation with
+# no intervention. A failure you can provoke is a recovery you can time.
+implemented_row "auto-recovery:self_recovery" self_recovery \
+  "the test must INDUCE a detected failure and prove the system returns unaided, not merely that the failure is counted"
+
+# recovery_bound is a declaration: no test can tell you what recovery latency
+# this workload is willing to tolerate. "manual" is an HONEST answer for a mode
+# that genuinely needs a human, and it routes to the decline path so that
+# answer costs a written reason instead of a shrug.
+if declined "recovery_bound"; then
+  row "auto-recovery:recovery_bound" NA "manual intervention ratified as a decline in $SPEC"
+else
+  rb="$(spec_field auto_recovery recovery_bound)"
+  rb_norm="$(printf '%s' "$rb" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  if placeholder_value "$rb"; then
+    row "auto-recovery:recovery_bound" FAIL "auto_recovery.recovery_bound in $SPEC is '${rb:-<absent>}' -- state the maximum time to self-recovery"
+  elif [[ "$rb_norm" == "manual" || "$rb_norm" == "unbounded" || "$rb_norm" == "never" ]]; then
+    row "auto-recovery:recovery_bound" FAIL "auto_recovery.recovery_bound is '$rb' -- a mode that never returns unaided is a ratified DECLINE with its reason, not a bound"
+  elif [[ "$rb_norm" =~ ^[0-9]+(ms|s|m|h)$ ]]; then
+    row "auto-recovery:recovery_bound" PASS "returns unaided within $rb"
+  else
+    row "auto-recovery:recovery_bound" FAIL "auto_recovery.recovery_bound is '$rb' -- must be a duration like 30s / 5m / 2h, so the bound is checkable rather than adjectival"
+  fi
+fi
+
+# --- 12d. the published contract (dimension 14) ---------------------------
+#
+# The asymmetry this exists for, observed in a service built from this
+# template: it versioned the formats only IT read with real rigour --
+# schema_version per record, write-one-read-many, golden fixtures per version,
+# loud refusal on unknown -- while the payload it PUBLISHED to other people's
+# consumers carried fourteen JSON fields and no version at all.
+#
+# That is backwards from where the cost falls. You can migrate your own log
+# whenever you like, because you are the only reader. You cannot migrate
+# someone else's consumer. A published event is an API.
+#
+# Kept separate from the `compatibility` row above on purpose: that row is
+# satisfied by any wire or golden test, including one over a format nobody
+# outside this repo parses. The audience is what makes this expensive, so the
+# audience is what it keys on.
+if declined "published_contract"; then
+  row "published-contract:versioned"    NA "nothing published to a foreign consumer; declined in $SPEC"
+  row "published-contract:shape_pinned" NA "nothing published to a foreign consumer; declined in $SPEC"
+  row "published-contract:policy"       NA "nothing published to a foreign consumer; declined in $SPEC"
+else
+  implemented_row "published-contract:versioned" published_contract_versioned \
+    "the test must assert the emitted payload carries a version a consumer can branch on"
+  implemented_row "published-contract:shape_pinned" published_contract_shape \
+    "the test must FAIL when the emitted shape changes -- a golden over what you publish, not over what you store"
+
+  cp_="$(spec_field published_contract compatibility_policy)"
+  cp_norm="$(printf '%s' "$cp_" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  case "$cp_norm" in
+    expand_contract|versioned_envelope)
+      row "published-contract:policy" PASS "declared: $cp_norm";;
+    *)
+      row "published-contract:policy" FAIL "published_contract.compatibility_policy in $SPEC is '${cp_:-<absent>}' -- must be expand_contract | versioned_envelope, or decline published_contract if nothing leaves this repo";;
+  esac
+fi
+
+# --- 12e. data lifecycle (dimension 15) -----------------------------------
+#
+# This framework pushes services toward event sourcing, so it creates this
+# problem and owes an answer to it. "Delete this subject's data" is genuinely
+# hard against an immutable append-only log, and harder once a snapshot has
+# folded that data in -- deleting the log entry leaves the snapshot holding it.
+#
+# retention_policy is NOT bounded_storage. That row asks whether SOMETHING
+# prunes the store; this one asks how long history is deliberately kept, which
+# is a different question with a different owner: one is an engineering bound,
+# the other is a policy commitment.
+if declined "retention_policy"; then
+  row "data-lifecycle:retention" NA "ratified decline in $SPEC"
+else
+  rp="$(spec_field data_lifecycle retention_policy)"
+  if placeholder_value "$rp"; then
+    row "data-lifecycle:retention" FAIL "data_lifecycle.retention_policy in $SPEC is '${rp:-<absent>}' -- state how long history is kept and what bounds it"
+  else
+    row "data-lifecycle:retention" PASS "retention: $rp"
+  fi
+fi
+
+dm="$(spec_field data_lifecycle deletion_mechanism)"
+dm_norm="$(printf '%s' "$dm" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+case "$dm_norm" in
+  crypto_shredding|tombstone_rebuild|log_expiry)
+    # A real mechanism is claimed, so it owes a test that proves a deletion
+    # request actually removes the data -- snapshots included.
+    row "data-lifecycle:deletion_mechanism" PASS "declared: $dm_norm"
+    implemented_row "data-lifecycle:subject_deletion" subject_deletion \
+      "the test must prove a deletion request removes the data from the log AND from any snapshot that already folded it in";;
+  no_subject_data)
+    row "data-lifecycle:deletion_mechanism" PASS "declared: no_subject_data (no deletable subject exists)"
+    row "data-lifecycle:subject_deletion" NA "no subject data to delete";;
+  *)
+    row "data-lifecycle:deletion_mechanism" FAIL "data_lifecycle.deletion_mechanism in $SPEC is '${dm:-<absent>}' -- must be crypto_shredding | tombstone_rebuild | log_expiry | no_subject_data; an immutable log makes this a design-time choice, not a later one"
+    row "data-lifecycle:subject_deletion" FAIL "no deletion mechanism declared, so nothing can prove deletion works";;
 esac
 
 # --- 13. observability: contract CHECKED, tracer WIRED --------------------

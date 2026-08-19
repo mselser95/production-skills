@@ -93,6 +93,70 @@ defaults: &defaults
                                                   # correct answers to
                                                   # different questions
 
+  # Bounded auto-recovery (dimension 13) — REQUIRED BY DEFAULT, every tier.
+  #
+  # Dimension 8 asks whether a failure is VISIBLE. This one asks whether the
+  # system comes BACK, and within what bound. They are different questions and
+  # a framework that only asks the first produces services that detect
+  # beautifully and stay down: the two defects that motivated this were both
+  # counted, logged and panelled, and neither ever recovered without a human.
+  #
+  # "Loud, not silent" is the defence that gets written for these, and it is
+  # true and beside the point. Silent-vs-loud is not the axis; recoverable-vs-
+  # wedged is.
+  auto_recovery:
+    self_recovery: required_or_ratified_decline  # a test that INDUCES a
+                                                 # detected failure and proves
+                                                 # the system returns with no
+                                                 # intervention
+    recovery_bound: declared                     # the stated maximum time to
+                                                 # self-recovery. "manual" is
+                                                 # an honest answer and routes
+                                                 # to the decline path, which
+                                                 # costs a written reason
+
+  # The published contract (dimension 14) — REQUIRED where anything is
+  # published to a consumer this repo does not own.
+  #
+  # Distinct from `compatibility` above, and deliberately not folded into it.
+  # That entry is satisfied by any wire/golden test, INCLUDING one over a
+  # format only this repo reads — and a format only you read is the one you can
+  # always migrate. This dimension is about the payloads you cannot migrate,
+  # because someone else parses them. The audience is what makes it expensive,
+  # so the audience is what the dimension keys on.
+  published_contract:
+    versioned: required_if_publishes       # every externally-published payload
+                                           # carries a version; a consumer
+                                           # cannot negotiate with a shape that
+                                           # will not say what it is
+    shape_pinned: required_if_publishes    # a test that FAILS when the emitted
+                                           # shape changes -- the same rigour
+                                           # already applied to internal
+                                           # formats, pointed outward
+    compatibility_policy: declared         # expand_contract | versioned_envelope
+                                           # | none_published
+    consumers: declared_or_ratified_decline # who depends on this, or the
+                                           # recorded fact that nobody does yet
+
+  # Data lifecycle (dimension 15) — REQUIRED where subject data exists.
+  #
+  # This framework pushes services toward event sourcing, so it creates this
+  # problem and therefore owes an answer to it: "delete this subject's data" is
+  # genuinely hard when the source of truth is an immutable append-only log,
+  # and harder once a snapshot has already folded that data in. Both real
+  # designs -- crypto-shredding and tombstone-plus-rebuild -- must be chosen at
+  # design time; neither retrofits cheaply.
+  data_lifecycle:
+    retention_policy: declared             # how long history is kept and what
+                                           # bounds it. Distinct from
+                                           # bounded_storage, which asks only
+                                           # whether SOMETHING prunes it
+    deletion_mechanism: declared           # crypto_shredding | tombstone_rebuild
+                                           # | log_expiry | no_subject_data
+    subject_deletion: required_if_subject_data  # a test proving a deletion
+                                                # request actually removes the
+                                                # data, snapshots included
+
   # Deployability / gate integrity
   #
   # The gates must be RUNNABLE, checked from outside CI. An invalid workflow
@@ -108,6 +172,14 @@ defaults: &defaults
   supply_chain: { secret_scan: all_triggers, vuln_scan: required, sbom: required,
                   artifact_provenance: required, secretless_presubmit: required }
   authz_invariants: required_if_multi_tenant
+  # A surface that ACCEPTS WORK needs a credential or a ratified decline
+  # naming who may reach it. Read-only health/metrics endpoints are exempt;
+  # anything that mutates is not, and "it only binds to loopback" stops being
+  # true the moment a container publishes the port.
+  write_surface_authn: required_or_declined
+  # One runaway process must not be able to take the host. Applies to whatever
+  # deployment artifacts the repo actually ships.
+  deployment_resource_limits: required_if_deployment_artifacts
 
   # Deployability / operability
   delivery: { progressive: required, analysis: automated_plus_invariant_gates,

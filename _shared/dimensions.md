@@ -41,6 +41,18 @@ Ask: which UNLISTED failure modes this system has learned the hard way
 (incidents, near-misses); which checklist entries are genuinely N/A here.
 Row: matrix completeness per capability, and the tested/identified count.
 
+**`poison_message` is satisfied by PROGRESS, not by complaint.** A consumer
+that counts an undecodable message, logs it loudly, and then cannot advance
+past it has not handled the poison — it has narrated its own deadlock. Found
+in a scaffolded service whose comment said the stall was "loud, not silent",
+which was true and beside the point: silent-vs-loud is not the axis, and the
+consumer never recovered. The honest question for this scenario is *what does
+the consumer do NEXT*, and there are only three real answers — skip the
+message and advance past it, park it somewhere durable and advance, or stop
+deliberately and page a human. Counting it is not one of them. Whichever is
+chosen, the test must show the consumer processing the message AFTER the
+poison one.
+
 ## 5. Integration and contracts
 Inventory: what real dependencies are exercised in tests vs faked (does ANY
 test touch a real DB/broker/venue? containerized?); contract/compat checks
@@ -122,6 +134,21 @@ artifact signing/provenance, secretless presubmit, network policy.
 Ask: which authorization rules are invariants ("A can never reach B"); what
 must never be reachable from outside.
 Row: each supply-chain gate present/absent; policy invariants declared or not.
+
+**Every WRITE surface needs authentication or a ratified decline naming who
+can reach it.** Read-only health and metrics endpoints are one thing; an
+endpoint that accepts work is another, and "it only listens on loopback"
+stops being true the moment a container publishes the port. Found in a
+scaffolded service that accepted orders on behalf of ANY account with no
+credential of any kind — while its own README criticised its upstream for
+exactly that. The decline is a legitimate answer for a local-only tool; an
+unexamined open port is not, and the difference is whether anyone wrote down
+which one it is.
+
+Same shape for the DEPLOYMENT artifacts: a container with no memory or CPU
+limit lets one runaway process take the host, which is a security property as
+much as an operational one. If the repo ships a compose file or manifests,
+they are part of this inventory.
 
 ## 10. Deployability and operability
 Inventory: promotion path, canary/progressive delivery and its analysis,

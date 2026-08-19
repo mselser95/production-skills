@@ -89,7 +89,35 @@ capabilities:
 
 # Ratified declines. Each is a recorded decision with its reason -- never a
 # silent omission.
+# Dimensions this repo IMPLEMENTS, each naming the test that proves it.
+#
+# The probe does not take these on trust: it runs `go test <package> -list` to
+# confirm the test exists, then EXECUTES it and requires green. A name that
+# decays into a test nobody kept is reported as decayed evidence, not as a
+# pass -- which is the whole difference between this and a keyword grep.
+implemented:
+  effect_journal_atomic: ./cmd/<SERVICE> TestRebuildOutboxFromLog_RecoversEffectsLostInTheCommitWindow
+  bounded_boot: ./internal/platform/eventlog TestRecover_UsesTheSnapshotAndReplaysOnlyTheTail
+  bounded_storage: ./internal/platform/eventlog TestCompact_BoundsTheLogAndPreservesTheState
+  egress_backpressure: ./internal/adapter/out/store TestOutbox_PendingBoundHoldsUnderAnOutageAndNothingIsLost
+
 out_of_scope:
+  - write_surface_authn: >
+      This scaffold exposes NO surface that accepts work. internal/adapter/in
+      ships healthhttp (/healthz, /readyz, /metrics -- all read-only) and
+      pprofhttp (off unless PPROF_PORT is set). There is nothing to
+      authenticate, so this is a decline of fact rather than of judgement.
+      IT LAPSES THE MOMENT A WRITE ENDPOINT IS ADDED. A service that grows an
+      admin or submit surface owes either a credential on it or a replacement
+      decline naming who may reach it -- "it only binds to loopback" is not
+      that decline, because a published container port ends it.
+  - deployment_resource_limits: >
+      The scaffold ships docker/Dockerfile and no orchestration manifests or
+      compose file, so there is nowhere here to set a memory or CPU limit.
+      This decline lapses as soon as the repo ships deployment artifacts: an
+      unlimited container lets one runaway process take its host, which is a
+      security property as much as an operational one.
+
   - backup_restore_test: >
       This scaffold's only durable store is a local append-only file
       (internal/platform/eventlog) -- there is no managed backup/restore
@@ -113,6 +141,22 @@ out_of_scope:
       partitions it -- the obstacle is normally a shared counter or cursor
       threaded through the design, which is cheap to avoid now and expensive
       to remove later. See dimensions.md §12.
+  - published_contract: >
+      This scaffold publishes NOTHING to a consumer it does not own. Its only
+      egress is store.LogSink, which "delivers" by emitting a structured log
+      line -- a real demonstration of the outbox pattern, but not an API
+      anybody parses. There is no versioned payload to pin because there is no
+      foreign reader to break.
+
+      What this decline does NOT mean: that published contracts are optional.
+      It lapses the moment a real Sink is wired -- an HTTP webhook, a broker
+      subject, a queue -- because at that instant the payload becomes an API
+      owned by whoever consumes it. The framework's own experience is that this
+      is the asymmetry teams get backwards: they version the formats only they
+      read (this scaffold does, rigorously, in internal/platform/eventlog and
+      internal/platform/outboxlog) and ship the outward-facing payload with no
+      version at all. You can always migrate your own log. You cannot migrate
+      someone else's consumer. See dimensions.md §14.
   - authz_invariants: >
       No tenants and no credentials exist in this scaffold's example flow;
       the units ledger has no multi-tenant boundary to enforce.
@@ -141,6 +185,44 @@ scalability:
   # the ceiling in production.
   durability_trade: fsync_per_event
 
+# Bounded auto-recovery (dimension 13) -- REQUIRED BY DEFAULT at every tier.
+# Dimension 8 asks whether a failure is VISIBLE; this asks whether the system
+# comes BACK, and within what bound.
+auto_recovery:
+  # The boot path is the scaffold's genuinely self-recovering surface, and it
+  # is wired: a corrupt or unreadable snapshot does not fail the start and does
+  # not silently restart from genesis pretending nothing happened -- it falls
+  # back to full replay and says so. That is recovery without intervention, on
+  # a path that always runs, which is why it is what this claims rather than
+  # some mechanism that merely has a test.
+  #
+  # Stated as the BOOT bound deliberately. It is not a blanket claim that every
+  # failure mode in this scaffold self-heals -- see the honest gap recorded in
+  # registries/contract-debt.yaml about the outbox's drain.
+  recovery_bound: 30s
+
+# Data lifecycle (dimension 15).
+data_lifecycle:
+  # The event log is compacted behind snapshots (internal/platform/eventlog),
+  # so history is bounded by the snapshot cadence rather than kept forever.
+  # This is the POLICY statement; bounded_storage above is the engineering one,
+  # and they are deliberately separate questions with different owners.
+  retention_policy: compacted-behind-snapshots
+  # crypto_shredding | tombstone_rebuild | log_expiry | no_subject_data.
+  #
+  # The example aggregate is a units ledger: a balance, an applied-set and a
+  # version counter. There is no subject -- no account holder, no tenant, no
+  # personal data -- so there is nothing a deletion request could name. This is
+  # the same fact that makes authz_invariants a decline above.
+  #
+  # A real service replaces this the moment its state has a subject, and it
+  # must do so at DESIGN time: "delete this subject's data" is genuinely hard
+  # against an immutable append-only log and harder once a snapshot has folded
+  # that data in, because deleting the log record leaves the snapshot holding
+  # it. Both real designs -- crypto-shredding and tombstone-plus-rebuild -- are
+  # architectural choices, not later additions. See dimensions.md §15.
+  deletion_mechanism: no_subject_data
+
 gates:
   cheap: "make check-fast"
   presubmit: "make verify"
@@ -155,4 +237,5 @@ gates:
 # optimistically -- before the test exists -- reports as decayed evidence
 # rather than as progress. Add the entry when the test does.
 implemented:
+  self_recovery: ./internal/platform/eventlog TestRecover_CorruptSnapshotFallsBackToFullReplayAndSaysSo
   effect_journal_outbox: ./internal/adapter/out/store TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey
