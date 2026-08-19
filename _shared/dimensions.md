@@ -297,6 +297,47 @@ Row: self-recovery proven by a test that INDUCES a failure and shows the
 system returning unaided; the recovery bound stated as a duration; every mode
 that needs intervention named as a ratified decline with its reason.
 
+**A stall is not a failure this dimension catches unless something measures
+PROGRESS against an independent denominator.** The worst outage this framework
+has produced was not a mode that failed to recover — it was a mode nothing
+detected, because every signal read healthy while the service did no work at
+all: liveness green, readiness green, zero errors, zero alerts, and a consumer
+that had silently stopped consuming and was accepting and discarding writes.
+
+The mechanism is worth stating exactly, because it is general and it is easy
+to build by accident. A progress signal derived from **work done** freezes at
+a plausible value when work stops. Consumer lag computed as
+`highest_seen - cursor` reads 0 when you are caught up **and** 0 when you are
+dead, and there is nothing in the number to tell the two apart. The same shape
+appears in "records processed since last poll", "queue depth" measured from
+the consumer's own buffer, and any rate computed over a window in which the
+producer also stopped.
+
+So: **the denominator must come from the source, not from your own
+consumption.** Probe the upstream's head independently of reading from it —
+cheaply, since it is a liveness question and not a data one. Then the
+comparison has a fixed point of reference, and impossible readings become
+available as evidence: a head BELOW your cursor cannot happen in a monotonic
+stream, so observing it is proof the upstream's history was discarded, not a
+race to be smoothed over.
+
+Two rules follow, and both are cheap:
+
+- **A metric that is only correct while the system is healthy is worse than no
+  metric**, because it reads plausible in precisely the situation you consult
+  it. Ask of every gauge: what does this show when the thing it measures has
+  stopped entirely? If the answer is "the same as healthy" or "zero", it is not
+  a progress signal.
+- **Readiness must include a progress gate, not only correctness gates.** A
+  health check whose gates all ask "is my state valid" will pass forever on a
+  service that is valid and idle. At least one gate must ask "am I still
+  moving", and it must be able to answer no.
+
+Row: consumption/progress measured against an independently probed source, not
+against the consumer's own high-water mark; readiness carries at least one
+progress gate; the "impossible" reading is treated as evidence rather than
+clamped away.
+
 **Three defects that motivated it**, all found in services built from this
 framework:
 
