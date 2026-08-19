@@ -784,8 +784,15 @@ if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
   # everything else combined". The discriminator is arguments: a log call
   # always has some, `err.Error()` never does. The `|$` arm keeps a call whose
   # arguments start on the NEXT line from being dropped.
-  slog_plain=$(grep -rhoE '\.(Info|Warn|Error|Debug)\(([^)]|$)' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
-  slog_ctx=$(grep -rhoE '\.(Info|Warn|Error|Debug)Context\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  # Comment lines are dropped before counting. A repo that documents this very
+  # rule -- "logger.Info(...) discards the trace context" -- would otherwise
+  # have its own prose counted as a violation of it. Observed: a repo at 35 of
+  # 35 compliant reported "35 of 36", the phantom being one sentence in a
+  # comment. Harmless at that ratio, and a wrong FAIL at a closer one.
+  # (A trailing comment on a code line still counts; that is rare enough to
+  # accept, and erring toward counting is the safe direction for this row.)
+  slog_plain=$(grep -rhE '\.(Info|Warn|Error|Debug)\(([^)]|$)' --include='*.go' --exclude='*_test.go' . 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '\.(Info|Warn|Error|Debug)\(([^)]|$)' | wc -l | tr -d ' ')
+  slog_ctx=$(grep -rhE '\.(Info|Warn|Error|Debug)Context\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '\.(Info|Warn|Error|Debug)Context\(' | wc -l | tr -d ' ')
   if (( slog_plain + slog_ctx == 0 )); then
     row "observability:logs_correlate" NA "slog is imported but no log call sites found"
   elif (( slog_ctx == 0 )); then
