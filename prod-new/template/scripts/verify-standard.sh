@@ -475,28 +475,49 @@ implemented_test() {
 # would be this file's oldest mistake for the fourth time -- and it would be
 # especially useless here, since the defect this checks for is present in code
 # that says "outbox" everywhere. The proving test has a specific shape: crash
+# implemented_row runs the shared "the spec names a test and the probe EXECUTES
+# it" check for one key, and emits a row under the given label. Every dimension
+# added after scalability uses this rather than copying the loop, because the
+# copy is where the keyword-grep habit creeps back in: this helper cannot be
+# satisfied by a word appearing anywhere.
+implemented_row() { # implemented_row <label> <spec-key> <extra-fail-hint>
+  local label="$1" key="$2" hint="${3:-}"
+  if declined "$key"; then row "$label" NA "ratified decline in $SPEC"; return; fi
+  local spec_test; spec_test="$(implemented_test "$key")"
+  if [[ -z "$spec_test" ]]; then
+    row "$label" FAIL "not declined, and no implemented.$key in $SPEC naming the test that proves it${hint:+ -- $hint}"
+    return
+  fi
+  local it_pkg="${spec_test%% *}" it_name="${spec_test##* }"
+  if [[ -z "$it_pkg" || "$it_pkg" == "$it_name" ]]; then
+    row "$label" FAIL "spec's implemented.$key must be '<package> <TestName>', got '$spec_test'"
+    return
+  fi
+  # `go test -list` prints NOTHING when the package fails to build, which is
+  # indistinguishable from "the test is gone" unless you look at why. The first
+  # version of this helper did not, and reported a compile error somewhere else
+  # in the repo as "the evidence has decayed" -- blaming the spec, which is
+  # correct-sounding, actionable, and wrong. Same class as the coverage row that
+  # rendered an evidence-free FAIL: a gate that misattributes a failure sends
+  # someone to edit the one file that was fine.
+  local list_out list_rc
+  list_out="$(go test "$it_pkg" -list "^${it_name}$" 2>&1)"; list_rc=$?
+  if (( list_rc != 0 )); then
+    row "$label" FAIL "cannot evaluate $it_name: $it_pkg does not build -- this is a BUILD failure, not a decayed spec: $(grep -m1 -oE '[^ ]+\.go:[0-9]+:[0-9]+: .*' <<<"$list_out" | cut -c1-90)"
+  elif ! grep -qx "$it_name" <<<"$list_out"; then
+    row "$label" FAIL "spec names $it_name in $it_pkg but no such test exists -- the evidence has decayed"
+  elif go test "$it_pkg" -run "^${it_name}$" -count=1 >/dev/null 2>&1; then
+    row "$label" PASS "proven by $it_name ($it_pkg), executed this run"
+  else
+    row "$label" FAIL "$it_name ($it_pkg) is RED -- the dimension it proves is not implemented"
+  fi
+}
+
 # between the state commit and the effect journal, recover, and assert the
 # effect is still delivered.
 for k in effect_journal_outbox effect_journal_atomic reconciliation backup_restore_test; do
-  if declined "$k"; then row "$k" NA "ratified decline in $SPEC"; continue; fi
-
-  spec_test="$(implemented_test "$k")"
-  if [[ -n "$spec_test" ]]; then
-    it_pkg="${spec_test%% *}"; it_name="${spec_test##* }"
-    if [[ -z "$it_pkg" || "$it_pkg" == "$it_name" ]]; then
-      row "$k" FAIL "spec's implemented.$k must be '<package> <TestName>', got '$spec_test'"
-    # NOT `go test ... | grep -qx`. This file runs under `set -o pipefail`,
-    # and `grep -q` exits the moment it matches, closing the pipe; go test
-    # then dies of SIGPIPE and pipefail reports the PIPELINE as failed even
-    # though the grep succeeded. Measured: exit 0 without pipefail, 255 with.
-    # A found test would have been reported as decayed evidence on every run.
-    elif ! grep -qx "$it_name" <<<"$(go test "$it_pkg" -list "^${it_name}$" 2>/dev/null)"; then
-      row "$k" FAIL "spec names $it_name in $it_pkg but no such test exists -- the evidence has decayed"
-    elif go test "$it_pkg" -run "^${it_name}$" -count=1 >/dev/null 2>&1; then
-      row "$k" PASS "proven by $it_name ($it_pkg), executed this run"
-    else
-      row "$k" FAIL "$it_name ($it_pkg) is RED -- the dimension it proves is not implemented"
-    fi
+  if [[ -n "$(implemented_test "$k")" ]] || declined "$k"; then
+    implemented_row "$k" "$k"
     continue
   fi
 
@@ -520,23 +541,7 @@ done
 # `grep -qi "reconcil"` satisfied by a comment saying reconciliation is absent,
 # and the `mutation` keyword search satisfied by typing the word. Both shipped.
 for k in bounded_boot bounded_storage egress_backpressure; do
-  if declined "$k"; then row "scalability:$k" NA "ratified decline in $SPEC"; continue; fi
-
-  spec_test="$(implemented_test "$k")"
-  if [[ -z "$spec_test" ]]; then
-    row "scalability:$k" FAIL "not declined, and no implemented.$k in $SPEC naming the test that proves it"
-    continue
-  fi
-  it_pkg="${spec_test%% *}"; it_name="${spec_test##* }"
-  if [[ -z "$it_pkg" || "$it_pkg" == "$it_name" ]]; then
-    row "scalability:$k" FAIL "spec's implemented.$k must be '<package> <TestName>', got '$spec_test'"
-  elif ! grep -qx "$it_name" <<<"$(go test "$it_pkg" -list "^${it_name}$" 2>/dev/null)"; then
-    row "scalability:$k" FAIL "spec names $it_name in $it_pkg but no such test exists -- the evidence has decayed"
-  elif go test "$it_pkg" -run "^${it_name}$" -count=1 >/dev/null 2>&1; then
-    row "scalability:$k" PASS "proven by $it_name ($it_pkg), executed this run"
-  else
-    row "scalability:$k" FAIL "$it_name ($it_pkg) is RED -- the dimension it proves is not implemented"
-  fi
+  implemented_row "scalability:$k" "$k"
 done
 
 # spec_field reads one scalar from a named top-level block of the spec:
@@ -574,30 +579,6 @@ placeholder_value() {
   esac
 }
 
-# implemented_row runs the shared "the spec names a test and the probe EXECUTES
-# it" check for one key, and emits a row under the given label. Every dimension
-# added after scalability uses this rather than copying the loop, because the
-# copy is where the keyword-grep habit creeps back in: this helper cannot be
-# satisfied by a word appearing anywhere.
-implemented_row() { # implemented_row <label> <spec-key> <extra-fail-hint>
-  local label="$1" key="$2" hint="${3:-}"
-  if declined "$key"; then row "$label" NA "ratified decline in $SPEC"; return; fi
-  local spec_test; spec_test="$(implemented_test "$key")"
-  if [[ -z "$spec_test" ]]; then
-    row "$label" FAIL "not declined, and no implemented.$key in $SPEC naming the test that proves it${hint:+ -- $hint}"
-    return
-  fi
-  local it_pkg="${spec_test%% *}" it_name="${spec_test##* }"
-  if [[ -z "$it_pkg" || "$it_pkg" == "$it_name" ]]; then
-    row "$label" FAIL "spec's implemented.$key must be '<package> <TestName>', got '$spec_test'"
-  elif ! grep -qx "$it_name" <<<"$(go test "$it_pkg" -list "^${it_name}$" 2>/dev/null)"; then
-    row "$label" FAIL "spec names $it_name in $it_pkg but no such test exists -- the evidence has decayed"
-  elif go test "$it_pkg" -run "^${it_name}$" -count=1 >/dev/null 2>&1; then
-    row "$label" PASS "proven by $it_name ($it_pkg), executed this run"
-  else
-    row "$label" FAIL "$it_name ($it_pkg) is RED -- the dimension it proves is not implemented"
-  fi
-}
 
 # A presence check is weak, so both fields below are constrained rather than
 # free text. partition_key rejects the placeholders someone types to get green,
