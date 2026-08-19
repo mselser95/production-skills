@@ -127,6 +127,36 @@ more — the only evidence that instrumentation REACHES production is a test tha
 exercises the entrypoint's own construction path, or the signal appearing in a
 real environment. Say which one you have.
 
+**Logs are a signal with a contract, not a debug afterthought.** Three things
+recur, and all three are invisible to a passing test suite:
+
+- **No handler configured.** A service can have tracing, dashboards and alerts
+  wired and still emit unstructured text to stderr, because nothing forces a
+  structured handler to be installed. Check the composition root for an
+  explicit handler, not for the presence of log calls.
+- **Logs that do not correlate.** In Go, `logger.Info(...)` silently drops the
+  trace context; only the `*Context` variants carry it. A repo can be fully
+  traced and have ZERO correlated logs. Grep for the ratio of `Info(` to
+  `InfoContext(` — a service with none of the latter has no correlation
+  regardless of what its exporter config says.
+- **Attribute names that are not label names.** Loki and Prometheus rewrite
+  characters outside `[a-zA-Z0-9_:]` to `_` **silently**, so a log key written
+  one way is queried another and nobody gets an error, only zero results. Log
+  attributes may use whatever house convention the owner wants; metric names,
+  label names and any attribute promoted to a label may not.
+
+For Go specifically, the researched default is `log/slog` bridged to OTel with
+`contrib/bridges/otelslog`, and `sloglint` (`context: all`, `forbidden-keys`,
+a `key-naming-case`) to make all three of the above compile-time rather than
+review-time. zap's published speed advantage does not survive a like-for-like
+re-run; see the consuming repo's decision memo before re-litigating it.
+
+**Log levels are not portable and mostly should not be a gate.** RFC 5424 says
+its own severity table is non-normative; OTel's SeverityNumber inverts syslog's
+direction and adds TRACE. What IS worth checking: a service whose ERROR call
+sites outnumber everything else combined is usually logging handled errors, and
+each of those is a line nobody can act on.
+
 ## 9. Security
 Inventory: authz/authn surface, policy-as-invariant candidates, secret
 scanning (on which triggers), dependency vulnerability scanning, SBOM,

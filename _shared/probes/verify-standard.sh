@@ -751,6 +751,52 @@ if grep -rql "emitted-metrics\|spans.yaml" --include='*_test.go' . 2>/dev/null; 
   row "observability-contract-checked" PASS "a test compares emitted signals to the manifest"
 else row "observability-contract-checked" FAIL "manifest is documentation — nothing verifies it"; fi
 
+# Logs correlate, or they are a second system nobody can join to the first.
+#
+# In Go, `logger.Info(...)` DROPS the trace context: only the *Context variants
+# read it. A service can be fully traced, exporting to Tempo, with dashboards
+# and alerts, and still have zero correlated log lines -- and nothing fails,
+# because every individual piece works. The ratio is the only tell.
+#
+# Conditional on the repo actually using slog: a repo on another logger, or on
+# none, must not fail a row about slog. An absent denominator is NA, never PASS
+# -- "0 of 0 call sites are wrong" is the vacuous pass this framework exists to
+# refuse.
+if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
+  # The two counts are DISJOINT: `\.Info\(` requires the paren immediately
+  # after the name, so it does not match `.InfoContext(`. An earlier version
+  # of this row subtracted one from the other "to remove the overlap", which
+  # drove the plain count negative on a fully-compliant repo and reported NA
+  # -- a clean repo scoring as unmeasurable. Verified: `echo '.InfoContext('
+  # | grep -cE '\.(Info)\('` is 0.
+  #
+  # --exclude, NOT a piped `grep -v '_test.go'`. With -o the output is the
+  # match alone with no filename, so a downstream filename filter matches
+  # nothing and silently counts every test file. That mistake made this row
+  # report 80 call sites where the repo has 35, and flipped the handler row
+  # below from FAIL to PASS on a handler that only a test constructs.
+  slog_plain=$(grep -rhoE '\.(Info|Warn|Error|Debug)\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  slog_ctx=$(grep -rhoE '\.(Info|Warn|Error|Debug)Context\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  if (( slog_plain + slog_ctx == 0 )); then
+    row "observability:logs_correlate" NA "slog is imported but no log call sites found"
+  elif (( slog_ctx == 0 )); then
+    row "observability:logs_correlate" FAIL "$slog_plain log call site(s), NONE using the *Context variants -- the trace context is dropped, so no log line can be joined to its span no matter what the exporter is configured to do"
+  elif (( slog_plain > slog_ctx )); then
+    row "observability:logs_correlate" FAIL "$slog_plain of $(( slog_plain + slog_ctx )) log call sites drop the trace context (only $slog_ctx use *Context) -- partial correlation is worse than none, because the lines that DO correlate make the gap invisible"
+  else
+    row "observability:logs_correlate" PASS "$slog_ctx of $(( slog_plain + slog_ctx )) log call sites carry the trace context"
+  fi
+
+  # A structured handler must actually be INSTALLED. slog.Default() is a text
+  # handler writing to stderr; a repo can log diligently for months and emit
+  # nothing a log store can parse into fields.
+  if grep -rqE 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
+    row "observability:log_handler_installed" PASS "a slog handler is constructed, not left at the default"
+  else
+    row "observability:log_handler_installed" FAIL "no slog handler is constructed anywhere -- slog.Default() emits unstructured text to stderr, so every structured field is lost before it reaches a log store"
+  fi
+fi
+
 # THE probe that catches the no-op-port trap: wiring lives in the entrypoints
 # Look for the INJECTION SITE, not the identifier.
 #
