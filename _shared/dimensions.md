@@ -243,6 +243,126 @@ threaded through everything. That coupling cost nothing to avoid at design time
 and would cost a rewrite to remove. Notice it early; that is most of the value
 of asking.
 
+## 13. Bounded auto-recovery
+
+**This dimension is REQUIRED BY DEFAULT.** Dimension 8 asks whether a failure
+is VISIBLE. This one asks whether the system comes BACK, and within what bound.
+They are different questions, and a framework that only asks the first produces
+services that detect beautifully and stay down.
+
+The defence that gets written for these is "loud, not silent" — and it is true
+and beside the point. **Silent-vs-loud is not the axis; recoverable-vs-wedged
+is.** §4's `poison_message` note is one instance of this rule; this dimension
+is the general form, applied to every failure mode the system detects.
+
+Inventory: for each failure mode in the §4 matrix, does the system return on
+its own or does it require a human? The bound on that return. And — the part
+that is easiest to miss — whether the recovery mechanism is actually WIRED,
+not merely implemented and tested.
+
+Ask: what is the longest a detected failure may persist before someone is
+paged? Which modes genuinely need a human, and why can they not be automated?
+
+Row: self-recovery proven by a test that INDUCES a failure and shows the
+system returning unaided; the recovery bound stated as a duration; every mode
+that needs intervention named as a ratified decline with its reason.
+
+**Three defects that motivated it**, all found in services built from this
+framework:
+
+- **An undecodable message wedged a consumer permanently.** It was counted,
+  logged and panelled. The cursor could not advance past it, so every later
+  message was a gap, forever. Detection was perfect; recovery did not exist.
+- **An upstream restarted its own history**, leaving the consumer polling a
+  position that no longer existed — receiving nothing, reporting nothing,
+  indefinitely.
+- **An outbox whose recovery half was never invoked.** `Reconcile` existed,
+  had passing tests, and was called from nowhere in production code. The tests
+  proved the mechanism; only the composition root proves it RUNS, and a test
+  suite cannot tell the difference. This is the same defect class as a tracer
+  that is constructed and thrown away, and it is why this dimension asks about
+  wiring rather than about existence.
+
+**"There is a retry" is not an answer; "it returns within N seconds, and here
+is the test that induced the failure and timed it" is.** A failure you can
+provoke is a recovery you can time — which is what makes a scenario driver
+(§4) the natural instrument for this dimension rather than a separate effort.
+
+## 14. The published contract
+
+**Required wherever anything is published to a consumer this repo does not
+own.** A published event is an API, not an implementation detail.
+
+The asymmetry this exists for, observed in a service built from this
+framework's own template: it versioned the formats **only it read** with real
+rigour — `schema_version` stamped per record, write-one-read-many, golden
+fixtures per version, loud refusal on an unknown version — while the payload it
+**published** to other people's consumers carried fourteen JSON fields and no
+version at all.
+
+That is exactly backwards from where the cost falls. You can migrate your own
+log whenever you like, because you are the only reader. **You cannot migrate
+someone else's consumer.** The rigour was pointed at the cheap problem.
+
+Inventory: every payload that leaves the process for a reader this repo does
+not control — broker subjects, webhooks, API responses, files written for
+another system. Whether each carries a version a consumer can branch on.
+Whether a test pins the emitted shape. Who the known consumers are.
+
+Ask: who reads this, and what happens to them when a field is renamed? Is the
+compatibility promise expand/contract, or a versioned envelope with parallel
+shapes?
+
+Row: every published payload versioned; the emitted shape pinned by a test
+that fails when it changes; the compatibility policy declared; consumers named
+or their absence recorded.
+
+**This is deliberately NOT folded into §5's `compatibility`.** That entry is
+satisfied by any wire or golden test, including one over a format nobody
+outside this repo parses — and that is the format you can always fix. The
+audience is what makes this dimension expensive, so the audience is what it
+keys on. A repo can be fully compliant with §5 and still break every downstream
+consumer on its next deploy.
+
+## 15. Data lifecycle
+
+**Required wherever subject data exists.** This framework pushes services
+toward event sourcing (§12, and the derivation in prod-new), so it creates this
+problem and therefore owes an answer to it.
+
+**"Delete this subject's data" is genuinely hard when the source of truth is an
+immutable append-only log** — and harder once a snapshot has folded that data
+in, because deleting the log record leaves the snapshot still holding it.
+Retention is the same dimension: how long history is deliberately kept, which
+is a policy commitment with a different owner from §12's `bounded_storage`
+(that one asks only whether *something* prunes the store).
+
+Inventory: what subject data exists (accounts, tenants, people); the retention
+policy and what enforces it; the deletion mechanism; how deletion interacts
+with snapshots, with the replay corpus, and with downstream consumers who have
+already received the data.
+
+Ask: does this system hold data about an identifiable subject who can demand
+its removal? How long must history be kept, and by whose requirement?
+
+Row: retention policy declared; deletion mechanism declared from a closed set;
+where a real mechanism is claimed, a test proving a deletion request removes
+the data from the log AND from any snapshot that already folded it in.
+
+**Both real designs must be chosen at design time.** *Crypto-shredding*
+encrypts per subject and deletes the key, so the ciphertext becomes noise and
+the log stays immutable. *Tombstone-plus-rebuild* appends a deletion marker and
+rewrites history behind it. Neither retrofits cheaply, and the choice
+constrains the storage layer — which is why it belongs beside the event-log
+decision rather than after it. A service that reaches this question late
+discovers that its immutability guarantee and its deletion obligation are the
+same guarantee pointing in opposite directions.
+
+**Downstream is the half people forget.** Deleting your own copy does nothing
+about the consumer who received the event last Tuesday. If §14's consumers are
+named, this is answerable; if they are not, it is not — which is one reason
+these two dimensions are worth having together.
+
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big
   gap localizes weak assertions better than either number alone; both inputs
