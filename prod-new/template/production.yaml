@@ -101,6 +101,26 @@ implemented:
   bounded_storage: ./internal/platform/eventlog TestCompact_BoundsTheLogAndPreservesTheState
   egress_backpressure: ./internal/adapter/out/store TestOutbox_PendingBoundHoldsUnderAnOutageAndNothingIsLost
 
+# Every mechanism this service claims, paired with the symbol that must
+# survive linking from ./cmd/... . The probe builds the binary and reads its
+# symbol table: a symbol the linker eliminated is a mechanism nothing calls.
+#
+# This block exists because "implemented and tested" turned out not to imply
+# "reached by production" FOUR times in one repo -- a tracer nobody
+# constructed, counters nobody wired, a durable constructor the composition
+# root never used, and a Reconcile with no caller. Each passed its own tests,
+# which is what made them worse than missing.
+#
+# Add a line here when you add a mechanism. If the symbol you would name is
+# one the linker keeps only because it satisfies a used interface, say so in a
+# comment -- see the probe's stated limit.
+driven:
+  durable_outbox: store.OpenDurable
+  event_log: eventlog.Open
+  snapshots: eventlog.(*Log).Snapshot
+  outbox_reconcile: store.(*Outbox).Reconcile
+  tracing: observability.New
+
 out_of_scope:
   - write_surface_authn: >
       This scaffold exposes NO surface that accepts work. internal/adapter/in

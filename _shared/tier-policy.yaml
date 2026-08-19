@@ -54,6 +54,11 @@ defaults: &defaults
   operational_determinism: required       # code+config+schema+flag versions in signals
   isolation_and_backpressure: required    # explicit, tested, per-partition
 
+  # Wiring (dimension 16) — REQUIRED at every tier, with no relaxation.
+  # A mechanism that nothing calls passes its own tests and does nothing in
+  # production; four separate instances in one repo is what put this here.
+  # Checked against the linked binary, not against source or tests.
+  mechanisms_driven: required
   # Reproducibility (dimension 11)
   evidence_record: required               # one record per commit: policy version,
                                           # gates, seeds, waivers

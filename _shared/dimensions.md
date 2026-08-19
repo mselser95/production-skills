@@ -363,6 +363,58 @@ about the consumer who received the event last Tuesday. If §14's consumers are
 named, this is answerable; if they are not, it is not — which is one reason
 these two dimensions are worth having together.
 
+## 16. Wiring — mechanisms are DRIVEN, not merely present
+
+A mechanism nothing calls is indistinguishable from one that does not exist,
+except that it passes its own unit tests — so the suite reports it as covered.
+That makes it **worse than absent**: absence is visible, dead wiring is not.
+
+This dimension exists because the same defect appeared FOUR times in one repo
+that was passing every other gate. A tracer, instrumented, with a green span
+contract test, never constructed in `cmd/`. Operational counters, implemented
+and tested, never wired into the metrics surface — so the series read zero in
+production while the underlying value climbed, and a derived lag went
+*negative*: a healthy-looking impossible number rather than a crash. A durable
+outbox constructor, tested, absent from the composition root, which wired the
+in-memory form instead. And a `Reconcile` with passing tests and no caller, so
+a journaled entry whose sink was down stayed pending for the life of the
+process.
+
+Inventory: every mechanism the spec claims, paired with the symbol that proves
+production reaches it. What grows this list is the same thing that grows the
+system — if you added a mechanism, you owe a line here.
+
+Ask: nothing. This one is not a semantic question for the human; it is
+mechanically checkable, and asking would only invite the answer "yes of course
+it is wired", which is what everyone believed all four times.
+
+Row: how the wiring is PROVEN — and note what does not count. Neither a unit
+test of the mechanism nor a grep of the source can answer this. A test links a
+different binary; a grep matches comments, discarded assignments, helpers that
+are themselves never called, and the mechanism's own tests. The probe reads
+the LINKED ARTIFACT instead: Go eliminates code unreachable from `main`, so a
+symbol's presence in the shipped binary is evidence production reaches it, and
+its absence is proof nothing does.
+
+Two things learned building that check, both worth keeping:
+
+- **Disable inlining when you look.** A small function production really does
+  call can be inlined into its caller, and an inlined symbol is missing from
+  the table in exactly the way an eliminated one is. The first draft reported
+  a correctly-wired tracer as dead. A row that cries wolf is a row somebody
+  switches off, so the false positive mattered more than the true ones.
+- **Match the symbol exactly, not as a substring.** Caught by mutation:
+  swapping a real tracer for `NewNoop()` left the declared `New` matching as a
+  prefix of `NewNoop`, and the row passed a service whose tracing had just
+  been turned off.
+
+The limit, stated because a gate that overclaims is the defect this framework
+exists to name: the linker keeps every method of an interface the program
+uses, since dynamic dispatch could reach any of them. A never-called method
+belonging to a used interface will survive and this row will pass it. Plain
+functions and methods outside any used interface are eliminated precisely.
+That covers the four defects above; it is not a universal reachability proof.
+
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big
   gap localizes weak assertions better than either number alone; both inputs

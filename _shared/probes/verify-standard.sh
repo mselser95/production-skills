@@ -574,6 +574,35 @@ placeholder_value() {
   esac
 }
 
+# driven_symbol reads one entry from the spec's `driven:` block:
+#
+#   driven_symbol durable_outbox   ->  store.OpenDurable
+#
+# See the driven-mechanisms row for why this block exists and why it is
+# checked against a LINKED BINARY rather than against source.
+driven_symbol() {
+  awk -v key="$1" '
+    /^driven:/ { inblock=1; next }
+    inblock && /^[a-z_]+:/ { inblock=0 }
+    inblock {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
+    }
+  ' "$SPEC" 2>/dev/null
+}
+
+# driven_keys lists every key declared under `driven:`.
+driven_keys() {
+  awk '
+    /^driven:/ { inblock=1; next }
+    inblock && /^[a-z_]+:/ { inblock=0 }
+    inblock && /^[[:space:]]+[a-z_]+:/ {
+      line=$0; sub(/^[[:space:]]+/, "", line); sub(/:.*$/, "", line); print line
+    }
+  ' "$SPEC" 2>/dev/null
+}
+
 # implemented_row runs the shared "the spec names a test and the probe EXECUTES
 # it" check for one key, and emits a row under the given label. Every dimension
 # added after scalability uses this rather than copying the loop, because the
@@ -775,13 +804,115 @@ if [[ "${tracer_sites:-0}" -gt 0 ]]; then
   # EXISTS; it cannot establish that it RUNS. Claiming "injected" was the defect
   # -- the row asserted more than it measured, which is the same failure it was
   # written to catch one level down.
-  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; only a contract test exercising the entrypoint proves it runs"
+  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; the mechanisms-driven row proves reachability properly, and this one is kept as the earlier, weaker signal"
 elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
   row "tracing-wired-in-prod" FAIL "cmd/ names a tracer but never passes or assigns it — constructed and discarded is a no-op in production"
 else
   grep -rql "StartSpan" --include='*.go' internal/ 2>/dev/null \
     && row "tracing-wired-in-prod" FAIL "spans instrumented but NO tracer in cmd/ — no-op in production" \
     || row "tracing-wired-in-prod" FAIL "no tracing at all"
+fi
+
+# --- 13b. mechanisms are DRIVEN, not merely present ------------------------
+#
+# The strongest pattern this framework has found, and the one it kept missing.
+# Four separate times, in a repo passing every other gate, a mechanism was
+# fully implemented, unit-tested green, and CALLED BY NOTHING:
+#
+#   * a tracer instrumented with a passing span-contract test, never
+#     constructed in cmd/ -- every span went nowhere;
+#   * operational counters implemented and tested, never wired into the
+#     metrics surface -- the series read 0 in production while the underlying
+#     value climbed, so a derived lag went NEGATIVE: a healthy-looking
+#     impossible number rather than a crash;
+#   * a durable outbox constructor, tested, absent from the composition root,
+#     which wired the in-memory form instead;
+#   * an outbox Reconcile with passing tests and no caller, so a journaled
+#     entry whose sink was down stayed pending for the life of the process.
+#
+# A mechanism nothing calls is indistinguishable from one that does not exist
+# -- except that it passes its own tests, so the suite reports it as covered.
+# That makes it WORSE than absent.
+#
+# HOW THIS IS PROBED, and why it is not another keyword grep. Every previous
+# attempt at this class of check read SOURCE, and source cannot answer it: a
+# grep for the constructor's name matches a comment, a discarded assignment, a
+# helper that is itself never called, and the mechanism's own tests. This row
+# reads the LINKED BINARY instead. Go's linker eliminates code unreachable
+# from main, so a symbol's PRESENCE in the shipped artifact is evidence that
+# production reaches it, and its absence is proof that nothing does.
+#
+# Verified empirically before this row was written: on the template,
+# `store.OpenDurable` resolved to 1 symbol while wired and 0 after the call
+# site was replaced with the in-memory constructor (the exact shape of defect
+# three), and `Outbox.Reconcile` -- which nothing calls -- was already absent.
+# A unit test cannot satisfy this check, because `go test` links a different
+# binary that this row never inspects.
+#
+# The first draft of this row also reported the template's TRACER as unwired,
+# which was wrong: the compiler had inlined the constructor. See the build
+# flags below. A row that cries wolf is a row somebody disables, so the false
+# positive mattered more than the true ones.
+#
+# THE LIMIT, stated because a gate that overclaims is the defect this file
+# exists to catch: the linker retains every method of an interface a program
+# actually uses, since dynamic dispatch could reach any of them. So a method
+# that is never called but belongs to a used interface WILL survive and this
+# row will pass it. Plain functions and methods outside any used interface are
+# eliminated precisely. That covers all four defects above; it is not a
+# universal reachability proof, and it is not claimed as one.
+if [[ -z "$(driven_keys)" ]]; then
+  row "mechanisms-driven" FAIL "no driven: block in $SPEC -- every mechanism the service declares must name the symbol that proves production reaches it, or nothing distinguishes an implemented mechanism from a dead one"
+else
+  driven_bin="${TMPDIR:-/tmp}/prod-driven-$$"
+  # Two build flags, both load-bearing.
+  #
+  # No -s/-w: this row needs the symbol table, which is exactly what those
+  # strip.
+  #
+  # -gcflags=all=-l disables INLINING, and without it this row reports false
+  # positives that would get it switched off within a week. A small function
+  # that production really does call can be inlined into its caller, and an
+  # inlined symbol is absent from the table in exactly the same way an
+  # eliminated one is -- nm cannot tell you which happened. Measured on the
+  # template: `observability.New` is called at cmd/.../main.go:49 and resolved
+  # to ZERO symbols with inlining on, and to three with it off, while
+  # `Outbox.Reconcile` -- which genuinely has no caller -- stayed at zero
+  # either way. Disabling inlining keeps the true positive and removes the
+  # false one.
+  if ! driven_build=$(go build -gcflags=all=-l -o "$driven_bin" ./cmd/... 2>&1); then
+    row "mechanisms-driven" FAIL "cannot build ./cmd/... so wiring is unprovable: $(grep -m1 -oE '[^ ]+\.go:[0-9]+:[0-9]+: .*' <<<"$driven_build" | cut -c1-100)"
+  else
+    driven_syms=$(go tool nm "$driven_bin" 2>/dev/null)
+    d_total=0; d_ok=0; d_missing=""
+    while IFS= read -r dk; do
+      [[ -n "$dk" ]] || continue
+      d_total=$((d_total+1))
+      dsym="$(driven_symbol "$dk")"
+      if [[ -z "$dsym" ]]; then
+        d_missing="${d_missing} ${dk}:no-symbol-declared"
+      # The symbol must END the nm line. A substring match is not enough and
+      # that is not hypothetical: it was caught by mutation here. Swapping a
+      # real tracer for `observability.NewNoop()` -- the exact shape of defect
+      # one -- left `observability.New` matching as a PREFIX of
+      # `observability.NewNoop`, so the row passed a service whose tracing had
+      # just been disabled. Anchoring to end-of-line makes New and NewNoop
+      # distinct symbols, which is what they are.
+      elif grep -qE "[ /.]$(printf '%s' "$dsym" | sed 's/[][\.*^$(){}?+|/]/\\&/g')\$" <<<"$driven_syms"; then
+        d_ok=$((d_ok+1))
+      else
+        d_missing="${d_missing} ${dk}(${dsym}):ELIMINATED-BY-LINKER"
+      fi
+    done < <(driven_keys)
+    rm -f "$driven_bin"
+    if (( d_total == 0 )); then
+      row "mechanisms-driven" FAIL "driven: block parsed to zero entries -- a check of nothing must never read as clean"
+    elif [[ -n "$d_missing" ]]; then
+      row "mechanisms-driven" FAIL "$((d_total-d_ok))/$d_total declared mechanism(s) are NOT reachable from main:${d_missing}"
+    else
+      row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- production reaches each"
+    fi
+  fi
 fi
 
 # --- 14. security: RUN the scanners ---------------------------------------
