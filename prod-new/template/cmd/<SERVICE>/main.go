@@ -31,21 +31,79 @@ import (
 	"time"
 )
 
+// serviceName identifies this process in the exported OTel resource and is
+// the instrumentation scope name on every bridged log record. A constant,
+// not config: a pod that can rename the service it claims to be makes every
+// downstream query a guess.
+const serviceName = "<SERVICE>"
+
 func main() {
-	if err := run(); err != nil {
-		slog.Error("svc: fatal", "error", err)
+	// The signal context is created HERE, not two thirds of the way through
+	// run() where it used to live. Two consequences, in order of how much
+	// they matter.
+	//
+	// It gives main() a context, which is what lets the fatal line below be
+	// an *Context call rather than the one log line in the process that
+	// silently drops its trace context.
+	//
+	// And it moves the whole boot -- config, event-log recovery, outbox
+	// rebuild -- inside the handled window. Before, a SIGTERM arriving
+	// during a long replay hit Go's DEFAULT disposition and killed the
+	// process outright; nothing was corrupted (every write is journaled
+	// first) but nothing was said either, so a pod that died mid-replay was
+	// indistinguishable from one that crashed. Now it is a context
+	// cancellation the boot path can observe and describe.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := run(ctx); err != nil {
+		// A LOCAL bootstrap logger, not slog's package-level Error.
+		//
+		// Two reasons, both learned the hard way. slog.Error goes to the
+		// default TEXT handler on stderr, so the one line that says why the
+		// process refused to start is the one line no log store can parse
+		// into fields. And run() may have failed BEFORE it built the
+		// configured logger -- config.Load returning an error is the
+		// commonest way to reach here -- so there is nothing else to use.
+		boot := observability.NewBootstrapLogger(os.Stderr)
+		boot.ErrorContext(ctx, "svc: fatal", "error", err)
+		cancel()
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	logger := slog.Default()
 
 	build := buildinfo.Get()
+
+	logger, shutdownLogs, err := observability.NewLogger(ctx, os.Stdout, observability.LogOptions{
+		Level:          cfg.LogLevel,
+		Export:         cfg.LogExport,
+		ServiceName:    serviceName,
+		ServiceVersion: build.Revision,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// context.WithoutCancel is load-bearing on the NORMAL exit path.
+		// run() returns from here after <-ctx.Done(), so ctx is already
+		// cancelled -- that is why we are shutting down -- and the SDK's
+		// Processor contract requires Shutdown and ForceFlush to honor the
+		// passed context's cancellation. Handing them the cancelled one
+		// would therefore abandon whatever is still in the batch: the last
+		// records before exit, which is to say the ones describing the
+		// shutdown. A fresh 5s budget is the difference between "the log
+		// ends mid-sentence" and "the log says goodbye".
+		flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelFlush()
+		_ = shutdownLogs(flushCtx)
+	}()
+
 	tracer := observability.WithBaseAttrs(
 		observability.New(cfg.Tracing, logger),
 		map[string]string{"revision": build.Revision, "config_digest": cfg.Digest()},
@@ -70,7 +128,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger.Info("svc: recovered state",
+	logger.InfoContext(ctx, "svc: recovered state",
 		"from_snapshot", recovered.SnapshotFound,
 		"events_replayed", recovered.EventsReplayed,
 		"records_scanned", recovered.RecordsScanned,
@@ -80,7 +138,7 @@ func run() error {
 		// state is correct -- but it means boot just paid full-replay cost
 		// for a reason nobody asked about. Say so at ERROR so it cannot be
 		// mistaken for a normal start.
-		logger.Error("svc: snapshot rejected, recovered by full replay instead",
+		logger.ErrorContext(ctx, "svc: snapshot rejected, recovered by full replay instead",
 			"rejected", recovered.SnapshotsRejected,
 			"events_replayed", recovered.EventsReplayed)
 	}
@@ -119,7 +177,7 @@ func run() error {
 		return err
 	}
 	if rebuilt > 0 {
-		logger.Warn("svc: recovered effects the outbox never journaled",
+		logger.WarnContext(ctx, "svc: recovered effects the outbox never journaled",
 			"effects", rebuilt,
 			"cause", "crash between the state commit and the effect journal")
 	}
@@ -165,9 +223,6 @@ func run() error {
 		Outbox: outbox,
 	})
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
 	var wg sync.WaitGroup
 
 	healthLis, err := net.Listen("tcp", portAddr(cfg.HealthPort))
@@ -178,10 +233,10 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		if err := healthSrv.ServeListener(ctx, healthLis); err != nil {
-			logger.Error("svc: health server", "error", err)
+			logger.ErrorContext(ctx, "svc: health server", "error", err)
 		}
 	}()
-	logger.Info("svc: serving health", "addr", healthLis.Addr().String())
+	logger.InfoContext(ctx, "svc: serving health", "addr", healthLis.Addr().String())
 
 	if cfg.PprofPort != 0 {
 		pprofLis, err := net.Listen("tcp", portAddr(cfg.PprofPort))
@@ -192,10 +247,10 @@ func run() error {
 		go func() {
 			defer wg.Done()
 			if err := pprofhttp.ServeListener(ctx, pprofLis); err != nil {
-				logger.Error("svc: pprof server", "error", err)
+				logger.ErrorContext(ctx, "svc: pprof server", "error", err)
 			}
 		}()
-		logger.Info("svc: serving pprof", "addr", pprofLis.Addr().String())
+		logger.InfoContext(ctx, "svc: serving pprof", "addr", pprofLis.Addr().String())
 	}
 
 	// -- snapshot + compaction: what keeps boot and storage bounded --------
@@ -212,12 +267,12 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		if err := rel.Run(ctx); err != nil {
-			logger.Error("svc: relay stopped", "error", err)
+			logger.ErrorContext(ctx, "svc: relay stopped", "error", err)
 		}
 	}()
 
 	<-ctx.Done()
-	logger.Info("svc: shutting down")
+	logger.InfoContext(ctx, "svc: shutting down")
 	wg.Wait()
 	return nil
 }
@@ -259,17 +314,17 @@ func snapshotLoop(
 				continue
 			}
 			if err := log.Snapshot(state()); err != nil {
-				logger.Error("svc: snapshot failed; log keeps growing", "error", err)
+				logger.ErrorContext(ctx, "svc: snapshot failed; log keeps growing", "error", err)
 				continue
 			}
 			stats, err := log.Compact()
 			if err != nil {
 				// The snapshot IS durable at this point, so the next boot is
 				// already bounded. Only the disk reclaim failed.
-				logger.Error("svc: compaction failed; snapshot is durable, disk not reclaimed", "error", err)
+				logger.ErrorContext(ctx, "svc: compaction failed; snapshot is durable, disk not reclaimed", "error", err)
 				continue
 			}
-			logger.Info("svc: snapshot + compaction",
+			logger.InfoContext(ctx, "svc: snapshot + compaction",
 				"records_before", stats.RecordsBefore, "records_after", stats.RecordsAfter)
 		}
 	}
@@ -319,6 +374,15 @@ func rebuildOutboxFromLog(eventLogPath string, outbox *store.Outbox) (int, error
 // import-free port -- see internal/app/ledger.go's doc for why app cannot
 // import internal/platform directly). This is the ONE place in the whole
 // module allowed to know about both types at once.
+//
+// KNOWN LIMIT, stated rather than hidden: app.SpanFunc carries no
+// context.Context, so the span started here has no parent and the line the
+// log tracer emits at End carries no trace_id. Widening SpanFunc to take a
+// ctx is the real fix and it is an app-layer port change, not a change to
+// this adapter. Until then, app-level spans correlate by their attributes
+// (event id, config digest, revision) and not by trace id -- which is a
+// weaker join, and worth knowing before someone builds a dashboard on the
+// assumption that it is not.
 func adaptTracer(tr observability.Tracer) app.SpanFunc {
 	return func(name string, attrs map[string]string) func(error) {
 		_, span := tr.StartSpan(context.Background(), name, attrs)

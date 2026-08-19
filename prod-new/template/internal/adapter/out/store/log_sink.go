@@ -43,7 +43,7 @@ func (s *LogSink) Deliver(ctx context.Context, idempotencyKey string, entry Entr
 	if s.FailUntilAttempt > 0 && s.attempts[idempotencyKey] < s.FailUntilAttempt {
 		return fmt.Errorf("logsink: simulated failure (attempt %d/%d for key %s)", s.attempts[idempotencyKey], s.FailUntilAttempt, idempotencyKey)
 	}
-	s.logger.Info("outbox delivery",
+	s.logger.InfoContext(ctx, "outbox delivery",
 		"idempotency_key", idempotencyKey,
 		"entry_id", entry.ID,
 		"effect", fmt.Sprintf("%#v", entry.Effect),

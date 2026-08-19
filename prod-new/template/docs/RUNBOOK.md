@@ -57,3 +57,46 @@ in-memory state — not currently exposed over HTTP by this scaffold).
 `docs/SLO.md`'s rollback lever is `artifact_repin`: redeploy the previous
 image digest. No feature flags currently gate the units-ledger capability
 (see `registries/flags.yaml` — empty).
+
+## Reading the logs, and joining them to a trace
+
+**Where they go.** Every line is JSON on stdout, from a handler built in
+`internal/platform/observability.NewLogger` and wired at the composition
+root. Nothing in this service writes through `slog.Default()` — that is a
+text handler on stderr, and `.golangci.yml`'s `sloglint: no-global` makes
+adding one a lint failure rather than a discovery six months later.
+
+**How to join a log line to its span.** Every line logged from inside a span
+carries `trace_id` and `span_id` at the top level. Grepping one trace is
+`jq 'select(.trace_id=="<id>")'`; in Loki, `| json | trace_id="<id>"`.
+
+If a line you expected to see has NO `trace_id`, the call site used
+`logger.Info(…)` instead of `logger.InfoContext(ctx, …)` — the plain
+variants drop the context, which is what `sloglint: context: all` exists to
+prevent. That is a code defect, not a configuration problem; do not go
+looking at the collector.
+
+**The two levers.**
+
+| Env | Default | Effect |
+| --- | --- | --- |
+| `LOG_LEVEL` | `info` | Floor for the stdout lane: `debug`, `info`, `warn`, `error`. A value outside that set is a BOOT ERROR, not a silent fallback. |
+| `LOG_EXPORT` | `off` | `otlp` additionally ships records to `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+
+Both are surfaced live on `/healthz` (`config.Identity`'s `log_level` /
+`log_export`), so "there are no DEBUG lines" can be answered without
+guessing whether the pod was started with them enabled.
+
+**`LOG_LEVEL=debug` does not put debug traffic on the wire.** The OTLP lane
+is floored at INFO by `minsev` (`observability.otlpMinSeverity`) regardless
+of `LOG_LEVEL`, so turning the level down during an incident costs local
+volume only. You will see the DEBUG lines in `kubectl logs`; the collector
+will not.
+
+**Known gap.** An unparseable `OTEL_EXPORTER_OTLP_ENDPOINT` is NOT a boot
+error: the OTel SDK logs `invalid OTEL_EXPORTER_OTLP_ENDPOINT value` through
+its own error handler and falls back to `localhost:4318`, so a typo exports
+into the void while the pod looks healthy. If exported logs go missing,
+check that line in the pod's own stderr before suspecting the collector.
+See the note on `otlploghttp.New` in
+`internal/platform/observability/logging.go`.

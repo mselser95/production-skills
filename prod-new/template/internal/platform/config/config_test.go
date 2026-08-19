@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"log/slog"
+	"testing"
+)
 
 // provenance: derived
 // verifies: config loading defaults + env overrides
@@ -98,10 +101,16 @@ func TestConfig_DigestIsStableAndSensitiveToEveryField(t *testing.T) {
 // verifies: operational determinism (Identity mirrors the rollback-lever
 // fields plus Digest)
 func TestConfig_Identity(t *testing.T) {
-	c := Config{OutboxMaxAttempts: 7, Tracing: "log", PprofPort: 6060}
+	c := Config{OutboxMaxAttempts: 7, Tracing: "log", PprofPort: 6060, LogLevel: slog.LevelWarn, LogExport: LogExportOTLP}
 	id := c.Identity()
 	if id.OutboxMaxAttempts != 7 || id.Tracing != "log" || id.PprofPort != 6060 {
 		t.Fatalf("Identity() = %+v, want mirrored fields", id)
+	}
+	// "there are no DEBUG lines" is ambiguous without these two: it can
+	// mean the code never logged one, or that this pod runs at WARN, or
+	// that the exported lane was off.
+	if id.LogLevel != "WARN" || id.LogExport != LogExportOTLP {
+		t.Fatalf("Identity() = %+v, want the live log level and export mode mirrored", id)
 	}
 	if id.Digest != c.Digest() {
 		t.Fatalf("Identity().Digest = %q, want c.Digest() = %q", id.Digest, c.Digest())
@@ -137,5 +146,86 @@ func TestLoad_OutboxLogPath(t *testing.T) {
 	}
 	if cfg.OutboxLogPath != "/tmp/custom-outbox.jsonl" {
 		t.Errorf("OutboxLogPath = %q, want the override", cfg.OutboxLogPath)
+	}
+}
+
+// provenance: derived
+// verifies: fail-closed config -- a typo'd LOG_LEVEL is a boot error, not a
+// silent fallback.
+//
+// The failure this prevents is specific and expensive: an operator sets
+// LOG_LEVEL=verbose mid-incident, sees no new lines, and concludes the code
+// does not log what they need. A boot error says "that is not a level" in
+// the one second it takes to read it.
+func TestParseLogLevel(t *testing.T) {
+	for raw, want := range map[string]slog.Level{
+		"":       slog.LevelInfo,
+		" ":      slog.LevelInfo,
+		"debug":  slog.LevelDebug,
+		"DEBUG":  slog.LevelDebug,
+		"info":   slog.LevelInfo,
+		"warn":   slog.LevelWarn,
+		" ERROR": slog.LevelError,
+	} {
+		got, err := ParseLogLevel(raw)
+		if err != nil {
+			t.Fatalf("ParseLogLevel(%q): %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("ParseLogLevel(%q) = %v, want %v", raw, got, want)
+		}
+	}
+	// slog's own UnmarshalText accepts these; this parser deliberately does
+	// not, because nobody can say from a dashboard what INFO+2 suppresses.
+	for _, raw := range []string{"verbose", "INFO+2", "trace", "9"} {
+		if _, err := ParseLogLevel(raw); err == nil {
+			t.Fatalf("ParseLogLevel(%q) accepted an unknown level", raw)
+		}
+	}
+}
+
+// provenance: derived
+// verifies: fail-closed config -- LOG_EXPORT is off by default and rejects
+// anything it does not implement.
+func TestParseLogExport(t *testing.T) {
+	for _, raw := range []string{"", "  "} {
+		got, err := ParseLogExport(raw)
+		if err != nil || got != LogExportOff {
+			t.Fatalf("ParseLogExport(%q) = %q, %v; want %q, nil", raw, got, err, LogExportOff)
+		}
+	}
+	for _, raw := range []string{LogExportOff, LogExportOTLP} {
+		got, err := ParseLogExport(raw)
+		if err != nil || got != raw {
+			t.Fatalf("ParseLogExport(%q) = %q, %v", raw, got, err)
+		}
+	}
+	for _, raw := range []string{"OTLP", "stdout", "on", "true"} {
+		if _, err := ParseLogExport(raw); err == nil {
+			t.Fatalf("ParseLogExport(%q) accepted an unimplemented mode", raw)
+		}
+	}
+}
+
+// provenance: derived
+// verifies: fail-closed config -- Load surfaces a bad LOG_LEVEL/LOG_EXPORT
+// as a boot error rather than defaulting past it.
+func TestLoad_RejectsBadLogEnv(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "verbose")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted LOG_LEVEL=verbose")
+	}
+	t.Setenv("LOG_LEVEL", "debug")
+	t.Setenv("LOG_EXPORT", "carrier-pigeon")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted LOG_EXPORT=carrier-pigeon")
+	}
+	t.Setenv("LOG_EXPORT", LogExportOTLP)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LogLevel != slog.LevelDebug || c.LogExport != LogExportOTLP {
+		t.Fatalf("Load() log config = %v/%q, want DEBUG/%q", c.LogLevel, c.LogExport, LogExportOTLP)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -123,3 +124,26 @@ func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 }
 func (h *recordingHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
 func (h *recordingHandler) WithGroup(name string) slog.Handler       { return h }
+
+// provenance: derived
+// verifies: tracing port (log adapter) -- a span started with a nil context
+// still emits at End instead of panicking.
+//
+// The nil guard exists because logSpan now CARRIES the context from
+// StartSpan to End so the emitted line can be joined to its span. That
+// turned a parameter the adapter used to ignore into one it dereferences,
+// which is exactly the kind of change that converts a harmless nil into a
+// panic inside a deferred End() -- the worst place to find one, because it
+// fires during the failure it was supposed to be describing.
+func TestLogTracer_NilContextStillEmitsAtEnd(t *testing.T) {
+	var buf strings.Builder
+	tr := NewLog(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+	var nilCtx context.Context
+	_, span := tr.StartSpan(nilCtx, "svc.nil_ctx", map[string]string{"k": "v"})
+	span.End()
+
+	if !strings.Contains(buf.String(), "svc.nil_ctx") {
+		t.Fatalf("span line was not emitted for a nil-context span: %q", buf.String())
+	}
+}

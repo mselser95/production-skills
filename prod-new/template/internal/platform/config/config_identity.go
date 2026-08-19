@@ -37,6 +37,14 @@ type Identity struct {
 	OutboxMaxAttempts  int    `json:"outbox_max_attempts"`
 	Tracing            string `json:"tracing"`
 	PprofPort          int    `json:"pprof_port"`
+	// LogLevel and LogExport are here because a log store answering
+	// "there are no DEBUG lines" is ambiguous: it can mean the code never
+	// logged one, or that this pod was started at INFO, or that the OTLP
+	// lane was off entirely. Surfacing both live values turns that
+	// ambiguity into a lookup. snake_case JSON like every other key on this
+	// struct -- see the label-naming note in observability.traceHandler.
+	LogLevel  string `json:"log_level"`
+	LogExport string `json:"log_export"`
 }
 
 // Identity builds the Identity view of c.
@@ -51,6 +59,8 @@ func (c Config) Identity() Identity {
 		OutboxMaxAttempts:  c.OutboxMaxAttempts,
 		Tracing:            c.Tracing,
 		PprofPort:          c.PprofPort,
+		LogLevel:           c.LogLevel.String(),
+		LogExport:          c.LogExport,
 	}
 }
 

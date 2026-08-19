@@ -40,6 +40,16 @@ internal/platform/clock 98.00
 internal/platform/config 92.00
 internal/platform/eventlog 83.00
 internal/platform/outboxlog 78.00
+# ADJACENT FIX, not part of the logging change that added this line:
+# internal/platform/relay shipped in the "the event log IS the outbox"
+# commit without a floor entry, and this file's ratchet FAILS CLOSED on a
+# package it has no floor for. The result was that the coverage gate never
+# completed at all for any repo generated from this template -- it aborted
+# with "has measured coverage but NO floor" before checking a single one of
+# the floors below. A gate that cannot run is not a gate that passes.
+# 82.00 = the measured 84.29 minus the 2.0 points this file's header
+# prescribes.
+internal/platform/relay 82.00
 internal/platform/ids 83.00
 internal/platform/observability 98.00
 verification/conformance 94.00

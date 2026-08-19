@@ -48,7 +48,13 @@ func NewLogPublisher(logger *slog.Logger) *LogPublisher {
 
 // Publish implements relay.Publisher. It returns only after the "delivery"
 // is complete, which is the contract the relay's ordering depends on.
-func (p *LogPublisher) Publish(_ context.Context, topic string, msg relay.Message) error {
+//
+// The ctx is USED, not discarded: the delivery line is emitted with
+// InfoContext so it carries the trace context of the relay iteration that
+// produced it. This parameter was `_` until the correlation gap was measured
+// -- a publisher whose delivery lines cannot be joined to the span that
+// triggered them is the single hardest thing to debug about a relay.
+func (p *LogPublisher) Publish(ctx context.Context, topic string, msg relay.Message) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.attempts[msg.ID]++
@@ -56,7 +62,7 @@ func (p *LogPublisher) Publish(_ context.Context, topic string, msg relay.Messag
 		return fmt.Errorf("logpublisher: simulated failure (attempt %d/%d for %s)", p.attempts[msg.ID], p.FailUntil, msg.ID)
 	}
 	p.delivered = append(p.delivered, msg)
-	p.logger.Info("relay delivery", "topic", topic, "message_id", msg.ID,
+	p.logger.InfoContext(ctx, "relay delivery", "topic", topic, "message_id", msg.ID,
 		"metadata", msg.Metadata, "bytes", len(msg.Payload))
 	return nil
 }

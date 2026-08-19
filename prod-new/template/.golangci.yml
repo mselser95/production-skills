@@ -16,3 +16,68 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+    # sloglint is not in golangci-lint's default set. It is enabled here
+    # because the two logging defects this repo shipped are both things a
+    # linter can prevent and a human reviewer reliably does not notice:
+    # every call site used the plain variant (so no log line could be joined
+    # to a span), and nothing constructed a handler (so every structured
+    # field was flattened into stderr text).
+    - sloglint
+
+  settings:
+    sloglint:
+      # THE rule. In Go, logger.Info(...) DROPS the trace context -- only
+      # the *Context variants read trace.SpanContextFromContext. A service
+      # can be fully traced, exporting to a collector, with dashboards and
+      # alerts, and still have zero log lines joinable to a span, because
+      # every individual piece works. Nothing goes red; the correlation just
+      # is not there.
+      #
+      # "all", not "scope". `scope` only complains when a context.Context is
+      # already a parameter of the enclosing function, which means a call
+      # site can comply forever by never threading one -- the exact shape of
+      # the defect. `all` forces the question at every call site, and where
+      # threading a context is genuinely wrong the answer is a nolint with a
+      # reason, not silence.
+      context: all
+
+      # Report the package-level slog.Info/Error/... and any package-level
+      # logger variable. The default logger writes unstructured text to
+      # stderr, so one such call is a line that silently leaves the
+      # structured pipeline -- and it is always the fatal-path line, because
+      # that is the one written before a logger exists. cmd/'s main() uses
+      # observability.NewBootstrapLogger for exactly this reason.
+      no-global: all
+
+      # A message built with fmt.Sprintf is a message no log store can group
+      # by: 10k distinct strings where there was one event, and no way to
+      # alert on "this happened 400 times". Put the variable part in an
+      # attribute, where it is queryable.
+      static-msg: true
+
+      # A secret in a log line is a secret in every downstream index,
+      # backup and screenshot, and redacting it after the fact means
+      # redacting all of them.
+      forbidden-keys:
+        - password
+        - token
+        - api_key
+        - secret
+
+      # snake, matching every metric name, metric label and span attribute
+      # in this repo.
+      #
+      # The case itself is arbitrary; ONE case is not. Loki and Prometheus
+      # silently rewrite characters outside [a-zA-Z0-9_:] in a LABEL name to
+      # `_`, so a log key written `trace-id` and promoted to a label is
+      # queried as `trace_id` -- with no error and no results, which is the
+      # worst possible failure mode for a debugging tool. Picking the case
+      # that survives that rewrite everywhere means nobody has to remember
+      # which surface they are on.
+      #
+      # (sloglint does support `kebab`, with autofix -- see
+      # go-simpler/sloglint's options.go. golangci-lint's own docs page for
+      # this linter omits it and is wrong. Verified against sloglint v0.12.0
+      # before writing this comment, because "the docs say it is
+      # unsupported" is precisely the kind of claim that decays.)
+      key-naming-case: snake
