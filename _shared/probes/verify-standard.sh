@@ -936,6 +936,29 @@ fi
 # A unit test cannot satisfy this check, because `go test` links a different
 # binary that this row never inspects.
 #
+# THAT SECOND MEASUREMENT NO LONGER HOLDS, and the correction matters more
+# than the original claim. The template later converted *Outbox to an
+# interface (healthhttp.OutboxHealth), and Go's linker retains the ENTIRE
+# METHOD SET of a type that reaches an interface -- so `Outbox.Reconcile`
+# became present in the binary with still no caller, and this row went GREEN
+# on a template whose reconcile loop did not exist. Measured on that binary:
+#
+#   1002fe8f0 T ….store.(*Outbox).Reconcile      (present, uncalled)
+#
+# So the two halves of this row are NOT symmetric, and the asymmetry is the
+# thing to remember:
+#
+#   ABSENCE is still proof. Nothing reaches it.
+#   PRESENCE is proof only for a symbol the linker COULD have eliminated --
+#   a package-level func, or a method on a type that never reaches an
+#   interface. For a method on a type that does, presence proves nothing.
+#
+# Therefore: DECLARE THE CALLER, NOT THE CALLEE. Name the loop function that
+# drives the mechanism (`main.reconcileLoop`), which belongs to no interface
+# and is eliminated the moment its goroutine is deleted, rather than the
+# method it calls. The row below flags a declared symbol in method form for
+# exactly this reason.
+#
 # The first draft of this row also reported the template's TRACER as unwired,
 # which was wrong: the compiler had inlined the constructor. See the build
 # flags below. A row that cries wolf is a row somebody disables, so the false
@@ -987,6 +1010,20 @@ else
       # distinct symbols, which is what they are.
       elif grep -qE "[ /.]$(printf '%s' "$dsym" | sed 's/[][\.*^$(){}?+|/]/\\&/g')\$" <<<"$driven_syms"; then
         d_ok=$((d_ok+1))
+        # Method form -- `pkg.(*Type).Method` or `pkg.Type.Method`. Collected
+        # so the PASS text can say its evidence is weaker for these. See the
+        # asymmetry note above: the linker keeps a type's whole method set
+        # once that type reaches an interface, so presence stops proving a
+        # caller. This is how a template with NO reconcile loop scored green.
+        # A `case` rather than a regex, deliberately: the ERE form of this
+        # (`\.\(\*?…\)\.`) fails to compile in bash's engine with
+        # "repetition-operator operand invalid", and a pattern that silently
+        # never matches would make this whole caveat decorative -- which is
+        # the defect the caveat is about.
+        case "$dsym" in
+          *"("*")."*)  d_methods="${d_methods:-} ${dk}(${dsym})" ;;  # pkg.(*T).M
+          *.*.*)       d_methods="${d_methods:-} ${dk}(${dsym})" ;;  # pkg.T.M
+        esac
       else
         d_missing="${d_missing} ${dk}(${dsym}):ELIMINATED-BY-LINKER"
       fi
@@ -997,7 +1034,17 @@ else
     elif [[ -n "$d_missing" ]]; then
       row "mechanisms-driven" FAIL "$((d_total-d_ok))/$d_total declared mechanism(s) are NOT reachable from main:${d_missing}"
     else
-      row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- production reaches each"
+      # A declared symbol in METHOD form (`pkg.(*Type).Method` or
+      # `pkg.Type.Method`) is weak evidence: if Type reaches any interface,
+      # the linker retains its whole method set and presence proves nothing
+      # about callers. Name the caller instead. Reported, not failed -- the
+      # declaration may still be correct, and a row that FAILED here would
+      # punish repos whose mechanism genuinely has no wrapper.
+      if [[ -n "${d_methods:-}" ]]; then
+        row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- WEAK for:${d_methods}. Those are methods; if the receiver type reaches an interface the linker keeps the whole method set, so presence does not prove a caller. Declare the function that DRIVES the mechanism instead"
+      else
+        row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- production reaches each"
+      fi
     fi
   fi
 fi
