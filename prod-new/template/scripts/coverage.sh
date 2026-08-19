@@ -84,8 +84,24 @@ if [[ -f "${floors_file}" ]]; then
     fi
   done < "${floors_file}"
 
+  # The loop above walks the FLOORS file, so it catches a floor whose package
+  # vanished. It cannot catch the opposite, which is the direction that
+  # actually happens: a NEW package appears, nobody adds a line for it, and it
+  # is silently ungated forever while the ratchet reports every package at or
+  # above its floor. A green ratchet over an unmeasured package is worse than
+  # no ratchet, because green reads as evidence.
+  #
+  # So: every package with measured statements must have a floor line.
+  while read -r pkg _actual; do
+    [[ -z "${pkg}" ]] && continue
+    if ! awk -v want="${pkg}" '$1 == want { found=1 } END { exit !found }' "${floors_file}"; then
+      echo "per-package coverage ratchet: package '${pkg}' has measured coverage but NO floor in ${floors_file} -- a new package is ungated until you add one (measure it, subtract 2.0, add the line)" >&2
+      ratchet_failed=1
+    fi
+  done < "${perpkg_out}"
+
   if [[ "${ratchet_failed}" -ne 0 ]]; then
     exit 1
   fi
-  echo "per-package coverage ratchet: all packages at/above their floor (${floors_file})"
+  echo "per-package coverage ratchet: all packages at/above their floor, and every measured package has one (${floors_file})"
 fi
