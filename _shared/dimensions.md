@@ -139,11 +139,26 @@ recur, and all three are invisible to a passing test suite:
   traced and have ZERO correlated logs. Grep for the ratio of `Info(` to
   `InfoContext(` — a service with none of the latter has no correlation
   regardless of what its exporter config says.
-- **Attribute names that are not label names.** Loki and Prometheus rewrite
-  characters outside `[a-zA-Z0-9_:]` to `_` **silently**, so a log key written
-  one way is queried another and nobody gets an error, only zero results. Log
-  attributes may use whatever house convention the owner wants; metric names,
-  label names and any attribute promoted to a label may not.
+- **Attribute names, and the rewrite nobody warns you about.** Loki and
+  Prometheus silently replace characters outside `[a-zA-Z0-9_:]` with `_`, so a
+  key written one way is queried another and nobody gets an error — only zero
+  results.
+
+  The trap is the scope. It is natural to conclude "that only applies to LABEL
+  names, so log attributes are free" — and that is **wrong for any service
+  shipping logs over OTLP**. Measured against a live Loki 3.x: a service
+  emitting `entry-id` and `idempotency-key` had them stored as `entry_id` and
+  `idempotency_key`, because Loki promotes record attributes to structured
+  metadata under the same naming rules. LogQL cannot even parse the emitted
+  spelling — `` | `entry-id`="…" `` is a syntax error, while `| entry_id="…"`
+  returns the line.
+
+  So: whatever the house convention, if the logs land in Loki the operator
+  greps one spelling in the source and must type another in Grafana. Prefer
+  **one case everywhere** — snake, matching metric names, label names and OTel
+  semantic conventions — unless the owner accepts that cost explicitly. Verify
+  it rather than reasoning about it: emit one line and read back what the store
+  actually holds.
 
 For Go specifically, the researched default is `log/slog` bridged to OTel with
 `contrib/bridges/otelslog`, and `sloglint` (`context: all`, `forbidden-keys`,
