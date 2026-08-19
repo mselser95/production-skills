@@ -1,7 +1,7 @@
 // Package app is the durable orchestration zone: it drives
 // internal/domain's pure Apply function through a real command-processing
 // pipeline with an injected clock/id source, a durable event journal, and
-// an outbox for effects that need external delivery.
+// a relay that publishes committed events outward.
 //
 // It deliberately imports NEITHER internal/adapter NOR internal/platform
 // (see internal/architecture/boundaries_test.go's
@@ -42,20 +42,22 @@ type EventJournal interface {
 	Append(event domain.Event) error
 }
 
-// EffectPublisher is the outbox port for effects requiring delivery to
-// something outside this process. Satisfied structurally by
-// internal/adapter/out/store.(*Outbox).
+// Notifier tells the relay that new events are available, so a healthy
+// deployment delivers immediately instead of waiting out the relay's idle
+// interval. Satisfied by internal/platform/relay.(*Relay).Notify.
 //
-// Journal records the intent to deliver effect and returns an opaque entry
-// id; Publish attempts delivery for a previously journaled entry and marks
-// it done on success. Splitting these two steps -- rather than one
-// "DeliverEffect" call -- is the outbox pattern itself: a crash between
-// Journal and Publish leaves a durable, recoverable intent instead of a
-// lost effect.
-type EffectPublisher interface {
-	Journal(effect domain.Effect) (entryID string, err error)
-	Publish(ctx context.Context, entryID string) error
-}
+// It must never block. This is the write path: anything that can block here
+// puts the network back in front of a command, which is the coupling the
+// relay exists to remove.
+//
+// There is deliberately no publisher port here at all. THE EVENT LOG IS THE
+// OUTBOX -- the relay tails it and publishes what it finds, so this layer's
+// entire delivery responsibility is one durable append plus a nudge. An
+// earlier design journaled effects to a SECOND durable store here; that
+// store held no information the log did not already imply, and the window
+// between the two writes could lose an effect for a fact that had already
+// committed.
+type Notifier func()
 
 // Tracer is the narrow tracing port app needs, satisfied structurally by
 // internal/platform/observability.Tracer without importing that package.
@@ -70,19 +72,15 @@ func noopSpan(string, map[string]string) func(error) { return func(error) {} }
 type CommandOutcome struct {
 	State   domain.State
 	Effects []domain.Effect
-	// EffectsCommitted is true iff every EffectDeposited/EffectWithdrawn
-	// effect this command produced was successfully journaled AND published
-	// through the EffectPublisher. false does not mean the LEDGER state is
-	// wrong -- the domain.Apply step (Logged/Applied below) already
-	// committed durably before any effect publishing is attempted -- it
-	// means the outbound notification is still pending in the outbox and
-	// will be retried by a future Reconcile call.
-	EffectsCommitted bool
-	// Stage names the LAST commandState transition this command actually
-	// reached (see the commandState doc above) -- "committed" is the only
-	// terminal stage with EffectsCommitted=true; every other value pairs
-	// with EffectsCommitted=false and names exactly where recovery should
-	// resume from.
+	// Stage names the last commandState transition this command reached.
+	//
+	// There is deliberately NO EffectsCommitted field. It used to report
+	// whether delivery had succeeded, and once delivery moved to the relay
+	// this layer cannot know that -- the honest options were to remove it or
+	// to redefine it, and a field that silently changes meaning is worse than
+	// one that is gone, because every existing reader keeps believing the old
+	// meaning. Delivery progress is observable on the relay (its lag against
+	// the log head), which is where it now happens.
 	Stage string
 }
 
@@ -91,58 +89,64 @@ type CommandOutcome struct {
 // crash-recovery semantics, per this zone's job: pure decision-making lives
 // in internal/domain; RECOVERABLE ORCHESTRATION lives here.
 //
-//	Received          -- command accepted, nothing durable yet.
-//	                     Crash here: nothing happened; safe to retry from
-//	                     scratch (no partial effect exists).
-//	Logged            -- domain.Event appended to the durable EventJournal.
-//	                     Crash here: the event log has the entry but
-//	                     in-memory Ledger.state does not yet reflect it.
-//	                     Recovery: cmd/<SERVICE>'s boot sequence replays the
-//	                     journal through domain.Apply BEFORE constructing a
-//	                     new Ledger, so the next process's initial state
-//	                     already includes this entry -- no data loss, no
-//	                     double-apply (domain.Apply's own idempotency-by-ID
-//	                     guard covers a re-delivered command whose caller
-//	                     retries with the same event ID).
-//	Applied           -- domain.Apply executed; Ledger.state updated in
-//	                     memory and the runtime invariant checks
-//	                     (checkConservation) have run. Crash here: identical
-//	                     to Logged's recovery (replay reconstructs the same
-//	                     state, since Apply is deterministic).
-//	EffectsJournaled  -- every Effect requiring external delivery has an
-//	                     outbox intent (EffectPublisher.Journal). Crash
-//	                     here: the intent is durable in the outbox; a
-//	                     future Reconcile call resumes delivery from there
-//	                     -- the ledger's own state is already final and
-//	                     correct, only the SIDE NOTIFICATION is pending.
-//	Committed         -- every journaled effect was Published successfully.
-//	                     Terminal; no recovery needed.
+//	Received   -- command accepted, nothing durable yet. Crash here:
+//	              nothing happened; safe to retry from scratch.
+//	Applied    -- domain.Apply executed against the current state and the
+//	              runtime invariant checks have run. This decision is still
+//	              IN MEMORY and the lock is still held; a crash here loses
+//	              only the decision, which the caller may safely retry.
+//	Logged     -- the event was admitted and appended to the durable
+//	              EventJournal. Crash here: the log has the entry but
+//	              in-memory state does not. Recovery: the composition root
+//	              replays the journal through domain.Apply before building
+//	              a Ledger, so the next process starts with it folded in.
+//	Committed  -- in-memory state advanced to match the log, and the relay
+//	              was nudged. Terminal.
+//
+// # Why decide, then journal, then commit -- all under ONE lock
+//
+// The order is load-bearing in both directions.
+//
+// Journaling FIRST (before Apply) would put commands into the log that the
+// domain then rejects -- a duplicate, an overdraft, a malformed amount. The
+// log would stop being a log of facts and become a log of attempts, and
+// every reader of it (replay, the relay, an auditor) would have to
+// re-implement admission to tell the two apart. The relay's mapper in
+// particular cannot: admission depends on ACCUMULATED state, which is not
+// in the event. Keeping only admitted events makes the log's contract
+// "everything in here happened".
+//
+// Committing state before the append succeeds would let the service serve a
+// balance that no durable record supports; a crash would then silently undo
+// an acknowledged command.
+//
+// Holding ONE lock across all three closes the window between deciding and
+// committing. Releasing it in between lets a concurrent command decide
+// against a state that is about to change underneath it -- two withdrawals
+// each reading the same balance, each individually valid, together
+// overdrawing.
 type commandState int
 
 const (
 	csReceived commandState = iota
-	csLogged
 	csApplied
-	csEffectsJournaled
+	csLogged
 	csCommitted
 )
 
 // String names the stage a command reached, for CommandOutcome.Stage --
 // exported observability of the state machine documented above, not just
 // an internal bookkeeping detail (a caller or test can distinguish "the
-// ledger committed but a notification is still pending reconciliation"
-// from "the ledger itself never committed" instead of inferring it from
-// EffectsCommitted alone).
+// command was rejected by the domain without ever reaching the log" from
+// "the command was admitted and is durable").
 func (s commandState) String() string {
 	switch s {
 	case csReceived:
 		return "received"
-	case csLogged:
-		return "logged"
 	case csApplied:
 		return "applied"
-	case csEffectsJournaled:
-		return "effects_journaled"
+	case csLogged:
+		return "logged"
 	case csCommitted:
 		return "committed"
 	default:
@@ -151,14 +155,14 @@ func (s commandState) String() string {
 }
 
 // Ledger is the orchestrator: it holds the current domain.State in memory,
-// journals every command durably before admitting it, applies it through
-// the pure core, and drives any resulting effects through the outbox.
+// applies each command through the pure core, journals it durably if the
+// core ADMITS it, and nudges the relay that publishes what the log gained.
 type Ledger struct {
 	mu    sync.Mutex
 	state domain.State
 
 	journal   EventJournal
-	effects   EffectPublisher
+	notify    Notifier
 	clock     Clock
 	ids       IDGenerator
 	spanStart SpanFunc
@@ -187,8 +191,11 @@ type Ledger struct {
 // internal/platform/clock.Real{}.Now and
 // internal/platform/ids.Real{}.NewID explicitly, and every test in this
 // package supplies its own deterministic fake.
-func NewLedger(initial domain.State, journal EventJournal, effects EffectPublisher, clock Clock, ids IDGenerator) *Ledger {
-	return &Ledger{state: initial, journal: journal, effects: effects, clock: clock, ids: ids, spanStart: noopSpan}
+func NewLedger(initial domain.State, journal EventJournal, notify Notifier, clock Clock, ids IDGenerator) *Ledger {
+	if notify == nil {
+		notify = func() {} // a Ledger with no relay attached still commands
+	}
+	return &Ledger{state: initial, journal: journal, notify: notify, clock: clock, ids: ids, spanStart: noopSpan}
 }
 
 // SetTracer wires a real tracing backend. fn matches
@@ -223,7 +230,8 @@ func (l *Ledger) Withdraw(ctx context.Context, eventID, amount string) (CommandO
 }
 
 // process is the state machine documented on commandState: csReceived ->
-// csLogged -> csApplied -> csEffectsJournaled -> csCommitted.
+// csApplied -> csLogged -> csCommitted, with the last three inside one
+// critical section.
 func (l *Ledger) process(ctx context.Context, spanName, eventID string, eventType domain.EventType, amount string) (CommandOutcome, error) {
 	end := l.spanStart(spanName, map[string]string{"event_type": string(eventType)})
 	var stepErr error
@@ -234,54 +242,49 @@ func (l *Ledger) process(ctx context.Context, spanName, eventID string, eventTyp
 	}
 	event := domain.Event{ID: eventID, Type: eventType, Amount: amount}
 
-	// -- Received -> Logged ------------------------------------------------
-	// A failure here means the command never advanced past csReceived: it
-	// is reported at that stage explicitly (Stage below), rather than the
-	// zero-value CommandOutcome leaving the caller to guess how far the
-	// pipeline got.
-	if err := l.journal.Append(event); err != nil {
-		stepErr = fmt.Errorf("app: journal append: %w", err)
-		return CommandOutcome{Stage: csReceived.String()}, stepErr
-	}
-	// csLogged is reached here implicitly: nothing between a successful
-	// journal append and the (infallible, pure) domain.Apply call below can
-	// fail, so there is no observable stage between the two worth a
-	// separate branch -- see commandState's own doc for the full
-	// transition table this collapses.
-
-	// -- Applied -------------------------------------------------------
 	l.mu.Lock()
+
+	// -- Received -> Applied ------------------------------------------------
+	// Pure, in memory, still under the lock. Nothing is durable yet.
 	before := l.state
 	after, effectsOut := domain.Apply(before, event)
 	l.checkInvariants(before, event, after)
+
+	// domain.Apply increments Version exactly when it ADMITS the event, and
+	// leaves it untouched for every rejection (duplicate, overdraft,
+	// malformed amount, unknown type). That makes the version bump the
+	// domain's own admission signal, so this layer does not have to
+	// enumerate rejection effect types -- a new rejection added to the
+	// domain is handled here without an edit, whereas a type switch would
+	// silently start journaling it.
+	admitted := after.Version > before.Version
+
+	// -- Applied -> Logged ---------------------------------------------------
+	if admitted {
+		if err := l.journal.Append(event); err != nil {
+			// State is NOT advanced: the decision dies with the append.
+			l.mu.Unlock()
+			stepErr = fmt.Errorf("app: journal append: %w", err)
+			return CommandOutcome{State: before, Effects: effectsOut, Stage: csApplied.String()}, stepErr
+		}
+	}
+
+	// -- Logged -> Committed -------------------------------------------------
 	l.state = after
 	l.mu.Unlock()
 
-	// -- EffectsJournaled / Committed ---------------------------------------
-	committed := true
-	anyEffectJournaled := false
-	for _, effect := range effectsOut {
-		switch effect.(type) {
-		case domain.EffectDeposited, domain.EffectWithdrawn:
-			entryID, err := l.effects.Journal(effect)
-			if err != nil {
-				committed = false
-				continue
-			}
-			anyEffectJournaled = true
-			if err := l.effects.Publish(ctx, entryID); err != nil {
-				committed = false
-				continue
-			}
-		}
-	}
-	stage := csApplied
-	if anyEffectJournaled {
-		stage = csEffectsJournaled
-	}
-	if committed {
-		stage = csCommitted
+	// The write path ENDS here. The event is durable and the state is
+	// folded; delivery is the relay's job, reached by a nudge that cannot
+	// block. Publishing inline would put a network round trip inside the
+	// command, so an unreachable broker would stop the service rather than
+	// merely delay its notifications.
+	//
+	// Nudging only on admission keeps the relay from waking for commands
+	// that appended nothing -- under a duplicate-heavy retry storm that is
+	// the difference between a quiet relay and a hot spin.
+	if admitted {
+		l.notify()
 	}
 
-	return CommandOutcome{State: after, Effects: effectsOut, EffectsCommitted: committed, Stage: stage.String()}, nil
+	return CommandOutcome{State: after, Effects: effectsOut, Stage: csCommitted.String()}, nil
 }

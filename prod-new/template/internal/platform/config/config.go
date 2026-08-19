@@ -35,6 +35,14 @@ type Config struct {
 	// per entry before giving up and marking it failed (still counted;
 	// never retried forever). Env OUTBOX_MAX_ATTEMPTS.
 	OutboxMaxAttempts int
+	// CheckpointPath is where the relay's durable position lives. Separate
+	// from the event log because it is a READER's bookmark, not history: it
+	// is rewritten in place, and losing it costs a republish rather than a
+	// loss. Env CHECKPOINT_PATH.
+	CheckpointPath string
+	// PublishTopic is the topic integration events are published to. Env
+	// PUBLISH_TOPIC.
+	PublishTopic string
 	// Tracing selects the observability.Tracer the composition root wires
 	// into every adapter (see observability/tracing-contract equivalent:
 	// package doc of internal/platform/observability). Env TRACING: unset
@@ -58,6 +66,8 @@ func Load() (Config, error) {
 		InvariantViolationCooldown: 30 * time.Second,
 		OutboxLogPath:              "data/outbox.jsonl",
 		OutboxMaxAttempts:          5,
+		CheckpointPath:             "data/checkpoints.json",
+		PublishTopic:               "svc.events",
 		Tracing:                    "off",
 	}
 	if v := os.Getenv("HEALTH_PORT"); v != "" {

@@ -27,6 +27,7 @@ import (
 	"github.com/<OWNER>/<SERVICE>/internal/platform/eventlog"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/ids"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/observability"
+	"github.com/<OWNER>/<SERVICE>/internal/platform/relay"
 	"time"
 )
 
@@ -123,8 +124,32 @@ func run() error {
 			"cause", "crash between the state commit and the effect journal")
 	}
 
+	// -- the relay: THE EVENT LOG IS THE OUTBOX ------------------------------
+	// Publication is a READ of the log, not a second write beside it. The
+	// relay tails the log from a durable checkpoint, maps each event to the
+	// integration events consumers receive, publishes them synchronously, and
+	// only then advances the checkpoint. A crash between publish and
+	// checkpoint redelivers; it cannot lose.
+	//
+	// This is why the write path has no publisher: there is nothing for a
+	// command to deliver, so there is no window between committing a fact and
+	// recording the intent to announce it.
+	checkpoints, err := relay.OpenCheckpoints(cfg.CheckpointPath)
+	if err != nil {
+		return err
+	}
+	publisher := store.NewLogPublisher(logger)
+	rel, err := relay.New[eventlog.SeqEvent](
+		log, checkpoints, store.EnvelopeMapper(cfg.PublishTopic), publisher,
+		relay.NopLeader(), // single-replica scaffold; a multi-replica deployment supplies a real Leader
+		relay.Options{Name: "integration-events"},
+	)
+	if err != nil {
+		return err
+	}
+
 	// -- orchestration core --------------------------------------------------
-	ledger := app.NewLedger(initial, log, outbox, clock.Real{}.Now, ids.Real{}.NewID)
+	ledger := app.NewLedger(initial, log, rel.Notify, clock.Real{}.Now, ids.Real{}.NewID)
 	ledger.SetTracer(adaptTracer(tracer))
 
 	// -- health/readiness/metrics -------------------------------------------
@@ -178,6 +203,17 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		snapshotLoop(ctx, log, ledger.State, logger, 30*time.Second, eventlog.DefaultSnapshotEvery)
+	}()
+
+	// The relay runs for the life of the process. Its failure is loud and
+	// non-fatal: a broker outage must not stop the service from committing
+	// facts, which is the entire reason delivery left the write path.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := rel.Run(ctx); err != nil {
+			logger.Error("svc: relay stopped", "error", err)
+		}
 	}()
 
 	<-ctx.Done()

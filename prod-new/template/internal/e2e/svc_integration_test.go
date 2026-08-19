@@ -23,6 +23,7 @@ import (
 	"github.com/<OWNER>/<SERVICE>/internal/platform/clock"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/eventlog"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/ids"
+	"github.com/<OWNER>/<SERVICE>/internal/platform/relay"
 )
 
 // provenance: derived
@@ -31,21 +32,36 @@ import (
 // here a real TCP socket + a real on-disk event log, mirroring exactly how
 // cmd/<SERVICE>'s composition root wires the same pieces together)
 func TestSvc_RealEventLogAndRealTCP_DepositAndWithdrawSurviveARestart(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "eventlog.jsonl")
+	dir := t.TempDir()
 
 	// -- "boot 1": deposit, withdraw, observe the real HTTP surface --------
-	ledger1, log1, cleanup1 := bootRealLedger(t, logPath)
-	if _, err := ledger1.Deposit(context.Background(), "e1", "10"); err != nil {
+	boot1, cleanup1 := bootRealLedger(t, dir)
+	if _, err := boot1.ledger.Deposit(context.Background(), "e1", "10"); err != nil {
 		t.Fatalf("Deposit: %v", err)
 	}
-	if _, err := ledger1.Withdraw(context.Background(), "e2", "3"); err != nil {
+	if _, err := boot1.ledger.Withdraw(context.Background(), "e2", "3"); err != nil {
 		t.Fatalf("Withdraw: %v", err)
 	}
-	if got := ledger1.State().Balance; got != "7.00000000" {
+	if got := boot1.ledger.State().Balance; got != "7.00000000" {
 		t.Fatalf("balance after boot 1 = %q, want 7.00000000", got)
 	}
 
-	srv := healthhttp.New(ledger1, healthhttp.Options{Log: log1})
+	// The relay reads the SAME on-disk log the ledger just wrote, with no
+	// second store between them, and publishes both facts -- including the
+	// withdrawal, which a mapper that re-derives effects from a fresh state
+	// silently drops.
+	if err := boot1.relay.RunToEnd(context.Background()); err != nil {
+		t.Fatalf("relay drain on boot 1: %v", err)
+	}
+	delivered := boot1.pub.Delivered()
+	if len(delivered) != 2 || delivered[0].ID != "e1" || delivered[1].ID != "e2" {
+		t.Fatalf("relay delivered %+v, want e1 then e2 over the real on-disk log", delivered)
+	}
+	if lag, err := boot1.relay.Lag(context.Background()); err != nil || lag != 0 {
+		t.Fatalf("relay lag = %d, %v; want 0, nil", lag, err)
+	}
+
+	srv := healthhttp.New(boot1.ledger, healthhttp.Options{Log: boot1.log})
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -74,15 +90,50 @@ func TestSvc_RealEventLogAndRealTCP_DepositAndWithdrawSurviveARestart(t *testing
 	cleanup1()
 
 	// -- "boot 2": a fresh process replays the SAME on-disk log -------------
-	ledger2, _, cleanup2 := bootRealLedger(t, logPath)
+	boot2, cleanup2 := bootRealLedger(t, dir)
 	defer cleanup2()
-	if got := ledger2.State().Balance; got != "7.00000000" {
+	if got := boot2.ledger.State().Balance; got != "7.00000000" {
 		t.Fatalf("balance after replaying the real on-disk log on a fresh boot = %q, want 7.00000000 (recovery semantics: rebuild from the log)", got)
+	}
+
+	// The restarted relay reads the checkpoint boot 1 left on disk and
+	// republishes NOTHING. A restart that floods downstream with the whole
+	// history is what a non-durable checkpoint produces, and it looks like a
+	// clean boot from every other angle.
+	if err := boot2.relay.RunToEnd(context.Background()); err != nil {
+		t.Fatalf("relay drain on boot 2: %v", err)
+	}
+	if n := len(boot2.pub.Delivered()); n != 0 {
+		t.Fatalf("restart republished %d messages over the real checkpoint file, want 0", n)
+	}
+
+	// A fact recorded after the restart is picked up from the stored
+	// position, so the checkpoint resumed rather than merely suppressed.
+	if _, err := boot2.ledger.Deposit(context.Background(), "e3", "5"); err != nil {
+		t.Fatalf("post-restart Deposit: %v", err)
+	}
+	if err := boot2.relay.RunToEnd(context.Background()); err != nil {
+		t.Fatalf("post-restart relay drain: %v", err)
+	}
+	if d := boot2.pub.Delivered(); len(d) != 1 || d[0].ID != "e3" {
+		t.Fatalf("post-restart relay delivered %+v, want only e3", d)
 	}
 }
 
-func bootRealLedger(t *testing.T, logPath string) (*app.Ledger, *eventlog.Log, func()) {
+// realBoot is one simulated process: the same pieces cmd/<SERVICE>'s
+// composition root wires, over a real on-disk log and a real on-disk relay
+// checkpoint.
+type realBoot struct {
+	ledger *app.Ledger
+	log    *eventlog.Log
+	relay  *relay.Relay[eventlog.SeqEvent]
+	pub    *store.LogPublisher
+}
+
+func bootRealLedger(t *testing.T, dir string) (*realBoot, func()) {
 	t.Helper()
+	logPath := filepath.Join(dir, "eventlog.jsonl")
+
 	log, err := eventlog.Open(logPath)
 	if err != nil {
 		t.Fatalf("eventlog.Open: %v", err)
@@ -92,7 +143,18 @@ func bootRealLedger(t *testing.T, logPath string) (*app.Ledger, *eventlog.Log, f
 		t.Fatalf("eventlog.Replay: %v", err)
 	}
 	initial := eventlog.Rebuild(past)
-	outbox := store.NewOutbox(store.NewLogSink(nil), ids.Real{}.NewID, 3)
-	ledger := app.NewLedger(initial, log, outbox, clock.Real{}.Now, ids.Real{}.NewID)
-	return ledger, log, func() { _ = log.Close() }
+
+	cps, err := relay.OpenCheckpoints(filepath.Join(dir, "checkpoints.json"))
+	if err != nil {
+		t.Fatalf("relay.OpenCheckpoints: %v", err)
+	}
+	pub := store.NewLogPublisher(nil)
+	rel, err := relay.New[eventlog.SeqEvent](log, cps, store.EnvelopeMapper("svc.events"), pub, nil,
+		relay.Options{Name: "publisher"})
+	if err != nil {
+		t.Fatalf("relay.New: %v", err)
+	}
+
+	ledger := app.NewLedger(initial, log, rel.Notify, clock.Real{}.Now, ids.Real{}.NewID)
+	return &realBoot{ledger: ledger, log: log, relay: rel, pub: pub}, func() { _ = log.Close() }
 }

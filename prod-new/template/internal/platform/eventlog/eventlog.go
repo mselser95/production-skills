@@ -42,6 +42,7 @@ package eventlog
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,13 +55,13 @@ import (
 
 // SchemaVersion is the schema this build WRITES. Bump it, and extend
 // SupportedSchemaVersions, on any incompatible change to record's shape.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // SupportedSchemaVersions is every schema this build can READ. Writing one
 // version while reading several is what expand/contract means here: a build
 // that stopped reading v1 would silently refuse to recover a log written by
 // the build it is replacing, which is an outage caused by an upgrade.
-var SupportedSchemaVersions = []int{1, 2}
+var SupportedSchemaVersions = []int{1, 2, 3}
 
 // DefaultSnapshotEvery is how many appended events the composition root
 // lets accumulate before taking a snapshot.
@@ -93,6 +94,30 @@ type record struct {
 	SchemaVersion int        `json:"schema_version"`
 	Kind          recordKind `json:"kind,omitempty"`
 
+	// Seq is this record's LOCAL position: monotonic, assigned by this log
+	// on append, never reused, and PRESERVED across compaction. The relay
+	// checkpoints against it.
+	//
+	// It must be persisted rather than derived from file order. An ordinal
+	// works only until the first compaction rewrites the file, at which
+	// point every position shifts and a relay checkpoint silently skips or
+	// republishes the difference.
+	Seq int64 `json:"seq,omitempty"`
+
+	// Origin records WHO ordered this fact. A service that both ingests a
+	// foreign stream and raises its own facts has two ordering authorities
+	// at once, and the difference decides what each record's identity means
+	// (see the Origin doc).
+	Origin Origin `json:"origin,omitempty"`
+
+	// ForeignSeq is the position this event had in the UPSTREAM stream, set
+	// only for ingested records. It is a different number from Seq and they
+	// must not be conflated: ForeignSeq is the deduplication and gap-detection
+	// key (we cannot invent a missing one), while Seq is the local publication
+	// order. A pure originator has no ForeignSeq; a pure consumer discovers it
+	// needs Seq the moment it publishes anything.
+	ForeignSeq int64 `json:"foreign_seq,omitempty"`
+
 	// event fields
 	ID     string `json:"id,omitempty"`
 	Type   string `json:"type,omitempty"`
@@ -100,6 +125,41 @@ type record struct {
 
 	// snapshot field: the folded domain.State, verbatim.
 	State json.RawMessage `json:"state,omitempty"`
+}
+
+// Origin names which authority ordered a fact.
+//
+// This exists because a service can be BOTH an event producer and an event
+// consumer, and the two roles order facts differently:
+//
+//   - OriginRaised: this service decided the fact. It owns the order, and
+//     concurrent writers to one stream are a real conflict to resolve
+//     (optimistic append).
+//   - OriginIngested: someone else decided it and someone else ordered it.
+//     There is nothing to conflict with — but there ARE gaps, because a
+//     missing foreign event cannot be invented, only waited for.
+//
+// A service that is both keeps ONE log with both kinds interleaved, rather
+// than two logs. State depends on the order of ALL facts it folded, and two
+// logs cannot reproduce that interleaving without recording the merge order
+// somewhere -- which is a single log with extra steps. One log also gives the
+// relay one checkpoint and a downstream consumer one ordered stream.
+type Origin string
+
+const (
+	// OriginRaised marks a fact this service decided.
+	OriginRaised Origin = "raised"
+	// OriginIngested marks a fact received from an upstream authority.
+	OriginIngested Origin = "ingested"
+)
+
+// originOf defaults to raised, so records written before this field existed
+// read as facts of this service -- which they were.
+func (r record) originOf() Origin {
+	if r.Origin == "" {
+		return OriginRaised
+	}
+	return r.Origin
 }
 
 // kindOf reports what a decoded record is, defaulting to an event so that
@@ -123,6 +183,11 @@ type Log struct {
 	// enough to be worth collapsing. Kept here rather than in the caller
 	// because the log is the only thing that sees every append.
 	sinceSnapshot int
+	// nextSeq is the local position the next appended record will carry.
+	// Established at Open by reading the highest seq already on disk, so a
+	// restart never reuses a position -- reuse would make a relay checkpoint
+	// ambiguous about which record it had already published.
+	nextSeq int64
 }
 
 // Open opens (creating if necessary) the log file at path for appending.
@@ -132,8 +197,95 @@ func Open(path string) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("eventlog: open %s: %w", path, err)
 	}
-	return &Log{path: path, file: f}, nil
+	// Establish the next position from what is already on disk. This is one
+	// pass over the file, the same pass Recover makes at boot, and a snapshot
+	// bounds its length -- the cost snapshots exist to bound.
+	records, err := readRecords(path)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	var highest int64
+	for _, rec := range records {
+		if rec.Seq > highest {
+			highest = rec.Seq
+		}
+	}
+	return &Log{path: path, file: f, nextSeq: highest + 1}, nil
 }
+
+// ReadAfter returns up to limit records with a local position greater than
+// after, in position order, paired with their positions. It is the relay's
+// read surface: the event log IS the outbox, and this is how it is tailed.
+//
+// It is GAP-SAFE by construction, which is a property of this storage choice
+// and not of this code: a single writer appending to one file makes every
+// position visible in the order it was assigned, so a reader can never see
+// position N while N-1 is still in flight. A store whose writers commit
+// independently does NOT get this for free -- Postgres hands out sequence
+// numbers before commit, so a plain "WHERE seq > $1 ORDER BY seq" can return
+// 7 while 6 is uncommitted, and 6 is then skipped forever. Any replacement
+// store owes a proof of gap-safety before it is wired to a relay.
+func (l *Log) ReadAfter(_ context.Context, after int64, limit int) ([]SeqEvent, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("eventlog: non-positive ReadAfter limit %d", limit)
+	}
+	l.mu.Lock()
+	path := l.path
+	l.mu.Unlock()
+
+	records, err := readRecords(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SeqEvent, 0, limit)
+	for _, rec := range records {
+		if rec.kindOf() == kindSnapshot || rec.Seq <= after {
+			continue
+		}
+		out = append(out, SeqEvent{Seq: rec.Seq, Origin: rec.originOf(), ForeignSeq: rec.ForeignSeq, Event: eventFrom(rec)})
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// Head returns the highest local position committed (0 when empty).
+func (l *Log) Head(_ context.Context) (int64, error) {
+	l.mu.Lock()
+	path := l.path
+	next := l.nextSeq
+	l.mu.Unlock()
+	if next > 1 {
+		return next - 1, nil
+	}
+	records, err := readRecords(path)
+	if err != nil {
+		return 0, err
+	}
+	var highest int64
+	for _, rec := range records {
+		if rec.Seq > highest {
+			highest = rec.Seq
+		}
+	}
+	return highest, nil
+}
+
+// SeqEvent is one event with its local position and its provenance.
+type SeqEvent struct {
+	// Seq is the local publication order, assigned by this log.
+	Seq int64
+	// Origin says which authority ordered the fact.
+	Origin Origin
+	// ForeignSeq is the upstream position for ingested facts, 0 otherwise.
+	ForeignSeq int64
+	Event      domain.Event
+}
+
+// Position implements relay.Sequenced: the local publication order.
+func (s SeqEvent) Position() int64 { return s.Seq }
 
 // Close closes the underlying file and marks the log unwritable.
 //
@@ -159,17 +311,37 @@ func (l *Log) Close() error {
 // import of internal/platform by internal/app -- see that package's port
 // doc).
 func (l *Log) Append(event domain.Event) error {
+	return l.append(event, OriginRaised, 0)
+}
+
+// AppendIngested records a fact decided and ordered by an UPSTREAM authority,
+// carrying the position it had there.
+//
+// foreignSeq is kept separate from the local Seq on purpose. It is the
+// deduplication and gap-detection key: this service cannot invent a foreign
+// event it never received, so a hole in foreignSeq is a condition to block on,
+// whereas the local Seq is simply the order in which this log observed things
+// and never has holes. Collapsing the two loses exactly one of those meanings.
+func (l *Log) AppendIngested(event domain.Event, foreignSeq int64) error {
+	return l.append(event, OriginIngested, foreignSeq)
+}
+
+func (l *Log) append(event domain.Event, origin Origin, foreignSeq int64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.writeLocked(record{
 		SchemaVersion: SchemaVersion,
 		Kind:          kindEvent,
+		Seq:           l.nextSeq,
+		Origin:        origin,
+		ForeignSeq:    foreignSeq,
 		ID:            event.ID,
 		Type:          string(event.Type),
 		Amount:        event.Amount,
 	}); err != nil {
 		return err
 	}
+	l.nextSeq++
 	l.sinceSnapshot++
 	return nil
 }
@@ -204,9 +376,12 @@ func (l *Log) Snapshot(state domain.State) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// The snapshot records the position it COVERS, so compaction can drop
+	// everything at or below it and the surviving numbering is unchanged.
 	if err := l.writeLocked(record{
 		SchemaVersion: SchemaVersion,
 		Kind:          kindSnapshot,
+		Seq:           l.nextSeq - 1,
 		State:         raw,
 	}); err != nil {
 		return err
@@ -482,6 +657,14 @@ func readRecords(path string) ([]record, error) {
 		rec, err := decodeLine(line)
 		if err != nil {
 			return nil, fmt.Errorf("eventlog: replay %s line %d: %w", path, lineNo, err)
+		}
+		// Records written before schema 3 carry no position. Backfill the
+		// ordinal, which is stable for them precisely because the file has
+		// only ever been appended to: a pre-v3 log cannot have been compacted,
+		// since compaction is what writes v3. Once compaction runs it writes
+		// these positions explicitly, freezing the numbering from then on.
+		if rec.Seq == 0 {
+			rec.Seq = int64(lineNo)
 		}
 		records = append(records, rec)
 	}
