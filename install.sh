@@ -82,6 +82,46 @@ case "${1:-install}" in
     ;;
 esac
 
+# --- source consistency, BEFORE anything enters the trusted set -------------
+#
+# Ten of the eleven on-disk copies of the shared probe are symlinks into
+# _shared/ and cannot drift. The greenfield TEMPLATE's copy is a real file --
+# correctly so, because the template is COPIED OUT into a new repo and a
+# symlink would dangle the moment it left. That correctness is exactly what
+# lets it rot, and it did: it sat 186 lines behind _shared for long enough that
+# a commit added a `driven:` block to the template's production.yaml declaring
+# five mechanisms, while the template's own probe had no `mechanisms-driven`
+# row to read them. A repo born from prod-new therefore shipped a declaration
+# nothing verified -- the framework's own defect class, in the framework's own
+# scaffold.
+#
+# The mapping is spelled out rather than inferred from basenames. A clever
+# matcher that silently stops matching is the same vacuous gate this whole
+# standard exists to refuse.
+mirrors=(
+  "prod-new/template/scripts/verify-standard.sh:_shared/probes/verify-standard.sh"
+)
+drift=0
+for m in "${mirrors[@]}"; do
+  copy="$src/${m%%:*}"; orig="$src/${m##*:}"
+  if [[ ! -f "$copy" || ! -f "$orig" ]]; then
+    echo "install: mirror declared but missing on disk: ${m%%:*} <- ${m##*:}" >&2
+    drift=1; continue
+  fi
+  if ! cmp -s "$copy" "$orig"; then
+    echo "install: SOURCE DRIFT — ${m%%:*} differs from ${m##*:}" >&2
+    echo "         $(wc -l <"$copy" | tr -d ' ') lines vs $(wc -l <"$orig" | tr -d ' ')." \
+         "Installing would ratify a stale standard into the trusted set." >&2
+    echo "         Fix with:  cp '${m##*:}' '${m%%:*}'   then re-run." >&2
+    drift=1
+  fi
+done
+if (( drift )); then
+  echo "install: refusing to install with source drift (${#mirrors[@]} mirror(s) checked)" >&2
+  exit 1
+fi
+echo "source consistency: ${#mirrors[@]} mirrored file(s) match _shared"
+
 mkdir -p "$cfg/skills" "$cfg/agents"
 # The installed copy is left READ-ONLY at the end of this script, so make it
 # writable again before rewriting it. install.sh is the only legitimate writer:

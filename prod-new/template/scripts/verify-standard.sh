@@ -475,6 +475,9 @@ implemented_test() {
 # would be this file's oldest mistake for the fourth time -- and it would be
 # especially useless here, since the defect this checks for is present in code
 # that says "outbox" everywhere. The proving test has a specific shape: crash
+# between the state commit and the effect journal, recover, and assert the
+# effect is still delivered.
+#
 # implemented_row runs the shared "the spec names a test and the probe EXECUTES
 # it" check for one key, and emits a row under the given label. Every dimension
 # added after scalability uses this rather than copying the loop, because the
@@ -513,8 +516,6 @@ implemented_row() { # implemented_row <label> <spec-key> <extra-fail-hint>
   fi
 }
 
-# between the state commit and the effect journal, recover, and assert the
-# effect is still delivered.
 for k in effect_journal_outbox effect_journal_atomic reconciliation backup_restore_test; do
   if [[ -n "$(implemented_test "$k")" ]] || declined "$k"; then
     implemented_row "$k" "$k"
@@ -577,6 +578,35 @@ placeholder_value() {
     ""|todo|tbd|none|n/a|na|null|"-"|unknown|fixme|xxx) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# driven_symbol reads one entry from the spec's `driven:` block:
+#
+#   driven_symbol durable_outbox   ->  store.OpenDurable
+#
+# See the driven-mechanisms row for why this block exists and why it is
+# checked against a LINKED BINARY rather than against source.
+driven_symbol() {
+  awk -v key="$1" '
+    /^driven:/ { inblock=1; next }
+    inblock && /^[a-z_]+:/ { inblock=0 }
+    inblock {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
+    }
+  ' "$SPEC" 2>/dev/null
+}
+
+# driven_keys lists every key declared under `driven:`.
+driven_keys() {
+  awk '
+    /^driven:/ { inblock=1; next }
+    inblock && /^[a-z_]+:/ { inblock=0 }
+    inblock && /^[[:space:]]+[a-z_]+:/ {
+      line=$0; sub(/^[[:space:]]+/, "", line); sub(/:.*$/, "", line); print line
+    }
+  ' "$SPEC" 2>/dev/null
 }
 
 
@@ -722,6 +752,60 @@ if grep -rql "emitted-metrics\|spans.yaml" --include='*_test.go' . 2>/dev/null; 
   row "observability-contract-checked" PASS "a test compares emitted signals to the manifest"
 else row "observability-contract-checked" FAIL "manifest is documentation — nothing verifies it"; fi
 
+# Logs correlate, or they are a second system nobody can join to the first.
+#
+# In Go, `logger.Info(...)` DROPS the trace context: only the *Context variants
+# read it. A service can be fully traced, exporting to Tempo, with dashboards
+# and alerts, and still have zero correlated log lines -- and nothing fails,
+# because every individual piece works. The ratio is the only tell.
+#
+# Conditional on the repo actually using slog: a repo on another logger, or on
+# none, must not fail a row about slog. An absent denominator is NA, never PASS
+# -- "0 of 0 call sites are wrong" is the vacuous pass this framework exists to
+# refuse.
+if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
+  # The two counts are DISJOINT: `\.Info\(` requires the paren immediately
+  # after the name, so it does not match `.InfoContext(`. An earlier version
+  # of this row subtracted one from the other "to remove the overlap", which
+  # drove the plain count negative on a fully-compliant repo and reported NA
+  # -- a clean repo scoring as unmeasurable. Verified: `echo '.InfoContext('
+  # | grep -cE '\.(Info)\('` is 0.
+  #
+  # --exclude, NOT a piped `grep -v '_test.go'`. With -o the output is the
+  # match alone with no filename, so a downstream filename filter matches
+  # nothing and silently counts every test file. That mistake made this row
+  # report 80 call sites where the repo has 35, and flipped the handler row
+  # below from FAIL to PASS on a handler that only a test constructs.
+  # `\(([^)]|$)` -- NOT a bare `\(`. `err.Error()` is the error interface's
+  # own method, not a log call, and a bare paren counts every one of them: in
+  # the repo this row was built against, 7 of 15 `.Error(` hits were
+  # `err.Error()`. That inflated the denominator and made a healthy level
+  # distribution (7 error logs, 14 info, 11 warn) read as "more ERROR than
+  # everything else combined". The discriminator is arguments: a log call
+  # always has some, `err.Error()` never does. The `|$` arm keeps a call whose
+  # arguments start on the NEXT line from being dropped.
+  slog_plain=$(grep -rhoE '\.(Info|Warn|Error|Debug)\(([^)]|$)' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  slog_ctx=$(grep -rhoE '\.(Info|Warn|Error|Debug)Context\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  if (( slog_plain + slog_ctx == 0 )); then
+    row "observability:logs_correlate" NA "slog is imported but no log call sites found"
+  elif (( slog_ctx == 0 )); then
+    row "observability:logs_correlate" FAIL "$slog_plain log call site(s), NONE using the *Context variants -- the trace context is dropped, so no log line can be joined to its span no matter what the exporter is configured to do"
+  elif (( slog_plain > slog_ctx )); then
+    row "observability:logs_correlate" FAIL "$slog_plain of $(( slog_plain + slog_ctx )) log call sites drop the trace context (only $slog_ctx use *Context) -- partial correlation is worse than none, because the lines that DO correlate make the gap invisible"
+  else
+    row "observability:logs_correlate" PASS "$slog_ctx of $(( slog_plain + slog_ctx )) log call sites carry the trace context"
+  fi
+
+  # A structured handler must actually be INSTALLED. slog.Default() is a text
+  # handler writing to stderr; a repo can log diligently for months and emit
+  # nothing a log store can parse into fields.
+  if grep -rqE 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
+    row "observability:log_handler_installed" PASS "a slog handler is constructed, not left at the default"
+  else
+    row "observability:log_handler_installed" FAIL "no slog handler is constructed anywhere -- slog.Default() emits unstructured text to stderr, so every structured field is lost before it reaches a log store"
+  fi
+fi
+
 # THE probe that catches the no-op-port trap: wiring lives in the entrypoints
 # Look for the INJECTION SITE, not the identifier.
 #
@@ -756,13 +840,115 @@ if [[ "${tracer_sites:-0}" -gt 0 ]]; then
   # EXISTS; it cannot establish that it RUNS. Claiming "injected" was the defect
   # -- the row asserted more than it measured, which is the same failure it was
   # written to catch one level down.
-  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; only a contract test exercising the entrypoint proves it runs"
+  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; the mechanisms-driven row proves reachability properly, and this one is kept as the earlier, weaker signal"
 elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
   row "tracing-wired-in-prod" FAIL "cmd/ names a tracer but never passes or assigns it — constructed and discarded is a no-op in production"
 else
   grep -rql "StartSpan" --include='*.go' internal/ 2>/dev/null \
     && row "tracing-wired-in-prod" FAIL "spans instrumented but NO tracer in cmd/ — no-op in production" \
     || row "tracing-wired-in-prod" FAIL "no tracing at all"
+fi
+
+# --- 13b. mechanisms are DRIVEN, not merely present ------------------------
+#
+# The strongest pattern this framework has found, and the one it kept missing.
+# Four separate times, in a repo passing every other gate, a mechanism was
+# fully implemented, unit-tested green, and CALLED BY NOTHING:
+#
+#   * a tracer instrumented with a passing span-contract test, never
+#     constructed in cmd/ -- every span went nowhere;
+#   * operational counters implemented and tested, never wired into the
+#     metrics surface -- the series read 0 in production while the underlying
+#     value climbed, so a derived lag went NEGATIVE: a healthy-looking
+#     impossible number rather than a crash;
+#   * a durable outbox constructor, tested, absent from the composition root,
+#     which wired the in-memory form instead;
+#   * an outbox Reconcile with passing tests and no caller, so a journaled
+#     entry whose sink was down stayed pending for the life of the process.
+#
+# A mechanism nothing calls is indistinguishable from one that does not exist
+# -- except that it passes its own tests, so the suite reports it as covered.
+# That makes it WORSE than absent.
+#
+# HOW THIS IS PROBED, and why it is not another keyword grep. Every previous
+# attempt at this class of check read SOURCE, and source cannot answer it: a
+# grep for the constructor's name matches a comment, a discarded assignment, a
+# helper that is itself never called, and the mechanism's own tests. This row
+# reads the LINKED BINARY instead. Go's linker eliminates code unreachable
+# from main, so a symbol's PRESENCE in the shipped artifact is evidence that
+# production reaches it, and its absence is proof that nothing does.
+#
+# Verified empirically before this row was written: on the template,
+# `store.OpenDurable` resolved to 1 symbol while wired and 0 after the call
+# site was replaced with the in-memory constructor (the exact shape of defect
+# three), and `Outbox.Reconcile` -- which nothing calls -- was already absent.
+# A unit test cannot satisfy this check, because `go test` links a different
+# binary that this row never inspects.
+#
+# The first draft of this row also reported the template's TRACER as unwired,
+# which was wrong: the compiler had inlined the constructor. See the build
+# flags below. A row that cries wolf is a row somebody disables, so the false
+# positive mattered more than the true ones.
+#
+# THE LIMIT, stated because a gate that overclaims is the defect this file
+# exists to catch: the linker retains every method of an interface a program
+# actually uses, since dynamic dispatch could reach any of them. So a method
+# that is never called but belongs to a used interface WILL survive and this
+# row will pass it. Plain functions and methods outside any used interface are
+# eliminated precisely. That covers all four defects above; it is not a
+# universal reachability proof, and it is not claimed as one.
+if [[ -z "$(driven_keys)" ]]; then
+  row "mechanisms-driven" FAIL "no driven: block in $SPEC -- every mechanism the service declares must name the symbol that proves production reaches it, or nothing distinguishes an implemented mechanism from a dead one"
+else
+  driven_bin="${TMPDIR:-/tmp}/prod-driven-$$"
+  # Two build flags, both load-bearing.
+  #
+  # No -s/-w: this row needs the symbol table, which is exactly what those
+  # strip.
+  #
+  # -gcflags=all=-l disables INLINING, and without it this row reports false
+  # positives that would get it switched off within a week. A small function
+  # that production really does call can be inlined into its caller, and an
+  # inlined symbol is absent from the table in exactly the same way an
+  # eliminated one is -- nm cannot tell you which happened. Measured on the
+  # template: `observability.New` is called at cmd/.../main.go:49 and resolved
+  # to ZERO symbols with inlining on, and to three with it off, while
+  # `Outbox.Reconcile` -- which genuinely has no caller -- stayed at zero
+  # either way. Disabling inlining keeps the true positive and removes the
+  # false one.
+  if ! driven_build=$(go build -gcflags=all=-l -o "$driven_bin" ./cmd/... 2>&1); then
+    row "mechanisms-driven" FAIL "cannot build ./cmd/... so wiring is unprovable: $(grep -m1 -oE '[^ ]+\.go:[0-9]+:[0-9]+: .*' <<<"$driven_build" | cut -c1-100)"
+  else
+    driven_syms=$(go tool nm "$driven_bin" 2>/dev/null)
+    d_total=0; d_ok=0; d_missing=""
+    while IFS= read -r dk; do
+      [[ -n "$dk" ]] || continue
+      d_total=$((d_total+1))
+      dsym="$(driven_symbol "$dk")"
+      if [[ -z "$dsym" ]]; then
+        d_missing="${d_missing} ${dk}:no-symbol-declared"
+      # The symbol must END the nm line. A substring match is not enough and
+      # that is not hypothetical: it was caught by mutation here. Swapping a
+      # real tracer for `observability.NewNoop()` -- the exact shape of defect
+      # one -- left `observability.New` matching as a PREFIX of
+      # `observability.NewNoop`, so the row passed a service whose tracing had
+      # just been disabled. Anchoring to end-of-line makes New and NewNoop
+      # distinct symbols, which is what they are.
+      elif grep -qE "[ /.]$(printf '%s' "$dsym" | sed 's/[][\.*^$(){}?+|/]/\\&/g')\$" <<<"$driven_syms"; then
+        d_ok=$((d_ok+1))
+      else
+        d_missing="${d_missing} ${dk}(${dsym}):ELIMINATED-BY-LINKER"
+      fi
+    done < <(driven_keys)
+    rm -f "$driven_bin"
+    if (( d_total == 0 )); then
+      row "mechanisms-driven" FAIL "driven: block parsed to zero entries -- a check of nothing must never read as clean"
+    elif [[ -n "$d_missing" ]]; then
+      row "mechanisms-driven" FAIL "$((d_total-d_ok))/$d_total declared mechanism(s) are NOT reachable from main:${d_missing}"
+    else
+      row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- production reaches each"
+    fi
+  fi
 fi
 
 # --- 14. security: RUN the scanners ---------------------------------------
