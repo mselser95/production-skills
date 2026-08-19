@@ -9,7 +9,14 @@ import "testing"
 func FuzzDecodeRecord(f *testing.F) {
 	for _, seed := range []string{
 		`{"schema_version":1,"id":"e1","type":"deposited","amount":"10"}`,
-		`{"schema_version":2,"id":"e1","type":"deposited","amount":"10"}`,
+		`{"schema_version":2,"kind":"event","id":"e1","type":"deposited","amount":"10"}`,
+		`{"schema_version":2,"kind":"snapshot","state":{"Balance":"1.0","Applied":{"a":true},"Version":1}}`,
+		`{"schema_version":2,"kind":"snapshot","state":null}`,
+		`{"schema_version":2,"kind":"snapshot"}`,
+		`{"schema_version":2,"kind":"snapshot","state":"not an object"}`,
+		`{"schema_version":2,"kind":"","id":"e1","type":"deposited","amount":"10"}`,
+		`{"schema_version":2,"kind":"wat","id":"e1"}`,
+		`{"schema_version":3,"kind":"event"}`,
 		`{}`,
 		`not json at all`,
 		`{"schema_version":1}`,

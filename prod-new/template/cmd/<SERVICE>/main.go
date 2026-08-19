@@ -19,12 +19,14 @@ import (
 	"github.com/<OWNER>/<SERVICE>/internal/adapter/in/pprofhttp"
 	"github.com/<OWNER>/<SERVICE>/internal/adapter/out/store"
 	"github.com/<OWNER>/<SERVICE>/internal/app"
+	"github.com/<OWNER>/<SERVICE>/internal/domain"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/buildinfo"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/clock"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/config"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/eventlog"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/ids"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/observability"
+	"time"
 )
 
 func main() {
@@ -59,12 +61,27 @@ func run() error {
 	}
 	defer func() { _ = log.Close() }()
 
-	pastEvents, err := eventlog.Replay(cfg.EventLogPath)
+	// Recover, not Replay+Rebuild: recovery starts from the newest snapshot
+	// and folds only the events after it, so boot cost tracks
+	// history-since-snapshot rather than history-since-genesis.
+	initial, recovered, err := eventlog.Recover(cfg.EventLogPath)
 	if err != nil {
 		return err
 	}
-	initial := eventlog.Rebuild(pastEvents)
-	logger.Info("svc: replayed event log", "events", len(pastEvents), "balance", initial.Balance)
+	logger.Info("svc: recovered state",
+		"from_snapshot", recovered.SnapshotFound,
+		"events_replayed", recovered.EventsReplayed,
+		"records_scanned", recovered.RecordsScanned,
+		"balance", initial.Balance)
+	if recovered.SnapshotsRejected > 0 {
+		// A rejected snapshot is not fatal -- recovery fell back and the
+		// state is correct -- but it means boot just paid full-replay cost
+		// for a reason nobody asked about. Say so at ERROR so it cannot be
+		// mistaken for a normal start.
+		logger.Error("svc: snapshot rejected, recovered by full replay instead",
+			"rejected", recovered.SnapshotsRejected,
+			"events_replayed", recovered.EventsReplayed)
+	}
 
 	// -- outbox (external_effect adapter) ----------------------------------
 	outbox := store.NewOutbox(store.NewLogSink(logger), ids.Real{}.NewID, cfg.OutboxMaxAttempts)
@@ -114,10 +131,70 @@ func run() error {
 		logger.Info("svc: serving pprof", "addr", pprofLis.Addr().String())
 	}
 
+	// -- snapshot + compaction: what keeps boot and storage bounded --------
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		snapshotLoop(ctx, log, ledger.State, logger, 30*time.Second, eventlog.DefaultSnapshotEvery)
+	}()
+
 	<-ctx.Done()
 	logger.Info("svc: shutting down")
 	wg.Wait()
 	return nil
+}
+
+// snapshotLoop collapses the replay tail on a fixed cadence: once enough
+// events have accumulated it writes a snapshot, then compacts the log so the
+// history the snapshot subsumes stops occupying disk.
+//
+// Without this the service is correct and unboundedly slow to start -- boot
+// is O(every event ever recorded) and the log file never shrinks. Those two
+// grow together, so the failure arrives as a service that takes longer to
+// come back every time it restarts, which is exactly when it is least
+// affordable.
+//
+// Order matters and is the whole risk: the snapshot must be durable BEFORE
+// anything is discarded. Compact refuses to run without one for that reason,
+// so a failed snapshot degrades to "no reclaim this round" rather than to
+// lost history.
+// The interval and threshold are parameters rather than constants read
+// inside so a test can drive this loop in milliseconds instead of waiting
+// half a minute to learn whether it snapshots at all. A loop nothing can
+// exercise is a loop nobody knows runs.
+func snapshotLoop(
+	ctx context.Context,
+	log *eventlog.Log,
+	state func() domain.State,
+	logger *slog.Logger,
+	every time.Duration,
+	threshold int,
+) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if log.AppendsSinceSnapshot() < threshold {
+				continue
+			}
+			if err := log.Snapshot(state()); err != nil {
+				logger.Error("svc: snapshot failed; log keeps growing", "error", err)
+				continue
+			}
+			stats, err := log.Compact()
+			if err != nil {
+				// The snapshot IS durable at this point, so the next boot is
+				// already bounded. Only the disk reclaim failed.
+				logger.Error("svc: compaction failed; snapshot is durable, disk not reclaimed", "error", err)
+				continue
+			}
+			logger.Info("svc: snapshot + compaction",
+				"records_before", stats.RecordsBefore, "records_after", stats.RecordsAfter)
+		}
+	}
 }
 
 // adaptTracer bridges internal/platform/observability.Tracer (this

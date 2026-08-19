@@ -21,7 +21,7 @@
 # pieces (portAddr, adaptTracer) are tested directly; internal/e2e's
 # integration-tagged test exercises the same wiring pattern end to end
 # instead.
-cmd/<SERVICE> 11.00
+cmd/<SERVICE> 24.00
 
 internal/adapter/in/healthhttp 91.00
 internal/adapter/in/pprofhttp 80.00
@@ -38,7 +38,7 @@ internal/domain 88.00
 internal/platform/buildinfo 98.00
 internal/platform/clock 98.00
 internal/platform/config 92.00
-internal/platform/eventlog 82.00
+internal/platform/eventlog 83.00
 internal/platform/outboxlog 78.00
 internal/platform/ids 83.00
 internal/platform/observability 98.00
