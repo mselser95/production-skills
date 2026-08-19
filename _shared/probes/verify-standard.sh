@@ -856,6 +856,50 @@ else
     || row "tracing-wired-in-prod" FAIL "no tracing at all"
 fi
 
+# A span is not a trace. Spans that cannot be PARENTED are 3132 traces of one
+# span each, and every existing check passes on them.
+#
+# This was measured, not imagined. A repo with a correctly wired tracer, spans
+# reaching the backend with full fidelity, RecordError firing in production on
+# exactly the declared condition, and a green contract test, had:
+#
+#   tempo_distributor_spans_received_total  3132
+#   tempo_ingester_traces_created_total     3132
+#
+# One trace created per span received, process-wide. Nothing was joinable to
+# anything. A traceparent sent with a real request produced HTTP 404 for that
+# trace id -- the header was silently dropped.
+#
+# The tracing-wired row cannot see this: the tracer IS wired and IS reachable,
+# so it passes. mechanisms-driven cannot see it either, for the same reason.
+# The defect is SEMANTIC -- the same shape as a lag metric derived from work
+# done, which is correct only while nothing is wrong.
+#
+# What is mechanically checkable is the precondition: a service that starts
+# spans and also talks to anything else needs a propagator installed and
+# context injected on the way out, or a trace can never cross a process
+# boundary. Absence of all of it is proof; presence is only a signal, so the
+# PASS says so rather than claiming the traces are actually joined.
+# Span detection must cover BOTH shapes: a house abstraction named StartSpan,
+# and the raw OTel SDK's `tracer.Start(...)`. Matching only the first skipped
+# the whole row -- silently -- for any repo using the SDK directly, which is
+# the more common case. Caught by testing the row against a scratch module
+# that used the SDK and got no output at all.
+if grep -rqlE 'StartSpan|otel\.Tracer\(|TracerProvider|trace\.Tracer' \
+     --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
+  egress=$(grep -rlE 'http\.NewRequest|http\.Client|\.Publish\(|PublishMsg\(|grpc\.Dial|NewClient\(' \
+            --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  prop=$(grep -rlE 'SetTextMapPropagator|propagation\.|otelhttp|otelgrpc|traceparent|\.Inject\(|\.Extract\(' \
+            --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  if (( egress == 0 )); then
+    row "observability:trace_propagation" NA "spans are emitted but this service makes no outbound calls -- nothing to propagate to"
+  elif (( prop == 0 )); then
+    row "observability:trace_propagation" FAIL "spans are emitted and $egress file(s) make outbound calls, but NOTHING installs a propagator or injects trace context -- every span is a root, so the backend stores one trace per span and no request can be followed across a boundary"
+  else
+    row "observability:trace_propagation" PASS "$prop file(s) carry propagation machinery alongside $egress egress site(s) -- present, which is necessary; that traces are actually PARENTED is provable only by a test that asserts a child span's parent, or by reading the backend"
+  fi
+fi
+
 # --- 13b. mechanisms are DRIVEN, not merely present ------------------------
 #
 # The strongest pattern this framework has found, and the one it kept missing.

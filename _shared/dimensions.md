@@ -127,6 +127,35 @@ more — the only evidence that instrumentation REACHES production is a test tha
 exercises the entrypoint's own construction path, or the signal appearing in a
 real environment. Say which one you have.
 
+**A span is not a trace.** The question a tracing check must ask is not "are
+spans emitted" but "can two spans ever end up in the same trace". Measured on
+a service that passed every other tracing check — tracer wired, spans reaching
+the backend with full attribute fidelity, `RecordError` firing in production on
+exactly the declared condition, contract test green:
+
+    tempo_distributor_spans_received_total  3132
+    tempo_ingester_traces_created_total     3132
+
+One trace created per span received. Nothing joinable to anything. A
+`traceparent` sent with a real request produced a 404 for that trace id — no
+propagator was ever installed, so the global one was OTel's no-op and the
+header was silently discarded.
+
+Two rules, both cheap:
+
+- **Check the precondition mechanically**: a service that starts spans and
+  talks to anything else needs a propagator installed and context injected
+  outbound, or a trace can never cross a process boundary. Absence of all of
+  it is proof of the defect; presence is only necessary, so do not let the
+  check claim more.
+- **Guard the fix, not just the bug.** The specific defect that produces this
+  — an adapter that calls `StartSpan(ctx, …)` and DISCARDS the returned
+  context — was found, fixed, and then re-introduced verbatim in an audit with
+  the full suite still green, because the test that nominally guarded it also
+  discarded the context it was testing. A test that asserts a span's NAME and
+  attributes proves nothing about propagation. Assert that the returned context
+  CONTAINS the span, and that a child's parent is the expected span.
+
 **Logs are a signal with a contract, not a debug afterthought.** Three things
 recur, and all three are invisible to a passing test suite:
 
