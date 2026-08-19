@@ -21,7 +21,9 @@ description: >
 
 # prod-bootstrap — bring a repo to standard
 
-Read `references/preamble.md` first. Outputs use
+Read `references/preamble.md` first, and `references/mechanism-derivation.md`
+before Phase 1b (which mechanisms this service warrants — the inventory shows
+what it HAS, the derivation says what it should have). Outputs use
 `references/resolved-context.md` conventions for the spec fields and
 `references/change-plan.md` for the refactor plan. Registry and path names
 come from `config.sh`.
@@ -97,10 +99,28 @@ Before formulating a single question, resolve from the policy files:
   denominator; the author never supplies scenario lists);
 - which dimensions need a gap row and which need a human answer →
   `references/dimensions.md`;
+- **which architectural mechanisms this service warrants** →
+  `references/mechanism-derivation.md`, run against the Phase-1 INVENTORY
+  rather than a purpose line, since the code already shows what exists;
 - the cheap-gate and presubmit commands → read the repo's build files;
   propose, don't ask.
 Anything still unresolved after this step is either a Phase-2 semantic
 question or a Phase-1 inventory gap you must go back and fill.
+
+**The derivation produces two lists here, and they are worth more than either
+alone.** Brownfield is the only place both are visible:
+
+- **warranted but ABSENT** — real gaps. Each becomes a gap-report row in Phase
+  4 and a plan task in Phase 5, like any other unmet obligation.
+- **PRESENT but not warranted** — ceremony the repo is already paying for: an
+  outbox nothing external needs, an event log over state that is just arbitrary
+  writes. Report these as PROPOSALS with the property that produced them, never
+  as automatic removal tasks. Deleting working machinery is a bigger decision
+  than adding some, the repo may know something the derivation does not, and
+  preamble §3 keeps you out of existing code regardless.
+
+Both lists carry the property that decided them, so a reader can disagree with
+the reasoning rather than just the conclusion.
 
 ### Phase 2 — ONE batched confirmation (proposal-first)
 Present a single message containing your PROPOSAL for each item below, each
@@ -121,7 +141,12 @@ already holds.
    never writes `verification/ratified/`).
 4. **Declines** — anything the inventory suggests is N/A for this system
    (e.g. reconciliation where no durable state exists), each with the
-   rationale that will be recorded in `out_of_scope`.
+   rationale that will be recorded in `out_of_scope`. Where a decline comes
+   from Phase 1b's derivation, quote the PROPERTY that produced it rather than
+   restating the conclusion: "no outbox — every declared capability is
+   source_of_truth or external_read, so nothing leaves this process that a
+   crash could lose" is a decline a future reader can check against the
+   capability list. "No outbox — N/A" is one they can only trust.
 Everything else — coverage numbers, mutation policy, fuzz requirements,
 scenario lists, benchmark policy, security gates, delivery/runbook
 requirements — is DERIVED and merely REPORTED in the gap report. Do not ask.

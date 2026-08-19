@@ -4,14 +4,17 @@ description: >
   Greenfield: create a NEW service repo that is born at the standard instead of
   retrofitted to it. Scaffolds the three architectural zones (pure decision
   core / durable orchestration / shell), with tracing, metrics, an
-  observability contract, event-sourced replay, injected clock+random+IDs, the
-  outbox pattern on external effects, invariant counters, liability registries
-  with expiry enforcement, conformance kits per capability class, and every
-  GATE wired into CI and the Makefile from the first commit — so the easiest
-  code to write in the repo is already the compliant code. Derives every
-  threshold from the org tier policy and asks ONLY the handful of things it
-  cannot: what the service does, its tier, its boundaries, and what must never
-  happen. Ends with the standard's own probe green on an empty service.
+  observability contract, injected clock+random+IDs, invariant counters, the
+  replay corpus, liability registries with expiry enforcement, conformance kits
+  per capability class, and every GATE wired into CI and the Makefile from the
+  first commit — so the easiest code to write in the repo is already the
+  compliant code. DERIVES which architectural machinery this service actually
+  needs (event log, inbox, outbox, snapshots, reconciliation) from what it does
+  and what it owns, so a CRUD service does not inherit a journal it will never
+  replay. Derives every threshold from the org tier policy and asks ONLY the
+  handful of things it cannot: what the service does, its tier, its boundaries,
+  and what must never happen. Ends with the standard's own probe green on an
+  empty service.
   TRIGGER when: a new service or repo is being created ("new service", "start
   a repo for X", "bootstrap a greenfield service", "scaffold a new Go service
   at the standard", "armemos el repo nuevo de X").
@@ -25,8 +28,9 @@ description: >
 
 Read `references/preamble.md` first, then `references/tier-policy.yaml` (every
 threshold and class checklist), `references/dimensions.md` (the completeness
-list) and `references/verification-probes.md` (verify the effect, never the
-report).
+list), `references/mechanism-derivation.md` (which machinery this service
+actually needs) and `references/verification-probes.md` (verify the effect,
+never the report).
 
 The thesis this skill exists to serve: **retrofitting the standard costs
 weeks; being born with it costs an afternoon.** Everything the brownfield path
@@ -53,11 +57,24 @@ a starting point to grow into it.
   batched message with your proposal pre-filled for each (see Phase 1). Never
   an interrogation, never a question whose answer you can derive.
 - **RULE BORN-COMPLETE:** the scaffold ships tracing, metrics, the
-  observability contract, replay/event-sourcing, invariant counters, the
-  outbox, conformance kits, registries + expiry gate, and all lanes wired. A
-  dimension the service genuinely cannot have yet (no durable state ⇒ no
-  reconciliation) is a **ratified decline recorded in the spec**, never an
-  omission.
+  observability contract, invariant counters, conformance kits, the replay
+  corpus, registries + expiry gate, and all lanes wired. A dimension the
+  service genuinely cannot have yet is a **ratified decline recorded in the
+  spec**, never an omission.
+- **RULE DERIVED-MECHANISMS:** the ARCHITECTURAL machinery — event log,
+  inbox/dedup, outbox, snapshots, reconciliation — is not shipped
+  unconditionally. It is DERIVED from the Phase-1 answers per
+  `references/mechanism-derivation.md`, and a mechanism derived NOT WARRANTED
+  is left out with its deriving property recorded in `out_of_scope`.
+
+  **The mechanism is derived; the dimension is not.** Declining the event log
+  does not decline `bounded_boot` — that question is still owed and still
+  probed, just answered differently ("boot loads nothing; state lives in
+  Postgres"). This is the distinction that keeps the rule honest: a CRUD
+  service should not inherit a journal, a watermark and a compaction loop it
+  will never run, because a scaffold that ships an event log to a CRUD service
+  teaches that event logs are the standard. They are not. The standard is
+  knowing whether you need one.
 - **RULE EMPTY-BUT-REAL:** the scaffold's example capability, invariant,
   fixture, kit and span are REAL and exercised by the gates, not TODOs. A
   scaffold whose tests pass because they assert nothing teaches the opposite
@@ -102,7 +119,27 @@ stateless transform ⇒ no) and the latency budget's implication (a sub-ms hot
 path keeps the shell's own recovery protocol rather than routing through a
 durable engine).
 
-## Phase 2 — Scaffold (the whole machine)
+## Phase 1b — Derive the mechanism set (no new questions)
+
+Run `references/mechanism-derivation.md` against the four answers. It takes the
+purpose line, what the service OWNS, and the declared capability classes, and
+returns per mechanism `warranted` / `not warranted` / `needs one more
+question` — **each naming the property that decided it.**
+
+This is machinery for deriving MORE from the same four answers, never a fifth
+question. The single verdict that may reach the human is `needs one more
+question`, and it rides inside the Phase-1 batched message rather than
+becoming another round trip.
+
+Present the verdicts WITH their properties. A verdict is a proposal: the human
+may overturn any of them, and an override is recorded with THEIR reason, not
+yours. If several services in a row overturn the same verdict, the property
+that produced it is wrong — fix it in the reference, not with a special case
+here.
+
+Phase 2 then scaffolds the derived set, not the full one.
+
+## Phase 2 — Scaffold (the derived machine)
 
 Copy `template/` and instantiate every `<slot>` from the answers. What ships:
 
@@ -122,26 +159,18 @@ in the core; and, ALWAYS, the `regressions/` replay corpus harness that drives
 fixtures through the real decode→core→serve path asserting invariants at every
 transition.
 
-Do not assume the event LOG applies. Whether it does is DERIVED from observable
-properties of the workload, and asked only where the derivation is genuinely
-ambiguous. Durable state is not the test — a CRUD service has durable state and
-wants no event log:
+Do not assume the event LOG applies — it is one of the derived mechanisms, and
+`references/mechanism-derivation.md` §1 holds the four properties that decide
+it. Durable state is not the test: a CRUD service has durable state and wants
+no event log. When it does not apply, that is a RATIFIED DECLINE with its
+deriving property in the spec's `out_of_scope`, never a silence.
 
-- Is the state a function of an ORDERED STREAM of inputs, or of arbitrary
-  writes? A fold over a stream is what an event log models; "whatever the last
-  writer said" is not.
-- Does the history have value of its own — audit, replay, reconstruction — or
-  does only the latest value matter?
-- Is there an external source that already owns the ordering (an upstream feed
-  with monotonic ids, a broker's partition offsets), or would this service have
-  to invent an order to have one?
-- Does any declared obligation require reproducing a PAST decision — an
-  incident replay, a dispute, a regulator?
-
-Two or more yes-es and the log earns its cost; mostly no-es and it is ceremony,
-because every write then pays journal + replay for a history nobody reads.
-When it does not apply, that is a RATIFIED DECLINE with its reason in the
-spec's `out_of_scope`, never a silence.
+The mechanisms that travel WITH the log are derived from it and recorded the
+same way: snapshots + compaction (§4) exist to bound a replay, so no log means
+nothing to snapshot; and the outbox's durability STRATEGY (§3) changes shape
+entirely — with a log the outbox can be a projection plus a delivery watermark,
+without one the outbox record is the only evidence the intent ever existed and
+must be atomic with the state change it accompanies.
 
 **The corpus is not derived — only the log is.** `regressions/` stays required
 either way: it is fixtures driven through the real path asserting invariants,
@@ -149,9 +178,15 @@ which is valuable whether or not those fixtures came from a durable log. A
 repo that declines event sourcing still owes its regression corpus, and the
 probe must not let one excuse the other.
 
-**Effects** — the outbox: intent is journaled before any external effect, and
-the recovery function is table-driven over the full "journal says X, world
-says Y" matrix. Idempotency keys are generated INSIDE the retry closure.
+**Effects** — the outbox, WHEN derived (§3: warranted only if this service
+causes effects outside itself that must not be lost; a service whose every
+capability is `source_of_truth` or `external_read` writes nowhere a crash could
+lose it, and "we write to our own database" is not an external effect). Where
+it applies: intent is journaled before any external effect, and the recovery
+function is table-driven over the full "journal says X, world says Y" matrix.
+The idempotency key is minted per ENTRY and persisted with it — not per
+`Publish` invocation, or every recovery pass presents a fresh key and defeats
+the deduplication the key exists for.
 
 **Observability** — a tracing port with a no-op default plus a structured-log
 adapter (no library dependency), spans on every declared critical transition,
@@ -235,10 +270,16 @@ from `references/agents-template.md`, `CODEOWNERS` with a real owner,
    template shipped: a record naming another commit, produced by an older
    probe with different row names, is a green attestation for a state this
    repo was never in.
-5. Report: the four answers as ratified, what was declined and why, what was
-   ratified vs left CANDIDATE, the probe table, and the ONE command the next engineer runs to add their first
+5. Report: the four answers as ratified, **the mechanism derivation — every
+   verdict with the property that produced it, including the NOT-WARRANTED
+   ones** — what was declined and why, what was ratified vs left CANDIDATE, the
+   probe table, and the ONE command the next engineer runs to add their first
    feature (`prod-spec`). Nothing else should be left for the human to
    remember.
+
+   Report the not-warranted verdicts as prominently as the warranted ones. A
+   reader who finds no outbox six months from now will otherwise assume it was
+   forgotten, and either add one nothing needs or distrust the whole scaffold.
 
 ## Guardrails
 
