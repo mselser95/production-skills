@@ -141,7 +141,50 @@ Phase 2 then scaffolds the derived set, not the full one.
 
 ## Phase 2 — Scaffold (the derived machine)
 
-Copy `template/` and instantiate every `<slot>` from the answers. What ships:
+Run the derivation FIRST (`references/mechanism-derivation.md`), then scaffold
+the set it returns. The four Phase-1 answers are its whole input; it is not a
+fifth question.
+
+**How a partial scaffold is produced, in order.** Two agents following this
+must land on the same tree, so the order is fixed and each step is checkable:
+
+1. Copy `template/` whole and instantiate every `<slot>`. Start from the full
+   tree even when the derivation trimmed it — removing from a working scaffold
+   is checkable, and assembling one from parts is not.
+2. For each mechanism the derivation returned `not warranted`, apply its
+   removal shape — and for the event log, note that the ROLE decides what
+   comes out even when the log itself stays. The derivation reference's "What removal actually costs"
+   table says which of three shapes each mechanism has —
+   **package + wiring**, **wiring only**, or **declaration only** — and the
+   nine-item debris list says what a package-shaped removal leaves behind.
+   Items 7 and 8 of that list are the ones that bite: a stale line in
+   `scripts/coverage-floors.txt` fails the ratchet as if coverage had
+   regressed, and the `Makefile`'s `Fuzz*` and e2e name-guards fail loudly
+   for a target that is deliberately gone.
+3. Record every verdict in `production.yaml` — warranted ones as capability
+   entries, not-warranted ones under `out_of_scope` with the DERIVING
+   PROPERTY as the reason, never a bare "not needed".
+4. Run `make verify-standard`. A correctly trimmed scaffold reaches FAIL 0
+   through NA rows, because the probe reads those declines. If a row FAILs
+   instead of going NA, the decline is missing or misspelled — fix the spec,
+   never the probe.
+
+**How a reviewer tells whether this was followed.** Three checks, none of
+which requires re-deriving anything: every `out_of_scope` entry names a
+property rather than a preference; no absent mechanism is still named in
+`coverage-floors.txt` or the `Makefile` guards; and the probe's report shows
+NA where the spec declines rather than a shorter report with rows missing.
+
+**When the derivation and the template disagree, say so and stop.** The
+template's example domain is a fold (`Apply(state, event)`) and its app layer
+journals before applying — so the event log is not a package the example uses,
+it is the example's shape across three layers. A service the derivation says
+is not event-sourced therefore cannot be scaffolded by omission today: you
+would produce a broken event-sourced skeleton, not a CRUD one. The derivation
+reference states this blocker and its scope. Tell the human plainly rather
+than shipping a broken tree or silently shipping the full one.
+
+What ships, for the mechanisms that survive derivation:
 
 **Zones** — `internal/domain` (pure: no I/O, no clock, no random, no
 goroutines), `internal/app` (orchestration over ports; state transitions with
@@ -159,10 +202,21 @@ in the core; and, ALWAYS, the `regressions/` replay corpus harness that drives
 fixtures through the real decode→core→serve path asserting invariants at every
 transition.
 
-Do not assume the event LOG applies — it is one of the derived mechanisms, and
-`references/mechanism-derivation.md` §1 holds the four properties that decide
-it. Durable state is not the test: a CRUD service has durable state and wants
-no event log. When it does not apply, that is a RATIFIED DECLINE with its
+Do not assume the event LOG applies, and do not treat it as a yes/no — §1 of
+`references/mechanism-derivation.md` returns a ROLE: `produce`, `consume`,
+`both`, or `none`. Durable state is not the test (a CRUD service has durable
+state and wants no event log), and neither is "event sourced" on its own: the
+role decides which machinery ships. A consumer gets a cursor and a gap guard
+and NO optimistic concurrency, because it never assigns a sequence and so has
+nothing to conflict with; a producer gets the version check and no gap guard,
+because it cannot receive a hole in a sequence it assigns itself. Scaffolding
+one role's machinery for the other yields a guard that can never fire, which
+is the hardest kind of dead code to notice.
+
+`both` is the ordinary case, not an exotic one — this template's own
+downstream service ingests an upstream feed and originates trades. When the
+role is `both`, §1's one-log-or-two question goes into the Phase-1 batched
+message and its answer into the spec. When it does not apply, that is a RATIFIED DECLINE with its
 deriving property in the spec's `out_of_scope`, never a silence.
 
 The mechanisms that travel WITH the log are derived from it and recorded the

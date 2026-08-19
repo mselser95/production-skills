@@ -122,6 +122,23 @@ alone.** Brownfield is the only place both are visible:
 Both lists carry the property that decided them, so a reader can disagree with
 the reasoning rather than just the conclusion.
 
+**If a removal proposal is ever accepted, price it honestly.** The derivation
+reference's "What removal actually costs" section classifies each mechanism as
+**package + wiring**, **wiring only**, or **declaration only**, and lists the
+nine kinds of debris a package-shaped removal leaves — including the two that
+fail LATER and blame something else: a stale line in the coverage floors reads
+as a coverage regression, and a `Makefile` name-guard fails loudly for a fuzz
+or e2e target that is deliberately gone. A removal task that stops at deleting
+the directory produces a red repo whose redness points somewhere useless.
+
+**Brownfield is where package-shaped removal is actually executable**, and it
+is worth knowing why. `prod-new` cannot yet scaffold a non-event-sourced
+service by omission, because the template's own example IS a fold across three
+layers. Here there is no template example — the repo's domain is whatever it
+already is — so the mechanism really is separable from it. That asymmetry is
+recorded in the derivation reference; do not carry `prod-new`'s blocker over
+to a repo it does not apply to.
+
 ### Phase 2 — ONE batched confirmation (proposal-first)
 Present a single message containing your PROPOSAL for each item below, each
 with its evidence, phrased so that "yes/dale" completes it. Never a
