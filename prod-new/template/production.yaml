@@ -38,6 +38,7 @@ capabilities:
       idempotency_key_stable_across_publish_invocations: TestOutbox_IdempotencyKeyIsStableAcrossPublishInvocations (the key belongs to the ENTRY, so a Reconcile pass re-delivers under the SAME key rather than re-keying)
       max_attempts_never_retries_forever: TestOutbox_Publish_ExhaustsMaxAttemptsAndMarksFailed
       reconciliation_resumes_pending_entries: TestOutbox_Reconcile_ResumesPendingEntries
+      stalled_delivery_drains_without_intervention: ./cmd/<SERVICE> TestRun_DrainsAStalledOutboxEntryWithNobodyCallingReconcile (the composition root drives Reconcile on a ticker plus a boot wake-up; the mechanism above is what it drives)
       conformance_kit: TestOutbox_PassesExternalEffectConformanceKit (verification/conformance.ExternalEffectKit)
     assumed:
       fsync_reaches_stable_storage:
@@ -118,7 +119,17 @@ driven:
   durable_outbox: store.OpenDurable
   event_log: eventlog.Open
   snapshots: eventlog.(*Log).Snapshot
-  outbox_reconcile: store.(*Outbox).Reconcile
+  # outbox_reconcile names the LOOP in package main, not Outbox.Reconcile
+  # itself, and the difference is the whole value of this row. *Outbox is
+  # converted to healthhttp.OutboxHealth, and the linker retains EVERY method
+  # of a type that reaches an interface -- measured on this template:
+  # `go tool nm` resolved store.(*Outbox).Reconcile while nothing on earth
+  # called it, so this row passed the exact defect it exists to catch.
+  # main.reconcileLoop belongs to no interface, so deleting the goroutine that
+  # starts it eliminates the symbol and reds this row. Match it with grep -F:
+  # the method name it replaced is full of regex metacharacters, and a plain
+  # grep -E reports a false ABSENCE for it.
+  outbox_reconcile: main.reconcileLoop
   tracing: observability.New
 
 out_of_scope:
@@ -209,16 +220,20 @@ scalability:
 # Dimension 8 asks whether a failure is VISIBLE; this asks whether the system
 # comes BACK, and within what bound.
 auto_recovery:
-  # The boot path is the scaffold's genuinely self-recovering surface, and it
-  # is wired: a corrupt or unreadable snapshot does not fail the start and does
-  # not silently restart from genesis pretending nothing happened -- it falls
-  # back to full replay and says so. That is recovery without intervention, on
-  # a path that always runs, which is why it is what this claims rather than
-  # some mechanism that merely has a test.
+  # Two surfaces recover unaided, and they answer different questions.
   #
-  # Stated as the BOOT bound deliberately. It is not a blanket claim that every
-  # failure mode in this scaffold self-heals -- see the honest gap recorded in
-  # registries/contract-debt.yaml about the outbox's drain.
+  # BOOT: a corrupt or unreadable snapshot does not fail the start and does not
+  # silently restart from genesis pretending nothing happened -- it falls back
+  # to full replay and says so (internal/platform/eventlog
+  # TestRecover_CorruptSnapshotFallsBackToFullReplayAndSaysSo, still green).
+  #
+  # STEADY STATE: a delivery the sink refused is retried until it lands.
+  # cmd/<SERVICE>'s reconcileLoop drains the outbox on a 10s floor plus a
+  # boot wake-up, so a stalled entry gets at least two attempts inside the
+  # bound below. This is what implemented.self_recovery now names, because the
+  # boot claim -- true, and proven -- could never have caught the gap that was
+  # actually here: Reconcile was implemented, tested, and called from nowhere,
+  # so the scaffold DETECTED a delivery failure and never returned from one.
   recovery_bound: 30s
 
 # Data lifecycle (dimension 15).
@@ -257,5 +272,16 @@ gates:
 # optimistically -- before the test exists -- reports as decayed evidence
 # rather than as progress. Add the entry when the test does.
 implemented:
-  self_recovery: ./internal/platform/eventlog TestRecover_CorruptSnapshotFallsBackToFullReplayAndSaysSo
+  # Was the boot path (eventlog's TestRecover_CorruptSnapshotFallsBackToFull
+  # ReplayAndSaysSo, still green and still the reason boot self-heals). It is
+  # replaced here because that test proves recovery on a path that runs ONCE,
+  # and the dimension asks whether a failure detected in STEADY STATE is
+  # returned from. This one induces the real thing -- a delivery the sink
+  # refused -- boots the actual composition root, and asserts the entry drains
+  # with nobody calling Reconcile.
+  self_recovery: ./cmd/<SERVICE> TestRun_DrainsAStalledOutboxEntryWithNobodyCallingReconcile
+  # Upgraded from the probe's keyword fallback: `reconciliation` used to pass
+  # on a grep for "reconcil" in any .go file, which every version of this repo
+  # satisfied including the ones where nothing ran it.
+  reconciliation: ./cmd/<SERVICE> TestReconcileLoop_RetriesAStalledEntryUntilTheSinkRecovers
   effect_journal_outbox: ./internal/adapter/out/store TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey

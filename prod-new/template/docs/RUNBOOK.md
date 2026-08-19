@@ -41,16 +41,31 @@ suspect is `domain.Apply`'s idempotency guard
 
 ## Outbox entries stuck in `intent`/`failed`
 
-The outbox (`internal/adapter/out/store`) has no background sweep wired
-into `cmd/<SERVICE>` yet in this scaffold — `Outbox.Reconcile(ctx)` exists and is
-tested (`internal/adapter/out/store/outbox_test.go`,
-`conformance_kit_test.go`'s `crash_between_decision_and_effect` scenario)
-but nothing calls it on a timer. A real deployment should wire a periodic
-`Reconcile` call (or a dedicated sweep endpoint) before depending on outbox
-recovery in production; until then, a stuck entry is only resumed by a
-manual `Reconcile` call from an operator context (e.g. a one-off debug
-binary or REPL that constructs the same `Outbox` against the running pod's
-in-memory state — not currently exposed over HTTP by this scaffold).
+`cmd/<SERVICE>` runs `reconcileLoop`, which drives `Outbox.Reconcile(ctx)`
+on two triggers: a **10s ticker** (`outboxReconcileInterval`) and a
+**wake-up** signalled once at boot, after the outbox has replayed its journal
+and the event log has been re-derived into it. So an entry left behind by a
+sink outage is retried without anyone doing anything, and one left behind by
+a crash is retried in milliseconds rather than after a full interval.
+
+**What that means at 3am.** A single stuck entry is expected to clear itself.
+An entry stuck for MINUTES means the sink is still refusing it, not that
+nothing is trying: look for `svc: outbox reconciled` lines with a non-zero
+`still_down`, which is the loop reporting that it attempted and failed.
+`svc_outbox_oldest_pending_age_seconds` climbing steadily is the same
+statement as a gauge.
+
+1. Confirm the loop is alive: `svc: outbox reconciled` should appear whenever
+   anything is pending. Total silence with `svc_outbox_pending_entries > 0`
+   means the goroutine is gone — that is a code defect, and
+   `production.yaml`'s `driven: outbox_reconcile` row (`main.reconcileLoop`)
+   is what fails the build when it is.
+2. Investigate the SINK, since the loop has already ruled itself out.
+3. `svc_outbox_dead_lettered_total > 0` is a different and worse problem: the
+   bounds evicted an entry, and `Reconcile` deliberately ignores dead-lettered
+   entries so an eviction is not undone by the very loop that could not
+   deliver it. Those need `Outbox.Requeue` — an explicit operator decision,
+   not currently exposed over HTTP by this scaffold.
 
 ## Rolling back a bad deploy
 

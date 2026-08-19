@@ -13,15 +13,22 @@
 # with a reason in the commit message (a genuine, reviewed regression),
 # never to silence a failing gate.
 
-# cmd/<SERVICE> note: low by design, like every cmd/* composition root in this
-# framework -- run()'s body is process-wiring glue (listener setup, signal
-# handling, graceful shutdown) that is 0%-coverable without either an
-# actual running process or padding tests against main() itself (coverage
-# theater the standard forbids). The two EXTRACTABLE, meaningfully-testable
-# pieces (portAddr, adaptTracer) are tested directly; internal/e2e's
-# integration-tagged test exercises the same wiring pattern end to end
-# instead.
-cmd/<SERVICE> 24.00
+# cmd/<SERVICE> was 24.00, on the argument that run()'s body is
+# process-wiring glue "0%-coverable without an actual running process". That
+# argument was true and the conclusion drawn from it was wrong: a composition
+# root nothing runs is exactly where a mechanism gets implemented, tested and
+# never injected, which is what happened to Outbox.Reconcile. The floor is
+# now 72.00 because TestRun_DrainsAStalledOutboxEntryWithNobodyCallingReconcile
+# BOOTS run() for real -- measured 74.67, minus the 2.7 points of headroom this
+# file's header prescribes.
+#
+# What this floor buys, beyond a number: deleting that test drops the package
+# to a MEASURED 22.67% and reds this gate twice over -- the ratchet here, and
+# the 85% global floor, which the same deletion takes to 83.8%. The wiring
+# proof cannot be quietly removed. A generated service whose run() is larger
+# than the scaffold's raises or lowers this line deliberately, with the reason
+# in the commit message -- never to silence it.
+cmd/<SERVICE> 72.00
 
 internal/adapter/in/healthhttp 91.00
 internal/adapter/in/pprofhttp 80.00

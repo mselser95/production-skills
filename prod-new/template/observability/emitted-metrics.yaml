@@ -78,6 +78,13 @@
     sink outage and says nothing on its own -- what matters is whether it
     DRAINS. Alert on svc_outbox_oldest_pending_age_seconds instead; a count
     that climbs and falls is the pattern working.
+    What makes the drain real, and is worth knowing before trusting this
+    series: cmd/<SERVICE>'s reconcileLoop drives Outbox.Reconcile on a 10s
+    floor plus a boot wake-up. Before that loop existed the advice above was
+    aspirational -- nothing drained, so a non-zero count was permanent and any
+    alert on the age series fired forever. production.yaml's
+    `driven: outbox_reconcile` row is what keeps the loop from disappearing
+    again.
 
 - name: svc_outbox_oldest_pending_age_seconds
   type: gauge

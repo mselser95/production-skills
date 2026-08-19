@@ -44,35 +44,3 @@ entries:
       part, exactly as it is for a snapshot, and getting it backwards loses
       intents irrecoverably. Recorded rather than improvised: a compaction
       that races its own writer is worse than an oversized file.
-
-  - id: outbox-reconcile-never-driven
-    owner: "@mselser95"
-    created: 2026-08-19
-    expires: 2026-11-17
-    evidence: >
-      The outbox's recovery half is never invoked by the running service.
-      Outbox.Reconcile exists, is exercised by
-      TestOutbox_Reconcile_ResumesPendingEntries and
-      TestOutbox_Reconcile_ReportsEntriesItCouldNotDeliver, and is called from
-      NOWHERE in production code -- `grep -rn '\.Reconcile(' --include='*.go'`
-      outside tests returns nothing. The composition root wires a snapshotLoop
-      and no reconcile loop.
-      Consequence: an entry journaled while the sink is unavailable stays
-      pending for the life of the process. Publish is attempted once, inline,
-      at Journal time; when it fails there is nothing that ever tries again.
-      The bounds added by the egress-backpressure work stop that from growing
-      without limit, so the failure mode is now "the effect is dead-lettered
-      and never delivered" rather than "the process grows until the disk is
-      full" -- which is better, and still a lost effect.
-      This is the same defect class the tracing-wired-in-prod row exists to
-      catch: a mechanism that is implemented, tested, and never injected. The
-      tests prove the mechanism; only the composition root proves it RUNS, and
-      a test suite cannot tell the difference.
-      Found by dimension 13 (bounded auto-recovery) on its first run against
-      this template, which is the dimension working: the scaffold detects a
-      delivery failure and never returns from it.
-      Retire by driving Reconcile on a timer in cmd/<SERVICE> -- with a
-      wake-up signal so a healthy path stays prompt -- and by naming the test
-      that proves a stalled entry drains without intervention under
-      implemented.self_recovery, replacing the boot-path claim recorded there
-      today.

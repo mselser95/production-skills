@@ -161,6 +161,11 @@ func run(ctx context.Context) error {
 	}
 	defer func() { _ = outbox.Close() }()
 
+	// The wake-up half of the outbox's recovery. Created BEFORE anything can
+	// journal, so no signal can be raised against a channel that does not
+	// exist yet.
+	wake, notifyPending := newPendingWake()
+
 	// Close the window between the state commit and the effect journal.
 	//
 	// process() appends the event, commits the state, unlocks, and only THEN
@@ -181,6 +186,16 @@ func run(ctx context.Context) error {
 			"effects", rebuilt,
 			"cause", "crash between the state commit and the effect journal")
 	}
+
+	// Drain NOW, not one tick from now.
+	//
+	// Unconditional, and deliberately not `if rebuilt > 0`. The outbox can
+	// boot holding pending work from either of two independent sources: the
+	// reconstruction just above, and its OWN journal replayed by OpenDurable
+	// -- an intent a previous process journaled and died before delivering.
+	// The second one leaves rebuilt at zero, so gating the signal on it would
+	// make exactly the crash the outbox exists for wait out a full interval.
+	notifyPending()
 
 	// -- the relay: THE EVENT LOG IS THE OUTBOX ------------------------------
 	// Publication is a READ of the log, not a second write beside it. The
@@ -260,6 +275,18 @@ func run(ctx context.Context) error {
 		snapshotLoop(ctx, log, ledger.State, logger, 30*time.Second, eventlog.DefaultSnapshotEvery)
 	}()
 
+	// -- outbox drain: what turns a DETECTED delivery failure into a
+	// RECOVERED one -------------------------------------------------------
+	// Without this goroutine every mechanism below it still passes its own
+	// tests and none of them ever runs: Reconcile was implemented, tested by
+	// two cases, and called from nowhere. See production.yaml's `driven:`
+	// block -- main.reconcileLoop is the symbol that proves this line exists.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		reconcileLoop(ctx, outbox, wake, logger, outboxReconcileInterval)
+	}()
+
 	// The relay runs for the life of the process. Its failure is loud and
 	// non-fatal: a broker outage must not stop the service from committing
 	// facts, which is the entire reason delivery left the write path.
@@ -326,6 +353,93 @@ func snapshotLoop(
 			}
 			logger.InfoContext(ctx, "svc: snapshot + compaction",
 				"records_before", stats.RecordsBefore, "records_after", stats.RecordsAfter)
+		}
+	}
+}
+
+// outboxReconcileInterval is the FLOOR on redelivery attempts, not the normal
+// path -- the wake-up signal is. It is nonetheless the half that closes the
+// gap this loop exists for: a sink that rejected an entry produces nothing
+// that would signal on that entry's behalf, so without a clock nothing would
+// ever try it again.
+//
+// Ten seconds is chosen against auto_recovery.recovery_bound in
+// production.yaml (30s): a stalled entry gets at least two attempts inside
+// the declared bound, so the bound is met by the retry cadence rather than by
+// the first attempt happening to succeed.
+const outboxReconcileInterval = 10 * time.Second
+
+// newPendingWake returns the channel reconcileLoop selects on and the
+// notifier that signals it.
+//
+// Buffered to exactly ONE, with the send DROPPED when that buffer is full.
+// Dropping is correct rather than lossy: a full buffer means a drain is
+// already queued, and that queued drain reconciles every pending entry --
+// including whatever this signal was about. What the drop buys is the
+// property that actually matters, on the other side of the channel: the
+// signaller never blocks, so no path that journals an intent can ever be held
+// up behind a reconciler waiting on a dead sink.
+func newPendingWake() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	return ch, func() {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// reconcileLoop is the ONLY place this process re-attempts outbox delivery.
+//
+// It drains on two triggers, and both are load-bearing. The wake-up is what
+// keeps a healthy path prompt -- boot recovery signals it, so an intent left
+// behind by a crashed predecessor is delivered in milliseconds instead of
+// waiting out a full interval. The ticker is the floor, and it is the half
+// that recovers from the sink: an entry the sink REJECTED will never be the
+// subject of a new signal, so a wake-only loop would detect the failure and
+// never return from it.
+//
+// On shutdown it returns immediately and does NOT attempt a final drain.
+// Pending entries are durable and the next boot resumes them (OpenDurable
+// replays the journal), so a farewell drain buys nothing and costs precisely
+// the thing you least want: when the SINK is the component that is down, a
+// "flush before we go" turns a one-second shutdown into a timeout-length one.
+//
+// The interval is a parameter rather than a constant read inside, for the
+// same reason snapshotLoop's is: a loop no test can drive in milliseconds is
+// a loop nobody knows runs.
+func reconcileLoop(
+	ctx context.Context,
+	outbox *store.Outbox,
+	wake <-chan struct{},
+	logger *slog.Logger,
+	every time.Duration,
+) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+
+	drain := func() {
+		result := outbox.Reconcile(ctx)
+		if result.Resumed == 0 {
+			// Silent when there is nothing to do. A line per tick on a
+			// healthy service is a line nobody reads on the one tick that
+			// matters.
+			return
+		}
+		logger.InfoContext(ctx, "svc: outbox reconciled",
+			"resumed", result.Resumed,
+			"delivered", result.Delivered,
+			"still_down", result.StillDown)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+			drain()
+		case <-ticker.C:
+			drain()
 		}
 	}
 }
