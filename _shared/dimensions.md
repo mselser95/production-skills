@@ -603,6 +603,47 @@ That covers the four defects above; it is not a universal reachability proof.
   already exist (coverage as SIGNAL, mutation as TREND). Report per package in
   the trend lane, never as a gate.
 
+## When a gate fires on something CORRECT, find the missing distinction
+
+A red gate has two possible meanings and they need opposite responses: the code
+is wrong, or the gate lacks a distinction the code legitimately relies on. The
+second is rarer, and it is where the damage happens, because the cheapest way
+out is to edit the code until the gate goes quiet.
+
+**Measured 2026-08-20.** A citation checker enforces the rule that every `TestX`
+named in a comment, doc or spec must exist — a citation to a deleted test is an
+evidence trail that dead-ends and fails silently. It went red on a test header
+whose prose explained what that test's **weaker predecessor** failed to catch.
+The predecessor is deliberately gone. The sentence is the reason the replacement
+exists. The gate could not tell a citation from a **tombstone**.
+
+Three wrong fixes, in order of temptation:
+
+1. **Delete the name from the comment.** Green in one edit, and it deletes the
+   reasoning the comment exists to carry. Worse than the red gate, because
+   afterwards nothing shows what was lost.
+2. **Teach the checker to recognise prose** — "was named", "formerly",
+   "predecessor". A clever matcher that silently stops matching one rewording
+   later, which is the same vacuous-gate failure the standard exists to refuse.
+3. **A blanket ignore list.** Rots into a mute nobody rereads.
+
+**What works: an explicit registry whose entries COST something.** A retired-name
+registry, plus two rules that stop it becoming a blanket mute:
+
+- every entry must name a **replacement that exists** — otherwise the evidence
+  trail merely dead-ends one hop later, the exact defect being guarded;
+- a retired name that **exists again is a FAILURE** — resurrection means the
+  exemption is now silently muting a live symbol's citations.
+
+**Then prove the exemption did not blunt the gate.** After adding it, the same
+checker immediately caught a genuinely dead citation in a README written minutes
+earlier. That is the check to run after ANY exemption: *does the gate still
+catch a real one?* An exemption you cannot demonstrate is narrow is a hole.
+
+The general rule: when a gate fires on something correct, the question is never
+"how do I make it stop" but **"what distinction does it lack"** — then encode
+that distinction somewhere a human must justify each instance.
+
 ## Liabilities: read the RETIREMENT CONDITION, not just the evidence
 
 A registry entry has two halves. The evidence says why the liability exists —
