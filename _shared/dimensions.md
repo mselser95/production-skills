@@ -535,3 +535,62 @@ That covers the four defects above; it is not a universal reachability proof.
   gap localizes weak assertions better than either number alone; both inputs
   already exist (coverage as SIGNAL, mutation as TREND). Report per package in
   the trend lane, never as a gate.
+
+## Liabilities: read the RETIREMENT CONDITION, not just the evidence
+
+A registry entry has two halves. The evidence says why the liability exists —
+and it is written at the moment someone decided they could not fix it, so it
+reads like a wall. The retirement condition says what closing it would take,
+and it is usually the more useful half, because whoever wrote the entry had
+just finished thinking about exactly that.
+
+**Measured, on one repo, in one session: five liabilities were characterised as
+"external constraints — not closeable from this side". Four were closeable, and
+three of those four had the fix written in their own retirement condition.**
+
+  - "the upstream feed's history retention is undocumented" — condition asked
+    for cursor-reset DETECTION, which had already shipped.
+  - "fsync is untested; that needs a machine kill" — condition asked for
+    `docker kill` on a container, and the stack was running.
+  - "losing the outbox log silently replays all history" — condition offered
+    "refuse to boot when the event log is non-empty and the outbox log is
+    absent". One `stat()`.
+  - "the venue has no idempotency; that is their contract" — condition named a
+    reconciliation pass that matches our own submitted intents against what the
+    venue published. That needs no cooperation from the venue at all.
+
+The failure mode is a framing error, not laziness: asking whether the
+DEPENDENCY can be fixed, when the question is whether the SYSTEM can defend
+itself. A venue with no idempotency cannot be made idempotent — and a client
+can ask it what it already has before retrying. An upstream that publishes no
+epoch cannot be made to — and a consumer that already read message N knows what
+N contained, so different bytes at the same id prove the history was replaced.
+
+So, when triaging any liability:
+
+- **Read the retirement condition first.** If it names a mechanism, the entry
+  is a TODO wearing a constraint's clothes.
+- **Separate "the dependency cannot do X" from "we cannot detect or defend
+  against X".** The first is often true and rarely the whole question.
+- **An entry with no retirement condition is itself a finding.** It cannot be
+  discharged, only expire, which makes it a permanent excuse.
+- Only after all three: if the residual is genuinely inherent, say what it is
+  in one sentence an operator can act on, and make sure the code CHOOSES rather
+  than drifting — for an ambiguity with no safe default, pick the direction
+  whose worst case is the smaller loss and write down why.
+
+**Two constants that describe one property must have the RELATIONSHIP
+enforced.** A broker remembered a message id for 2 minutes while a queue would
+hold an entry for 24 hours. Each value was defensible; together they meant a
+retry after a long outage was accepted as new, and the stream carried the same
+effect twice with nothing failing. Neither constant was wrong. The absence of a
+test tying them was. Where two numbers in two packages encode one guarantee,
+assert the ordering — in a neutral third package if importing one from the other
+would be a cycle or a layering violation.
+
+**Skipping something must not destroy the evidence for it.** A consumer that
+cannot decode a message and advances past it is right — waiting is not recovery
+— but the raw bytes are the one artifact nobody can reconstruct, and upstreams
+routinely keep history in memory. File the payload BEFORE the decision that
+moves past it: a crash between the two then leaves evidence with no decision,
+which is recoverable, instead of a decision with no evidence, which is not.
