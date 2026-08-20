@@ -856,6 +856,50 @@ else
     || row "tracing-wired-in-prod" FAIL "no tracing at all"
 fi
 
+# A span is not a trace. Spans that cannot be PARENTED are 3132 traces of one
+# span each, and every existing check passes on them.
+#
+# This was measured, not imagined. A repo with a correctly wired tracer, spans
+# reaching the backend with full fidelity, RecordError firing in production on
+# exactly the declared condition, and a green contract test, had:
+#
+#   tempo_distributor_spans_received_total  3132
+#   tempo_ingester_traces_created_total     3132
+#
+# One trace created per span received, process-wide. Nothing was joinable to
+# anything. A traceparent sent with a real request produced HTTP 404 for that
+# trace id -- the header was silently dropped.
+#
+# The tracing-wired row cannot see this: the tracer IS wired and IS reachable,
+# so it passes. mechanisms-driven cannot see it either, for the same reason.
+# The defect is SEMANTIC -- the same shape as a lag metric derived from work
+# done, which is correct only while nothing is wrong.
+#
+# What is mechanically checkable is the precondition: a service that starts
+# spans and also talks to anything else needs a propagator installed and
+# context injected on the way out, or a trace can never cross a process
+# boundary. Absence of all of it is proof; presence is only a signal, so the
+# PASS says so rather than claiming the traces are actually joined.
+# Span detection must cover BOTH shapes: a house abstraction named StartSpan,
+# and the raw OTel SDK's `tracer.Start(...)`. Matching only the first skipped
+# the whole row -- silently -- for any repo using the SDK directly, which is
+# the more common case. Caught by testing the row against a scratch module
+# that used the SDK and got no output at all.
+if grep -rqlE 'StartSpan|otel\.Tracer\(|TracerProvider|trace\.Tracer' \
+     --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
+  egress=$(grep -rlE 'http\.NewRequest|http\.Client|\.Publish\(|PublishMsg\(|grpc\.Dial|NewClient\(' \
+            --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  prop=$(grep -rlE 'SetTextMapPropagator|propagation\.|otelhttp|otelgrpc|traceparent|\.Inject\(|\.Extract\(' \
+            --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  if (( egress == 0 )); then
+    row "observability:trace_propagation" NA "spans are emitted but this service makes no outbound calls -- nothing to propagate to"
+  elif (( prop == 0 )); then
+    row "observability:trace_propagation" FAIL "spans are emitted and $egress file(s) make outbound calls, but NOTHING installs a propagator or injects trace context -- every span is a root, so the backend stores one trace per span and no request can be followed across a boundary"
+  else
+    row "observability:trace_propagation" PASS "$prop file(s) carry propagation machinery alongside $egress egress site(s) -- present, which is necessary; that traces are actually PARENTED is provable only by a test that asserts a child span's parent, or by reading the backend"
+  fi
+fi
+
 # --- 13b. mechanisms are DRIVEN, not merely present ------------------------
 #
 # The strongest pattern this framework has found, and the one it kept missing.
@@ -891,6 +935,29 @@ fi
 # three), and `Outbox.Reconcile` -- which nothing calls -- was already absent.
 # A unit test cannot satisfy this check, because `go test` links a different
 # binary that this row never inspects.
+#
+# THAT SECOND MEASUREMENT NO LONGER HOLDS, and the correction matters more
+# than the original claim. The template later converted *Outbox to an
+# interface (healthhttp.OutboxHealth), and Go's linker retains the ENTIRE
+# METHOD SET of a type that reaches an interface -- so `Outbox.Reconcile`
+# became present in the binary with still no caller, and this row went GREEN
+# on a template whose reconcile loop did not exist. Measured on that binary:
+#
+#   1002fe8f0 T ….store.(*Outbox).Reconcile      (present, uncalled)
+#
+# So the two halves of this row are NOT symmetric, and the asymmetry is the
+# thing to remember:
+#
+#   ABSENCE is still proof. Nothing reaches it.
+#   PRESENCE is proof only for a symbol the linker COULD have eliminated --
+#   a package-level func, or a method on a type that never reaches an
+#   interface. For a method on a type that does, presence proves nothing.
+#
+# Therefore: DECLARE THE CALLER, NOT THE CALLEE. Name the loop function that
+# drives the mechanism (`main.reconcileLoop`), which belongs to no interface
+# and is eliminated the moment its goroutine is deleted, rather than the
+# method it calls. The row below flags a declared symbol in method form for
+# exactly this reason.
 #
 # The first draft of this row also reported the template's TRACER as unwired,
 # which was wrong: the compiler had inlined the constructor. See the build
@@ -943,6 +1010,20 @@ else
       # distinct symbols, which is what they are.
       elif grep -qE "[ /.]$(printf '%s' "$dsym" | sed 's/[][\.*^$(){}?+|/]/\\&/g')\$" <<<"$driven_syms"; then
         d_ok=$((d_ok+1))
+        # Method form -- `pkg.(*Type).Method` or `pkg.Type.Method`. Collected
+        # so the PASS text can say its evidence is weaker for these. See the
+        # asymmetry note above: the linker keeps a type's whole method set
+        # once that type reaches an interface, so presence stops proving a
+        # caller. This is how a template with NO reconcile loop scored green.
+        # A `case` rather than a regex, deliberately: the ERE form of this
+        # (`\.\(\*?…\)\.`) fails to compile in bash's engine with
+        # "repetition-operator operand invalid", and a pattern that silently
+        # never matches would make this whole caveat decorative -- which is
+        # the defect the caveat is about.
+        case "$dsym" in
+          *"("*")."*)  d_methods="${d_methods:-} ${dk}(${dsym})" ;;  # pkg.(*T).M
+          *.*.*)       d_methods="${d_methods:-} ${dk}(${dsym})" ;;  # pkg.T.M
+        esac
       else
         d_missing="${d_missing} ${dk}(${dsym}):ELIMINATED-BY-LINKER"
       fi
@@ -953,7 +1034,17 @@ else
     elif [[ -n "$d_missing" ]]; then
       row "mechanisms-driven" FAIL "$((d_total-d_ok))/$d_total declared mechanism(s) are NOT reachable from main:${d_missing}"
     else
-      row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- production reaches each"
+      # A declared symbol in METHOD form (`pkg.(*Type).Method` or
+      # `pkg.Type.Method`) is weak evidence: if Type reaches any interface,
+      # the linker retains its whole method set and presence proves nothing
+      # about callers. Name the caller instead. Reported, not failed -- the
+      # declaration may still be correct, and a row that FAILED here would
+      # punish repos whose mechanism genuinely has no wrapper.
+      if [[ -n "${d_methods:-}" ]]; then
+        row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- WEAK for:${d_methods}. Those are methods; if the receiver type reaches an interface the linker keeps the whole method set, so presence does not prove a caller. Declare the function that DRIVES the mechanism instead"
+      else
+        row "mechanisms-driven" PASS "$d_ok/$d_total declared mechanism(s) survive linking from ./cmd/... -- production reaches each"
+      fi
     fi
   fi
 fi
