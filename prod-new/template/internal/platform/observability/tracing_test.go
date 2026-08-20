@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -21,19 +22,30 @@ func TestNoop_StartSpanAndEndNeverPanicAndDoNothingObservable(t *testing.T) {
 }
 
 // provenance: derived
-// verifies: tracing port (mode selection)
-func TestNew_SelectsBackendByMode(t *testing.T) {
-	if _, ok := New("off", nil).(noopTracer); !ok {
-		t.Fatal(`New("off", nil) did not return the noop tracer`)
+// verifies: tracing port (mode selection) -- the exporting mode lives in
+// otlp_tracer_test.go, which needs an endpoint and a shutdown.
+func TestNewTracer_SelectsBackendByMode(t *testing.T) {
+	for _, mode := range []string{TracingOff, "", "bogus"} {
+		tr, shutdown, err := NewTracer(context.Background(), TracerOptions{Mode: mode})
+		if err != nil {
+			t.Fatalf("NewTracer(%q) errored: %v", mode, err)
+		}
+		if _, ok := tr.(noopTracer); !ok {
+			t.Fatalf("NewTracer(%q) did not return the noop tracer, got %T", mode, tr)
+		}
+		if err := shutdown(context.Background()); err != nil {
+			t.Fatalf("NewTracer(%q) shutdown errored: %v", mode, err)
+		}
 	}
-	if _, ok := New("", nil).(noopTracer); !ok {
-		t.Fatal(`New("", nil) did not return the noop tracer`)
+	tr, shutdown, err := NewTracer(context.Background(), TracerOptions{Mode: TracingLog})
+	if err != nil {
+		t.Fatalf("NewTracer(log) errored: %v", err)
 	}
-	if _, ok := New("bogus", nil).(noopTracer); !ok {
-		t.Fatal(`New("bogus", nil) did not fall back to the noop tracer`)
+	if _, ok := tr.(*logTracer); !ok {
+		t.Fatalf("NewTracer(log) did not return the log tracer, got %T", tr)
 	}
-	if _, ok := New("log", nil).(*logTracer); !ok {
-		t.Fatal(`New("log", nil) did not return the log tracer`)
+	if err := shutdown(context.Background()); err != nil {
+		t.Fatalf("NewTracer(log) shutdown errored: %v", err)
 	}
 }
 
@@ -47,17 +59,17 @@ func TestLogTracer_EmitsOneLinePerSpan(t *testing.T) {
 
 	_, span := tr.StartSpan(context.Background(), "svc.deposit", map[string]string{"event_id": "e1"})
 	span.End()
-	if buf.count != 1 {
-		t.Fatalf("record count = %d, want 1", buf.count)
+	if n := buf.snapshot().count; n != 1 {
+		t.Fatalf("record count = %d, want 1", n)
 	}
 
 	_, span2 := tr.StartSpan(context.Background(), "svc.withdraw", nil)
 	span2.RecordError(errors.New("insufficient balance"))
 	span2.End()
-	if buf.count != 2 {
-		t.Fatalf("record count = %d, want 2", buf.count)
+	if n := buf.snapshot().count; n != 2 {
+		t.Fatalf("record count = %d, want 2", n)
 	}
-	if !buf.sawError {
+	if !buf.snapshot().sawError {
 		t.Fatal("span with a recorded error did not emit at Error level")
 	}
 }
@@ -70,7 +82,7 @@ func TestLogSpan_RecordErrorNilIsANoOp(t *testing.T) {
 	_, span := tr.StartSpan(context.Background(), "svc.deposit", nil)
 	span.RecordError(nil)
 	span.End()
-	if buf.sawError {
+	if buf.snapshot().sawError {
 		t.Fatal("RecordError(nil) caused an Error-level emission")
 	}
 }
@@ -109,19 +121,55 @@ func TestWithBaseAttrs_MergesAndPrefersPerSpanOnCollision(t *testing.T) {
 }
 
 // recordingHandler is a minimal slog.Handler test double.
+//
+// MUTEX-GUARDED, and not out of habit: otlp_tracer_test.go installs one of
+// these as the PROCESS-GLOBAL OTel error sink, where it is reachable from SDK
+// export goroutines that outlive the test that created them. Counting without
+// a lock there is a data race waiting for the scheduler to notice, and the
+// kind that only appears under a different -count or a busier machine.
 type recordingHandler struct {
+	mu       sync.Mutex
 	count    int
 	sawError bool
+	// lastLevel and lastMsg exist because asserting ARRIVAL is not asserting
+	// the signal: a mutation from WarnContext to DebugContext kept every
+	// count-only assertion green while making the line invisible in
+	// production, where the JSON lane is floored at LOG_LEVEL.
+	lastLevel slog.Level
+	lastMsg   string
 }
 
 func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
 func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.count++
+	h.lastLevel = r.Level
+	h.lastMsg = r.Message
 	if r.Level == slog.LevelError {
 		h.sawError = true
 	}
 	return nil
 }
+
+// snapshot returns a lock-free copy of what the handler has seen, so callers
+// read a consistent view without reaching into the guarded fields.
+func (h *recordingHandler) snapshot() struct {
+	count     int
+	sawError  bool
+	lastLevel slog.Level
+	lastMsg   string
+} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return struct {
+		count     int
+		sawError  bool
+		lastLevel slog.Level
+		lastMsg   string
+	}{h.count, h.sawError, h.lastLevel, h.lastMsg}
+}
+
 func (h *recordingHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
 func (h *recordingHandler) WithGroup(name string) slog.Handler       { return h }
 

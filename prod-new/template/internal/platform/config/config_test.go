@@ -101,10 +101,16 @@ func TestConfig_DigestIsStableAndSensitiveToEveryField(t *testing.T) {
 // verifies: operational determinism (Identity mirrors the rollback-lever
 // fields plus Digest)
 func TestConfig_Identity(t *testing.T) {
-	c := Config{OutboxMaxAttempts: 7, Tracing: "log", PprofPort: 6060, LogLevel: slog.LevelWarn, LogExport: LogExportOTLP}
+	c := Config{OutboxMaxAttempts: 7, Tracing: TracingOTLP, TracingEndpoint: "tempo:4318", PprofPort: 6060, LogLevel: slog.LevelWarn, LogExport: LogExportOTLP}
 	id := c.Identity()
-	if id.OutboxMaxAttempts != 7 || id.Tracing != "log" || id.PprofPort != 6060 {
+	if id.OutboxMaxAttempts != 7 || id.Tracing != TracingOTLP || id.PprofPort != 6060 {
 		t.Fatalf("Identity() = %+v, want mirrored fields", id)
+	}
+	// "is this pod exporting traces, and to where?" must be a lookup, not a
+	// guess: the mode alone says spans go SOMEWHERE, and the endpoint that
+	// is syntactically fine and points at nothing is the whole defect class.
+	if id.TracingEndpoint != "tempo:4318" {
+		t.Fatalf("Identity() = %+v, want the live trace endpoint mirrored", id)
 	}
 	// "there are no DEBUG lines" is ambiguous without these two: it can
 	// mean the code never logged one, or that this pod runs at WARN, or
@@ -227,5 +233,63 @@ func TestLoad_RejectsBadLogEnv(t *testing.T) {
 	}
 	if c.LogLevel != slog.LevelDebug || c.LogExport != LogExportOTLP {
 		t.Fatalf("Load() log config = %v/%q, want DEBUG/%q", c.LogLevel, c.LogExport, LogExportOTLP)
+	}
+}
+
+// provenance: regression
+// verifies: fail-closed configuration -- TRACING=otlp without an endpoint
+// refuses the boot instead of degrading to no export.
+//
+// The degraded form is the dangerous one and it is invisible: the service
+// starts, logging.go stamps every line with a trace_id, and every one of
+// those ids resolves to nothing in the backend. An operator reading a
+// trace_id has no way to tell "the trace is elsewhere" from "there is no
+// trace", so they conclude their query is wrong.
+func TestLoad_TracingOTLPRequiresAnEndpoint(t *testing.T) {
+	t.Setenv("TRACING", TracingOTLP)
+	t.Setenv("TRACING_ENDPOINT", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("TRACING=otlp with no TRACING_ENDPOINT booted instead of failing closed")
+	}
+
+	t.Setenv("TRACING_ENDPOINT", "tempo:4318")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Tracing != TracingOTLP || c.TracingEndpoint != "tempo:4318" {
+		t.Fatalf("got Tracing=%q Endpoint=%q, want otlp/tempo:4318", c.Tracing, c.TracingEndpoint)
+	}
+
+	// The endpoint is read whatever the mode is -- it is simply unused --
+	// so a deployment can pre-seed it before flipping TRACING.
+	t.Setenv("TRACING", TracingOff)
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.TracingEndpoint != "tempo:4318" {
+		t.Fatalf("TracingEndpoint = %q, want it read regardless of mode", c.TracingEndpoint)
+	}
+}
+
+// provenance: derived
+// verifies: TRACING accepts exactly the three modes the observability
+// package implements, and nothing else.
+func TestParseTracing_AcceptsExactlyTheImplementedModes(t *testing.T) {
+	for raw, want := range map[string]string{"": TracingOff, "off": TracingOff, "log": TracingLog, "otlp": TracingOTLP, "  otlp  ": TracingOTLP} {
+		got, err := ParseTracing(raw)
+		if err != nil {
+			t.Fatalf("ParseTracing(%q): %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("ParseTracing(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	for _, raw := range []string{"OTLP", "otel", "jaeger", "on", "true"} {
+		if _, err := ParseTracing(raw); err == nil {
+			t.Fatalf("ParseTracing(%q) accepted a mode nothing implements: a typo'd TRACING would "+
+				"silently produce no tracing at all", raw)
+		}
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -156,5 +158,72 @@ func TestMetrics_ServesPrometheusText(t *testing.T) {
 	}
 	if !strings.Contains(body, "svc_units_conserved_violations_total 2") {
 		t.Errorf("conservation violations value not rendered as 2:\n%s", body)
+	}
+}
+
+// provenance: regression
+// verifies: /healthz surfaces EVERY field of config.Identity, compared
+// against the struct's own JSON tags rather than a hand-written list.
+//
+// THE DRIFT THIS CATCHES ALREADY HAPPENED. config.Identity was built to
+// answer "which config produced this result" and docs/RUNBOOK.md told
+// operators to read `tracing`, `log_level` and `log_export` off /healthz --
+// while the handler printed four string literals and consumed the struct only
+// for `.Digest`. The endpoint had never surfaced a single one of those
+// fields, and no test noticed, because every test named the fields it
+// expected.
+//
+// So this one names NONE of them: it reflects over config.Identity's JSON
+// tags and requires each to appear in the response. A field added to Identity
+// and forgotten here fails immediately, which is the only version of this
+// check that survives the next person.
+func TestHealthz_SurfacesEveryConfigIdentityField(t *testing.T) {
+	identity := config.Config{
+		Tracing:                    config.TracingOTLP,
+		TracingEndpoint:            "tempo:4318",
+		LogLevel:                   slog.LevelWarn,
+		LogExport:                  config.LogExportOTLP,
+		OutboxMaxAttempts:          7,
+		PprofPort:                  6060,
+		InvariantViolationCooldown: 42 * time.Second,
+	}.Identity()
+
+	srv := New(fakeLedger{}, Options{PodID: "pod-1", ConfigIdentity: identity})
+	base := serveTest(t, srv)
+
+	resp, err := http.Get(base + "/healthz")
+	if err != nil {
+		t.Fatalf("get /healthz: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var body struct {
+		Config map[string]any `json:"config"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	typ := reflect.TypeOf(identity)
+	for i := 0; i < typ.NumField(); i++ {
+		tag := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if tag == "" || tag == "-" {
+			t.Fatalf("config.Identity.%s has no json tag, so it can never reach /healthz", typ.Field(i).Name)
+		}
+		if _, ok := body.Config[tag]; !ok {
+			t.Errorf("/healthz does not surface config.Identity field %q (%s) -- "+
+				"docs/RUNBOOK.md tells operators to read it off this endpoint",
+				tag, typ.Field(i).Name)
+		}
+	}
+
+	// Spot-check the two the runbook's tracing procedure depends on, so a
+	// response that carried the KEYS with empty values would still fail.
+	if body.Config["tracing"] != config.TracingOTLP {
+		t.Fatalf("config.tracing = %v, want %q", body.Config["tracing"], config.TracingOTLP)
+	}
+	if body.Config["tracing_endpoint"] != "tempo:4318" {
+		t.Fatalf("config.tracing_endpoint = %v, want tempo:4318 -- "+
+			"'is this pod exporting, and to where' must be a lookup", body.Config["tracing_endpoint"])
 	}
 }

@@ -63,3 +63,28 @@ will fail at the journal-append step (`internal/app.Ledger.process`'s
 `csReceived -> csLogged` transition). The pod is correctly reporting
 NOT READY via this same gate; this alert exists so the page fires even if
 nothing is actively polling `/readyz` at the moment.
+
+## `SvcOTLPExportFailures` (warn)
+
+```
+increase(svc_otlp_export_failures_total[15m]) > 0
+```
+
+**Meaning:** OTLP exports are failing, so telemetry is being dropped. This
+spans EVERY signal: the OpenTelemetry error handler is process-global, so
+under `LOG_EXPORT=otlp` a log-collector outage increments this too. The WARN
+line that accompanies each failure carries the failing URL, which is what
+distinguishes `/v1/traces` from `/v1/logs`.
+
+**Warn, never a page, and that is a decision rather than an omission.**
+Nothing about telemetry is on the request path — the exporter never dials at
+boot, `Span.End()` is a queue append, and a full queue drops spans — so the
+service is genuinely unaffected. Paging on it would train the rotation to
+treat a real outage's first symptom as noise.
+
+**But it must not be silent either.** This is the one condition under which
+"the dashboards look fine" carries no information, so an alert that nobody is
+woken by is still the difference between noticing and not.
+
+**First response:** read `docs/RUNBOOK.md`'s "Telemetry is being dropped"
+section.

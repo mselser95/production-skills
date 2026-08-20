@@ -220,8 +220,8 @@ func TestTraceParent_RoundTripsThroughText(t *testing.T) {
 }
 
 // provenance: regression
-// verifies: New installs the propagator for EVERY tracing mode, before the
-// mode switch.
+// verifies: NewTracer installs the propagator for EVERY tracing mode,
+// before the mode switch.
 //
 // The mode-dependent version of this bug is the nastiest shape it takes: a
 // deployment running the OTLP backend propagates and a deployment running the
@@ -233,17 +233,31 @@ func TestTraceParent_RoundTripsThroughText(t *testing.T) {
 // not through this package's own Inject, precisely because this package's
 // Inject uses its own propagator and would pass even if InstallPropagation
 // were deleted outright.
-func TestNew_InstallsThePropagatorForEveryMode(t *testing.T) {
-	for _, mode := range []string{"off", "", "log", "bogus"} {
+func TestNewTracer_InstallsThePropagatorForEveryMode(t *testing.T) {
+	// "otlp" is in this list and it is the mode that most needs to be: it is
+	// the only one whose spans reach a backend, so it is the only one where
+	// "one trace per span" is visible to everyone who opens the UI. The
+	// endpoint below is a real host:port that nothing listens on -- the
+	// exporter never dials at construction, so this costs no I/O.
+	for _, mode := range []string{"off", "", "log", "otlp", "bogus"} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			// Start from the SDK's default: a no-op propagator that drops
-			// everything. Anything green from here is green because New
-			// installed something.
+			// everything. Anything green from here is green because
+			// NewTracer installed something.
 			otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
 
-			tr := New(mode, slog.New(slog.NewJSONHandler(discard{}, nil)))
+			tr, shutdown, err := NewTracer(context.Background(), TracerOptions{
+				Mode:           mode,
+				Endpoint:       "127.0.0.1:1",
+				Logger:         slog.New(slog.NewJSONHandler(discard{}, nil)),
+				ExportFailures: slog.New(slog.NewJSONHandler(discard{}, nil)),
+			})
+			if err != nil {
+				t.Fatalf("NewTracer(%q) errored: %v", mode, err)
+			}
+			t.Cleanup(func() { _ = shutdown(context.Background()) })
 			if tr == nil {
-				t.Fatal("New returned no tracer")
+				t.Fatal("NewTracer returned no tracer")
 			}
 
 			ctx := spanCtx(t)

@@ -10,33 +10,6 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
-// New builds the Tracer selected by mode: "log" wires the structured-log
-// adapter (NewLog); anything else ("off", "", or unrecognized) wires
-// NewNoop(). This is the composition-root helper cmd/<SERVICE> calls once at
-// boot with its validated config.Config.Tracing value -- config.Load
-// already rejects any string other than "off"/""/"log" as a boot error, so
-// this constructor treats an unrecognized value the same as "off" rather
-// than panicking: a tracing default must never be able to crash a boot.
-func New(mode string, logger *slog.Logger) Tracer {
-	// Installed for EVERY mode, including "off", and BEFORE the switch so no
-	// return path can skip it.
-	//
-	// The propagator is what lets a trace cross a process boundary at all;
-	// leaving it to the composition root is how it came to be missing
-	// entirely (see propagation.go: 3132 spans, 3132 traces). Installing it
-	// under "off" costs nothing -- the noop tracer produces no span context
-	// to inject -- and it removes a mode-dependent difference in behaviour
-	// that nobody would think to test: a service running TRACING=log with the
-	// propagator installed only on some other branch injects nothing, with no
-	// error and no clue.
-	InstallPropagation()
-
-	if mode == "log" {
-		return NewLog(logger)
-	}
-	return NewNoop()
-}
-
 // NewLog returns a Tracer that emits ONE structured slog line per span, at
 // End: the span name, its duration, every declared attribute (sorted for a
 // deterministic, greppable line), and the recorded error if any. This is

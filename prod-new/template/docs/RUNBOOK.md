@@ -139,6 +139,14 @@ If NO line in the whole process carries a `trace_id`, check `TRACING` first:
 there is nothing for a line to be stamped with. `/healthz` reports the live
 value.
 
+**A `trace_id` on a log line does NOT mean the trace is in your backend.**
+Under `TRACING=log` the span is a log line and nothing else: the id is real,
+it joins lines within this process, and it will 404 in Tempo/Jaeger because
+no exporter was ever wired. Only `TRACING=otlp` ships spans anywhere.
+`/healthz` reports `config.tracing` and `config.tracing_endpoint` together for
+exactly this question — "is this pod exporting, and to where?" is a lookup:
+`curl -s :8081/healthz | jq .config`.
+
 **Following one command past the durable log.** The command and the
 publication it causes are ONE trace, and they are emitted seconds or a
 restart apart:
@@ -157,16 +165,75 @@ new root is correct. A record that HAS a traceparent while its delivery line
 does not is a code defect in the mapper or the publisher — see
 `internal/platform/observability/propagation.go`.
 
-**The two levers.**
+**The four levers.**
 
 | Env | Default | Effect |
 | --- | --- | --- |
 | `LOG_LEVEL` | `info` | Floor for the stdout lane: `debug`, `info`, `warn`, `error`. A value outside that set is a BOOT ERROR, not a silent fallback. |
-| `LOG_EXPORT` | `off` | `otlp` additionally ships records to `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+| `LOG_EXPORT` | `off` | `otlp` additionally ships records to `OTEL_EXPORTER_OTLP_ENDPOINT` (a full URL). |
+| `TRACING` | `off` | `log` = one structured line per span, no collector. `otlp` = export spans over OTLP/HTTP. Anything else is a BOOT ERROR. |
+| `TRACING_ENDPOINT` | — | `host:port`, **no scheme** (`tempo:4318`). REQUIRED under `TRACING=otlp`; a missing or malformed value is a BOOT ERROR. |
 
-Both are surfaced live on `/healthz` (`config.Identity`'s `log_level` /
-`log_export`), so "there are no DEBUG lines" can be answered without
-guessing whether the pod was started with them enabled.
+All four are surfaced live under `/healthz`'s `config` object (it is
+`config.Identity` marshalled whole, so a field added there appears here
+automatically — `TestHealthz_SurfacesEveryConfigIdentityField` fails if one
+does not). `curl -s :8081/healthz | jq .config` answers "there are no DEBUG
+lines" and "are we exporting traces" without guessing what the pod was
+started with.
+
+Until this change the endpoint printed four literals and read `config.Identity`
+only for its digest, so none of these fields had ever actually been served —
+the paragraph you are reading was false for as long as it existed. That is
+the failure mode worth remembering here: a runbook step nobody executes reads
+exactly like one that works.
+
+**Sampling is 100% and `OTEL_TRACES_SAMPLER` does nothing.** The tracer
+declares `ParentBased(AlwaysSample)` explicitly, which makes the SDK's own
+`OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` variables inert. That is on
+purpose: an env var this repo never validates and never surfaces on `/healthz`
+must not be able to take a service to zero traces. A service with real volume
+owes a validated config knob beside `TRACING_ENDPOINT`, not a reach for the
+OTel variable. An upstream `sampled=0` decision IS respected — including one
+restored from a durable `traceparent`.
+
+**The two endpoints want OPPOSITE shapes, and this bites everyone once.**
+`OTEL_EXPORTER_OTLP_ENDPOINT` (logs) is a full URL, path included.
+`TRACING_ENDPOINT` (traces) is a bare `host:port` — `otlptracehttp` adds the
+scheme and the `/v1/traces` path itself, so `http://tempo:4318` there makes
+the *whole string* the hostname. That exact value is refused by name at boot
+(`observability.validateTraceEndpoint`).
+
+**Traces are best-effort; their CONFIG is not.** A collector that is down at
+boot, or that dies at 03:00, cannot fail this service: nothing dials at
+construction, spans go to a bounded in-memory queue, `End()` is a queue
+append, and a full queue DROPS spans. Measured on this scaffold against a
+listener that ACCEPTS connections and never answers — which is what a
+degraded collector actually looks like, and far harsher than a closed port —
+1000 spans complete in **1.3 ms** total. With the batching removed the same
+1000 spans did not finish in two minutes.
+
+So export failures are WARN lines
+(`observability: OTLP export failed (service unaffected)`) plus the
+`svc_otlp_export_failures_total` counter, and never an outage. A *malformed*
+endpoint, by contrast, refuses the boot — because that failure is otherwise
+completely silent, and the pod would look healthy while every span went
+nowhere.
+
+**The export-failure signal spans every OTLP signal, not just traces.**
+`otel.SetErrorHandler` is process-global and the OpenTelemetry *log* SDK
+reports through it too, so under `LOG_EXPORT=otlp` a log-collector outage
+also increments `svc_otlp_export_failures_total` and emits the same WARN. The
+`error` field carries the failing URL (`/v1/traces` vs `/v1/logs`) — read it
+before deciding which collector to chase. Those lines go to **stderr as JSON,
+deliberately not through the process logger**: routing them through a logger
+that is itself exporting makes a collector outage self-sustaining, which was
+measured here at ~1 line/second forever from a single seed log line.
+
+**What no check here can catch.** An endpoint with the right shape and the
+wrong host. `tempo:4318` when the collector is `tempo-gateway:4318` passes
+validation, boots clean, and exports into the void with only WARN lines to
+show for it. The only proof is querying a trace back from the backend after
+a deploy.
 
 **`LOG_LEVEL=debug` does not put debug traffic on the wire.** The OTLP lane
 is floored at INFO by `minsev` (`observability.otlpMinSeverity`) regardless
@@ -181,3 +248,40 @@ into the void while the pod looks healthy. If exported logs go missing,
 check that line in the pod's own stderr before suspecting the collector.
 See the note on `otlploghttp.New` in
 `internal/platform/observability/logging.go`.
+
+## Telemetry is being dropped (`svc_otlp_export_failures_total` climbing)
+
+**Series:** `svc_otlp_export_failures_total`. **Severity: warn, never a page.**
+The service is unaffected — nothing about telemetry is on the request path,
+and a full span queue drops spans rather than blocking a command. What is
+affected is your ability to see anything, which is why it must not be
+ignored either: a dashboard showing nothing wrong may be showing nothing at
+all.
+
+**First: which signal?** The counter is shared. `otel.SetErrorHandler` is
+process-global and the OpenTelemetry log SDK reports through it, so under
+`LOG_EXPORT=otlp` this climbs for log-export failures too. The WARN line
+beside it carries the URL:
+
+    kubectl logs <pod> | jq 'select(.msg | test("OTLP export failed")) | .error'
+
+`.../v1/traces` is the trace exporter (`TRACING_ENDPOINT`); `.../v1/logs` is
+the log exporter (`OTEL_EXPORTER_OTLP_ENDPOINT`). They are configured
+separately and want opposite endpoint shapes — see "The four levers" above.
+
+**Then, in order:**
+
+1. `curl -s :8081/healthz | jq .config` — confirm `tracing` and
+   `tracing_endpoint` are what this deployment intends. A syntactically valid
+   endpoint pointing at the wrong host boots clean and fails every export;
+   that is the one case no boot-time check can catch.
+2. Reach the collector from the pod's own network position, not from your
+   laptop. `TRACING_ENDPOINT` is resolved and dialled by this pod.
+3. If the collector is genuinely down, there is nothing to do here: the
+   counter stops climbing when it returns, spans emitted in the meantime are
+   gone, and no restart is required or helpful.
+
+**Do not** restart the service to "reset" the counter. It is monotonic by
+design — a counter that drops is one every `rate()` misreads as a restart —
+and restarting discards the queued spans that a recovering collector would
+otherwise have received.

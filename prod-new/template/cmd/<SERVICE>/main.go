@@ -104,8 +104,44 @@ func run(ctx context.Context) error {
 		_ = shutdownLogs(flushCtx)
 	}()
 
+	// The tracer is built AFTER the logger for two reasons that are easy to
+	// get backwards: the OTLP exporter's error handler logs through it, and
+	// TRACING=log has nowhere to write without it.
+	traceBackend, shutdownTraces, err := observability.NewTracer(ctx, observability.TracerOptions{
+		Mode:           cfg.Tracing,
+		Endpoint:       cfg.TracingEndpoint,
+		ServiceName:    serviceName,
+		ServiceVersion: build.Revision,
+		Logger:         logger,
+	})
+	if err != nil {
+		// A misconfigured trace endpoint REFUSES THE BOOT. Nothing about
+		// tracing is on the request path, so the tempting alternative is to
+		// warn and carry on -- and that is precisely how a fleet ends up
+		// stamping every log line with a trace_id that resolves to nothing.
+		// Reachability is allowed to degrade (see observability.NewTracer);
+		// configuration is not.
+		return err
+	}
+	defer func() {
+		// Deferred AFTER the log shutdown above, so it runs BEFORE it: LIFO.
+		// Spans are flushed while the logger that reports a flush failure is
+		// still alive. Reversing these two silently discards the one line
+		// that would say the last batch was lost.
+		//
+		// context.WithoutCancel for the same reason the log flush uses it --
+		// run() returns from here after <-ctx.Done(), so ctx is already
+		// cancelled, and the SDK honors that cancellation by abandoning the
+		// batch it was asked to flush.
+		flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelFlush()
+		if err := shutdownTraces(flushCtx); err != nil {
+			logger.ErrorContext(flushCtx, "svc: trace flush failed; the last batch of spans was lost", "error", err)
+		}
+	}()
+
 	tracer := observability.WithBaseAttrs(
-		observability.New(cfg.Tracing, logger),
+		traceBackend,
 		map[string]string{"revision": build.Revision, "config_digest": cfg.Digest()},
 	)
 
@@ -257,6 +293,11 @@ func run(ctx context.Context) error {
 		// durable, countable, and invisible to every operator. Instrumented
 		// but never injected is the same defect as a tracer nobody constructs.
 		Outbox: outbox,
+		// Without this the OTLP export-failure series reads 0 forever while
+		// exports fail -- instrumented but never injected, the same defect
+		// the Outbox line above exists to prevent. It is passed as a plain
+		// function so healthhttp keeps knowing nothing about OpenTelemetry.
+		OTLPExportFailures: observability.OTLPExportFailures,
 	})
 
 	var wg sync.WaitGroup

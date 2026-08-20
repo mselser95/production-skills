@@ -54,4 +54,19 @@
 #       svc_outbox_compaction_reclaimed_bytes_total flat while the file grows
 #       (docs/RUNBOOK.md § "Outbox compaction has stopped reclaiming").
 
+# THE ONE ASSUMPTION THIS SCAFFOLD SHIPS WITH, and why it is a header note
+# rather than a dated entry: the OTLP trace exporter is built with
+# `otlptracehttp.WithInsecure()`
+# (internal/platform/observability/otlp_tracer.go), because the scaffold's
+# deployment shape is a same-network hop to a sidecar-style collector. A
+# generated service whose collector sits across a trust boundary is exporting
+# span names, attributes and timings in the clear, and OWES AN ENTRY HERE the
+# day that becomes true -- with an owner and a real expiry.
+#
+# It is not entered pre-expired in the template because a dated entry authored
+# once, here, would arrive already lapsed in every repo generated afterwards:
+# check-registries.sh would red the very first build, and the only available
+# fix would be to push the date out, which is precisely the habit this
+# registry exists to prevent.
+
 entries: []

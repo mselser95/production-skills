@@ -48,10 +48,31 @@ type Config struct {
 	// into every adapter (see observability/tracing-contract equivalent:
 	// package doc of internal/platform/observability). Env TRACING: unset
 	// or "off" -> "off" (observability.NewNoop(), the default, costs
-	// nothing); "log" -> a structured-log Tracer. Any other value is a boot
-	// error -- fail closed on a typo'd config rather than silently falling
-	// back to noop.
+	// nothing); "log" -> a structured-log Tracer; "otlp" -> the OTLP/HTTP
+	// exporter, which additionally REQUIRES TracingEndpoint. Any other
+	// value is a boot error -- fail closed on a typo'd config rather than
+	// silently falling back to noop.
 	Tracing string
+	// TracingEndpoint is the OTLP/HTTP trace receiver, host:port with NO
+	// scheme (e.g. "tempo:4318"). Env TRACING_ENDPOINT. Required when
+	// Tracing == "otlp"; ignored otherwise.
+	//
+	// TWO VALIDATIONS, ON PURPOSE, and the split is not redundancy for its
+	// own sake. Load refuses an EMPTY endpoint under TRACING=otlp, because
+	// that is a config contradiction and this is where every other boot
+	// refusal in the service lives. The endpoint's SYNTAX is checked by
+	// observability.NewTracer, because the rules belong beside the exporter
+	// that consumes them (host:port with no scheme -- the exact opposite of
+	// the OTLP LOGS endpoint's full URL) and because config must stay a leaf
+	// package that imports no OTel.
+	//
+	// Said precisely, because the tidy version of this sentence was wrong:
+	// on the BOOT path only the check below can fire, since a caller reaching
+	// observability.NewTracer has already passed it. NewTracer's own
+	// empty-endpoint guard is therefore unreachable from cmd/<SERVICE> and
+	// exists for direct callers of the package -- a test, a second
+	// composition root -- not as a second line of defence for this one.
+	TracingEndpoint string
 	// PprofPort, when non-zero, serves net/http/pprof on its own listener.
 	// Env PPROF_PORT; unset/0 means pprof is not served at all -- the
 	// documented default-off rollback lever (registries/flags.yaml).
@@ -88,7 +109,7 @@ func Load() (Config, error) {
 		OutboxMaxAttempts:          5,
 		CheckpointPath:             "data/checkpoints.json",
 		PublishTopic:               "svc.events",
-		Tracing:                    "off",
+		Tracing:                    TracingOff,
 		LogLevel:                   slog.LevelInfo,
 		LogExport:                  LogExportOff,
 	}
@@ -134,6 +155,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	c.Tracing = tracing
+	c.TracingEndpoint = strings.TrimSpace(os.Getenv("TRACING_ENDPOINT"))
+	if c.Tracing == TracingOTLP && c.TracingEndpoint == "" {
+		// Fail closed rather than degrade to "off". A deployment that asked
+		// for exported traces and silently got none is the failure this
+		// whole file exists to refuse: every log line would still carry a
+		// trace_id, and every one of them would 404 in the backend.
+		return Config{}, fmt.Errorf("TRACING=%s requires TRACING_ENDPOINT (host:port, e.g. tempo:4318)", TracingOTLP)
+	}
 	level, err := ParseLogLevel(os.Getenv("LOG_LEVEL"))
 	if err != nil {
 		return Config{}, err
@@ -150,19 +179,30 @@ func Load() (Config, error) {
 	return c, nil
 }
 
+// Tracing modes. These mirror internal/platform/observability's
+// TracingOff/TracingLog/TracingOTLP and are re-declared here rather than
+// imported, for the same reason LogExportOff/LogExportOTLP are: config is a
+// leaf package every layer may read, so it must not pull an OTel dependency
+// in behind it.
+const (
+	TracingOff  = "off"
+	TracingLog  = "log"
+	TracingOTLP = "otlp"
+)
+
 // ParseTracing validates and canonicalizes a raw TRACING env value: unset/
-// empty -> "off"; "off" or "log" pass through unchanged; anything else is a
-// boot error.
+// empty -> TracingOff; "off", "log" or "otlp" pass through unchanged;
+// anything else is a boot error.
 func ParseTracing(raw string) (string, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
-		return "off", nil
+		return TracingOff, nil
 	}
 	switch v {
-	case "off", "log":
+	case TracingOff, TracingLog, TracingOTLP:
 		return v, nil
 	default:
-		return "", fmt.Errorf("TRACING: must be \"off\" or \"log\" (got %q)", v)
+		return "", fmt.Errorf("TRACING: must be %q, %q or %q (got %q)", TracingOff, TracingLog, TracingOTLP, v)
 	}
 }
 

@@ -5,7 +5,7 @@
 //
 // The default implementation (NewNoop) is a pure no-op: accepting this port
 // changes nothing about production behavior until a real Tracer is wired in
-// at the composition root via Config.Tracing / New.
+// at the composition root via Config.Tracing / NewTracer.
 package observability
 
 import "context"

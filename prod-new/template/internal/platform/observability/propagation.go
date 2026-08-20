@@ -68,9 +68,10 @@ var tracePropagator propagation.TextMapPropagator = propagation.NewCompositeText
 // (otelhttp, otelgrpc, anything added later) agrees with the injection this
 // package performs by hand.
 //
-// New calls it for EVERY tracing mode, before the mode switch -- see the
-// comment there. A propagator installed only on the branch that builds a real
-// exporter is a propagator a service running any other mode does not have.
+// NewTracer calls it for EVERY tracing mode, before the mode switch -- see
+// the comment there. A propagator installed only on the branch that builds a
+// real exporter is a propagator a service running any other mode does not
+// have.
 func InstallPropagation() { otel.SetTextMapPropagator(tracePropagator) }
 
 // InjectTraceContext writes the trace context in ctx into an HTTP header map

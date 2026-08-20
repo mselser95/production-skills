@@ -152,3 +152,18 @@
     gauge: what it measures is a file that just got SMALLER, so anything
     derived from the current size would read as "nothing happened" precisely
     when the mechanism worked.
+
+- name: svc_otlp_export_failures_total
+  type: counter
+  labels: []
+  note: >
+    OTLP exports that failed since boot, counted by the process-global
+    OpenTelemetry error handler that internal/platform/observability installs
+    when TRACING=otlp. It spans EVERY signal -- traces, and logs too when
+    LOG_EXPORT=otlp -- because that handler is shared and cannot tell them
+    apart; the accompanying WARN line carries the failing URL, which is what
+    says which one. Telemetry is never on the request path, so this is a WARN
+    condition and never a page: the service is unaffected and continuing to
+    serve is the correct behaviour. What it does mean is that a dashboard
+    showing nothing wrong may be showing nothing at all. Stays 0 for
+    TRACING=off and TRACING=log, which install no exporter.

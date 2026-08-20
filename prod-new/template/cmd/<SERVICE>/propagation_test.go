@@ -55,7 +55,15 @@ func TestTracePropagation_ACommandAndItsPublicationShareOneTrace(t *testing.T) {
 	// implicit.
 	elog.SetTraceParentSource(observability.TraceParentFromContext)
 	ledger := app.NewLedger(domain.NewState(), elog, func() {}, clock.Real{}.Now, ids.Real{}.NewID)
-	ledger.SetTracer(adaptTracer(observability.New("log", logger)))
+	traceBackend, shutdownTraces, err := observability.NewTracer(context.Background(), observability.TracerOptions{
+		Mode:   "log",
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("NewTracer: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdownTraces(context.Background()) })
+	ledger.SetTracer(adaptTracer(traceBackend))
 	if _, err := ledger.Deposit(context.Background(), "e1", "10"); err != nil {
 		t.Fatalf("Deposit: %v", err)
 	}

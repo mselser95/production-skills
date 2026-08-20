@@ -17,6 +17,13 @@
 //     LoggerProvider with a resource; otel/trace is read directly by
 //     observability.traceHandler to stamp trace_id/span_id on the stdout
 //     lane.
+//   - otlptracehttp CLOSES THE OTHER HALF OF THAT SENTENCE. Everything above
+//     stamps a trace_id onto a log line; without a trace exporter that id
+//     names a trace no backend has ever been told about. Shipping the log
+//     bridge alone was worse than shipping neither: an absent trace_id reads
+//     as "outside a span", while a present one that 404s reads as "your query
+//     is wrong", and people believe it. See
+//     internal/platform/observability/otlp_tracer.go.
 //
 // NOTE ON MATURITY: OpenTelemetry Go's LOGS signal is BETA
 // (go.opentelemetry.io/otel/log is v0.x) while traces and metrics are
@@ -31,6 +38,7 @@ require (
 	go.opentelemetry.io/contrib/processors/minsev v0.16.2
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.21.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.45.0
 	go.opentelemetry.io/otel/sdk v1.45.0
 	go.opentelemetry.io/otel/sdk/log v0.21.0
 	go.opentelemetry.io/otel/trace v1.45.0
@@ -44,6 +52,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.45.0 // indirect
 	go.opentelemetry.io/otel/log v0.21.0 // indirect
 	go.opentelemetry.io/otel/metric v1.45.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect

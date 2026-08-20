@@ -18,6 +18,7 @@ package healthhttp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -93,6 +94,19 @@ type Options struct {
 	// ConfigIdentity is surfaced on /healthz and the build_info metric --
 	// see config.Config.Identity.
 	ConfigIdentity config.Identity
+	// OTLPExportFailures reports how many OTLP exports have failed since
+	// boot. The composition root passes
+	// observability.OTLPExportFailures; nil is legal and reports 0.
+	//
+	// A FUNCTION, not an interface or an import, so this package keeps
+	// knowing nothing about OpenTelemetry -- the same reason internal/app
+	// declares its own SpanFunc rather than accepting a Tracer. And it is
+	// here at all because a telemetry-export failure is a failure branch,
+	// and a failure branch with no series is one an operator can only find
+	// by already suspecting it: the WARN it also emits is a poor signal for
+	// "your logs may not be reaching you", which is one of the two cases
+	// this counts.
+	OTLPExportFailures func() int64
 }
 
 // DefaultViolationCooldown is used when Options.ViolationCooldown is zero.
@@ -179,10 +193,54 @@ func (s *Server) mux() *http.ServeMux {
 	return mux
 }
 
+// handleHealthz reports liveness plus this pod's full config IDENTITY.
+//
+// THE IDENTITY IS MARSHALLED, not hand-formatted field by field, and that is
+// the fix for a defect this endpoint carried silently. It used to print four
+// literals -- status, pod_id, revision, config_digest -- while docs/RUNBOOK.md
+// told operators to read `tracing`, `log_level` and `log_export` off it.
+// config.Identity exists precisely to answer "which config produced this",
+// every one of its fields is JSON-tagged for this response, and NONE of them
+// reached the wire: only `.Digest` was read. A digest answers "did the config
+// change"; it cannot answer "is this pod exporting traces, and to where",
+// which is the question the runbook procedure actually asks.
+//
+// json.Marshal over the struct means the next field added to config.Identity
+// is surfaced automatically instead of being forgotten here --
+// TestHealthz_SurfacesEveryConfigIdentityField compares the response against
+// the struct's own field set, so the drift cannot happen twice.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"status":"ok","pod_id":%q,"revision":%q,"config_digest":%q}`,
-		s.opts.PodID, s.build.Revision, s.opts.ConfigIdentity.Digest)
+	body, err := json.Marshal(struct {
+		Status string `json:"status"`
+		PodID  string `json:"pod_id"`
+		// Revision and ConfigDigest stay at the TOP LEVEL, duplicating
+		// `config.digest` below, because they are the pre-existing contract
+		// (and the two labels on the svc_build_info series). A field that
+		// dashboards and probes already read does not get moved to make a
+		// new one fit.
+		Revision     string `json:"revision"`
+		ConfigDigest string `json:"config_digest"`
+		// Config is the whole identity, NESTED rather than flattened so a
+		// field added to config.Identity can never collide with one of the
+		// three above.
+		Config config.Identity `json:"config"`
+	}{
+		Status:       "ok",
+		PodID:        s.opts.PodID,
+		Revision:     s.build.Revision,
+		ConfigDigest: s.opts.ConfigIdentity.Digest,
+		Config:       s.opts.ConfigIdentity,
+	})
+	if err != nil {
+		// Unreachable for this struct (every field is a string or an int),
+		// but a liveness probe must never emit a half-written body: a
+		// truncated JSON object reads as a malformed response, which some
+		// probes treat as UP.
+		http.Error(w, `{"status":"error"}`, http.StatusInternalServerError)
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +325,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeMetric(w, "svc_outbox_compaction_reclaimed_bytes_total", "counter",
 		"Bytes reclaimed by boot compaction. Zero across repeated restarts while the outbox log grows on disk is exactly the condition the mechanism exists to prevent: boot replay cost climbing with lifetime effect volume instead of with the live set.",
 		"", float64(compactBytes))
+
+	// -- telemetry export health --------------------------------------------
+	var exportFailures int64
+	if s.opts.OTLPExportFailures != nil {
+		exportFailures = s.opts.OTLPExportFailures()
+	}
+	writeMetric(w, "svc_otlp_export_failures_total", "counter",
+		"OTLP exports that failed, across every signal (traces, and logs when LOG_EXPORT=otlp -- the OpenTelemetry error handler they share does not distinguish them). Non-zero means telemetry is being DROPPED while the service itself is unaffected, so this is a warn, never a page. Climbing while the service is healthy is the one condition under which a dashboard showing nothing wrong means nothing at all.",
+		"", float64(exportFailures))
 }
 
 // writeMetric renders one Prometheus text-exposition series (HELP, TYPE,
@@ -296,6 +363,7 @@ func MetricNames() []string {
 		"svc_outbox_compactions_total",
 		"svc_outbox_compacted_entries_total",
 		"svc_outbox_compaction_reclaimed_bytes_total",
+		"svc_otlp_export_failures_total",
 	}
 	sort.Strings(names)
 	return names

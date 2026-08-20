@@ -36,7 +36,14 @@ type Identity struct {
 	InvariantCooldownS int    `json:"invariant_cooldown_s"`
 	OutboxMaxAttempts  int    `json:"outbox_max_attempts"`
 	Tracing            string `json:"tracing"`
-	PprofPort          int    `json:"pprof_port"`
+	// TracingEndpoint turns "is this pod exporting traces, and to where?"
+	// into a lookup instead of a guess. Tracing alone cannot answer it: a
+	// pod reading `"tracing":"otlp"` is exporting SOMEWHERE, and the whole
+	// class of defect this scaffold cares about is the endpoint that is
+	// syntactically fine and points at nothing. Empty whenever Tracing is
+	// not "otlp", which is itself the answer to the question.
+	TracingEndpoint string `json:"tracing_endpoint"`
+	PprofPort       int    `json:"pprof_port"`
 	// LogLevel and LogExport are here because a log store answering
 	// "there are no DEBUG lines" is ambiguous: it can mean the code never
 	// logged one, or that this pod was started at INFO, or that the OTLP
@@ -58,6 +65,7 @@ func (c Config) Identity() Identity {
 		InvariantCooldownS: int(c.InvariantViolationCooldown.Seconds()),
 		OutboxMaxAttempts:  c.OutboxMaxAttempts,
 		Tracing:            c.Tracing,
+		TracingEndpoint:    c.TracingEndpoint,
 		PprofPort:          c.PprofPort,
 		LogLevel:           c.LogLevel.String(),
 		LogExport:          c.LogExport,

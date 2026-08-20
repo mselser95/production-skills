@@ -134,3 +134,35 @@ func TestCompactionStats_AbsentOutboxReportsZeroesRatherThanNothing(t *testing.T
 		}
 	}
 }
+
+// provenance: regression
+// verifies: svc_otlp_export_failures_total carries the INJECTED count, not a
+// hardcoded zero.
+//
+// The metrics-contract test only proves the series NAME appears in the scrape
+// and in the manifest, in both directions. That is exactly satisfied by a
+// series wired to nothing: substituting `_ = s.opts.OTLPExportFailures` for
+// the call left the whole healthhttp package green while the series read 0
+// forever -- the same "instrumented but never injected" shape that made
+// Outbox.Reconcile decoration, reproduced in the freshly added counter.
+//
+// A non-zero, non-round value on purpose: a series accidentally wired to some
+// other zero-ish reading would still pass a `== 0` check.
+func TestOTLPExportFailures_ReachTheScrape(t *testing.T) {
+	srv := New(nil, Options{OTLPExportFailures: func() int64 { return 37 }})
+	got, ok := seriesValue(t, scrapeBody(t, srv), "svc_otlp_export_failures_total")
+	if !ok {
+		t.Fatal("svc_otlp_export_failures_total is absent from the scrape -- " +
+			"dropped telemetry is then visible only to whoever already suspects it")
+	}
+	if got != 37 {
+		t.Fatalf("svc_otlp_export_failures_total = %v, want 37 -- the series is not reading the "+
+			"injected counter, so it will report 0 while every export fails", got)
+	}
+
+	// Nil is legal (a pod with no exporter wired) and must report 0 rather
+	// than panicking a scrape.
+	if v, ok := seriesValue(t, scrapeBody(t, New(nil, Options{})), "svc_otlp_export_failures_total"); !ok || v != 0 {
+		t.Fatalf("with no counter injected the series = %v (present=%t), want 0", v, ok)
+	}
+}
