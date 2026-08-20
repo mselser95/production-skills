@@ -51,6 +51,7 @@ import (
 	"sync"
 
 	"github.com/<OWNER>/<SERVICE>/internal/domain"
+	"github.com/<OWNER>/<SERVICE>/internal/platform/observability"
 )
 
 // SchemaVersion is the schema this build WRITES. Bump it, and extend
@@ -122,6 +123,24 @@ type record struct {
 	ID     string `json:"id,omitempty"`
 	Type   string `json:"type,omitempty"`
 	Amount string `json:"amount,omitempty"`
+
+	// TraceParent is the W3C traceparent of the span under which this fact
+	// was COMMITTED, or "" when it was committed outside any span.
+	//
+	// It is persisted because the log is this service's outbox: the command
+	// commits under a span and the relay publishes later, from a different
+	// goroutine, possibly a different process after a restart. Nothing else
+	// survives that gap, so without this field every published event is a
+	// fresh root and the trace that decided a fact can never be joined to the
+	// trace that announced it -- the shape that produced 3132 traces for 3132
+	// spans in a service where every individual mechanism was correct.
+	//
+	// Optional and `omitempty`, so it is a COMPATIBLE addition: a log written
+	// by a build that predates it reads back with an empty traceparent and
+	// publishes exactly as before (see ContextWithTraceParent, which treats ""
+	// as "no parent" rather than as an error). The schema version is therefore
+	// NOT bumped -- expand, do not break.
+	TraceParent string `json:"traceparent,omitempty"`
 
 	// snapshot field: the folded domain.State, verbatim.
 	State json.RawMessage `json:"state,omitempty"`
@@ -243,7 +262,13 @@ func (l *Log) ReadAfter(_ context.Context, after int64, limit int) ([]SeqEvent, 
 		if rec.kindOf() == kindSnapshot || rec.Seq <= after {
 			continue
 		}
-		out = append(out, SeqEvent{Seq: rec.Seq, Origin: rec.originOf(), ForeignSeq: rec.ForeignSeq, Event: eventFrom(rec)})
+		out = append(out, SeqEvent{
+			Seq:         rec.Seq,
+			Origin:      rec.originOf(),
+			ForeignSeq:  rec.ForeignSeq,
+			TraceParent: rec.TraceParent,
+			Event:       eventFrom(rec),
+		})
 		if len(out) == limit {
 			break
 		}
@@ -281,7 +306,13 @@ type SeqEvent struct {
 	Origin Origin
 	// ForeignSeq is the upstream position for ingested facts, 0 otherwise.
 	ForeignSeq int64
-	Event      domain.Event
+	// TraceParent is the W3C traceparent recorded when this fact was
+	// committed, or "" for a fact committed outside a span (or written by a
+	// build that predates the field). It is what lets a publisher attribute a
+	// delivery to the command that caused it, across the durable gap between
+	// them.
+	TraceParent string
+	Event       domain.Event
 }
 
 // Position implements relay.Sequenced: the local publication order.
@@ -310,8 +341,13 @@ func (l *Log) Close() error {
 // stable storage. Satisfies internal/app.EventJournal structurally (no
 // import of internal/platform by internal/app -- see that package's port
 // doc).
-func (l *Log) Append(event domain.Event) error {
-	return l.append(event, OriginRaised, 0)
+//
+// The ctx is not decoration and is not cancellation plumbing: it is read for
+// the caller's SPAN, whose traceparent is persisted with the record so the
+// relay can publish this fact inside the trace that committed it. A ctx with
+// no span records nothing and changes nothing.
+func (l *Log) Append(ctx context.Context, event domain.Event) error {
+	return l.append(ctx, event, OriginRaised, 0)
 }
 
 // AppendIngested records a fact decided and ordered by an UPSTREAM authority,
@@ -322,11 +358,11 @@ func (l *Log) Append(event domain.Event) error {
 // event it never received, so a hole in foreignSeq is a condition to block on,
 // whereas the local Seq is simply the order in which this log observed things
 // and never has holes. Collapsing the two loses exactly one of those meanings.
-func (l *Log) AppendIngested(event domain.Event, foreignSeq int64) error {
-	return l.append(event, OriginIngested, foreignSeq)
+func (l *Log) AppendIngested(ctx context.Context, event domain.Event, foreignSeq int64) error {
+	return l.append(ctx, event, OriginIngested, foreignSeq)
 }
 
-func (l *Log) append(event domain.Event, origin Origin, foreignSeq int64) error {
+func (l *Log) append(ctx context.Context, event domain.Event, origin Origin, foreignSeq int64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.writeLocked(record{
@@ -338,6 +374,7 @@ func (l *Log) append(event domain.Event, origin Origin, foreignSeq int64) error 
 		ID:            event.ID,
 		Type:          string(event.Type),
 		Amount:        event.Amount,
+		TraceParent:   observability.TraceParentFromContext(ctx),
 	}); err != nil {
 		return err
 	}

@@ -17,7 +17,7 @@ import (
 func TestReadAfter_AssignsGaplessPositionsInAppendOrder(t *testing.T) {
 	l, _ := openTemp(t)
 	for i := 0; i < 4; i++ {
-		if err := l.Append(domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
+		if err := l.Append(context.Background(), domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -47,7 +47,7 @@ func TestReadAfter_AssignsGaplessPositionsInAppendOrder(t *testing.T) {
 func TestReadAfter_IsExclusiveAndBounded(t *testing.T) {
 	l, _ := openTemp(t)
 	for i := 0; i < 5; i++ {
-		if err := l.Append(domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
+		if err := l.Append(context.Background(), domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -95,7 +95,7 @@ func TestHead_ReportsTheHighestPosition(t *testing.T) {
 		t.Fatalf("Head on an empty log = %d, want 0", head)
 	}
 	for i := 0; i < 3; i++ {
-		if err := l.Append(domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
+		if err := l.Append(context.Background(), domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -111,7 +111,7 @@ func TestHead_ReportsTheHighestPosition(t *testing.T) {
 func TestHead_SurvivesAReopen(t *testing.T) {
 	l, path := openTemp(t)
 	for i := 0; i < 3; i++ {
-		if err := l.Append(domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
+		if err := l.Append(context.Background(), domain.Event{ID: string(rune('a' + i)), Type: domain.EventDeposited, Amount: "1"}); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -127,7 +127,7 @@ func TestHead_SurvivesAReopen(t *testing.T) {
 	if head, err := reopened.Head(context.Background()); err != nil || head != 3 {
 		t.Fatalf("Head after reopen = %d, %v; want 3, nil", head, err)
 	}
-	if err := reopened.Append(domain.Event{ID: "d", Type: domain.EventDeposited, Amount: "1"}); err != nil {
+	if err := reopened.Append(context.Background(), domain.Event{ID: "d", Type: domain.EventDeposited, Amount: "1"}); err != nil {
 		t.Fatalf("Append after reopen: %v", err)
 	}
 	got, err := reopened.ReadAfter(context.Background(), 3, 10)
@@ -150,10 +150,10 @@ func TestHead_SurvivesAReopen(t *testing.T) {
 // order this log observed things and never has holes.
 func TestAppendIngested_KeepsBothPositions(t *testing.T) {
 	l, _ := openTemp(t)
-	if err := l.Append(domain.Event{ID: "own", Type: domain.EventDeposited, Amount: "1"}); err != nil {
+	if err := l.Append(context.Background(), domain.Event{ID: "own", Type: domain.EventDeposited, Amount: "1"}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := l.AppendIngested(domain.Event{ID: "up", Type: domain.EventDeposited, Amount: "2"}, 91); err != nil {
+	if err := l.AppendIngested(context.Background(), domain.Event{ID: "up", Type: domain.EventDeposited, Amount: "2"}, 91); err != nil {
 		t.Fatalf("AppendIngested: %v", err)
 	}
 	got, err := l.ReadAfter(context.Background(), 0, 10)
@@ -221,7 +221,7 @@ func TestReadAfter_BackfillsPositionsForPreV3Records(t *testing.T) {
 		t.Fatalf("pre-v3 record origin = %q, want %q", got[0].Origin, OriginRaised)
 	}
 	// A new append must continue from the recovered head, not restart at 1.
-	if err := l.Append(domain.Event{ID: "c", Type: domain.EventDeposited, Amount: "1"}); err != nil {
+	if err := l.Append(context.Background(), domain.Event{ID: "c", Type: domain.EventDeposited, Amount: "1"}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	tail, err := l.ReadAfter(context.Background(), 2, 10)

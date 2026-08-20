@@ -45,7 +45,7 @@ func TestRebuildOutboxFromLog_RecoversEffectsLostInTheCommitWindow(t *testing.T)
 		{ID: "e1", Type: domain.EventDeposited, Amount: "10"},
 		{ID: "e2", Type: domain.EventDeposited, Amount: "5"},
 	} {
-		if err := log.Append(e); err != nil {
+		if err := log.Append(context.Background(), e); err != nil {
 			t.Fatalf("append %s: %v", e.ID, err)
 		}
 	}
@@ -97,7 +97,7 @@ func TestRebuildOutboxFromLog_DoesNotRejournalWhatItAlreadyKnows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open event log: %v", err)
 	}
-	if err := log.Append(domain.Event{ID: "e1", Type: domain.EventDeposited, Amount: "10"}); err != nil {
+	if err := log.Append(context.Background(), domain.Event{ID: "e1", Type: domain.EventDeposited, Amount: "10"}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if err := log.Close(); err != nil {
@@ -152,7 +152,7 @@ func TestRebuildOutboxFromLog_RecoveredEffectCarriesItsDerivedIdentity(t *testin
 	if err != nil {
 		t.Fatalf("open event log: %v", err)
 	}
-	if err := log.Append(domain.Event{ID: "ev1", Type: domain.EventDeposited, Amount: "1"}); err != nil {
+	if err := log.Append(context.Background(), domain.Event{ID: "ev1", Type: domain.EventDeposited, Amount: "1"}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	_ = log.Close()

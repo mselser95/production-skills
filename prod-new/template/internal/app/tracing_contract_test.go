@@ -8,7 +8,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/<OWNER>/<SERVICE>/internal/domain"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/observability"
 )
 
@@ -23,9 +25,9 @@ func TestSpansYAML_MatchesLedgerSpanNames(t *testing.T) {
 
 	rec := observability.NewRecording()
 	l, _, _ := newTestLedger()
-	l.SetTracer(func(name string, attrs map[string]string) func(error) {
-		_, span := rec.StartSpan(context.Background(), name, attrs)
-		return func(err error) {
+	l.SetTracer(func(ctx context.Context, name string, attrs map[string]string) (context.Context, func(error)) {
+		ctx, span := rec.StartSpan(ctx, name, attrs)
+		return ctx, func(err error) {
 			span.RecordError(err)
 			span.End()
 		}
@@ -60,9 +62,9 @@ func TestSpansYAML_MatchesLedgerSpanNames(t *testing.T) {
 func TestSpans_RecordErrorFiresOnAFailingCommand(t *testing.T) {
 	rec := observability.NewRecording()
 	l, j, _ := newTestLedger()
-	l.SetTracer(func(name string, attrs map[string]string) func(error) {
-		_, span := rec.StartSpan(context.Background(), name, attrs)
-		return func(err error) {
+	l.SetTracer(func(ctx context.Context, name string, attrs map[string]string) (context.Context, func(error)) {
+		ctx, span := rec.StartSpan(ctx, name, attrs)
+		return ctx, func(err error) {
 			span.RecordError(err)
 			span.End()
 		}
@@ -110,4 +112,84 @@ func parseSpanNames(t *testing.T, path string) map[string]bool {
 		t.Fatalf("parsed zero span names from %s -- format changed or the scanner broke", path)
 	}
 	return out
+}
+
+// spanCtxKey marks a context so the guard below can tell a span-carrying
+// context from the bare one the caller passed in.
+type spanCtxKey struct{}
+
+// ctxRecordingJournal records the context Append was handed, which is the
+// only way to see whether process() threads the SPAN's context downstream or
+// silently drops it.
+type ctxRecordingJournal struct {
+	fakeJournal
+	gotCtx context.Context
+}
+
+func (j *ctxRecordingJournal) Append(ctx context.Context, e domain.Event) error {
+	j.gotCtx = ctx
+	return j.fakeJournal.Append(ctx, e)
+}
+
+// provenance: regression
+// verifies: observability -- the context returned by SpanFunc REACHES the
+// ledger's durable write, on EVERY entry point that has one.
+//
+// This is the half of trace correlation that lives below the log call sites.
+// Converting every logger.Info to InfoContext is necessary and useless on its
+// own: a *Context call can only carry a trace id if some context in scope
+// actually contains the span. And here it decides something durable -- the
+// journal records the traceparent it finds in this context, so a dropped
+// context means every published event is an orphan root forever, in bytes on
+// disk, not just in this process.
+//
+// TABLE-DRIVEN because the rule has TWO call sites and a single row plus an
+// assumption is how the second one goes unguarded: `_, end := l.spanStart(...)`
+// in process() is one edit, and it must fail loudly for both commands.
+func TestSpanContextReachesTheLedgersDurableWrite(t *testing.T) {
+	tests := []struct {
+		name string
+		span string
+		call func(*Ledger, context.Context) error
+	}{
+		{
+			name: "Deposit",
+			span: "svc.deposit",
+			call: func(l *Ledger, ctx context.Context) error {
+				_, err := l.Deposit(ctx, "e1", "10")
+				return err
+			},
+		},
+		{
+			name: "Withdraw",
+			span: "svc.withdraw",
+			call: func(l *Ledger, ctx context.Context) error {
+				_, err := l.Withdraw(ctx, "e2", "0")
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			j := &ctxRecordingJournal{}
+			l := NewLedger(domain.NewState(), j, nil,
+				func() time.Time { return time.Unix(1_700_000_000, 0) },
+				func() string { return "gen-1" })
+			l.SetTracer(func(ctx context.Context, name string, _ map[string]string) (context.Context, func(error)) {
+				return context.WithValue(ctx, spanCtxKey{}, name), func(error) {}
+			})
+
+			if err := test.call(l, context.Background()); err != nil {
+				t.Fatalf("%s: %v", test.name, err)
+			}
+			if j.gotCtx == nil {
+				t.Fatal("Append was never called")
+			}
+			if got := j.gotCtx.Value(spanCtxKey{}); got != test.span {
+				t.Fatalf("the journal received a context WITHOUT the span (%v) -- the traceparent "+
+					"it persists is empty, so the relay's later publish of this fact is an orphan "+
+					"root that can never be joined to the command that decided it", got)
+			}
+		})
+	}
 }

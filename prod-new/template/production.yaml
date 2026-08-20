@@ -154,6 +154,14 @@ driven:
   # eliminates the symbol and reds this row.
   outbox_compaction: main.compactOutboxLog
   tracing: observability.New
+  # trace_propagation names the INSTALLER, not a method, and it is the row
+  # that turns "spans exist" into "traces exist". A plain package-level
+  # function belongs to no interface, so if observability.New stops calling it
+  # the linker eliminates the symbol and this row goes red -- which is the one
+  # mechanical signal that exists for a defect measured as 3132 spans in 3132
+  # traces, with the tracer wired, the spans complete, and every other probe
+  # green. See internal/platform/observability/propagation.go.
+  trace_propagation: observability.InstallPropagation
 
 out_of_scope:
   - write_surface_authn: >

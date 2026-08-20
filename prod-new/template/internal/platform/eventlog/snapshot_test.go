@@ -1,6 +1,7 @@
 package eventlog
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,7 +16,7 @@ func depositN(t *testing.T, log *Log, from, n int) {
 	t.Helper()
 	for i := from; i < from+n; i++ {
 		e := domain.Event{ID: "e" + strconv.Itoa(i), Type: domain.EventDeposited, Amount: "1"}
-		if err := log.Append(e); err != nil {
+		if err := log.Append(context.Background(), e); err != nil {
 			t.Fatalf("Append(%s): %v", e.ID, err)
 		}
 	}
@@ -494,7 +495,7 @@ func TestWritesToAClosedLogFail(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if err := log.Append(domain.Event{ID: "x", Type: domain.EventDeposited, Amount: "1"}); err == nil {
+	if err := log.Append(context.Background(), domain.Event{ID: "x", Type: domain.EventDeposited, Amount: "1"}); err == nil {
 		t.Error("Append on a closed log returned nil -- the caller believes the event is durable")
 	}
 	if err := log.Snapshot(domain.NewState()); err == nil {

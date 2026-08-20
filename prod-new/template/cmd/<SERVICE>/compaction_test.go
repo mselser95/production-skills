@@ -21,7 +21,7 @@ func seedEvents(t *testing.T, path string, events ...domain.Event) {
 		t.Fatalf("open event log: %v", err)
 	}
 	for _, e := range events {
-		if err := log.Append(e); err != nil {
+		if err := log.Append(context.Background(), e); err != nil {
 			t.Fatalf("append %s: %v", e.ID, err)
 		}
 	}

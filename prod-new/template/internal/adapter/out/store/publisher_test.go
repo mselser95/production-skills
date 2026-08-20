@@ -231,7 +231,7 @@ func TestEndToEnd_EventLogIsTheOutbox(t *testing.T) {
 		{ID: "w1", Type: domain.EventWithdrawn, Amount: "4"},
 		{ID: "d2", Type: domain.EventDeposited, Amount: "1"},
 	} {
-		if err := log.Append(e); err != nil {
+		if err := log.Append(context.Background(), e); err != nil {
 			t.Fatalf("Append %s: %v", e.ID, err)
 		}
 	}
@@ -283,7 +283,7 @@ func TestEndToEnd_EventLogIsTheOutbox(t *testing.T) {
 	}
 
 	// A new event after the restart is picked up from the stored position.
-	if err := log.Append(domain.Event{ID: "d3", Type: domain.EventDeposited, Amount: "2"}); err != nil {
+	if err := log.Append(context.Background(), domain.Event{ID: "d3", Type: domain.EventDeposited, Amount: "2"}); err != nil {
 		t.Fatalf("Append d3: %v", err)
 	}
 	if err := rel2.RunToEnd(context.Background()); err != nil {
@@ -306,7 +306,7 @@ func TestEndToEnd_PublisherOutageDelaysButNeverLoses(t *testing.T) {
 	}
 	defer func() { _ = log.Close() }()
 	for i := 0; i < 5; i++ {
-		if err := log.Append(domain.Event{ID: "d" + strconv.Itoa(i), Type: domain.EventDeposited, Amount: "1"}); err != nil {
+		if err := log.Append(context.Background(), domain.Event{ID: "d" + strconv.Itoa(i), Type: domain.EventDeposited, Amount: "1"}); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}

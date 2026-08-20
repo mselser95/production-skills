@@ -7,6 +7,16 @@
 #
 # A span fires only when a real Tracer is wired (Config.Tracing != "off",
 # the default) -- see internal/platform/observability.
+#
+# PROPAGATION IS NOT LISTED HERE, and the omission is deliberate rather than an
+# oversight: this file names spans, and a span is not a trace. What makes the
+# two spans of one causal chain ONE trace is
+# internal/platform/observability/propagation.go plus the traceparent the event
+# log persists with every fact -- neither of which emits a span of its own.
+# The end-to-end guard is cmd/<SERVICE>'s
+# TestTracePropagation_ACommandAndItsPublicationShareOneTrace, and the
+# production.yaml `driven:` block names the installer so a deployment that
+# stopped propagating fails the standard's own probe.
 
 - name: svc.deposit
   emitted_by: internal/app/ledger.go (Ledger.Deposit -> process)

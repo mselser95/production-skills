@@ -606,18 +606,29 @@ func rebuildOutboxFromLog(eventLogPath string, outbox derivedJournaler) (int, er
 // import internal/platform directly). This is the ONE place in the whole
 // module allowed to know about both types at once.
 //
-// KNOWN LIMIT, stated rather than hidden: app.SpanFunc carries no
-// context.Context, so the span started here has no parent and the line the
-// log tracer emits at End carries no trace_id. Widening SpanFunc to take a
-// ctx is the real fix and it is an app-layer port change, not a change to
-// this adapter. Until then, app-level spans correlate by their attributes
-// (event id, config digest, revision) and not by trace id -- which is a
-// weaker join, and worth knowing before someone builds a dashboard on the
-// assumption that it is not.
+// The context is threaded through in BOTH directions, and neither is
+// decoration. Inbound, so a span can be a child of whatever the caller was
+// already doing rather than a new orphan root. Outbound, so the ledger can
+// hand the span-carrying context to everything it calls -- which is the only
+// way the durable journal can record this span's traceparent, and the only
+// way a log line emitted during the span can carry that span's trace id.
+//
+// This function used to read
+//
+//	_, span := tr.StartSpan(context.Background(), name, attrs)
+//	return func(err error) { ... }
+//
+// -- the caller's context dropped on the way IN, the span's context dropped
+// on the way OUT. Spans were still emitted, every test passed, and
+// correlation was structurally impossible: no context anywhere in the process
+// ever contained a span, so nothing could be a parent and nothing could be a
+// child. The whole suite was blind to it, because each mechanism was correct
+// in isolation. TestAdaptTracer_ThreadsTheSpanContextInBothDirections is the
+// guard, and it asserts both halves separately for exactly that reason.
 func adaptTracer(tr observability.Tracer) app.SpanFunc {
-	return func(name string, attrs map[string]string) func(error) {
-		_, span := tr.StartSpan(context.Background(), name, attrs)
-		return func(err error) {
+	return func(ctx context.Context, name string, attrs map[string]string) (context.Context, func(error)) {
+		ctx, span := tr.StartSpan(ctx, name, attrs)
+		return ctx, func(err error) {
 			span.RecordError(err)
 			span.End()
 		}

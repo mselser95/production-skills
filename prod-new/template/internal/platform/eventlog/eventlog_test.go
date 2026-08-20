@@ -1,6 +1,7 @@
 package eventlog
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -24,7 +25,7 @@ func TestAppendAndReplay_RoundTrips(t *testing.T) {
 		{ID: "e3", Type: domain.EventDeposited, Amount: "5.5"},
 	}
 	for _, e := range events {
-		if err := log.Append(e); err != nil {
+		if err := log.Append(context.Background(), e); err != nil {
 			t.Fatalf("Append(%+v): %v", e, err)
 		}
 	}

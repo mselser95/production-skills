@@ -9,6 +9,7 @@ import (
 
 	"github.com/<OWNER>/<SERVICE>/internal/domain"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/eventlog"
+	"github.com/<OWNER>/<SERVICE>/internal/platform/observability"
 	"github.com/<OWNER>/<SERVICE>/internal/platform/relay"
 )
 
@@ -50,11 +51,22 @@ func NewLogPublisher(logger *slog.Logger) *LogPublisher {
 // is complete, which is the contract the relay's ordering depends on.
 //
 // The ctx is USED, not discarded: the delivery line is emitted with
-// InfoContext so it carries the trace context of the relay iteration that
-// produced it. This parameter was `_` until the correlation gap was measured
-// -- a publisher whose delivery lines cannot be joined to the span that
-// triggered them is the single hardest thing to debug about a relay.
+// InfoContext so it carries a trace context. This parameter was `_` until the
+// correlation gap was measured -- a publisher whose delivery lines cannot be
+// joined to the span that caused them is the single hardest thing to debug
+// about a relay.
 func (p *LogPublisher) Publish(ctx context.Context, topic string, msg relay.Message) error {
+	// The CONSUMER's half of propagation, performed here because this
+	// publisher is also the thing that observes the delivery. A real broker
+	// client would hand msg.Metadata to the broker as headers and the
+	// consumer process would call ExtractMetadata; this one delivers by
+	// logging, so it extracts and logs under the restored context. Either
+	// way the effect is the same and it is the point of the whole file: the
+	// delivery line carries the trace_id of the COMMAND that committed the
+	// event, across the durable gap -- a different goroutine, and possibly a
+	// different process after a restart -- instead of no trace id at all.
+	ctx = observability.ExtractMetadata(ctx, msg.Metadata)
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.attempts[msg.ID]++
@@ -174,6 +186,33 @@ func EnvelopeMapper(topic string) relay.Mapper[eventlog.SeqEvent] {
 		if err != nil {
 			return nil, fmt.Errorf("store: encoding notification for event %s: %w", se.Event.ID, err)
 		}
+		metadata := map[string]string{
+			MetaEventID:    se.Event.ID,
+			MetaEventType:  string(se.Event.Type),
+			MetaPosition:   fmt.Sprintf("%d", se.Seq),
+			MetaOrigin:     string(se.Origin),
+			MetaForeignSeq: fmt.Sprintf("%d", se.ForeignSeq),
+			MetaSchema:     IntegrationSchema,
+		}
+		// THE EGRESS HALF OF TRACE PROPAGATION, and the reason the event log
+		// persists a traceparent at all.
+		//
+		// Two steps, both necessary. ContextWithTraceParent rebuilds the
+		// committing span as a REMOTE parent (it has already ended, perhaps in
+		// a previous process); InjectMetadata then writes it back out through
+		// the propagator, so what leaves this service is whatever the W3C
+		// propagator says the header should be, not a string this file copied
+		// by hand. A record with no traceparent -- committed outside a span,
+		// or written by a build that predates the field -- injects nothing and
+		// publishes exactly as before.
+		//
+		// Written with the propagator's own key ("traceparent", lowercase and
+		// verbatim), NOT canonicalized: see propagation.go for the header a
+		// message consumer never finds.
+		observability.InjectMetadata(
+			observability.ContextWithTraceParent(context.Background(), se.TraceParent),
+			metadata,
+		)
 		return []relay.Publication{{
 			Topic: topic,
 			Msg: relay.Message{
@@ -181,16 +220,9 @@ func EnvelopeMapper(topic string) relay.Mapper[eventlog.SeqEvent] {
 				// redeliveries, so a consumer deduplicates on it; a fresh id
 				// per attempt would present a resumed delivery as a brand-new
 				// fact.
-				ID:      se.Event.ID,
-				Payload: payload,
-				Metadata: map[string]string{
-					MetaEventID:    se.Event.ID,
-					MetaEventType:  string(se.Event.Type),
-					MetaPosition:   fmt.Sprintf("%d", se.Seq),
-					MetaOrigin:     string(se.Origin),
-					MetaForeignSeq: fmt.Sprintf("%d", se.ForeignSeq),
-					MetaSchema:     IntegrationSchema,
-				},
+				ID:       se.Event.ID,
+				Payload:  payload,
+				Metadata: metadata,
 			},
 		}}, nil
 	}

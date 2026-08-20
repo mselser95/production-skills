@@ -134,6 +134,29 @@ variants drop the context, which is what `sloglint: context: all` exists to
 prevent. That is a code defect, not a configuration problem; do not go
 looking at the collector.
 
+If NO line in the whole process carries a `trace_id`, check `TRACING` first:
+`off` (a valid setting) wires the no-op tracer, which starts no span, so
+there is nothing for a line to be stamped with. `/healthz` reports the live
+value.
+
+**Following one command past the durable log.** The command and the
+publication it causes are ONE trace, and they are emitted seconds or a
+restart apart:
+
+    jq 'select(.trace_id=="<id>")' — the `svc.deposit` span line and the
+    `relay delivery` line for the same fact both match.
+
+What joins them is not a context — a context does not survive a process. It
+is the `traceparent` field the event log persists with the record
+(`jq 'select(.id=="<event id>") | .traceparent' events.jsonl`) and the
+`traceparent` key in the published envelope's metadata. If a delivery line
+has no `trace_id`, look at the record on disk: a fact committed before this
+field existed, or committed outside any span (a background job, a
+`TRACING=off` deployment), has no parent to restore, and publishing it as a
+new root is correct. A record that HAS a traceparent while its delivery line
+does not is a code defect in the mapper or the publisher — see
+`internal/platform/observability/propagation.go`.
+
 **The two levers.**
 
 | Env | Default | Effect |

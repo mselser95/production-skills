@@ -38,8 +38,18 @@ type IDGenerator func() string
 
 // EventJournal is the durable append-only log port. Satisfied structurally
 // by internal/platform/eventlog.(*Log).Append.
+//
+// The ctx is the SPAN-CARRYING context returned by SpanFunc, and threading it
+// here is the load-bearing half of trace correlation in this service, not
+// politeness. The log is the outbox: the relay publishes this record later,
+// from another goroutine and possibly another process, so the only way the
+// publish can belong to the trace that committed the fact is for the journal
+// to persist the caller's traceparent with it. Drop the ctx and every
+// published event is a fresh root, which is exactly the shape that produced
+// 3132 traces for 3132 spans in a service where every mechanism was correct
+// on its own.
 type EventJournal interface {
-	Append(event domain.Event) error
+	Append(ctx context.Context, event domain.Event) error
 }
 
 // Notifier tells the relay that new events are available, so a healthy
@@ -59,13 +69,31 @@ type EventJournal interface {
 // committed.
 type Notifier func()
 
-// Tracer is the narrow tracing port app needs, satisfied structurally by
-// internal/platform/observability.Tracer without importing that package.
-// A Ledger built without SetTracer uses noopSpan below, so tracing is
-// additive and costs nothing by default.
-type SpanFunc func(name string, attrs map[string]string) func(err error)
+// SpanFunc is the narrow tracing port app needs, satisfied structurally by
+// internal/platform/observability.Tracer.StartSpan (adapted at the
+// composition root) without importing that package. A Ledger built without
+// SetTracer uses noopSpan below, so tracing is additive and costs nothing by
+// default.
+//
+// THE CONTEXT IS THREADED IN BOTH DIRECTIONS, and neither direction is
+// decoration.
+//
+//   - INBOUND, so the span is a CHILD of whatever the caller was already
+//     doing rather than a new orphan root. This port used to take no context
+//     at all, so the composition root had nothing to pass and started every
+//     span from context.Background().
+//   - OUTBOUND, so this layer can hand the span-carrying context to
+//     everything it calls -- which is the only way a durable record can carry
+//     the traceparent of the command that wrote it, and the only way a log
+//     line emitted during the span can carry that span's trace id.
+//
+// A port whose span cannot be a parent and cannot be a child produces spans
+// that are individually perfect and collectively useless.
+type SpanFunc func(ctx context.Context, name string, attrs map[string]string) (context.Context, func(err error))
 
-func noopSpan(string, map[string]string) func(error) { return func(error) {} }
+func noopSpan(ctx context.Context, _ string, _ map[string]string) (context.Context, func(error)) {
+	return ctx, func(error) {}
+}
 
 // CommandOutcome is the final observable result of one Deposit/Withdraw
 // call, returned to the caller alongside any error.
@@ -233,7 +261,7 @@ func (l *Ledger) Withdraw(ctx context.Context, eventID, amount string) (CommandO
 // csApplied -> csLogged -> csCommitted, with the last three inside one
 // critical section.
 func (l *Ledger) process(ctx context.Context, spanName, eventID string, eventType domain.EventType, amount string) (CommandOutcome, error) {
-	end := l.spanStart(spanName, map[string]string{"event_type": string(eventType)})
+	ctx, end := l.spanStart(ctx, spanName, map[string]string{"event_type": string(eventType)})
 	var stepErr error
 	defer func() { end(stepErr) }()
 
@@ -261,7 +289,10 @@ func (l *Ledger) process(ctx context.Context, spanName, eventID string, eventTyp
 
 	// -- Applied -> Logged ---------------------------------------------------
 	if admitted {
-		if err := l.journal.Append(event); err != nil {
+		// ctx here is the SPAN's context, not the caller's: the journal
+		// records its traceparent, so the relay's later publish of this very
+		// record joins the trace this command opened.
+		if err := l.journal.Append(ctx, event); err != nil {
 			// State is NOT advanced: the decision dies with the append.
 			l.mu.Unlock()
 			stepErr = fmt.Errorf("app: journal append: %w", err)

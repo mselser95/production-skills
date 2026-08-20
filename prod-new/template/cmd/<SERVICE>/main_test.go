@@ -40,10 +40,10 @@ func TestAdaptTracer(t *testing.T) {
 	rec := observability.NewRecording()
 	spanFn := adaptTracer(rec)
 
-	end := spanFn("svc.deposit", map[string]string{"event_type": "deposited"})
+	_, end := spanFn(context.Background(), "svc.deposit", map[string]string{"event_type": "deposited"})
 	end(nil)
 
-	end2 := spanFn("svc.withdraw", map[string]string{"event_type": "withdrawn"})
+	_, end2 := spanFn(context.Background(), "svc.withdraw", map[string]string{"event_type": "withdrawn"})
 	end2(errors.New("boom"))
 
 	deposits := rec.Named("svc.deposit")
@@ -53,6 +53,84 @@ func TestAdaptTracer(t *testing.T) {
 	withdrawals := rec.Named("svc.withdraw")
 	if len(withdrawals) != 1 || withdrawals[0].Err == nil {
 		t.Fatalf("svc.withdraw span = %+v, want one span with a recorded error", withdrawals)
+	}
+}
+
+// callerCtxKey and spanCtxKey mark a context so the guard below can tell the
+// CALLER's context from a fresh one, and a span-carrying context from a bare
+// one. Unexported empty structs, so no other package can collide with them.
+type callerCtxKey struct{}
+type spanCtxKey struct{}
+
+// ctxDerivingTracer is a Tracer that DERIVES a new context per span, which is
+// what every real tracer does and what observability.Recording deliberately
+// does not -- Recording returns ctx unchanged, so TestAdaptTracer above cannot
+// observe this defect at all.
+type ctxDerivingTracer struct {
+	// startedWith is the context StartSpan was handed, kept so the test can
+	// prove the CALLER's context went in rather than a fresh one.
+	startedWith context.Context
+}
+
+func (t *ctxDerivingTracer) StartSpan(ctx context.Context, name string, _ map[string]string) (context.Context, observability.Span) {
+	t.startedWith = ctx
+	return context.WithValue(ctx, spanCtxKey{}, name), noopEndSpan{}
+}
+
+type noopEndSpan struct{}
+
+func (noopEndSpan) End()              {}
+func (noopEndSpan) RecordError(error) {}
+
+// provenance: regression
+// verifies: observability -- adaptTracer THREADS THE CONTEXT IN BOTH
+// DIRECTIONS, which is the whole of trace correlation below the composition
+// root and the one property TestAdaptTracer above cannot see.
+//
+// THIS IS THE TEST THE ORIGINAL DEFECT SURVIVED, in the service this template
+// was extracted from. adaptTracer used to read
+//
+//	_, span := tr.StartSpan(context.Background(), name, attrs)
+//	return func(err error) { ... }
+//
+// -- the caller's context dropped on the way IN, the span's context dropped on
+// the way OUT. Every span in the process was therefore an orphan root
+// (measured: 3132 spans received by the backend, 3132 traces created), and no
+// log line emitted during a span could carry that span's trace id, because no
+// context in the process ever contained a span. The defect was found, fixed,
+// and then RE-INTRODUCED VERBATIM during a later audit with the full suite
+// still green -- because the test nominally guarding it discarded the very
+// context it was testing and asserted only span names and attributes.
+//
+// So both directions are asserted here, separately, with messages that name
+// which half broke:
+//
+//   - OUTBOUND: the context adaptTracer RETURNS contains the span. Without it
+//     the ledger hands a span-free context to everything downstream, and the
+//     traceparent the event log persists is empty.
+//   - INBOUND: the context adaptTracer PASSES to StartSpan is the caller's,
+//     carrying whatever the caller already had on it. Without it every span is
+//     a root even when the caller was mid-trace -- which is exactly what
+//     `context.Background()` did.
+func TestAdaptTracer_ThreadsTheSpanContextInBothDirections(t *testing.T) {
+	tr := &ctxDerivingTracer{}
+	spanFn := adaptTracer(tr)
+
+	callerCtx := context.WithValue(context.Background(), callerCtxKey{}, "caller-was-here")
+	spanCtx, end := spanFn(callerCtx, "svc.deposit", map[string]string{"event_type": "deposited"})
+	end(nil)
+
+	if got := spanCtx.Value(spanCtxKey{}); got != "svc.deposit" {
+		t.Errorf("the context adaptTracer returned does NOT contain the span (%v) -- "+
+			"every downstream call, every log line made during the span, and the traceparent "+
+			"persisted with the event are all unattributable to it", got)
+	}
+	if tr.startedWith == nil {
+		t.Fatal("StartSpan was never called")
+	}
+	if got := tr.startedWith.Value(callerCtxKey{}); got != "caller-was-here" {
+		t.Errorf("StartSpan was handed a context WITHOUT the caller's own (%v) -- "+
+			"the span is a new orphan root instead of a child of whatever the caller was doing", got)
 	}
 }
 
@@ -77,7 +155,7 @@ func TestSnapshotLoop_CollapsesTheReplayTail(t *testing.T) {
 	const events = 25
 	for i := 0; i < events; i++ {
 		e := domain.Event{ID: fmt.Sprintf("e%d", i), Type: domain.EventDeposited, Amount: "1"}
-		if err := log.Append(e); err != nil {
+		if err := log.Append(context.Background(), e); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -142,7 +220,7 @@ func TestSnapshotLoop_CompactsSoTheLogStopsGrowing(t *testing.T) {
 	defer func() { _ = log.Close() }()
 
 	for i := 0; i < 40; i++ {
-		if err := log.Append(domain.Event{
+		if err := log.Append(context.Background(), domain.Event{
 			ID: fmt.Sprintf("e%d", i), Type: domain.EventDeposited, Amount: "1",
 		}); err != nil {
 			t.Fatalf("Append: %v", err)
@@ -193,7 +271,7 @@ func TestSnapshotLoop_SurvivesAFailingSnapshot(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	for i := 0; i < 15; i++ {
-		if err := log.Append(domain.Event{
+		if err := log.Append(context.Background(), domain.Event{
 			ID: fmt.Sprintf("e%d", i), Type: domain.EventDeposited, Amount: "1",
 		}); err != nil {
 			t.Fatalf("Append: %v", err)

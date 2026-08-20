@@ -39,7 +39,7 @@ func (f *fakeJournal) count() int {
 	return len(f.events)
 }
 
-func (f *fakeJournal) Append(e domain.Event) error {
+func (f *fakeJournal) Append(_ context.Context, e domain.Event) error {
 	f.mu.Lock()
 	gateEntered, gateRelease := f.entered, f.release
 	f.entered, f.release = nil, nil
