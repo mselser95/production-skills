@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# Keep the mirrored copies in step with _shared, automatically.
+#
+# WHY THIS IS A HOOK AND NOT A CHECK.
+#
+# install.sh already REFUSES to install when a mirror has drifted, and that
+# refusal is correct -- it stops a stale standard entering the trusted set.
+# But it fires at the end, on someone who has already forgotten, and the same
+# author drifted the same file twice in one day: improve _shared, forget the
+# copy, get caught by your own gate.
+#
+# Twice is not an argument against the gate. It is proof that mirroring is a
+# step nobody remembers, and the lesson learned elsewhere in this repo applies:
+# a gate that demands a step nobody remembers is a gate that eventually gets
+# deleted. So do the step instead of asking for it.
+#
+# The template's copy has to be a real file -- it is COPIED OUT into a new repo
+# and a symlink would dangle on the way -- which is exactly why it can rot. The
+# other ten copies are symlinks and cannot.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+mirrors=(
+  "prod-new/template/scripts/verify-standard.sh:_shared/probes/verify-standard.sh"
+)
+
+synced=0
+for m in "${mirrors[@]}"; do
+  copy="${m%%:*}"; orig="${m##*:}"
+  [[ -f "$orig" ]] || continue
+  if [[ ! -f "$copy" ]] || ! cmp -s "$copy" "$orig"; then
+    # Same atomic rename install.sh uses: bash reads a script by offset while
+    # executing it, and one of these may be running in another session.
+    cp "$orig" "$copy.tmp.$$" && chmod +x "$copy.tmp.$$" && mv "$copy.tmp.$$" "$copy"
+    git add "$copy"
+    echo "pre-commit: mirrored $orig -> $copy (staged)" >&2
+    synced=$((synced+1))
+  fi
+done
+
+if (( synced == 0 )); then
+  echo "pre-commit: ${#mirrors[@]} mirror(s) already in step" >&2
+fi
