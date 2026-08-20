@@ -603,6 +603,37 @@ That covers the four defects above; it is not a universal reachability proof.
   already exist (coverage as SIGNAL, mutation as TREND). Report per package in
   the trend lane, never as a gate.
 
+## A name that falls through to a global namespace EXECUTES something
+
+Ask of every script: what happens when a name in it is not defined? If the
+answer is "the lookup continues somewhere else", a typo is not an error — it is
+a call to whatever else answers.
+
+**Measured 2026-08-20.** A scenario script called `say "SIGKILL ..."` six times,
+meaning a local narration helper beside its real `step` / `note` / `good` /
+`bad`. It never defined `say`. Bash resolved the name on `PATH`, and on macOS
+that is `/usr/bin/say`: the script **spoke its status lines aloud through the
+speakers**. On Linux the same lines were `command not found` on stderr. The exit
+code was 0 either way, and the human who heard a voice had no idea it came from
+a shell script.
+
+Nothing in the usual kit sees this. `set -u` covers unset *variables*, not
+commands. `set -e` sees a *successful* `say`. `bash -n` is syntax only. And a
+linter cannot know the name was not meant, because calling an external binary is
+ordinary.
+
+**The guard: an explicit allowlist of external commands**, checked against every
+word in command position that is neither defined in the same file nor a
+builtin. The detail that makes it quiet enough to survive contact with real
+scripts: **only report words that actually RESOLVE to an executable.** Prose the
+regex sweeps up ("the", "cannot", "every") resolves to nothing and filters
+itself out; the dangerous case is exactly the word that resolves, and the
+message should name the path it would have run.
+
+State what such a check cannot see — a command inside `$( )`, behind `xargs`, or
+in a variable — in the script itself. A guard that implies more coverage than it
+has is the vacuous gate wearing a useful gate's clothes.
+
 ## When a gate fires on something CORRECT, find the missing distinction
 
 A red gate has two possible meanings and they need opposite responses: the code
