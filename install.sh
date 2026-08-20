@@ -82,6 +82,20 @@ case "${1:-install}" in
     ;;
 esac
 
+# Wire the repo's own hooks, because core.hooksPath is LOCAL CONFIG and does
+# not travel with a clone. Without this the mirroring hook exists in the tree
+# and runs on exactly one machine -- the one that wrote it -- which is the same
+# shape as a mechanism that is implemented, tested, and never injected.
+#
+# Idempotent, and scoped to this repo only.
+if git -C "$src" rev-parse --git-dir >/dev/null 2>&1 && [[ -d "$src/.githooks" ]]; then
+  current="$(git -C "$src" config --get core.hooksPath 2>/dev/null || true)"
+  if [[ "$current" != ".githooks" ]]; then
+    git -C "$src" config core.hooksPath .githooks
+    echo "hooks: core.hooksPath set to .githooks (mirrors now sync on commit)"
+  fi
+fi
+
 # --- source consistency, BEFORE anything enters the trusted set -------------
 #
 # Ten of the eleven on-disk copies of the shared probe are symlinks into
