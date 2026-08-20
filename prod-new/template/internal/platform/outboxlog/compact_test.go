@@ -305,11 +305,19 @@ func TestCompact_AFailedRewriteIsNeverRenamedOverTheLog(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 
-	// Make the replacement path unopenable by parking a DIRECTORY on it:
-	// os.OpenFile with O_WRONLY on a directory fails, so writeReplacement
-	// returns before a single record is written.
-	if err := os.Mkdir(path+".compact", 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	// Park a READ-ONLY, EMPTY file on the replacement path. writeReplacement's
+	// O_WRONLY open fails on it, so not one record is written -- and, unlike a
+	// directory in the way, a rename of this file over the log WOULD SUCCEED
+	// and would leave an empty log behind. That is the whole point: the test
+	// must be able to observe the destruction it forbids. Blocking the path
+	// with something un-renameable made this test pass even when the error was
+	// ignored and the rename attempted, because the rename then failed on its
+	// own -- measured 2026-08-19, and the reason this shape replaced it.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a 0444 file is still writable, so this test could not fail")
+	}
+	if err := os.WriteFile(path+".compact", nil, 0o444); err != nil {
+		t.Fatalf("seed the unwritable replacement: %v", err)
 	}
 
 	if _, err := log.Compact(nil); err == nil {
@@ -318,6 +326,9 @@ func TestCompact_AFailedRewriteIsNeverRenamedOverTheLog(t *testing.T) {
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read: %v -- the log itself is gone after a failed compaction", err)
+	}
+	if len(after) == 0 {
+		t.Fatalf("the log is EMPTY -- a replacement that was never written got renamed over the only copy of history")
 	}
 	if string(before) != string(after) {
 		t.Fatalf("the log was modified by a compaction that failed:\nbefore %q\nafter  %q", before, after)
