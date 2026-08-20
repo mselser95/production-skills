@@ -11,6 +11,51 @@ discovery frame.
 For each dimension: what to inventory (facts), what to ASK (human-only
 semantics), and what the gap-report row must state.
 
+---
+
+## The standing rule above every dimension: VERIFY END TO END WHEN YOU CAN
+
+**If a runnable environment exists, the claim "it works" means you RAN it and
+looked. Nothing else counts.**
+
+Every dimension below can be satisfied piece by piece and still leave the
+system not working, because the dimensions verify MECHANISMS and a user cares
+about PROPERTIES. A property lives in the gaps between mechanisms, and the gaps
+are exactly what no unit test covers.
+
+Measured, on a repo that had just passed 60 probe rows with zero failures:
+
+    115 log lines in the log store.  ZERO carrying a trace id.
+
+Every component was correct and had been verified individually — the OTLP log
+bridge, the W3C propagator, the exporter, the backend's ingestion, the
+dashboard links. Nothing was broken. There was simply nothing to correlate:
+every log call lived in an adapter and every span lived in the orchestration
+layer, so no line was ever emitted INSIDE a span. No test in that repo could
+have found it, because each half was doing its job. One `docker compose up` and
+one query did.
+
+So, before claiming a system-level property holds:
+
+- **Run the real thing.** `docker compose up`, the staging stack, whatever
+  exists. A green suite tells you the parts behave; only the running system
+  tells you they add up.
+- **Query the destination, not the emitter.** "The exporter was called" is a
+  mechanism. "The record is in the store, and I read it back" is the property.
+  Check the far end.
+- **Follow one real transaction across every boundary it crosses**, and name
+  the boundaries it does NOT cross. That walk is what surfaces a segment
+  everybody assumed somebody else covered.
+- **State which half you have.** "Unit-proven, not observed in a deployment" is
+  a complete and honest answer. "It works" without a run is not, and it is the
+  claim that gets found out by the person who trusted it.
+- If no environment can be stood up, say so explicitly and say what that leaves
+  unverified — an absent E2E check is a gap in the report, never a silence.
+
+The failure mode this exists to stop is not sloppiness. It is the reasonable
+inference that N correct mechanisms compose into a working system. They
+frequently do not, and the difference is invisible from the inside.
+
 ## 1. Correctness — structural
 Inventory: line/branch coverage today, the repo's own floor if any, whether
 changed-line coverage is measured at all, tests/production LOC ratio (record
