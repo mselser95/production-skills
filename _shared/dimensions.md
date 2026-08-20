@@ -201,6 +201,28 @@ Two rules, both cheap:
   attributes proves nothing about propagation. Assert that the returned context
   CONTAINS the span, and that a child's parent is the expected span.
 
+**Telemetry that reports its own failures through telemetry is a feedback
+loop.** OpenTelemetry's error handler is PROCESS-GLOBAL: `otel.SetErrorHandler`
+is one handler for every OTel SDK in the process. Route it through the
+application logger while that logger also exports over OTLP, and a collector
+outage becomes self-sustaining -- each failed export logs a warning, each
+warning is a log record that tries to export, that export fails, and it logs
+again.
+
+Measured, not imagined: **19 export attempts and 19 WARN lines in 20 seconds
+from a single seed log line, with zero traces exported.** The service was
+busy talking to itself about being unable to talk.
+
+So: the handler that reports a telemetry failure must write somewhere that
+does NOT export -- stderr, or a logger built with no bridge. And the message
+must not name a signal the global handler cannot identify, because one handler
+serves traces, metrics and logs alike and cannot tell you which one failed.
+
+The general rule underneath: **an error path must not depend on the subsystem
+that is failing.** It is the same shape as logging a disk error to disk, and it
+is easy to build by accident precisely because wiring telemetry failures into
+the good logger looks like the tidy choice.
+
 **Logs are a signal with a contract, not a debug afterthought.** Three things
 recur, and all three are invisible to a passing test suite:
 
