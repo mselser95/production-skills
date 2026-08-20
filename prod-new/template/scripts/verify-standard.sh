@@ -984,12 +984,23 @@ else
   # positives that would get it switched off within a week. A small function
   # that production really does call can be inlined into its caller, and an
   # inlined symbol is absent from the table in exactly the same way an
-  # eliminated one is -- nm cannot tell you which happened. Measured on the
-  # template: `observability.New` is called at cmd/.../main.go:49 and resolved
-  # to ZERO symbols with inlining on, and to three with it off, while
-  # `Outbox.Reconcile` -- which genuinely has no caller -- stayed at zero
-  # either way. Disabling inlining keeps the true positive and removes the
-  # false one.
+  # eliminated one is -- nm cannot tell you which happened.
+  #
+  # RE-MEASURED 2026-08-20 on the current template, because the original
+  # citation named a symbol that has since been renamed and a second one whose
+  # "no caller" half stopped being true. A stale measurement in a comment is
+  # the same defect as a stale line number in a doc: it still LOOKS like
+  # evidence.
+  #
+  #   observability.InstallPropagation   inlining ON: 0 symbols   OFF: 1
+  #   observability.NewTracer            inlining ON: 1 symbol    OFF: 1
+  #
+  # InstallPropagation is genuinely called -- from NewTracer, which is called
+  # at cmd/<SERVICE>/main.go:110 -- and is small enough that the compiler
+  # inlines it away entirely. With inlining left on, this row would report a
+  # WIRED mechanism as ELIMINATED-BY-LINKER, which is the false positive that
+  # gets a row switched off within a week. NewTracer is too big to inline and
+  # resolves either way, which is why one example is not enough to see this.
   if ! driven_build=$(go build -gcflags=all=-l -o "$driven_bin" ./cmd/... 2>&1); then
     row "mechanisms-driven" FAIL "cannot build ./cmd/... so wiring is unprovable: $(grep -m1 -oE '[^ ]+\.go:[0-9]+:[0-9]+: .*' <<<"$driven_build" | cut -c1-100)"
   else
