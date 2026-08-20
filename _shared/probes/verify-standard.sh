@@ -949,9 +949,19 @@ fi
 # thing to remember:
 #
 #   ABSENCE is still proof. Nothing reaches it.
-#   PRESENCE is proof only for a symbol the linker COULD have eliminated --
-#   a package-level func, or a method on a type that never reaches an
-#   interface. For a method on a type that does, presence proves nothing.
+#   PRESENCE is proof only for a symbol the linker COULD have eliminated.
+#
+# The precise rule, measured after a first draft of this comment overstated it:
+# the linker retains the methods an INTERFACE REQUIRES, not every method a type
+# has. So a method is weak evidence only when it sits in the method set of some
+# interface its receiver reaches -- `Outbox.Reconcile` did, and stayed present
+# with no caller at all; `(*rederivableSet).canRederive` did not, and vanished
+# the moment its call site went away, making it honest evidence after all.
+#
+# This row cannot tell those apart without type information it does not have,
+# so it flags EVERY method form as weak. That is the right conservative
+# default, and it will sometimes be unfair to a declaration that is fine.
+# Naming a package-level function removes the question entirely.
 #
 # Therefore: DECLARE THE CALLER, NOT THE CALLEE. Name the loop function that
 # drives the mechanism (`main.reconcileLoop`), which belongs to no interface
