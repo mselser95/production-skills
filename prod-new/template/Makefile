@@ -1,4 +1,4 @@
-.PHONY: check-registries verify-standard bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory
+.PHONY: check-registries verify-standard bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
 # checks + a plain (no -race) `go test ./...` + architecture. It must stay
@@ -63,6 +63,17 @@ e2e:
 	@name='TestSvc_RealEventLogAndRealTCP_DepositAndWithdrawSurviveARestart'; \
 	go test -tags=integration -list "^$${name}$$" ./internal/e2e | grep -qx "$$name" || { echo "missing e2e test: $$name" >&2; exit 1; }; \
 	go test -count=1 -tags=integration -race -run="^$${name}$$" ./internal/e2e
+
+# kill-durability is the CONTAINER-level durability check, and the only one in
+# this repo that can say anything at all about fsync. It is deliberately NOT in
+# `verify`: it needs a docker daemon and it builds an image, so a developer's
+# inner loop must not pay for it. CI runs it as its own job (see
+# .github/workflows/pr.yaml). Removing the Sync call in
+# internal/platform/outboxlog stays GREEN under every unit test in this module
+# -- a normally-exiting process flushes its writes anyway -- so this target is
+# the only thing that would ever notice.
+kill-durability:
+	bash scripts/kill-durability.sh
 
 # CHAOS_COUNT / FUZZTIME are overridable so the nightly trends lane
 # (.github/workflows/nightly.yaml) can run the same targets at a much

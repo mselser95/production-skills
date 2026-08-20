@@ -47,6 +47,19 @@ jobs:
           cache: true
       - run: make e2e
 
+  # The one check that cannot run in-process: SIGKILL a real container and
+  # prove the outbox intents it had already fsynced are still there. Removing
+  # the Sync call in internal/platform/outboxlog stays GREEN under every unit
+  # test, because a normally-exiting process flushes its writes anyway -- so
+  # this job is the only thing in CI that would notice. It is a JOB of its own
+  # rather than a step of e2e-real so a docker failure reads as a docker
+  # failure, not as an e2e regression.
+  kill-durability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make kill-durability
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:

@@ -177,7 +177,13 @@ func run(ctx context.Context) error {
 	// the log and journal whatever the outbox does not already know about.
 	// The outbox is thus a projection of the event log plus a delivery
 	// watermark, and the hot path keeps exactly one durable write.
-	rebuilt, err := rebuildOutboxFromLog(cfg.EventLogPath, outbox)
+	//
+	// The recorder wraps the outbox purely to remember WHICH identities this
+	// walk can re-derive. That set is what the outbox log's compaction below
+	// is allowed to forget: see rederivableSet's doc for why compacting
+	// without it republishes history.
+	rederivable := newRederivable(outbox)
+	rebuilt, err := rebuildOutboxFromLog(cfg.EventLogPath, rederivable)
 	if err != nil {
 		return err
 	}
@@ -186,6 +192,16 @@ func run(ctx context.Context) error {
 			"effects", rebuilt,
 			"cause", "crash between the state commit and the effect journal")
 	}
+
+	// -- compact the outbox log --------------------------------------------
+	//
+	// The outbox log was append-only with no compaction, so it grew with the
+	// service's total lifetime effect volume rather than with its live set,
+	// and OpenDurable's replay above grew with it. Compacting HERE, at the
+	// end of boot, is the one point where both halves of the decision are
+	// known: the log has already been replayed into the working set, and the
+	// event-log walk has just reported every identity it can still re-derive.
+	compactOutboxLog(ctx, outbox, rederivable, logger)
 
 	// Drain NOW, not one tick from now.
 	//
@@ -444,6 +460,107 @@ func reconcileLoop(
 	}
 }
 
+// compactOutboxLog folds the durable outbox log down to its live set and says
+// what that reclaimed.
+//
+// Extracted from run() rather than left inline for the same reason
+// rebuildOutboxFromLog is: a boot step nothing can call is a boot step nothing
+// can test. It is also the symbol production.yaml's `driven:` block names for
+// this mechanism -- *Outbox reaches an interface (healthhttp.OutboxHealth), so
+// the linker retains every one of its methods whether or not anything calls
+// them, and naming store.(*Outbox).Compact there would pass a service that had
+// deleted this call. A plain function in package main belongs to no interface,
+// so removing the call below eliminates the symbol and reds that row.
+//
+// BEST-EFFORT, deliberately. A reclaim that fails costs disk and a slower next
+// boot; refusing to serve over it would turn a housekeeping failure into an
+// outage. It is logged at WARN because the cost is real and silent: nothing
+// else in this process will ever mention that the log stopped shrinking.
+func compactOutboxLog(ctx context.Context, outbox *store.Outbox, watermark *rederivableSet, logger *slog.Logger) {
+	stats, err := outbox.Compact(watermark.canRederive)
+	if err != nil {
+		logger.WarnContext(ctx, "svc: outbox log compaction failed, the log keeps growing", "error", err)
+		return
+	}
+	logger.InfoContext(ctx, "svc: compacted the outbox log",
+		"rewritten", stats.Rewritten,
+		"entries_before", stats.EntriesBefore,
+		"entries_after", stats.EntriesAfter,
+		"entries_dropped", stats.EntriesDropped(),
+		"records_before", stats.RecordsBefore,
+		"records_after", stats.RecordsAfter,
+		"bytes_reclaimed", stats.BytesReclaimed(),
+		"watermark_retained", watermark.count())
+}
+
+// derivedJournaler is the narrow slice of the outbox the boot rebuild needs.
+// Declared here so the rebuild can be driven by a recorder (below) or a test
+// double rather than only by a real durable outbox.
+type derivedJournaler interface {
+	KnowsIdentity(identity string) bool
+	JournalDerived(identity string, effect domain.Effect) (string, error)
+}
+
+// rederivableSet remembers every identity the boot rebuild can derive from the
+// event log, so outbox-log compaction knows which terminal entries it must NOT
+// forget.
+//
+// WHY THIS EXISTS, and it is not bookkeeping. The outbox is rebuilt at boot as
+// a projection of the event log plus a delivery watermark, and THE OUTBOX LOG
+// IS THAT WATERMARK: rebuildOutboxFromLog asks KnowsIdentity(identity), and an
+// identity the log does not carry reads as an effect lost in the window
+// between the two fsyncs, so it is re-journaled for delivery. That is exactly
+// right when the record is genuinely absent -- and exactly wrong if compaction
+// is what removed it. A compaction that dropped delivered entries
+// unconditionally would make every boot re-journal every still-re-derivable
+// effect and deliver it again: a DATA-INTEGRITY REGRESSION dressed as a
+// cleanup, and the reason "keep only entries with no terminal record" must not
+// be read literally.
+//
+// So compaction may forget a terminal entry only once NOTHING can re-derive
+// its identity. This set is that test, and it is precise rather than
+// conservative because it is recorded from the very walk whose answers it has
+// to predict -- it holds what THIS boot re-derived, and the event log only
+// ever loses re-derivable history (eventlog.Compact drops what a snapshot
+// subsumes), so a later boot's set is a subset of this one.
+//
+// The consequence for growth, stated rather than left to be discovered: the
+// outbox log is now bounded by the live set PLUS the event log's replay tail,
+// not by lifetime effect volume. The tail is what snapshotLoop bounds, so the
+// two boundedness guarantees are deliberately joined -- an event log that
+// stops snapshotting stops the outbox log shrinking too, and the symptom is a
+// growing file rather than a wrong one.
+type rederivableSet struct {
+	derivedJournaler
+	seen map[string]struct{}
+}
+
+func newRederivable(inner derivedJournaler) *rederivableSet {
+	return &rederivableSet{derivedJournaler: inner, seen: map[string]struct{}{}}
+}
+
+// KnowsIdentity records the identity and delegates. It deliberately notes
+// EVERY identity the walk presents, not just the ones that were missing:
+// "already on disk" is precisely the case whose record compaction must keep,
+// and it is the ONLY branch a healthy service ever takes. Recording only in
+// JournalDerived would mean a boot that recovered nothing retained nothing --
+// which is to say, it would drop the entire delivered history on the first
+// clean restart.
+func (r *rederivableSet) KnowsIdentity(identity string) bool {
+	r.seen[identity] = struct{}{}
+	return r.derivedJournaler.KnowsIdentity(identity)
+}
+
+// canRederive reports whether the boot rebuild would re-derive this identity.
+func (r *rederivableSet) canRederive(identity string) bool {
+	_, ok := r.seen[identity]
+	return ok
+}
+
+// count is how many identities the walk re-derived -- the size of the set
+// compaction is forbidden to forget.
+func (r *rederivableSet) count() int { return len(r.seen) }
+
 // rebuildOutboxFromLog re-derives every deliverable effect from the durable
 // event log and journals the ones the outbox has no record of, returning how
 // many it recovered.
@@ -456,7 +573,7 @@ func reconcileLoop(
 // journaled is one this process would never deliver and never mention again,
 // and starting anyway would mean serving traffic while silently holding a lost
 // effect. Refusing to start is the louder and safer of the two.
-func rebuildOutboxFromLog(eventLogPath string, outbox *store.Outbox) (int, error) {
+func rebuildOutboxFromLog(eventLogPath string, outbox derivedJournaler) (int, error) {
 	events, err := eventlog.Replay(eventLogPath)
 	if err != nil {
 		return 0, err

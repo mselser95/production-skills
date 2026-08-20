@@ -203,6 +203,20 @@ type Outbox struct {
 	limits      Limits
 	clock       Clock
 	deadLetters int
+	// compactions/compactedEntries/compactedBytes record what boot-time
+	// compaction reclaimed from the durable log. COUNTERS, for the same
+	// reason deadLetters is one: the thing they measure is a file that just
+	// got SMALLER, so anything derived from the current size would read as
+	// "nothing happened" precisely when the mechanism worked.
+	//
+	// They are the operational answer to "is the outbox log still bounded".
+	// A compaction that silently stops reclaiming -- because every entry is
+	// retained by the watermark guard, or because the rewrite keeps failing
+	// -- looks exactly like a healthy service with nothing to reclaim, right
+	// up until the volume fills. See CompactionStats.
+	compactions      int
+	compactedEntries int
+	compactedBytes   int64
 }
 
 // NewOutbox constructs a NON-DURABLE Outbox: entries live in memory only, so
@@ -575,6 +589,83 @@ func (o *Outbox) Close() error {
 		return nil
 	}
 	return o.journal.Close()
+}
+
+// Compact reclaims the durable log, folding away every entry that reached a
+// terminal state and whose IDENTITY retain declines to keep. It returns what
+// the rewrite did.
+//
+// CALL THIS AT BOOT, and only at boot. The log was append-only with no
+// compaction, so it grew with total lifetime effect volume rather than with
+// the live set, and OpenDurable's replay grew with it -- reading the whole
+// delivery history of the service to reconstruct a working set that is
+// usually empty. That is registries/contract-debt.yaml's
+// outbox-log-grows-without-compaction, and this is its payment.
+//
+// WHY BOOT AND NOT A TICKER. Compaction rewrites the file under the open
+// handle; outboxlog.Compact serializes that against Append, so a concurrent
+// Journal is safe from the FILE's point of view. What it is not safe from is
+// the WATERMARK's: retain must describe every identity the boot rebuild can
+// still re-derive from the event log, and that set is only knowable while the
+// rebuild is the thing running. Running this on a timer would mean computing
+// that set against an event log that has moved, which is how a compaction
+// starts republishing history.
+//
+// RETAIN IS KEYED ON IDENTITY, NOT ON THE ENTRY ID, and that is the one thing
+// this method adds over outboxlog.Compact. Journal mints an opaque entry id
+// and a separate idempotency key; JournalDerived mints an opaque entry id and
+// stores the CALLER'S identity as the key. KnowsIdentity -- the watermark the
+// boot rebuild consults -- matches on the key. So the caller answers about
+// identities and this method translates. An entry with NO idempotency key is
+// offered as not-re-derivable: nothing can ever match it through
+// KnowsIdentity, so it is a watermark for nothing.
+//
+// A NON-DURABLE outbox has nothing on disk to compact, so this reports a zero
+// result rather than an error: the caller should not have to know which
+// constructor built it.
+func (o *Outbox) Compact(retain func(identity string) bool) (outboxlog.CompactStats, error) {
+	o.mu.Lock()
+	journal := o.journal
+	o.mu.Unlock()
+	if journal == nil {
+		return outboxlog.CompactStats{}, nil
+	}
+
+	// Deliberately NOT holding o.mu across the rewrite. retain is supplied by
+	// the composition root and, in a future where it consults something other
+	// than a plain map, calling it under this mutex would be a lock-ordering
+	// trap for a mechanism that has no need of the mutex at all: the log has
+	// its own.
+	stats, err := journal.Compact(func(_ string, idempotencyKey string) bool {
+		if retain == nil || idempotencyKey == "" {
+			return false
+		}
+		return retain(idempotencyKey)
+	})
+	if err != nil {
+		return stats, err
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.compactions++
+	o.compactedEntries += stats.EntriesDropped()
+	o.compactedBytes += stats.BytesReclaimed()
+	return stats, nil
+}
+
+// CompactionStats reports what compaction has reclaimed for the lifetime of
+// this process: how many times it ran, how many entries it dropped, and how
+// many bytes it gave back.
+//
+// Exposed as an accessor rather than kept internal because these are the
+// three numbers the metrics surface needs, and a mechanism whose effect
+// nothing can observe is one nobody notices has stopped working -- the same
+// defect as a dead-letter store with no counter.
+func (o *Outbox) CompactionStats() (runs, entriesDropped int, bytesReclaimed int64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.compactions, o.compactedEntries, o.compactedBytes
 }
 
 // record appends one state transition to the durable journal, if there is

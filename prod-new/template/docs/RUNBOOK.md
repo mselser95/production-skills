@@ -67,6 +67,49 @@ statement as a gauge.
    deliver it. Those need `Outbox.Requeue` — an explicit operator decision,
    not currently exposed over HTTP by this scaffold.
 
+## Outbox compaction has stopped reclaiming
+
+**Signal:** `svc_outbox_compactions_total` climbing across restarts while
+`svc_outbox_compaction_reclaimed_bytes_total` stays flat, and the outbox log
+growing on disk.
+
+Compaction runs **on boot only** (`main.compactOutboxLog`), after
+`OpenDurable` has replayed the log and after `rebuildOutboxFromLog` has walked
+the event log. It folds away entries that are terminal (`delivered`,
+`dead_lettered`) **and** no longer re-derivable from the event log; anything
+else it must keep, because this log doubles as the **delivery watermark** —
+dropping a delivered entry the event log can still re-derive would make the
+next boot read that identity as unknown, re-journal it, and republish the
+effect on every boot.
+
+Boot-only is not a scheduling convenience: the retain set is precisely what
+the event-log walk just reported, and computing it against a log that has
+moved is how a compaction starts republishing history.
+
+So "reclaimed nothing" has several very different causes, and the entries
+series is what separates them:
+
+| compactions | entries dropped | bytes reclaimed | reading |
+|---|---|---|---|
+| climbing | 0 | 0 | nothing terminal to fold — normal for a young or quiet service |
+| climbing | >0 | ~0 | it is folding entries but they are tiny; watch the file, not the counter |
+| climbing | 0 | 0, file growing | **the liability**: the live set is not shrinking. Look for entries that never reach a terminal state — a sink down for longer than `MaxPendingAge`, or dead letters nobody has requeued — and for an event log that stopped snapshotting, since the replay tail is the other half of the bound |
+| flat at 0 | — | — | compaction is not running. Check the boot log for `svc: compacted the outbox log` and whether `OpenDurable` was reached at all |
+
+**What to do:** this is not a page. It is a slow leak whose cost is boot time,
+and boot time is what an operator feels during an incident, not before one.
+Check `svc_outbox_pending_entries` and `svc_outbox_dead_lettered_total` first —
+a growing log with a growing pending set is a delivery problem wearing a
+storage problem's clothes.
+
+**If the boot log says compaction FAILED** (`svc: outbox log compaction failed,
+the log keeps growing`) the reclaim is the only thing that was lost: the
+pre-compaction log is complete and authoritative, because the rewrite is
+write-new → fsync → rename → fsync the directory → reopen, and a failure
+anywhere before the rename leaves the original file untouched. A stray
+`<outbox>.jsonl.compact` beside the log is a leftover of that path and is safe
+to delete.
+
 ## Rolling back a bad deploy
 
 `docs/SLO.md`'s rollback lever is `artifact_repin`: redeploy the previous

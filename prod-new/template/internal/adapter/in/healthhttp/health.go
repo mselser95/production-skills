@@ -62,6 +62,18 @@ type LedgerHealth interface {
 type OutboxHealth interface {
 	PendingStats() (count int, oldestAge time.Duration, unknownAge int)
 	DeadLetterCount() int
+
+	// CompactionStats reports what boot compaction did to the durable outbox
+	// log: how many times it ran, how many entries it folded away, and how
+	// many bytes that reclaimed.
+	//
+	// On the port because the alternative -- counting in-process and never
+	// emitting -- leaves the bound implemented but unobserved. A compaction
+	// that silently stops reclaiming is indistinguishable from one that has
+	// nothing to reclaim, and the two have opposite consequences: the second
+	// is a healthy quiet service, the first is a log growing back toward the
+	// unbounded shape compaction was added to remove.
+	CompactionStats() (runs, entriesDropped int, bytesReclaimed int64)
 }
 
 // Options configures optional collaborators. Every field is optional; a
@@ -237,6 +249,24 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeMetric(w, "svc_outbox_dead_lettered_total", "gauge",
 		"Entries the outbox gave up on after exhausting its bounds. Each is an effect that will NOT happen without a human requeueing it. Must stay 0; non-zero is an incident, not a warning.",
 		"", float64(deadLettered))
+
+	// -- outbox log compaction ----------------------------------------------
+	compactRuns, compactDropped, compactBytes := 0, 0, int64(0)
+	if s.opts.Outbox != nil {
+		compactRuns, compactDropped, compactBytes = s.opts.Outbox.CompactionStats()
+	}
+
+	writeMetric(w, "svc_outbox_compactions_total", "counter",
+		"Boot compactions of the durable outbox log. Compaction is BOOT-ONLY, so this climbs with restarts rather than with traffic -- a value that stops climbing while the process is alive is normal, and one stuck at 0 across many restarts means compaction is not running at all.",
+		"", float64(compactRuns))
+
+	writeMetric(w, "svc_outbox_compacted_entries_total", "counter",
+		"Outbox entries folded away by compaction: terminal AND no longer re-derivable from the event log. Read against the reclaimed-bytes series -- entries dropping while bytes stay flat means the log is dominated by entries compaction must KEEP.",
+		"", float64(compactDropped))
+
+	writeMetric(w, "svc_outbox_compaction_reclaimed_bytes_total", "counter",
+		"Bytes reclaimed by boot compaction. Zero across repeated restarts while the outbox log grows on disk is exactly the condition the mechanism exists to prevent: boot replay cost climbing with lifetime effect volume instead of with the live set.",
+		"", float64(compactBytes))
 }
 
 // writeMetric renders one Prometheus text-exposition series (HELP, TYPE,
@@ -263,6 +293,9 @@ func MetricNames() []string {
 		"svc_outbox_oldest_pending_age_seconds",
 		"svc_outbox_unknown_age_entries",
 		"svc_outbox_dead_lettered_total",
+		"svc_outbox_compactions_total",
+		"svc_outbox_compacted_entries_total",
+		"svc_outbox_compaction_reclaimed_bytes_total",
 	}
 	sort.Strings(names)
 	return names

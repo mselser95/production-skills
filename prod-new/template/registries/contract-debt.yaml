@@ -5,42 +5,53 @@
 # Records known API/schema-migration debt (e.g. an N-1 compatibility shim
 # kept alive past its natural retirement date), and durability/verification
 # gaps whose closing test does not exist yet.
-entries:
-  - id: outbox-fsync-unproven-against-machine-kill
-    owner: "@<OWNER>"
-    created: 2026-08-18
-    expires: 2026-11-16
-    evidence: >
-      internal/platform/outboxlog.Append fsyncs every record before
-      returning, and NO TEST GUARDS THAT LINE. Removing the Sync call stayed
-      GREEN under mutation on 2026-08-18: no in-process test can distinguish
-      fsync from no-fsync, because a normally-exiting process flushes its
-      writes anyway. Durability against a process restart IS proven
-      (TestOutbox_DurableIntentSurvivesARestartAndResumesUnderTheSameKey);
-      durability against a MACHINE kill is assumed. Closing this needs a
-      container-level test -- write an intent, `docker kill` the container
-      without a graceful stop, restart it, and assert the intent replays --
-      which belongs in the integration lane, not the unit lane. Until then
-      production.yaml records it under the units_notification capability's
-      `assumed:` block rather than claiming the guarantee.
+#
+# RETIRED, kept commented so the registry says what it used to hold rather
+# than losing the history (scripts/check-registries.sh skips comment lines
+# for exactly this):
+#
+#   - id: outbox-fsync-unproven-against-machine-kill
+#     retired: 2026-08-19
+#     met_by: >
+#       scripts/kill-durability.sh (make kill-durability; CI job
+#       kill-durability). It builds the real image, seeds an event log so the
+#       service journals real intents through its real fsyncing path, SIGKILLs
+#       the container with `docker kill --signal=SIGKILL`, REJECTS any exit
+#       code other than 137 so a graceful stop cannot pass it, restarts, and
+#       compares intent IDENTITIES -- not counts, because boot re-derives
+#       effects and the count legitimately goes up -- against a denominator
+#       that must be non-zero. Proven non-vacuous by three mutations on
+#       2026-08-19: `docker stop` instead of kill -> RED on exit code 0;
+#       EVENTS=0 -> RED on the zero denominator; wiping the outbox log between
+#       the kill and the restart -> RED with 12 lost while the COUNT was
+#       unchanged at 12, which is why the assertion is on identities.
+#     residue: >
+#       A container SIGKILL kills the PROCESS, not the machine, so the kernel
+#       page cache survives and what is proven is that the write reached the
+#       KERNEL. production.yaml's units_notification capability keeps the
+#       narrowed claim under `assumed: fsync_bytes_reach_the_platter`.
+#
+#   - id: outbox-log-grows-without-compaction
+#     retired: 2026-08-19
+#     met_by: >
+#       internal/platform/outboxlog.(*Log).Compact plus
+#       store.(*Outbox).Compact, called once at boot from
+#       main.compactOutboxLog (production.yaml `driven:` names that symbol, so
+#       deleting the call reds the build). Ordering is the part the entry
+#       called hard, and it is: write-new -> fsync the replacement -> rename ->
+#       fsync the DIRECTORY -> reopen the handle, with the whole rewrite
+#       serialized against Append by the log's own mutex, and NO rewrite at all
+#       when there is nothing to drop. Nothing an unfinished entry depends on
+#       is dropped: `failed` is explicitly not terminal, every record of a
+#       dropped entry goes together, and a `retain` guard keyed on the boot
+#       rebuild's re-derivable set keeps the delivered entries that are still
+#       serving as the delivery watermark.
+#     residue: >
+#       The outbox log is now bounded by the live set PLUS the event log's
+#       replay tail, which is what the snapshot loop bounds. An event log that
+#       stops snapshotting therefore stops the outbox log shrinking too -- a
+#       growing file rather than a wrong one, visible as
+#       svc_outbox_compaction_reclaimed_bytes_total flat while the file grows
+#       (docs/RUNBOOK.md § "Outbox compaction has stopped reclaiming").
 
-  - id: outbox-log-grows-without-compaction
-    owner: "@<OWNER>"
-    created: 2026-08-19
-    expires: 2026-11-17
-    evidence: >
-      internal/adapter/out/store.Limits bounds the PENDING set and the
-      in-memory entry map, so a sink outage can no longer grow this service
-      without limit. The durable log underneath is NOT bounded by any of
-      that: internal/platform/outboxlog is append-only with no compaction,
-      so every transition -- including every dead-letter eviction the bounds
-      perform -- is retained forever, and a long-running service's outbox log
-      grows monotonically even while its pending set sits at zero.
-      This is the same shape as the event log's own recovery cost, and the
-      same answer applies: fold the terminal transitions away and keep only
-      what an unfinished entry needs. Closing this needs a compaction pass
-      that is safe against a concurrent Append and that provably never drops
-      a transition an entry still depends on -- the ordering is the hard
-      part, exactly as it is for a snapshot, and getting it backwards loses
-      intents irrecoverably. Recorded rather than improvised: a compaction
-      that races its own writer is worse than an oversized file.
+entries: []

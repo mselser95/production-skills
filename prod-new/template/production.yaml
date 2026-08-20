@@ -40,17 +40,24 @@ capabilities:
       reconciliation_resumes_pending_entries: TestOutbox_Reconcile_ResumesPendingEntries
       stalled_delivery_drains_without_intervention: ./cmd/<SERVICE> TestRun_DrainsAStalledOutboxEntryWithNobodyCallingReconcile (the composition root drives Reconcile on a ticker plus a boot wake-up; the mechanism above is what it drives)
       conformance_kit: TestOutbox_PassesExternalEffectConformanceKit (verification/conformance.ExternalEffectKit)
+      durable_intent_survives_a_real_sigkill: scripts/kill-durability.sh (make kill-durability; CI job kill-durability) -- SIGKILLs the real container, asserts exit code 137 so a graceful stop cannot pass it, and compares intent IDENTITIES across the restart against a non-zero denominator
+      log_bounded_by_the_live_set: internal/platform/outboxlog TestCompact_DropsATerminalEntryNothingCanRederive + ./cmd/<SERVICE> TestCompactOutboxLog_ReclaimsWhatTheEventLogCanNoLongerRederive (boot compaction folds terminal, no-longer-re-derivable entries away, so the log tracks the live set instead of lifetime effect volume)
+      compaction_never_republishes: ./cmd/<SERVICE> TestCompactOutboxLog_DoesNotRepublishDeliveredEffectsOnTheNextBoot, with its constructive complement TestCompactOutboxLog_WithoutTheRetainGuardTheNextBootRedelivers (the log doubles as the delivery watermark; dropping a re-derivable delivered entry would republish it on every boot)
+      compaction_observed: internal/adapter/in/healthhttp TestCompactionStats_ReachTheScrape (svc_outbox_compactions_total / _compacted_entries_total / _compaction_reclaimed_bytes_total; a mechanism whose effect nothing can observe is one nobody notices has stopped working)
     assumed:
-      fsync_reaches_stable_storage:
+      fsync_bytes_reach_the_platter:
         detector: >
-          NOT VERIFIED HERE. internal/platform/outboxlog fsyncs every record
-          before Append returns, but removing that Sync call STAYED GREEN
-          under mutation on 2026-08-18: no in-process test can distinguish
-          fsync from no-fsync, because a normally-exiting process flushes its
-          writes anyway. Durability against a MACHINE kill is therefore
-          assumed, not proven. The line carries a NO TEST GUARDS THIS LINE
-          marker and registries/contract-debt.yaml holds the owned, expiring
-          entry for the docker-kill test that would close it.
+          NARROWED 2026-08-19, and stated so the claim is not read as larger
+          than it is. scripts/kill-durability.sh now SIGKILLs the real
+          container and proves every intent fsynced before the kill is still
+          on disk and replayable afterwards -- which is what closed
+          registries/contract-debt.yaml's
+          outbox-fsync-unproven-against-machine-kill. But a container SIGKILL
+          kills the PROCESS, not the machine: the kernel page cache survives
+          it, so what is proven is that the write reached the KERNEL. That the
+          bytes reached STABLE STORAGE is still assumed, and proving it needs
+          power loss or a fault-injecting filesystem -- neither of which any
+          check in this repo performs or claims.
       sink_receiver_dedups_by_idempotency_key:
         detector: internal/adapter/out/store's own ackLostOnceSink test double
           proves the CONTRACT this assumption depends on; a real Sink
@@ -130,6 +137,14 @@ driven:
   # the method name it replaced is full of regex metacharacters, and a plain
   # grep -E reports a false ABSENCE for it.
   outbox_reconcile: main.reconcileLoop
+  # outbox_compaction names main.compactOutboxLog for the same reason
+  # outbox_reconcile names the loop: *Outbox is converted to
+  # healthhttp.OutboxHealth, so the linker retains EVERY one of its methods
+  # whether or not anything calls them, and naming store.(*Outbox).Compact
+  # here would pass a service that had deleted the boot call entirely. A plain
+  # function in package main belongs to no interface, so removing that call
+  # eliminates the symbol and reds this row.
+  outbox_compaction: main.compactOutboxLog
   tracing: observability.New
 
 out_of_scope:

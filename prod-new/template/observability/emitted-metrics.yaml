@@ -120,3 +120,35 @@
     fired). Must stay 0 in normal operation; non-zero is an incident, not a
     warning. A gauge rather than a counter because it reflects what is
     currently held, and requeueing legitimately decreases it.
+
+- name: svc_outbox_compactions_total
+  type: counter
+  labels: []
+  note: >
+    Boot compactions of the durable outbox log (main.compactOutboxLog).
+    Compaction is BOOT-ONLY -- the retain guard can only be computed while the
+    event-log walk that produces it is running -- so this climbs with restarts
+    rather than with traffic. Flat while the process is alive is normal; stuck
+    at 0 across many restarts means compaction is not running at all.
+
+- name: svc_outbox_compacted_entries_total
+  type: counter
+  labels: []
+  note: >
+    Outbox entries folded away by compaction: terminal (delivered or
+    dead-lettered) AND no longer re-derivable from the event log. Read against
+    the reclaimed-bytes series -- entries dropping while bytes stay flat means
+    the log is dominated by entries compaction must KEEP, which is a different
+    problem from compaction not running.
+
+- name: svc_outbox_compaction_reclaimed_bytes_total
+  type: counter
+  labels: []
+  note: >
+    Bytes given back by boot compaction. Zero across repeated restarts while
+    the outbox log grows on disk is exactly the condition the mechanism exists
+    to prevent: the file tracking lifetime effect volume instead of the live
+    set, with OpenDurable's boot replay growing alongside it. A counter, not a
+    gauge: what it measures is a file that just got SMALLER, so anything
+    derived from the current size would read as "nothing happened" precisely
+    when the mechanism worked.
