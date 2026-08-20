@@ -1012,13 +1012,18 @@ else
       dsym="$(driven_symbol "$dk")"
       if [[ -z "$dsym" ]]; then
         d_missing="${d_missing} ${dk}:no-symbol-declared"
-      # The symbol must END the nm line. A substring match is not enough and
-      # that is not hypothetical: it was caught by mutation here. Swapping a
-      # real tracer for `observability.NewNoop()` -- the exact shape of defect
-      # one -- left `observability.New` matching as a PREFIX of
-      # `observability.NewNoop`, so the row passed a service whose tracing had
-      # just been disabled. Anchoring to end-of-line makes New and NewNoop
-      # distinct symbols, which is what they are.
+      # The symbol must END the nm line. A substring match is not enough, and
+      # the failure it admits is the worst kind: swapping a real constructor
+      # for a no-op one leaves the ORIGINAL name matching as a PREFIX of the
+      # replacement, so the row passes a service whose mechanism was just
+      # disabled.
+      #
+      # Caught by mutation, on a template that then had `observability.New`
+      # and `observability.NewNoop` -- neither symbol exists there any more,
+      # so this is recorded as the HISTORY it is rather than as a measurement
+      # someone could re-run. The shape is what generalises: any Foo / FooNoop,
+      # Open / OpenInMemory, Real / RealDisabled pair reproduces it, and
+      # anchoring to end-of-line makes them the distinct symbols they are.
       elif grep -qE "[ /.]$(printf '%s' "$dsym" | sed 's/[][\.*^$(){}?+|/]/\\&/g')\$" <<<"$driven_syms"; then
         d_ok=$((d_ok+1))
         # Method form -- `pkg.(*Type).Method` or `pkg.Type.Method`. Collected
