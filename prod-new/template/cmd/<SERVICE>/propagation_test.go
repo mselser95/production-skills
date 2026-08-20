@@ -49,6 +49,11 @@ func TestTracePropagation_ACommandAndItsPublicationShareOneTrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	// The seam the composition root wires. eventlog does not import
+	// observability -- it is storage -- so this test wires it exactly as
+	// main() does, which is what makes the wiring visible rather than
+	// implicit.
+	elog.SetTraceParentSource(observability.TraceParentFromContext)
 	ledger := app.NewLedger(domain.NewState(), elog, func() {}, clock.Real{}.Now, ids.Real{}.NewID)
 	ledger.SetTracer(adaptTracer(observability.New("log", logger)))
 	if _, err := ledger.Deposit(context.Background(), "e1", "10"); err != nil {

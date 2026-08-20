@@ -51,7 +51,6 @@ import (
 	"sync"
 
 	"github.com/<OWNER>/<SERVICE>/internal/domain"
-	"github.com/<OWNER>/<SERVICE>/internal/platform/observability"
 )
 
 // SchemaVersion is the schema this build WRITES. Bump it, and extend
@@ -202,6 +201,20 @@ type Log struct {
 	// enough to be worth collapsing. Kept here rather than in the caller
 	// because the log is the only thing that sees every append.
 	sinceSnapshot int
+	// traceParent renders the caller's span as a W3C traceparent, so an event
+	// records which span committed it and a later publish can be attributed
+	// back to that span across the durable gap.
+	//
+	// A HOOK rather than a direct call into internal/platform/observability,
+	// and the reason is layering: eventlog is storage. Importing the
+	// observability package to reach one function created a
+	// platform -> platform edge that a reviewer reasonably objected to, and
+	// the objection is right -- a storage package should not know how tracing
+	// is implemented, only that the caller can hand it a string.
+	//
+	// Defaults to returning "", so an untraced deployment records no
+	// traceparent rather than nil-checking at the call site.
+	traceParent func(context.Context) string
 	// nextSeq is the local position the next appended record will carry.
 	// Established at Open by reading the highest seq already on disk, so a
 	// restart never reuses a position -- reuse would make a relay checkpoint
@@ -211,6 +224,29 @@ type Log struct {
 
 // Open opens (creating if necessary) the log file at path for appending.
 // The caller must Close it when done.
+// SetTraceParentSource injects how a context becomes a W3C traceparent.
+//
+// The composition root passes observability.TraceParentFromContext. Nothing in
+// this package knows what a span is, which is the point: the layering rule and
+// the correlation both hold, and neither is paying for the other.
+func (l *Log) SetTraceParentSource(fn func(context.Context) string) {
+	if fn == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.traceParent = fn
+}
+
+// traceParentOf is the nil-safe read. An untraced deployment records an empty
+// traceparent, which is the honest value -- there was no span to attribute to.
+func (l *Log) traceParentOf(ctx context.Context) string {
+	if l.traceParent == nil {
+		return ""
+	}
+	return l.traceParent(ctx)
+}
+
 func Open(path string) (*Log, error) {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -374,7 +410,7 @@ func (l *Log) append(ctx context.Context, event domain.Event, origin Origin, for
 		ID:            event.ID,
 		Type:          string(event.Type),
 		Amount:        event.Amount,
-		TraceParent:   observability.TraceParentFromContext(ctx),
+		TraceParent:   l.traceParentOf(ctx),
 	}); err != nil {
 		return err
 	}

@@ -119,6 +119,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The event log records WHICH SPAN committed each event, so a publish that
+	// happens later -- on the relay, under a context with no span of its own --
+	// can still be attributed to the command that caused it. Injected rather
+	// than imported: eventlog is storage and must not know how tracing works.
+	log.SetTraceParentSource(observability.TraceParentFromContext)
 	defer func() { _ = log.Close() }()
 
 	// Recover, not Replay+Rebuild: recovery starts from the newest snapshot

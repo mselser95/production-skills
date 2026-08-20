@@ -31,6 +31,12 @@ func TestAppend_PersistsTheCommittingTraceParentAcrossAReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	// Injected the way the composition root injects it. The log does not
+	// import observability -- it is storage, and it only knows that a caller
+	// can hand it a string -- so a test that wants a traceparent recorded has
+	// to wire the same seam production wires. That visibility is the point of
+	// the seam.
+	log.SetTraceParentSource(observability.TraceParentFromContext)
 	ctx, span := observability.NewLog(nil).StartSpan(context.Background(), "svc.deposit", nil)
 	committing := oteltrace.SpanContextFromContext(ctx)
 	if !committing.IsValid() {
