@@ -58,6 +58,14 @@ capabilities:
           bytes reached STABLE STORAGE is still assumed, and proving it needs
           power loss or a fault-injecting filesystem -- neither of which any
           check in this repo performs or claims.
+          The SAME gap covers compaction's two fsyncs
+          (internal/platform/outboxlog.writeReplacement's f.Sync before the
+          rename, and the directory Sync after it): both were mutated away on
+          2026-08-19 and the whole suite STAYED GREEN, for the same reason the
+          Append fsync does -- a normally-exiting process flushes anyway, and a
+          container SIGKILL leaves the page cache intact. They are kept because
+          the alternative orderings are not benign, not because a test would
+          notice if they went.
       sink_receiver_dedups_by_idempotency_key:
         detector: internal/adapter/out/store's own ackLostOnceSink test double
           proves the CONTRACT this assumption depends on; a real Sink
