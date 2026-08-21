@@ -447,13 +447,32 @@ if grep -rql "wire\|golden\|protoreflect\|unknown.field" --include='*_test.go' .
 else row "compatibility" FAIL "no compatibility tests"; fi
 
 # --- 10. performance: benchmarks exist, RUN, and have a baseline -----------
-if grep -rql 'func Benchmark' --include='*_test.go' . 2>/dev/null; then
-  if go test -run='^$' -bench=. -benchtime=10x ./... >/dev/null 2>&1; then
-    base=$(ls benchmarks/baseline-*.txt 2>/dev/null | head -1)
-    nb=$(grep -rh 'func Benchmark' --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
-    if [[ -n "$base" ]]; then row "benchmarks" PASS "$nb benchmarks run; baseline $base"
-    else row "benchmarks" FAIL "benchmarks run but no baseline recorded"; fi
-  else row "benchmarks" FAIL "benchmarks do not run"; fi
+# "$nb benchmarks run" used to be a GREP of `func Benchmark` across every test
+# file, while the run itself was untagged. Measured in clcsolutions/marketdata:
+# 15 declared, all three benchmark files behind `//go:build candidate`, and
+# ZERO compiled or executed -- the row printed "15 benchmarks run" for a
+# command that ran none, and `go test`'s exit status was 0 because there was
+# nothing to fail. The count now comes from the OUTPUT, the run carries the
+# tags the benchmark files themselves declare, and the evidence names those
+# tags so a performance dimension parked in an advisory lane is visible rather
+# than implied.
+mapfile -t bench_files < <(grep -rl 'func Benchmark' --include='*_test.go' . 2>/dev/null | grep -v '^\./\.git/')
+if ((${#bench_files[@]})); then
+  bench_declared=$(grep -rh 'func Benchmark' --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  bench_tags=$(grep -h '^//go:build' "${bench_files[@]}" 2>/dev/null \
+    | sed 's|^//go:build||' | tr -c 'A-Za-z0-9_' ' ' | tr ' ' '\n' \
+    | sed '/^$/d' | grep -vx 'ignore' | sort -u | tr '\n' ',' | sed 's/,$//')
+  bench_out=$(go test -run='^$' -bench=. -benchtime=10x ${bench_tags:+-tags="$bench_tags"} ./... 2>&1)
+  bench_ran=$(grep -cE '^Benchmark[A-Za-z0-9_]+' <<<"$bench_out")
+  bench_ran=${bench_ran:-0}
+  base=$(ls benchmarks/baseline-*.txt 2>/dev/null | head -1)
+  if (( bench_ran == 0 )); then
+    row "benchmarks" FAIL "$bench_declared declared, ZERO executed${bench_tags:+ under -tags='$bench_tags'} — a benchmark that never runs is a file, not a measurement"
+  elif [[ -z "$base" ]]; then
+    row "benchmarks" FAIL "$bench_ran benchmark(s) ran but no baseline recorded"
+  else
+    row "benchmarks" PASS "$bench_ran of $bench_declared declared benchmark(s) executed${bench_tags:+ under -tags='$bench_tags'}; baseline $base"
+  fi
 else row "benchmarks" FAIL "no benchmarks"; fi
 
 # --- 11. profiling (capture path AND live endpoint) ------------------------
@@ -1428,12 +1447,36 @@ nfuzz=${#fuzzes[@]}
 # case for any repo not yet on the standard.
 inmake=$(grep -c 'Fuzz[A-Za-z0-9_]*' Makefile 2>/dev/null | head -1)
 inmake=${inmake:-0}
+# Counting fuzz NAMES in the Makefile certifies nothing about CI: a variable
+# listing every target satisfies it while no job on earth invokes them. The row
+# is called ci-runs-fuzz, so it has to find the INVOCATION -- either a workflow
+# step that fuzzes directly (`-fuzz=`), or one that calls a make target whose
+# own recipe does. The make targets are resolved from the Makefile rather than
+# guessed by name, because `fuzz`, `fuzz-guard` and `check-fast` are this
+# repo's names, not the standard's.
+fuzz_make_targets=$(awk '
+  /^[a-zA-Z0-9_.\-]+:/ { split($0, a, ":"); cur = a[1]; next }
+  /^\t/ && (/-fuzz[= ]/ || /Fuzz[A-Za-z0-9_]*/) { if (cur != "") print cur }
+' Makefile 2>/dev/null | sort -u)
+fuzz_ci_evidence=""
+if grep -rqE -- '-fuzz=' $wf 2>/dev/null; then
+  fuzz_ci_evidence="a workflow step fuzzes directly"
+else
+  while IFS= read -r mt; do
+    [[ -z "$mt" ]] && continue
+    if grep -rqE "make (--[a-z-]+ )*$mt( |\$|\")" $wf 2>/dev/null; then
+      fuzz_ci_evidence="a workflow runs 'make $mt'"; break
+    fi
+  done <<<"$fuzz_make_targets"
+fi
 if (( nfuzz == 0 )); then
   row "ci-runs-fuzz" FAIL "no fuzz targets exist, so nothing is wired: $inmake fuzz name(s) in Makefile"
+elif [[ -z "$fuzz_ci_evidence" ]]; then
+  row "ci-runs-fuzz" FAIL "$nfuzz fuzz target(s) and $inmake name(s) in the Makefile, but NO workflow invokes any of them — a name in a Makefile is not a lane"
 elif (( inmake >= nfuzz )); then
-  row "ci-runs-fuzz" PASS "$inmake fuzz names wired in Makefile"
+  row "ci-runs-fuzz" PASS "$nfuzz target(s), all named in the Makefile, and $fuzz_ci_evidence"
 else
-  row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets wired into make/CI — the rest run nowhere"
+  row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets named in the Makefile — the rest run nowhere ($fuzz_ci_evidence)"
 fi
 if [[ -n "${real_tag:-}" ]]; then
   grep -rq -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null     && row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into make/CI"     || row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
