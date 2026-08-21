@@ -813,9 +813,38 @@ case "$dm_norm" in
 esac
 
 # --- 13. observability: contract CHECKED, tracer WIRED --------------------
-if grep -rql "emitted-metrics\|spans.yaml" --include='*_test.go' . 2>/dev/null; then
-  row "observability-contract-checked" PASS "a test compares emitted signals to the manifest"
-else row "observability-contract-checked" FAIL "manifest is documentation — nothing verifies it"; fi
+# The row's CLAIM is "a test compares emitted signals to the manifest", so the
+# check has to be about a test READING the manifest and PASSING -- not about a
+# string. It used to fire on the literal "emitted-metrics" or "spans.yaml"
+# appearing anywhere in any *_test.go, which a comment satisfies; a repo could
+# delete the comparison, keep the sentence describing it, and stay green while
+# the manifest went back to being documentation. Now: the manifest must exist,
+# some test must both name it AND actually read a file, and that test package
+# must run green.
+mapfile -t obs_manifests < <(find . -path ./.git -prune -o \
+  \( -name 'spans.yaml' -o -name 'emitted-metrics.*' \) -print 2>/dev/null)
+if ((${#obs_manifests[@]} == 0)); then
+  row "observability-contract-checked" FAIL "no spans.yaml / emitted-metrics.* manifest exists at all"
+else
+  obs_readers=""
+  for m in "${obs_manifests[@]}"; do
+    base=$(basename "$m")
+    while IFS= read -r tf; do
+      # Naming the manifest is not reading it. Require a real file read in the
+      # same file, so a comment or an error message cannot carry the row.
+      grep -qE 'os\.ReadFile|os\.Open|embed\.FS|//go:embed|ioutil\.ReadFile' "$tf" 2>/dev/null \
+        && obs_readers+="$(dirname "$tf")"$'\n'
+    done < <(grep -rl -- "$base" --include='*_test.go' . 2>/dev/null)
+  done
+  obs_pkgs=$(printf '%s' "$obs_readers" | sort -u | sed '/^$/d')
+  if [[ -z "$obs_pkgs" ]]; then
+    row "observability-contract-checked" FAIL "${#obs_manifests[@]} manifest(s) exist but no test READS one — naming it in a comment is not a check"
+  elif obs_out=$(go test -count=1 $(printf './%s ' $(printf '%s' "$obs_pkgs" | sed 's|^\./||')) 2>&1); then
+    row "observability-contract-checked" PASS "$(printf '%s' "$obs_pkgs" | wc -l | tr -d ' ') package(s) read and verify ${#obs_manifests[@]} manifest(s), green"
+  else
+    row "observability-contract-checked" FAIL "the test(s) that read the manifest are RED: $(grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$obs_out" || echo 'see go test output')"
+  fi
+fi
 
 # Logs correlate, or they are a second system nobody can join to the first.
 #
