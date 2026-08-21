@@ -208,7 +208,7 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # ten-minute fix instead of a silent "0/4 verified" -- but a gate that needs
     # a dependency the runner lacks is a gate that does not run.
     #
-    # The grammar here is fixed and tiny: four keys under one top-level block,
+    # The grammar here is fixed and tiny: five keys under one top-level block,
     # each a single-quoted or bare scalar. That is parseable without a library,
     # and unlike the sed version it handles the quotes and colons that Go source
     # is full of, because it strips exactly one layer of quoting rather than
@@ -216,7 +216,7 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     nv_fields=$(PKG="$pkg" python3 - <<'PYNV'
 import os, sys
 
-want = ("file", "expect_red", "find", "replace")
+want = ("file", "expect_red", "find", "replace", "requires_tags")
 found = {}
 inblock = False
 for raw in open(os.environ["PKG"], encoding="utf-8"):
@@ -984,7 +984,15 @@ fi
 if [[ -z "$(driven_keys)" ]]; then
   row "mechanisms-driven" FAIL "no driven: block in $SPEC -- every mechanism the service declares must name the symbol that proves production reaches it, or nothing distinguishes an implemented mechanism from a dead one"
 else
+  # A DIRECTORY, not a file. `go build -o <file> ./cmd/...` fails outright with
+  # "cannot write multiple packages to non-directory" the moment a repo has more
+  # than one cmd/ binary -- which is most of them. The row then reported the
+  # wiring as unprovable for a reason that had nothing to do with the wiring,
+  # and it did so in EVERY multi-binary repo, including both repos this standard
+  # was developed against. Building into a directory and reading every binary in
+  # it is what the row always meant.
   driven_bin="${TMPDIR:-/tmp}/prod-driven-$$"
+  mkdir -p "$driven_bin"
   # Two build flags, both load-bearing.
   #
   # No -s/-w: this row needs the symbol table, which is exactly what those
@@ -1011,10 +1019,13 @@ else
   # WIRED mechanism as ELIMINATED-BY-LINKER, which is the false positive that
   # gets a row switched off within a week. NewTracer is too big to inline and
   # resolves either way, which is why one example is not enough to see this.
-  if ! driven_build=$(go build -gcflags=all=-l -o "$driven_bin" ./cmd/... 2>&1); then
+  if ! driven_build=$(go build -gcflags=all=-l -o "$driven_bin/" ./cmd/... 2>&1); then
     row "mechanisms-driven" FAIL "cannot build ./cmd/... so wiring is unprovable: $(grep -m1 -oE '[^ ]+\.go:[0-9]+:[0-9]+: .*' <<<"$driven_build" | cut -c1-100)"
   else
-    driven_syms=$(go tool nm "$driven_bin" 2>/dev/null)
+    # Every binary in the directory: a mechanism wired into ONE entrypoint is
+    # wired, and reading only the first would call it dead.
+    driven_syms=$(find "$driven_bin" -type f -perm -u+x 2>/dev/null \
+                  | while IFS= read -r b; do go tool nm "$b" 2>/dev/null; done)
     d_total=0; d_ok=0; d_missing=""
     while IFS= read -r dk; do
       [[ -n "$dk" ]] || continue
@@ -1054,7 +1065,7 @@ else
         d_missing="${d_missing} ${dk}(${dsym}):ELIMINATED-BY-LINKER"
       fi
     done < <(driven_keys)
-    rm -f "$driven_bin"
+    rm -rf "$driven_bin"
     if (( d_total == 0 )); then
       row "mechanisms-driven" FAIL "driven: block parsed to zero entries -- a check of nothing must never read as clean"
     elif [[ -n "$d_missing" ]]; then
@@ -1131,8 +1142,21 @@ if [[ -d $wf ]]; then
   # (it appears in benchmark baseline headers — that was a false PASS before).
   # Strip comments before matching: an earlier version PASSed on a comment
   # that explained why provenance is impossible. Only executable lines count.
-  if grep -rhE "^[^#]*" $wf/*.yaml 2>/dev/null | sed 's/#.*//' \
-       | grep -qE "cosign|--provenance=|actions/attest|attestations:"; then
+  # Read once into a variable instead of piping into `grep -q`.
+  #
+  # `producer | grep -q PATTERN` under `set -o pipefail` is a latent race: -q
+  # exits at the first match and closes the pipe, and if the producer is still
+  # writing it takes SIGPIPE (141), which pipefail then reports as the
+  # pipeline's status -- turning a match into a FAIL, nondeterministically. It
+  # does not bite while the input fits the 64KB pipe buffer (this repo's four
+  # workflows are ~683 lines, so the producer always finishes first), which is
+  # exactly what makes it the kind of bug that appears years later on a bigger
+  # repo and looks like anything but a probe defect. A subagent reported seeing
+  # this row alternate; I could not reproduce it in 40 runs across two trees,
+  # so the flake itself stays UNCONFIRMED -- but the hazard is real, removing it
+  # costs nothing, and a gate that might be nondeterministic is not a gate.
+  wf_exec="$(grep -rhE "^[^#]*" $wf/*.yaml 2>/dev/null | sed 's/#.*//' || true)"
+  if grep -qE "cosign|--provenance=|actions/attest|attestations:" <<<"$wf_exec"; then
     row "artifact-provenance" PASS "signing/attestation step present"
   elif waived artifact-provenance-signing; then
     row "artifact-provenance" NA "live waiver with owner+expiry in registries/waivers.yaml"
