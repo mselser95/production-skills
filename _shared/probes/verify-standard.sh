@@ -11,6 +11,23 @@
 # Language-specific probes assume Go; adapt the marked blocks for other stacks.
 
 set -uo pipefail
+
+# This probe uses `mapfile` and other bash-4 builtins. macOS still ships bash
+# 3.2 at /bin/bash, and `#!/usr/bin/env bash` picks up whatever is first on
+# PATH -- so on a stock Mac the probe dies with "local: -A: invalid option" or
+# "mapfile: command not found" partway through, which reads as a broken repo
+# rather than a missing interpreter. Reported by fd1az against
+# clcsolutions/marketdata#34 for scripts/coverage-lib.sh; verified: bash
+# 3.2.57 rejects `local -A`, bash 5.3.15 accepts it, and the difference on that
+# machine was only Homebrew's bash being earlier on PATH.
+#
+# Say so once, at the top, instead of failing obscurely in the middle.
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "verify-standard: needs bash >= 4 (running ${BASH_VERSION})." >&2
+  echo "  macOS ships 3.2 at /bin/bash. Install a newer one and put it first on PATH:" >&2
+  echo "    brew install bash   # then re-run" >&2
+  exit 2
+fi
 root="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$root" || exit 2
 
