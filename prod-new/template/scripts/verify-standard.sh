@@ -31,6 +31,67 @@ fi
 root="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$root" || exit 2
 
+# --- LANGUAGE GUARD: refuse a repo this probe cannot measure -----------------
+#
+# Roughly sixty lines of this script are Go: `go build ./...`, `go test`,
+# `--include='*.go'`, `//go:build` tags, golangci-lint, Go coverage profiles.
+# Pointed at a C++ repo they do not fail because the repo is bad -- they fail
+# because the probe cannot read it, and a wall of FAILs that say nothing about
+# the code is worse than no run at all. It trains whoever reads it to discount
+# the rows, which is how a gate stops being believed.
+#
+# Measured before claiming it, and the measurement corrected me. Disabling this
+# guard and running against clcsolutions/risk-engine (C++/CMake) gives:
+#
+#     PASS 3   FAIL 52   NA 2
+#     VERDICT: INCOMPLETE — 52 probe(s) failed
+#
+# So the honest reason is the NOISE, not a false green: it does not print
+# COMPLETE. 52 rows that report the probe's blind spot instead of the repo train
+# whoever reads them to discount the rows, which is how a gate stops being
+# believed -- and the one finding buried among them cannot be found.
+#
+# The pass-by-absence shape is real but narrower than I first wrote. Of the
+# three rows that passed, `loc-ratio` reported `test/prod = 0.00` as a PASS
+# because it counts *.go files and found none. That row is informational by
+# design, and it is now explicitly N/A when there is nothing to measure rather
+# than PASS -- a "PASS" over zero measured lines is the shape this refuses.
+#
+# A gate that cannot measure a dimension must go RED or say N/A out loud, never
+# pass quietly. Refusing at the top is the version of that which cannot be
+# misread.
+#
+# So: recognised language or no verdict at all. Adding a language means adding
+# its commands, not relaxing this.
+PROD_LANG="${PROD_LANG:-}"
+if [[ -z "$PROD_LANG" ]]; then
+  if [[ -f go.mod ]]; then PROD_LANG=go
+  elif [[ -f CMakeLists.txt || -f vcpkg.json || -f conanfile.txt || -f conanfile.py ]]; then PROD_LANG=cpp
+  elif [[ -f Cargo.toml ]]; then PROD_LANG=rust
+  elif [[ -f pyproject.toml || -f setup.py ]]; then PROD_LANG=python
+  elif [[ -f package.json ]]; then PROD_LANG=node
+  else PROD_LANG=unknown
+  fi
+fi
+if [[ "$PROD_LANG" != go ]]; then
+  echo "verify-standard: this probe implements the GO toolchain only; detected '$PROD_LANG' in $root." >&2
+  echo "" >&2
+  echo "  Refusing to run rather than emitting ~40 rows that measure the probe's blind spot" >&2
+  echo "  instead of the repo, and rather than printing a verdict over dimensions that were" >&2
+  echo "  never looked at: the language-agnostic rows (registries, runbook citations, scenario" >&2
+  echo "  matrix, observability contracts, SLOs, evidence record) WOULD pass here, and a" >&2
+  echo "  COMPLETE verdict on that basis is exactly the false green this standard exists to" >&2
+  echo "  refuse." >&2
+  echo "" >&2
+  echo "  To add a toolchain, give it the equivalent of every language-bound row -- build," >&2
+  echo "  unit tests, race (TSan for C++), coverage + per-package ratchet, lint, fuzz, and" >&2
+  echo "  benchmarks -- and wire them here. A row with no equivalent must be an explicit," >&2
+  echo "  ratified N/A with a reason, never a silent skip." >&2
+  echo "" >&2
+  echo "  Override with PROD_LANG=go only if this genuinely IS a Go repo the detection missed." >&2
+  exit 2
+fi
+
 # Two concurrent probe runs in the same repo fight over Go's fuzz cache and
 # produce a spurious "setup failed" — serialize on a lock dir instead of
 # reporting a false FAIL.
@@ -51,7 +112,164 @@ restore_mutations() {
 }
 trap 'restore_mutations; rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 
+# ...and ACTUALLY run it now, which the comment above has promised since it was
+# written while the function had exactly two references: its definition and the
+# trap. The trap cannot catch SIGKILL, and packages 003 and 004 mutate the SAME
+# file: killed mid-003, health.go is left with TickFreshnessOK dropped from the
+# ready formula, and the NEXT run made it permanent -- 003 bails at
+# find-string-gone, but 004's find-string is still present, so its
+# `cp "$nv_file" "$nv_file.nvbak"` overwrote the good backup with the already
+# mutated file and the closing mv restored the mutation for good.
+#
+# Restoring first also means a leftover .nvbak can never be silently committed
+# by a routine `git add -A` between two runs.
+restore_mutations
+
+# nv_package_reason <package> <extracted-fields> -- why this package cannot be
+# mutated, or EMPTY if it can. Four distinct reasons, deliberately not merged:
+#
+#   unparseable          the extractor could not read the file -- an ENVIRONMENT
+#                        gap. Reported identically to "no check" once, which
+#                        sent a reader to inspect four correct YAML files
+#                        instead of the interpreter error in the same log.
+#   no-executable-check  the package declares nothing -- an AUTHORING gap.
+#   no-such-file         it names a source file that does not exist.
+#   find-string-gone     the mutation no longer applies: the evidence DECAYED,
+#                        which is not the same as evidence that was never true
+#                        but is reported just as loudly.
+#
+# A function rather than inline branches because the selftest sources it and
+# drives all four, instead of grepping this file for their names -- a grep
+# cannot tell a branch that works from a branch that is dead, and one of these
+# was measured passing against `if false; then`.
+nv_package_reason() {
+  local pkg="$1" fields="$2" file test find
+  [[ "${fields%%$'\n'*}" == "PARSE-ERROR" ]] && { printf 'unparseable'; return; }
+  file=$(sed -n 1p <<<"$fields"); test=$(sed -n 2p <<<"$fields"); find=$(sed -n 3p <<<"$fields")
+  # A package with no executable check is UNVERIFIED, and unverified is not a
+  # softer kind of verified. Tolerating it with a PASS meant three of four
+  # invariants could carry nothing at all and the row would still be green as
+  # long as one worked -- the same "some evidence exists somewhere" reasoning
+  # the keyword grep used.
+  [[ -z "$file" || -z "$test" || -z "$find" ]] && { printf 'no-executable-check'; return; }
+  [[ -f "$file" ]] || { printf 'no-such-file'; return; }
+  FIND="$find" python3 -c 'import os,sys; sys.exit(0 if os.environ["FIND"] in open(sys.argv[1]).read() else 1)' "$file" \
+    || { printf 'find-string-gone'; return; }
+  return 0
+}
+
+# cited_function / executed_function <package> -- the two halves the citation
+# row compares, each read through extract_pkg_fields so there is ONE parser.
+#
+# Split out as functions for the same reason classify_mutation_result was: the
+# selftest sources them and drives them against scratch packages, instead of
+# grepping this file for a string, which cannot tell a working branch from a
+# dead one. Sourcing also means the selftest cannot drift into testing a copy.
+cited_function()    { sed -n 6p <<<"$(extract_pkg_fields "$1")"; }
+executed_function() { sed -n 2p <<<"$(extract_pkg_fields "$1")"; }
+
+# citation_drift <package> -- prints the drift description, or nothing.
+citation_drift() {
+  local fn red
+  fn=$(cited_function "$1"); red=$(executed_function "$1")
+  [[ -z "$fn" ]] && return 0
+  [[ "$red" == "$fn" ]] && return 0
+  printf '%s:cites=%s,executes=%s' "$(basename "$1")" "$fn" "$red"
+}
+
+# extract_pkg_fields <ratify-queue package> -- SIX lines on stdout:
+#   file, expect_red, find, replace, requires_tags, test.function
+#
+# ONE parser for these packages, used by the non-vacuity row and by the
+# citation row. See the comment inside for what having two cost.
+extract_pkg_fields() {
+  PKG="$1" python3 - <<'PYNV' 2>/dev/null
+import os, sys
+
+want = ("file", "expect_red", "find", "replace", "requires_tags")
+# `function` lives under a `test:` block, not under non_vacuity_check, and
+# it is read HERE so there is exactly one parser for these packages. The
+# citation check used to re-derive expect_red with awk, and the two
+# disagreed in BOTH directions: `expect_red:Foo` (no space) made the awk
+# return empty and the drift check silently SKIP while the row printed
+# PASS "cited test resolves AND matches", and a legally single-quoted
+# `expect_red: 'Foo'` made it report a false FAIL. Two parsers for one
+# field is two chances to be wrong about it.
+cited = ""
+found = {}
+inblock = False
+intest = False
+try:
+    lines = open(os.environ["PKG"], encoding="utf-8").read().splitlines(True)
+except Exception as exc:                      # unreadable, wrong encoding, gone
+    print("PARSE-ERROR", exc, file=sys.stderr)
+    print("PARSE-ERROR")
+    sys.exit(1)
+for raw in lines:
+    line = raw.rstrip("\n")
+    if line.startswith("non_vacuity_check:"):
+        inblock = True
+        intest = False
+        continue
+    if line.startswith("test:"):
+        intest = True
+        inblock = False
+        continue
+    if intest:
+        if line and not line[0].isspace():
+            intest = False
+        else:
+            s = line.strip()
+            if s.startswith("function:"):
+                v = s.partition(":")[2].strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+                    v = v[1:-1]
+                cited = v
+            continue
+    if inblock:
+        # any new top-level key ends the block
+        if line and not line[0].isspace():
+            break
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        if key not in want:
+            continue
+        value = value.strip()
+        # strip exactly one layer of matching quotes, then unescape a doubled
+        # single quote (YAML's own escape inside single-quoted scalars)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            quote = value[0]
+            value = value[1:-1]
+            if quote == "'":
+                value = value.replace("''", "'")
+            else:
+                # DOUBLE-quoted YAML scalars carry escapes, and Go source is
+                # full of tabs -- a find-string written as "\t\tif err != nil {"
+                # arrives as a literal backslash-t and never matches, which the
+                # probe then reports as find-string-gone: a true verdict for a
+                # false reason, and the most confusing kind of finding.
+                value = (value.replace("\\t", "\t").replace("\\n", "\n")
+                              .replace('\\"', '"').replace("\\\\", "\\"))
+        found[key] = value
+for k in want:
+    print(found.get(k, ""))
+print(cited)
+PYNV
+}
+
 SPEC="${PROD_SPEC_FILE:-production.yaml}"
+# Overridable for the SAME reason REGISTRIES_DIR is: the selftest for the
+# non-vacuity checker asserted three of its branches by grepping this script's
+# own SOURCE TEXT, and a grep cannot tell a branch that works from a branch
+# that is dead -- or, worse, from a branch that is the only outcome. With the
+# directory injectable, those branches are driven end to end against crafted
+# scratch packages instead.
+RATIFY_QUEUE_DIR="${RATIFY_QUEUE_DIR:-.prod/ratify-queue}"
 fails=0; passes=0; nas=0
 declare -a ROWS
 
@@ -69,7 +287,19 @@ waived() { # waived <id> -> 0 if a NON-EXPIRED waiver covers this obligation.
   # expiry has passed (check-registries.sh gates that separately).
   local w=registries/waivers.yaml
   [[ -f $w ]] || return 1
-  grep -qE "^[[:space:]]*-[[:space:]]*id:[[:space:]]*$1[[:space:]]*$" "$w" || return 1
+  # Order-INDEPENDENT, matching what check-registries.sh was already fixed to
+  # do. This required `id:` to sit on the entry's dash line, so a waiver
+  # written `- obligation: ... / id: foo` was expiry-checked correctly by
+  # check-registries.sh -- whose comment tells the reader key order no longer
+  # matters -- and simultaneously invisible here, making the probe report the
+  # dimension FAIL as though no waiver existed. It fails closed, so the cost
+  # was a confusing red rather than a bypass; a half-applied fix that
+  # contradicts the comment next to it is still a defect.
+  #
+  # `id:` on its own line, at any indentation, whether or not it follows a
+  # dash. The id must be the whole value, so `id: foo-bar` does not satisfy a
+  # lookup for `foo`.
+  grep -qE "^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]*$1[[:space:]]*$" "$w" || return 1
   bash scripts/check-registries.sh >/dev/null 2>&1
 }
 # classify_mutation_result turns `go test` output into one of DETECTED /
@@ -185,7 +415,16 @@ else row "coverage" FAIL "no scripts/coverage.sh"; fi
 # tests/prod LOC ratio — recorded, never a gate
 prod=$(find . -name '*.go' -not -name '*_test.go' -not -path './.git/*' | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
 tst=$(find . -name '*_test.go' -not -path './.git/*' | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
-row "loc-ratio (informational)" PASS "test/prod = $(awk -v t="$tst" -v p="$prod" 'BEGIN{printf "%.2f", (p?t/p:0)}') ($tst/$prod)"
+# N/A, not PASS, when there is nothing to measure. Found by disabling the
+# language guard above and running against a C++ repo: this row printed
+# `PASS test/prod = 0.00` because it counts *.go and found none -- a PASS over
+# zero measured lines, which is the pass-by-absence shape the guard exists to
+# refuse, sitting inside the probe.
+if [[ -z "$prod" || "$prod" == 0 ]]; then
+  row "loc-ratio (informational)" NA "no non-test Go source measured — nothing to ratio"
+else
+  row "loc-ratio (informational)" PASS "test/prod = $(awk -v t="$tst" -v p="$prod" 'BEGIN{printf "%.2f", t/p}') ($tst/$prod)"
+fi
 
 # --- 3. lint + fitness functions --------------------------------------------
 if have golangci-lint || [[ -x "$(gobin)/golangci-lint" ]]; then
@@ -252,8 +491,19 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   # restores the file. Keyed by source text rather than line number, because the
   # prose evidence this replaces cited three line numbers that had all moved.
   nv_total=0; nv_proven=0; nv_missing=0; nv_broken=""
-  for pkg in .prod/ratify-queue/*.yaml; do
+  # *.y*ml, matching the two sibling loops over this same directory (the
+  # ratification-packages count and the citation loop). Globbing *.yaml here
+  # meant a package written .yml was COUNTED by those two and never entered
+  # nv_total -- the non-vacuity row reporting green over a set that silently
+  # excluded it, which is the shape this row exists to prevent one level up.
+  for pkg in "$RATIFY_QUEUE_DIR"/*.y*ml; do
     [[ -f "$pkg" ]] || continue
+    # Counted HERE, before the parse. Counting after it meant a package the
+    # extractor could not read never reached the denominator, so a directory of
+    # unreadable packages produced "no ratification packages to check" rather
+    # than naming what was wrong with each one -- the absence looking like an
+    # empty directory instead of a failure.
+    nv_total=$((nv_total+1))
     # Parsed as YAML, not with sed. The find/replace strings are Go SOURCE, so
     # they routinely contain quotes, backslashes and colons; a sed expression
     # delimited by single quotes silently mis-extracts a rune literal or an
@@ -271,75 +521,31 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # and unlike the sed version it handles the quotes and colons that Go source
     # is full of, because it strips exactly one layer of quoting rather than
     # pattern-matching the line.
-    nv_fields=$(PKG="$pkg" python3 - <<'PYNV'
-import os, sys
-
-want = ("file", "expect_red", "find", "replace", "requires_tags")
-found = {}
-inblock = False
-for raw in open(os.environ["PKG"], encoding="utf-8"):
-    line = raw.rstrip("\n")
-    if line.startswith("non_vacuity_check:"):
-        inblock = True
-        continue
-    if inblock:
-        # any new top-level key ends the block
-        if line and not line[0].isspace():
-            break
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if ":" not in stripped:
-            continue
-        key, _, value = stripped.partition(":")
-        key = key.strip()
-        if key not in want:
-            continue
-        value = value.strip()
-        # strip exactly one layer of matching quotes, then unescape a doubled
-        # single quote (YAML's own escape inside single-quoted scalars)
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            quote = value[0]
-            value = value[1:-1]
-            if quote == "'":
-                value = value.replace("''", "'")
-            else:
-                # DOUBLE-quoted YAML scalars carry escapes, and Go source is
-                # full of tabs -- a find-string written as "\t\tif err != nil {"
-                # arrives as a literal backslash-t and never matches, which the
-                # probe then reports as find-string-gone: a true verdict for a
-                # false reason, and the most confusing kind of finding.
-                value = (value.replace("\\t", "\t").replace("\\n", "\n")
-                              .replace('\\"', '"').replace("\\\\", "\\"))
-        found[key] = value
-for k in want:
-    print(found.get(k, ""))
-PYNV
-)
+    # The extractor's own failure is a DISTINCT outcome from "this package
+    # declares nothing". Both used to arrive as four empty lines, so a parser
+    # that could not run reported `no-executable-check` for four packages that
+    # each declared a complete check -- sending the reader to inspect four
+    # correct YAML files instead of to the interpreter error a few lines up in
+    # the same log. Unverified is not a softer kind of verified, and WHY it is
+    # unverified changes where you go next: no check is an authoring gap, a
+    # broken parser is an environment gap.
+    #
+    # So the extractor prints PARSE-ERROR as its first line and exits non-zero
+    # on any failure, and that is classified as its own reason.
+    nv_fields=$(extract_pkg_fields "$pkg") || nv_fields="PARSE-ERROR"
+    nv_reason=$(nv_package_reason "$pkg" "$nv_fields")
+    if [[ -n "$nv_reason" ]]; then
+      case "$nv_reason" in
+        unparseable|no-executable-check) nv_missing=$((nv_missing+1)) ;;
+      esac
+      nv_broken="${nv_broken} $(basename "$pkg"):${nv_reason}"
+      continue
+    fi
     nv_reqtags=$(sed -n 5p <<<"$nv_fields")
     nv_file=$(sed -n 1p <<<"$nv_fields")
     nv_test=$(sed -n 2p <<<"$nv_fields")
     nv_find=$(sed -n 3p <<<"$nv_fields")
     nv_repl=$(sed -n 4p <<<"$nv_fields")
-    nv_total=$((nv_total+1))
-    if [[ -z "$nv_file" || -z "$nv_test" || -z "$nv_find" ]]; then
-      # A package with no executable check is UNVERIFIED, and unverified is not
-      # a softer kind of verified. Tolerating it with a PASS meant three of four
-      # invariants could carry nothing at all and the row would still be green
-      # as long as one worked -- the same "some evidence exists somewhere"
-      # reasoning the keyword grep used.
-      nv_missing=$((nv_missing+1))
-      nv_broken="${nv_broken} $(basename "$pkg"):no-executable-check"
-      continue
-    fi
-    if [[ ! -f "$nv_file" ]]; then
-      nv_broken="${nv_broken} $(basename "$pkg"):no-such-file"; continue
-    fi
-    # The mutation must still APPLY. A find-string that no longer matches means
-    # the evidence has silently decayed -- report it rather than skip it.
-    if ! FIND="$nv_find" python3 -c 'import os,sys; sys.exit(0 if os.environ["FIND"] in open(sys.argv[1]).read() else 1)' "$nv_file"; then
-      nv_broken="${nv_broken} $(basename "$pkg"):find-string-gone"; continue
-    fi
     cp "$nv_file" "${nv_file}.nvbak"
     FIND="$nv_find" REPL="$nv_repl" python3 -c 'import os,sys
 path=sys.argv[1]; src=open(path).read()
@@ -435,8 +641,19 @@ if [[ -f .prod/failure-modes.md ]]; then
   # to miss the header's capitalisation -- correct by luck. Fixing one of three
   # and leaving the others is how a gate ends up disagreeing with the very
   # document it scores.
-  tested=$(grep -cE '^\|[^|]*\|[[:space:]]*\**[Tt][Ee][Ss][Tt][Ee][Dd]\**[[:space:]]*\|' .prod/failure-modes.md || true)
-  na=$(grep -cE '^\|[^|]*\|[[:space:]]*\**[Nn]/?[Aa]\**[[:space:]]*\|' .prod/failure-modes.md || true)
+  #
+  # A third round on the same three lines, and the lesson is the same one: an
+  # anchor that is exactly right for the shape you happened to look at.
+  # Anchoring to the whole cell fixed the header-counts-as-a-row bug and then
+  # rejected every REAL row, because the convention in this file is
+  # `| timeout | tested (new) | ... |` -- a qualifier in parentheses after the
+  # status word. Result: `tested=0`, and the row PASSED reporting it. So the
+  # status word may be followed by an optional parenthetical, and nothing else.
+  status_cell() { # status_cell <word-regex> -- count rows whose SECOND cell is that status
+    grep -cE "^\|[^|]*\|[[:space:]]*\**${1}\**([[:space:]]*\([^)]*\))?[[:space:]]*\|" .prod/failure-modes.md || true
+  }
+  tested=$(status_cell '[Tt][Ee][Ss][Tt][Ee][Dd]')
+  na=$(status_cell '[Nn]/?[Aa]')
   # Anchored to a whole STATUS CELL, not "the word appears anywhere on the
   # line". The substring form failed the build for any repo that added a
   # summary table to this file, because a header cell or a totals row
@@ -452,8 +669,13 @@ if [[ -f .prod/failure-modes.md ]]; then
   # timeout while its six siblings do), and the row reported `blocked=0` and
   # PASSED. A gate that reads only lower-case failure states is a gate that
   # passes whenever someone shouts.
-  blocked=$(grep -cE '^\|[^|]*\|[[:space:]]*\**[Bb][Ll][Oo][Cc][Kk][Ee][Dd]\**[[:space:]]*\|' .prod/failure-modes.md || true)
+  blocked=$(status_cell '[Bb][Ll][Oo][Cc][Kk][Ee][Dd]')
   if (( blocked > 0 )); then row "scenario-matrix" FAIL "$blocked checklist entries blocked (need production changes)"
+  elif (( tested == 0 )); then
+    # tested=0 is not a passing state, it is a broken parser. The previous
+    # version printed exactly that and PASSED -- the failure mode this whole
+    # standard exists to name, in the row that scores the scenario coverage.
+    row "scenario-matrix" FAIL "tested=0 with N/A=$na -- a matrix whose every scenario is N/A means the status parser stopped matching, not that the work is done"
   else row "scenario-matrix" PASS "tested=$tested N/A=$na blocked=0"; fi
 else row "scenario-matrix" FAIL "no .prod/failure-modes.md — denominator unknown"; fi
 
@@ -489,9 +711,40 @@ elif [[ -n "$live_gate" ]]; then
 else row "integration-real-lane" FAIL "every test is hermetic — no real-dependency lane"; fi
 
 # --- 9. compatibility ------------------------------------------------------
-if grep -rql "wire\|golden\|protoreflect\|unknown.field" --include='*_test.go' . 2>/dev/null; then
-  row "compatibility" PASS "contract/wire-compat tests present"
-else row "compatibility" FAIL "no compatibility tests"; fi
+# EXECUTED, not grepped, and matched on executable identifiers rather than
+# prose.
+#
+# This row used to be `grep -rql "wire\|golden\|protoreflect\|unknown.field"`
+# over every *_test.go. In marketdata 39 test files contain the word "wire" --
+# in comments, in variable names, in the phrase "on the wire" -- so the row
+# could not go red if every compatibility test in the repo were deleted and one
+# comment survived. It certified a dimension the gap report presents as
+# delivered, on the strength of a word.
+#
+# The markers below are all IDENTIFIERS that only appear in code that actually
+# exercises the wire format: a protoreflect call, a golden-file comparison, an
+# unknown-field round trip, a raw proto.Unmarshal. From the files carrying one,
+# the test functions are extracted and RUN by name, and the row requires both a
+# non-zero count and a green run -- the same shape replay-corpus and benchmarks
+# already use in this file.
+compat_files=$(grep -rl -E 'protoreflect\.|\.golden|UnknownFields|proto\.Unmarshal' --include='*_test.go' . 2>/dev/null || true)
+if [[ -z "$compat_files" ]]; then
+  row "compatibility" FAIL "no compatibility tests: nothing in the tree calls protoreflect, compares a golden, round-trips unknown fields, or unmarshals raw proto"
+else
+  compat_funcs=$(grep -ho -E '^func (Test[A-Za-z0-9_]+)' $compat_files 2>/dev/null | awk '{print $2}' | sort -u)
+  compat_n=$(printf '%s\n' "$compat_funcs" | sed '/^$/d' | wc -l | tr -d ' ')
+  compat_pkgs=$(printf '%s\n' $compat_files | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|;s|^\./\./|./|')
+  if (( compat_n == 0 )); then
+    row "compatibility" FAIL "files carry compatibility markers but declare no Test function -- nothing to run"
+  else
+    compat_re=$(printf '%s\n' "$compat_funcs" | sed '/^$/d' | paste -sd'|' -)
+    if compat_out=$(go test -count=1 -run "^(${compat_re})\$" $compat_pkgs 2>&1); then
+      row "compatibility" PASS "$compat_n wire/contract test(s) RAN green: $(printf '%s' "$compat_re" | cut -c1-90)"
+    else
+      row "compatibility" FAIL "compatibility tests red: $(grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$compat_out" | cut -c1-120)"
+    fi
+  fi
+fi
 
 # --- 10. performance: benchmarks exist, RUN, and have a baseline -----------
 # "$nb benchmarks run" used to be a GREP of `func Benchmark` across every test
@@ -1466,7 +1719,7 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   # precisely the state this probe is pointed at first.
   inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null | head -1)
   inv=${inv:-0}
-  pkgs=$(ls .prod/ratify-queue/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
+  pkgs=$(ls "$RATIFY_QUEUE_DIR"/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
   if (( pkgs > 0 && pkgs >= inv )); then row "ratification-packages" PASS "$pkgs packages for $inv ratified invariants"
   else row "ratification-packages" FAIL "$pkgs ratification packages for $inv ratified invariants — the queue is the evidence trail"; fi
 
@@ -1480,9 +1733,20 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   rp_missing=""
   rp_drift=""
   rp_checked=0
-  for rp in .prod/ratify-queue/*.y*ml; do
+  for rp in "$RATIFY_QUEUE_DIR"/*.y*ml; do
     [[ -f "$rp" ]] || continue
-    rp_fn=$(awk '/^[[:space:]]*function:[[:space:]]/{print $2; exit}' "$rp" 2>/dev/null)
+    # ONE parser, the same one the non-vacuity row uses to decide what to
+    # execute. This used to be two independent awk expressions and they
+    # disagreed in BOTH directions -- measured by a reviewer against the real
+    # packages: `expect_red:Foo` (no space after the colon, which YAML allows
+    # and the stdlib parser reads fine) made the awk return empty, so the drift
+    # check SILENTLY SKIPPED while the row printed PASS claiming it had
+    # compared them; and a legally single-quoted `expect_red: 'Foo'` produced a
+    # false FAIL, because the awk does not strip quoting and the real parser
+    # does. A row that asserts a comparison it did not perform is worse than no
+    # row.
+    rp_fn=$(cited_function "$rp")
+    rp_red=$(executed_function "$rp")
     [[ -z "$rp_fn" ]] && continue
     rp_checked=$((rp_checked+1))
     grep -rqE "func[[:space:]]+${rp_fn}\(" --include='*_test.go' . 2>/dev/null \
@@ -1496,10 +1760,11 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # test B, both real, gate green, and the package's evidence describes
     # something the probe never ran. A gate weaker than the comment it enforces
     # leaves the comment doing the work.
-    rp_red=$(awk '/^[[:space:]]*expect_red:[[:space:]]/{print $2; exit}' "$rp" 2>/dev/null)
-    if [[ -n "$rp_red" && "$rp_red" != "$rp_fn" ]]; then
-      rp_drift+="$(basename "$rp"):cites=${rp_fn},executes=${rp_red} "
-    fi
+    # No `-n "$rp_red"` guard any more: an EMPTY expect_red used to make the
+    # comparison skip silently, which is exactly the fail-open above. A package
+    # that cites a function and executes nothing is drift too.
+    drift=$(citation_drift "$rp")
+    [[ -n "$drift" ]] && rp_drift+="$drift "
   done
   if (( rp_checked == 0 )); then
     row "ratification-citations" FAIL "no ratification package declares a test.function — the citation is what makes the package evidence"
@@ -1513,7 +1778,14 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
 fi
 
 # --- 19. candidate tests are segregated OUT of the blocking lane -------------
-cand=$(grep -rl "provenance: candidate" --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+# Matched as a PROVENANCE HEADER (`// provenance: candidate` at the start of a
+# comment line), not as the bare string anywhere in the file. The loose form
+# counted a file that merely MENTIONS the convention in prose -- it fired on a
+# comment reading "only `provenance: candidate` files carry a ttl", declaring a
+# blocking-lane file an untagged candidate. Same shape as a citation being
+# indistinguishable from a tombstone: a checker that reads prose cannot tell a
+# declaration from a discussion of one.
+cand=$(grep -rlE '^[[:space:]]*//[[:space:]]*provenance:[[:space:]]*candidate[[:space:]]*$' --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
 tagged=$(grep -rl "go:build candidate" --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
 if (( cand == 0 )); then row "candidate-lane-segregated" NA "no candidate tests"
 elif (( tagged >= cand )); then row "candidate-lane-segregated" PASS "$cand candidate files, all build-tagged"
