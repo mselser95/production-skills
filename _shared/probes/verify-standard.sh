@@ -275,6 +275,33 @@ declare -a ROWS
 
 # --- helpers -----------------------------------------------------------------
 row() { # row <dimension> <verdict> <evidence>
+  # A PASS WITH NO EVIDENCE IS A FAIL.
+  #
+  # Every PASS in this file is supposed to carry the measurement that earned
+  # it. When an extractor stops matching, the measurement silently becomes the
+  # empty string and the row passes anyway -- the gate reporting green over a
+  # number it never read.
+  #
+  # Not hypothetical. `coverage` extracts with
+  # `grep -oE 'TOTAL COVERAGE: [0-9.]+%'`; a coverage.sh printing any other
+  # wording (measured against clcsolutions/risk-engine's
+  # "TOTAL LINE COVERAGE (src/, hand-written only): 3.10%") yields nothing, and
+  # since the script exited 0 the row rendered exactly:
+  #
+  #     coverage                           PASS
+  #
+  # over a repo at 3.10% with no floor. This file already calls an
+  # evidence-free FAIL "the worst output a probe can produce"; the same defect
+  # in the PASS branch is worse, because nobody goes looking.
+  #
+  # One guard here catches every future extractor drift, not just this one.
+  # Found by a reviewer running the probe against a C++ repo -- the language
+  # mismatch was the symptom; this was the disease.
+  if [[ "$2" == PASS && -z "${3// /}" ]]; then
+    ROWS+=("$1|FAIL|passed with NO evidence: the extractor produced nothing, so this row certifies a measurement it never read")
+    fails=$((fails+1))
+    return
+  fi
   ROWS+=("$1|$2|$3")
   case "$2" in PASS) passes=$((passes+1));; FAIL) fails=$((fails+1));; NA) nas=$((nas+1));; esac
 }
@@ -1870,6 +1897,44 @@ if grep -rqE "commit|git_sha|config_version|schema_version|build_info" observabi
 else row "operational-determinism" FAIL "Output=F(code,config,state,inputs): the four versions are not surfaced — replay cannot reproduce prod"; fi
 
 # --- report --------------------------------------------------------------
+# --- SILENCE IS NOT A VERDICT -----------------------------------------------
+#
+# A row that is never emitted counts in neither PASS, FAIL nor NA: it evaporates
+# from the report AND from the tally, and the run still ends COMPLETE. That is
+# the quietest failure this file can have -- worse than a red row, because
+# nothing draws the eye to it.
+#
+# It is reachable through ordinary conditionals. Measured on a repo without a
+# docs/RUNBOOK.md, `runbook-citations-resolve` simply does not appear; on a repo
+# whose tests carry no `//go:build` integration tag, `ci-runs-integration-lane`
+# does not appear even when the lane exists; and every §14/§15 security row sits
+# inside `if [[ -d $wf ]]`, so a repo with no .github/workflows loses four rows
+# without a single FAIL.
+#
+# So: the dimension names this script CAN emit are derived from its own source,
+# and any one that produced no row becomes FAIL "not probed". Derived rather
+# than hand-listed so it cannot drift out of date -- a hand-maintained list is
+# one more thing that silently stops matching.
+#
+# Rows whose name is built from a variable are invisible to this derivation and
+# are simply extra; the guard is one-directional on purpose.
+declared_rows=$(grep -oE '^[[:space:]]*(el)?(se)?[[:space:]]*row "[a-zA-Z][^"$]*"' "$0" \
+  | sed -E 's/.*row "([^"]*)".*/\1/' | sort -u)
+if (( $(grep -c . <<<"$declared_rows") < 20 )); then
+  # The derivation itself must not fail open. If it stops matching, this guard
+  # would silently protect nothing -- exactly the shape it exists to catch.
+  ROWS+=("row-derivation|FAIL|could not derive the declared dimension list from this script -- the not-probed guard is inert")
+  fails=$((fails+1))
+else
+  emitted_rows=$(printf '%s\n' "${ROWS[@]}" | cut -d'|' -f1 | sort -u)
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    grep -qxF "$d" <<<"$emitted_rows" && continue
+    ROWS+=("$d|FAIL|not probed: no branch emitted this dimension, and an unemitted row counts in neither PASS, FAIL nor NA")
+    fails=$((fails+1))
+  done <<<"$declared_rows"
+fi
+
 printf '\n%-34s %-5s %s\n' "DIMENSION" "VERDICT" "EVIDENCE"
 printf '%s\n' "$(printf '%0.s-' {1..96})"
 for r in "${ROWS[@]}"; do IFS='|' read -r d v e <<<"$r"; printf '%-34s %-5s %s\n' "$d" "$v" "$e"; done
