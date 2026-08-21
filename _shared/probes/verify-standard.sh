@@ -418,8 +418,18 @@ else row "mutation-baseline (TREND)" FAIL "no baseline artifact"; fi
 
 # --- 7. scenarios matrix ----------------------------------------------------
 if [[ -f .prod/failure-modes.md ]]; then
-  tested=$(grep -cE '^\|.*\b(tested|TESTED)\b' .prod/failure-modes.md || true)
-  na=$(grep -cE '^\|.*\bN/?A\b' .prod/failure-modes.md || true)
+  # tested / N/A / blocked all anchored to the SECOND cell -- the status column
+  # -- and matched case-insensitively, for the same reason. Only `blocked` was
+  # fixed the first time round, which left its two neighbours matching the word
+  # ANYWHERE on the line: the Totals table's own header
+  # (`| Capability | Class | Tested | N/A | Blocked | Checklist size |`) counted
+  # as an N/A row, so the probe reported N/A=16 while the matrix's own totals
+  # said 15. `tested` came out right at 30 only because its alternation happened
+  # to miss the header's capitalisation -- correct by luck. Fixing one of three
+  # and leaving the others is how a gate ends up disagreeing with the very
+  # document it scores.
+  tested=$(grep -cE '^\|[^|]*\|[[:space:]]*\**[Tt][Ee][Ss][Tt][Ee][Dd]\**[[:space:]]*\|' .prod/failure-modes.md || true)
+  na=$(grep -cE '^\|[^|]*\|[[:space:]]*\**[Nn]/?[Aa]\**[[:space:]]*\|' .prod/failure-modes.md || true)
   # Anchored to a whole STATUS CELL, not "the word appears anywhere on the
   # line". The substring form failed the build for any repo that added a
   # summary table to this file, because a header cell or a totals row
