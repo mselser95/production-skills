@@ -343,9 +343,22 @@ open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$
 else row "invariants-ratified" FAIL "verification/ratified/ has no tests"; fi
 
 # --- 5. properties + fuzz (each target actually executed) -------------------
-if grep -rql "func TestProperty\|adequacy" --include='*_test.go' . 2>/dev/null; then
-  row "property-tests" PASS "$(grep -rho 'func TestProperty[A-Za-z_]*' --include='*_test.go' . | sort -u | wc -l | tr -d ' ') property tests present"
-else row "property-tests" FAIL "no property tests found"; fi
+# The CONDITION and the EVIDENCE must count the same thing. This used to pass
+# on `func TestProperty` OR the bare word `adequacy` appearing in any test
+# file, while the evidence string counted only `func TestProperty*` -- so a
+# repo that deleted every property test but left the word "adequacy" in a
+# comment PASSED, with the evidence reading "0 property tests present". A row
+# whose own evidence says zero is a row that has stopped checking.
+prop_n=$(grep -rho 'func TestProperty[A-Za-z_]*' --include='*_test.go' . 2>/dev/null | sort -u | wc -l | tr -d ' ')
+prop_n=${prop_n:-0}
+if (( prop_n > 0 )) && grep -rql 'adequacy' --include='*_test.go' . >/dev/null 2>&1; then
+  row "property-tests" PASS "$prop_n property test(s), with generator-adequacy assertion(s)"
+elif (( prop_n > 0 )); then
+  # A property test whose generator never produces the interesting shape
+  # passes vacuously, which is why the standard asks for an explicit adequacy
+  # assertion rather than trusting the generator.
+  row "property-tests" FAIL "$prop_n property test(s) but no generator-adequacy assertion — an inadequate generator passes vacuously"
+else row "property-tests" FAIL "no property tests found (the word 'adequacy' in a test file is not a property test)"; fi
 
 mapfile -t fuzzes < <(grep -rho 'func \(Fuzz[A-Za-z0-9_]*\)' --include='*_test.go' . 2>/dev/null | sed 's/func //' | sort -u)
 if ((${#fuzzes[@]})); then
@@ -357,7 +370,14 @@ if ((${#fuzzes[@]})); then
         if grep -q "setup failed" <<<"$fout"; then infra=$((infra+1)); else bad=$((bad+1)); fi; }; }
   done
   if ((bad==0 && infra==0)); then row "fuzz" PASS "${#fuzzes[@]} targets, all ran clean 3s"
-  elif ((bad==0)); then row "fuzz" PASS "${#fuzzes[@]} targets clean ($infra inconclusive: toolchain setup, not a finding)"
+  elif ((bad==0 && infra >= ${#fuzzes[@]})); then
+    # EVERY target bucketed as toolchain-infra means NOT ONE was fuzzed, and
+    # the old branch reported that as "targets clean". Tolerating some
+    # inconclusive runs is reasonable -- Go's fuzz cache genuinely contends
+    # under parallel packages -- but tolerating ALL of them turns the row into
+    # a report that the tool failed to start, printed as a pass.
+    row "fuzz" FAIL "${#fuzzes[@]} targets, ALL inconclusive: no target was actually fuzzed, so this row proves nothing"
+  elif ((bad==0)); then row "fuzz" PASS "${#fuzzes[@]} targets, $((${#fuzzes[@]}-infra)) ran clean ($infra inconclusive: toolchain setup, not a finding)"
   else row "fuzz" FAIL "${#fuzzes[@]} targets, $bad genuinely failed"; fi
 else row "fuzz" FAIL "no fuzz targets"; fi
 
