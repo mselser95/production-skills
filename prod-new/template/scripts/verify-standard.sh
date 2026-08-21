@@ -121,10 +121,17 @@ else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
 if race_out=$(go test ./... -race -count=1 2>&1); then
   row "race" PASS "race detector clean"
 else
-  race_why=$(grep -m1 -E '^[[:space:]]*(WARNING: DATA RACE)' <<<"$race_out" \
-    || grep -m1 -E '^--- FAIL: [A-Za-z0-9_/]+' <<<"$race_out" \
-    || grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$race_out" \
-    || grep -m1 -E '^FAIL' <<<"$race_out")
+  # The test NAME and the ASSERTION, not one or the other. Reporting only
+  # `--- FAIL: TestX` sends the reader to re-run it for the message -- and for
+  # an intermittent failure that re-run may come back clean, which is the whole
+  # reason this row captures output at all. Measured: a red race row named
+  # TestVenueView_LosingAVenueNeverMovesTheDemand and dropped
+  # "InQuorum=1, want 3", the number that identified the mechanism.
+  race_name=$(grep -m1 -E '^--- FAIL: [A-Za-z0-9_/]+' <<<"$race_out")
+  race_assert=$(grep -m1 -E '^[[:space:]]+[^[:space:]]+\.go:[0-9]+:' <<<"$race_out")
+  race_why=$(grep -m1 -E '^[[:space:]]*(WARNING: DATA RACE)' <<<"$race_out")
+  [[ -z "$race_why" ]] && race_why="$(printf '%s%s' "${race_name}" "${race_assert:+ -- $(printf '%s' "$race_assert" | sed 's/^[[:space:]]*//')}")"
+  [[ -z "$race_why" ]] && race_why=$(grep -m1 -E '^FAIL' <<<"$race_out")
   race_pkg=$(grep -m1 -E '^FAIL[[:space:]]+[^[:space:]]+' <<<"$race_out" | awk '{print $2}')
   row "race" FAIL "${race_why:-race suite failed}${race_pkg:+ (in $race_pkg)}"
 fi
@@ -1348,6 +1355,15 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
     _pat="$(printf '%s|' "${series_prefixes[@]}")"; _pat="(${_pat%|})"
     while read -r m; do
       [[ -n "$m" ]] || continue
+      # A Prometheus series name never ENDS in an underscore. A token that does
+      # is the prefix half of an alternation the runbook wrote for a human --
+      # `grep -E 'clcbinance_ws_(connects_total|reconnects_total)'` -- and the
+      # extractor stops at the `(`, inventing a series that was never cited.
+      # Measured in clcsolutions/binance-marketdata: two such "missing" series,
+      # `clcbinance_ws_` and `clcmd_venue_`, both from legitimate runbook
+      # commands. A gate that invents a citation and then reports it unresolved
+      # sends someone to fix a document that was correct.
+      [[ "$m" == *_ ]] && continue
       cited=$((cited+1))
       printf '%s\n' "${declared_series[@]}" | grep -qx "$m" || { bad=$((bad+1)); missing="${missing} $m"; }
     done < <(grep -ohE "\\b${_pat}[a-z0-9_]+\\b" docs/RUNBOOK.md | sort -u)
