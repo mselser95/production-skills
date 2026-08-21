@@ -113,8 +113,21 @@ if out=$(go test ./... -count=1 2>&1); then
   row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
 else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
 
-if go test ./... -race -count=1 >/dev/null 2>&1; then row "race" PASS "race detector clean"
-else row "race" FAIL "race suite failed"; fi
+# Capture the output. "race suite failed" names nothing -- not the test, not
+# the package, not whether it was a DATA RACE at all -- so the row sent the
+# reader back to re-run the suite themselves, and an INTERMITTENT failure may
+# not reproduce on that re-run. Evidence you have to regenerate is evidence you
+# may not get.
+if race_out=$(go test ./... -race -count=1 2>&1); then
+  row "race" PASS "race detector clean"
+else
+  race_why=$(grep -m1 -E '^[[:space:]]*(WARNING: DATA RACE)' <<<"$race_out" \
+    || grep -m1 -E '^--- FAIL: [A-Za-z0-9_/]+' <<<"$race_out" \
+    || grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$race_out" \
+    || grep -m1 -E '^FAIL' <<<"$race_out")
+  race_pkg=$(grep -m1 -E '^FAIL[[:space:]]+[^[:space:]]+' <<<"$race_out" | awk '{print $2}')
+  row "race" FAIL "${race_why:-race suite failed}${race_pkg:+ (in $race_pkg)}"
+fi
 
 # --- 2. coverage + per-package ratchet (measured, not claimed) ---------------
 if [[ -x scripts/coverage.sh ]]; then
