@@ -167,8 +167,29 @@ else row "fitness-functions" FAIL "no architecture/fitness test found"; fi
 # --- 4. ratified invariants (exist AND run AND provably non-vacuous) --------
 if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   n=$(grep -h '^func Test' verification/ratified/*_test.go 2>/dev/null | wc -l | tr -d ' ')
+  # The build tags the ratified tests DECLARE, taken from their own `//go:build`
+  # lines. This used to be a bare `go test ./verification/...`, which is the
+  # purest form of the defect this whole file exists to refuse: the ratified
+  # tests carry `//go:build integration`, so an untagged run compiles NONE of
+  # them, prints "[no test files]", and exits 0 -- and the row translated that
+  # into "N test func(s) green". A gate reporting N green from a run that
+  # compiled zero is worse than no gate: it is a gate that certifies its own
+  # absence. Measured: exit 0, "verification/ratified [no test files]", row PASS.
+  rat_tags=$(grep -h '^//go:build' verification/ratified/*_test.go 2>/dev/null \
+    | sed 's|^//go:build||' | tr -c 'A-Za-z0-9_' ' ' \
+    | tr ' ' '\n' | sed '/^$/d' | grep -vx 'ignore' | sort -u | tr '\n' ',' | sed 's/,$//')
+  # -v and a count, because "exit 0" is not "the tests ran". The run must
+  # produce exactly the N top-level PASS lines that N `func Test` promised;
+  # anything less means a tag was missing or a test was filtered away, and that
+  # is a FAIL rather than a quieter PASS.
+  rat_out=$(go test ${rat_tags:+-tags="$rat_tags"} ./verification/ratified/ -count=1 -v 2>&1)
+  rat_rc=$?
+  rat_ran=$(printf '%s\n' "$rat_out" | grep -cE '^--- (PASS|FAIL): Test')
+  rat_pass=$(printf '%s\n' "$rat_out" | grep -cE '^--- PASS: Test')
   if (( n == 0 )); then row "invariants-ratified" FAIL "verification/ratified/ has files but zero Test funcs"
-  elif go test ./verification/... -count=1 >/dev/null 2>&1; then
+  elif (( rat_ran != n )); then
+    row "invariants-ratified" FAIL "$n ratified Test func(s) declared but only $rat_ran ran under -tags='$rat_tags' — a run that compiles none of them exits 0 and proves nothing"
+  elif (( rat_rc == 0 && rat_pass == n )); then
     # Count from the SPEC, not from the directory listing. Counting `func Test`
     # in verification/ratified/ and calling the total "ratified" conflated
     # ratified invariants with ones still PENDING HUMAN RATIFICATION whose test
@@ -177,7 +198,7 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # a test file cannot confer it on itself.
     ratified_n=$(awk '/^invariants:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
     pending_n=$(awk '/^invariants_pending_ratification:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
-    row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $n test func(s) green"
+    row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $rat_pass/$n test func(s) ACTUALLY RAN green under -tags='$rat_tags'"
   else row "invariants-ratified" FAIL "ratified tests red"; fi
   # --- non-vacuity: EXECUTE the mutations, do not grep for the word ----------
   #
@@ -353,10 +374,18 @@ if [[ -f .prod/failure-modes.md ]]; then
   # line". The substring form failed the build for any repo that added a
   # summary table to this file, because a header cell or a totals row
   # containing the word "blocked" counted as a blocked scenario. Note this is
-  # tighter, not bulletproof: a totals row like `| blocked | 0 |` still
-  # matches, which is why the template's own failure-modes.md documents the
-  # constraint instead of this comment claiming the regex handles everything.
-  blocked=$(grep -cE '^\|.*\|[[:space:]]*\**blocked\**[[:space:]]*\|' .prod/failure-modes.md || true)
+  # Anchored to the SECOND cell -- the status column -- and case-INSENSITIVE.
+  # Both halves are load-bearing and both were wrong. The old pattern matched
+  # `blocked` in any cell of the row, so the summary table's own header
+  # (`| Capability | Class | Tested | N/A | Blocked | ... |`) counted as a
+  # blocked scenario; and it was case-SENSITIVE, so a row written
+  # `| timeout | **BLOCKED** | ... |` -- the emphasis a human naturally reaches
+  # for on the one row that matters -- was counted as zero. Measured in
+  # marketdata: one genuinely blocked scenario (`Migrate` has no internal
+  # timeout while its six siblings do), and the row reported `blocked=0` and
+  # PASSED. A gate that reads only lower-case failure states is a gate that
+  # passes whenever someone shouts.
+  blocked=$(grep -cE '^\|[^|]*\|[[:space:]]*\**[Bb][Ll][Oo][Cc][Kk][Ee][Dd]\**[[:space:]]*\|' .prod/failure-modes.md || true)
   if (( blocked > 0 )); then row "scenario-matrix" FAIL "$blocked checklist entries blocked (need production changes)"
   else row "scenario-matrix" PASS "tested=$tested N/A=$na blocked=0"; fi
 else row "scenario-matrix" FAIL "no .prod/failure-modes.md — denominator unknown"; fi
