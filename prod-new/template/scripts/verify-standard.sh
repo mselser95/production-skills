@@ -1478,6 +1478,7 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   # while the test is TestFailedFetchNeverDestroysLastKnownDrift, and nothing
   # in the gate could tell.
   rp_missing=""
+  rp_drift=""
   rp_checked=0
   for rp in .prod/ratify-queue/*.y*ml; do
     [[ -f "$rp" ]] || continue
@@ -1486,13 +1487,28 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     rp_checked=$((rp_checked+1))
     grep -rqE "func[[:space:]]+${rp_fn}\(" --include='*_test.go' . 2>/dev/null \
       || rp_missing+="$(basename "$rp"):$rp_fn "
+    # And it must be the SAME test the non_vacuity_check EXECUTES.
+    #
+    # Checking only that the cited function exists is weaker than what the
+    # packages themselves promise: their comment says the declarative citation
+    # is taken from expect_red "so the two cannot drift into naming different
+    # tests". Existence alone permits exactly that drift -- cite test A, execute
+    # test B, both real, gate green, and the package's evidence describes
+    # something the probe never ran. A gate weaker than the comment it enforces
+    # leaves the comment doing the work.
+    rp_red=$(awk '/^[[:space:]]*expect_red:[[:space:]]/{print $2; exit}' "$rp" 2>/dev/null)
+    if [[ -n "$rp_red" && "$rp_red" != "$rp_fn" ]]; then
+      rp_drift+="$(basename "$rp"):cites=${rp_fn},executes=${rp_red} "
+    fi
   done
   if (( rp_checked == 0 )); then
     row "ratification-citations" FAIL "no ratification package declares a test.function — the citation is what makes the package evidence"
   elif [[ -n "$rp_missing" ]]; then
     row "ratification-citations" FAIL "cited test(s) do not exist: $rp_missing"
+  elif [[ -n "$rp_drift" ]]; then
+    row "ratification-citations" FAIL "cited test != executed test: $rp_drift -- the package names one test as its evidence and the non-vacuity check runs another"
   else
-    row "ratification-citations" PASS "$rp_checked cited test function(s) all resolve to a real test"
+    row "ratification-citations" PASS "$rp_checked cited test function(s) resolve AND match the test each non_vacuity_check executes"
   fi
 fi
 
