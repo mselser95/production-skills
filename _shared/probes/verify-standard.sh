@@ -814,19 +814,33 @@ else
   for m in "${obs_manifests[@]}"; do
     base=$(basename "$m")
     while IFS= read -r tf; do
-      # Naming the manifest is not reading it. Require a real file read in the
-      # same file, so a comment or an error message cannot carry the row.
-      grep -qE 'os\.ReadFile|os\.Open|embed\.FS|//go:embed|ioutil\.ReadFile' "$tf" 2>/dev/null \
-        && obs_readers+="$(dirname "$tf")"$'\n'
+      # Belt and braces on the filename. `--include` is not honoured
+      # identically by every grep on every machine -- ugrep matched
+      # scripts/verify-standard.sh here for an --include='*_test.go' search --
+      # and one non-Go path in the list makes the `go test` below fail with
+      # "no Go files", turning a green contract into a red row for a reason
+      # that has nothing to do with observability.
+      [[ "$tf" == *_test.go ]] || continue
+      grep -qE 'os\.ReadFile|os\.Open|embed\.FS|//go:embed|ioutil\.ReadFile' "$tf" 2>/dev/null || continue
+      d=$(dirname "$tf")
+      # And it must be a real Go package, asked of the toolchain rather than
+      # inferred from the path.
+      go list "$d" >/dev/null 2>&1 && obs_readers+="$d"$'\n'
     done < <(grep -rl -- "$base" --include='*_test.go' . 2>/dev/null)
   done
   obs_pkgs=$(printf '%s' "$obs_readers" | sort -u | sed '/^$/d')
   if [[ -z "$obs_pkgs" ]]; then
     row "observability-contract-checked" FAIL "${#obs_manifests[@]} manifest(s) exist but no test READS one — naming it in a comment is not a check"
   elif obs_out=$(go test -count=1 $(printf './%s ' $(printf '%s' "$obs_pkgs" | sed 's|^\./||')) 2>&1); then
-    row "observability-contract-checked" PASS "$(printf '%s' "$obs_pkgs" | wc -l | tr -d ' ') package(s) read and verify ${#obs_manifests[@]} manifest(s), green"
+    row "observability-contract-checked" PASS "$(grep -c . <<<"$obs_pkgs") package(s) read and verify ${#obs_manifests[@]} manifest(s), green"
   else
-    row "observability-contract-checked" FAIL "the test(s) that read the manifest are RED: $(grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$obs_out" || echo 'see go test output')"
+    # Prefer a file:line diagnostic, fall back to the first real error line --
+    # "see go test output" is not evidence, and this row printed exactly that
+    # while the actual cause was a non-package directory in the list.
+    obs_why=$(grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$obs_out" \
+      || grep -m1 -E 'no Go files|cannot find|^FAIL|build failed' <<<"$obs_out" \
+      || printf '%s' "$(tail -n1 <<<"$obs_out")")
+    row "observability-contract-checked" FAIL "the test(s) that read the manifest are RED: ${obs_why:-unknown}"
   fi
 fi
 
