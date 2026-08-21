@@ -1379,6 +1379,31 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   pkgs=$(ls .prod/ratify-queue/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
   if (( pkgs > 0 && pkgs >= inv )); then row "ratification-packages" PASS "$pkgs packages for $inv ratified invariants"
   else row "ratification-packages" FAIL "$pkgs ratification packages for $inv ratified invariants — the queue is the evidence trail"; fi
+
+  # Every package's `test.function` must name a test that EXISTS. The probe
+  # executes `expect_red`, so a package can carry a `function:` naming a test
+  # that was renamed or deleted and stay green forever -- the citation rots
+  # into a tombstone and the package still reads as evidence. Found in
+  # clcsolutions/marketdata: 004 cited TestFailedFetchNeverReplacesLiveCatalog
+  # while the test is TestFailedFetchNeverDestroysLastKnownDrift, and nothing
+  # in the gate could tell.
+  rp_missing=""
+  rp_checked=0
+  for rp in .prod/ratify-queue/*.y*ml; do
+    [[ -f "$rp" ]] || continue
+    rp_fn=$(awk '/^[[:space:]]*function:[[:space:]]/{print $2; exit}' "$rp" 2>/dev/null)
+    [[ -z "$rp_fn" ]] && continue
+    rp_checked=$((rp_checked+1))
+    grep -rqE "func[[:space:]]+${rp_fn}\(" --include='*_test.go' . 2>/dev/null \
+      || rp_missing+="$(basename "$rp"):$rp_fn "
+  done
+  if (( rp_checked == 0 )); then
+    row "ratification-citations" FAIL "no ratification package declares a test.function — the citation is what makes the package evidence"
+  elif [[ -n "$rp_missing" ]]; then
+    row "ratification-citations" FAIL "cited test(s) do not exist: $rp_missing"
+  else
+    row "ratification-citations" PASS "$rp_checked cited test function(s) all resolve to a real test"
+  fi
 fi
 
 # --- 19. candidate tests are segregated OUT of the blocking lane -------------
