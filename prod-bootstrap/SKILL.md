@@ -262,6 +262,36 @@ Rules for this phase:
   the short list of open decisions — nothing else should be left for the human
   to remember.
 
+## Toolchain support — check this BEFORE promising a gate
+
+`_shared/probes/verify-standard.sh` implements the **Go** toolchain only. About
+sixty of its lines are `go build ./...`, `go test`, `--include='*.go'`,
+`//go:build` tags, golangci-lint and Go coverage profiles.
+
+It now REFUSES to run on anything else (`PROD_LANG` detection, exit 2) rather
+than emitting rows that measure its own blind spot. Measured against a C++/CMake
+repo with the guard disabled: `PASS 3  FAIL 52  NA 2`. Fifty-two rows saying
+nothing about the code, and the one real finding among them unfindable.
+
+So on a non-Go repo, phase 1 of this skill still works — the inventory, the
+Q&A, the gap report and the plan are language-agnostic, and so is most of the
+standard (liability registries with owner+expiry, the scenario matrix, runbook
+citations that resolve, SLOs, observability contracts, ratification packages,
+workflow validation, secret scanning, SBOM, the per-commit evidence record).
+What does NOT exist yet is the executable gate.
+
+**Do not scaffold a `scripts/verify-standard.sh` into a non-Go repo.** A vendored
+probe that refuses to run is a gate the repo believes it has and does not. Say
+so in the gap report as its own row, at the severity it deserves, and make the
+toolchain a plan task.
+
+Adding a toolchain means giving it the equivalent of every language-bound row —
+build, unit tests, race (TSan for C++), coverage plus the per-package ratchet,
+lint (clang-tidy), fuzz (libFuzzer), benchmarks (google-benchmark) — and wiring
+them in. A row with no equivalent becomes an explicit, ratified N/A with a
+reason. Never a silent skip: that is the one change that would make the probe
+worse than absent.
+
 ## Guardrails
 
 - Preamble in full. Bootstrap-specific:
