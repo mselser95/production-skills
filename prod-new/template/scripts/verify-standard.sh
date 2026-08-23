@@ -772,8 +772,25 @@ else row "scenario-matrix" FAIL "no .prod/failure-modes.md — denominator unkno
 # Every downstream use then looked for `-tags=e`, and the row named a tag that
 # does not exist in the repo. Digits belong in the class: build tags are
 # [A-Za-z0-9_.] and `e2e` is the single most common integration tag there is.
-real_tag=$(grep -rho 'go:build [A-Za-z0-9_.]*' --include='*_test.go' . 2>/dev/null | awk '{print $2}' \
-           | grep -vE '^(candidate|ignore)$' | sort -u | head -1)
+# `*` matches ZERO characters, so a constraint starting outside the class --
+# `//go:build !unit` -- matched the bare `go:build ` prefix, awk emitted an
+# EMPTY line, and `sort -u` sorts the empty string FIRST, so `head -1` took it
+# and real_tag came back "". Widening the class fixed `e2e` and left that.
+# `+` requires at least one character, so a negated leading constraint simply
+# does not match instead of winning. Empty lines are dropped as well, because
+# a guard that depends on one regex quantifier is a guard with one point of
+# failure. NOTE, stated rather than hidden: `//go:build !unit && integration`
+# still yields nothing -- the positive tag is not first. That is a narrower
+# gap than "empty string wins" and it fails CLOSED (row not emitted), not open.
+# Lifted into a FUNCTION so scripts/tests/non-vacuity-selftest.sh can source
+# and assert it instead of restating it. A selftest that reimplements the logic
+# tests the reimplementation -- this file already learned that with
+# classify_mutation_result.
+extract_real_tag() {   # extract_real_tag [dir] -> the chosen build tag, or empty
+  grep -rhoE 'go:build [A-Za-z0-9_.]+' --include='*_test.go' "${1:-.}" 2>/dev/null | awk '{print $2}' \
+    | grep -v '^$' | grep -vE '^(candidate|ignore)$' | sort -u | head -1
+}
+real_tag=$(extract_real_tag .)
 live_gate=$(grep -rlE 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
 if [[ -n "$real_tag" ]]; then
   # Scope the run to the packages that actually CONTAIN the tagged files, and
@@ -1597,6 +1614,14 @@ fi
 # repos derive that from go.mod's literal and feed it to setup-go. So the row
 # names what ran AND flags a mismatch with what go.mod pins: a local scan on a
 # different toolchain does not describe what ships.
+# Lifted into a FUNCTION for the same reason extract_real_tag was: the selftest
+# asserts it directly. Counts workflows that DEFINE the job or invoke it with a
+# real `uses:`, never files that merely MENTION the string -- a comment naming
+# secret-scan used to flip this row to PASS with nothing wired.
+count_secret_scan_workflows() {   # <workflows-dir> -> count
+  grep -rlE '^[[:space:]]*-?[[:space:]]*uses:.*secret-scan|^[[:space:]]+secret-scan:' "$1" 2>/dev/null | wc -l | tr -d ' '
+}
+
 toolchain_note() {
   local ran pinned
   ran=$(go env GOVERSION 2>/dev/null || echo "unknown")
@@ -1663,7 +1688,7 @@ if [[ -d $wf ]]; then
   # the standard turned this row FAIL -> PASS. A checker cannot tell a citation
   # from a tombstone unless it is made to look for the mechanism, so this now
   # requires a job DEFINITION (`secret-scan:`) or a real `uses:` invocation.
-  sc=$(grep -rlE '^[[:space:]]*-?[[:space:]]*uses:.*secret-scan|^[[:space:]]+secret-scan:' $wf 2>/dev/null | wc -l | tr -d ' ')
+  sc=$(count_secret_scan_workflows "$wf")
   (( sc >= 2 )) && row "secret-scan-all-triggers" PASS "in $sc workflows" || row "secret-scan-all-triggers" FAIL "only $sc workflow(s) — PR-only is the known gap"
   grep -rqi "sbom\|syft\|cyclonedx" $wf && row "sbom" PASS "SBOM step present" || row "sbom" FAIL "no SBOM"
   # Match only real attestation mechanisms, never the English word "provenance"
@@ -1894,16 +1919,31 @@ fuzz_make_targets=$(awk '
 #  - `.PHONY: fuzz verify` parses as a rule whose prerequisites include `fuzz`,
 #    so the closure "reached" .PHONY and the row proposed `make .PHONY`. Special
 #    dot-targets are excluded: they are declarations, not lanes.
+# make JOINS `\`-continued lines; the closure read one PHYSICAL line, so
+# `verify: lint \` + `fuzz \` + `race` dropped verify and everything above it.
+# Measured on a synthetic Makefile: seed [fuzz], closure [fuzz] where the
+# correct answer is [fuzz verify ci]. Both that and `::` rules landed as the
+# false FAIL this block was written to remove, and both were silent.
+fold_makefile() { sed -e :a -e '/\\$/N; s/\\\n//; ta' Makefile 2>/dev/null; }
+
 fuzz_reachable="$fuzz_make_targets"
 for _ in 1 2 3 4 5 6; do
-  more=$(awk -v seeds="$(echo $fuzz_reachable | tr '\n' ' ')" '
+  # shellcheck disable=SC2086  # deliberate: collapse the newline-separated
+  # seed list into one space-separated -v value; awk -v rejects a literal
+  # newline ("newline in string").
+  more=$(fold_makefile | awk -v seeds="$(echo $fuzz_reachable | tr '\n' ' ')" '
     BEGIN { n = split(seeds, sd, /[ \t]+/); for (i = 1; i <= n; i++) if (sd[i] != "") want[sd[i]] = 1 }
-    /^[a-zA-Z0-9_.\-]+[ \t]*:[^=]/ {
-      split($0, a, ":"); t = a[1]; gsub(/[ \t]/, "", t)
+    /^[a-zA-Z0-9_.\-]+[ \t]*::?[^=]/ {
+      # Double-colon rules split to an EMPTY prerequisite field on a naive
+      # split(":"), so `verify:: fuzz lint` dropped verify and everything above
+      # it -- the exact false FAIL this block exists to remove. Take everything
+      # after the FIRST colon run instead of trusting field 2.
+      t = $0; sub(/[ \t]*::?.*$/, "", t)
       if (t ~ /^\./) next
-      m = split(a[2], pq, /[ \t]+/)
+      rest = $0; sub(/^[^:]*::?[ \t]*/, "", rest)
+      m = split(rest, pq, /[ \t]+/)
       for (j = 1; j <= m; j++) if (pq[j] != "" && (pq[j] in want)) print t
-    }' Makefile 2>/dev/null | sort -u)
+    }' 2>/dev/null | sort -u)
   new_reach=$(printf '%s\n%s\n' "$fuzz_reachable" "$more" | sort -u | sed '/^$/d')
   [[ "$new_reach" == "$fuzz_reachable" ]] && break
   fuzz_reachable="$new_reach"
@@ -1939,12 +1979,26 @@ fi
 # 2026-08-23: the only matching file was scripts/verify-standard.sh.
 # The probe's own file is therefore excluded, and the row now carries the list
 # of files that DID match as its evidence, so a PASS names what wired it.
+# Excluding the probe's own copy closed the pure self-reference, but the
+# `scripts` arm still passed on a file's mere PRESENCE -- a repo that copies in
+# changed-line-coverage.sh and wires it into no workflow got a PASS naming that
+# script. That is the citation-vs-tombstone trap this same file refuses for
+# `fitness-functions`, and two rows in one probe cannot answer the same
+# question opposite ways. So the INVOCATION must appear in a workflow or the
+# Makefile; a script under scripts/ is corroborating evidence, never the whole
+# case.
+cl_invoked=$(grep -rlE "diff-cover|patch coverage|changed-line" Makefile $wf 2>/dev/null \
+             | grep -vF "$(basename "$PROBE_SELF")" || true)
 cl_hits=$(grep -rlE "diff-cover|patch coverage|changed-line" Makefile $wf scripts 2>/dev/null \
           | grep -vF "$(basename "$PROBE_SELF")" || true)
-if [[ -n "$cl_hits" ]]; then
+if [[ -n "$cl_invoked" ]]; then
   row "changed-line-coverage" PASS "changed-line signal wired in $(echo "$cl_hits" | tr '\n' ' ' | sed 's/ *$//')"
 else
-  row "changed-line-coverage" FAIL "changed-line coverage (every tier's SIGNAL) is measured nowhere — the probe's own vendored copy does not count as wiring"
+  if [[ -n "$cl_hits" ]]; then
+    row "changed-line-coverage" FAIL "a changed-line script exists ($(echo "$cl_hits" | tr '\n' ' ' | sed 's/ *$//')) but NO workflow or Makefile target invokes it — a file with that name is not a measurement"
+  else
+    row "changed-line-coverage" FAIL "changed-line coverage (every tier's SIGNAL) is measured nowhere — the probe's own vendored copy does not count as wiring"
+  fi
 fi
 
 # --- 22. reproducibility / operational determinism (restored dimension) -----

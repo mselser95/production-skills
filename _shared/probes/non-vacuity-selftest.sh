@@ -272,7 +272,7 @@ FIX
   printf '%s' "$f"
 }
 
-check "citation matching the executed test reports NO drift" "" \
+check_empty "citation matching the executed test reports NO drift" \
   "$(citation_drift "$(cite_fixture TestInvariant_UnvenuedItemsNeverAdmitted TestInvariant_UnvenuedItemsNeverAdmitted)")"
 
 check "citation drifting from the executed test IS reported" "cites=TestInvariant_UnvenuedItemsNeverAdmitted,executes=TestInvariant_StaleNeverReportsReady" \
@@ -289,7 +289,7 @@ check "a no-space expect_red still reports drift (was a silent pass)" \
 
 # A legally single-quoted expect_red must NOT be reported as drift: the awk did
 # not strip quoting and reported a mismatch against an identical name.
-check "a quoted expect_red is NOT a false drift" "" \
+check_empty "a quoted expect_red is NOT a false drift" \
   "$(citation_drift "$(cite_fixture "'TestInvariant_UnvenuedItemsNeverAdmitted'" TestInvariant_UnvenuedItemsNeverAdmitted)")"
 
 rm -f "${scratch}/910-citation.yaml"
