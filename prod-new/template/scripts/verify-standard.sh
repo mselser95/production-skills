@@ -1969,7 +1969,29 @@ else
   row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets named in the Makefile — the rest run nowhere ($fuzz_ci_evidence)"
 fi
 if [[ -n "${real_tag:-}" ]]; then
-  grep -rq -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null     && row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into make/CI"     || row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
+  # COMMENTS ARE STRIPPED BEFORE MATCHING. Found on re-canary 2026-08-23: a
+  # comment written INTO pr.yaml, explaining that the lane runs with
+  # `-tags=chaos`, satisfied this row for four commits -- prose about the gate
+  # bought the gate, in the file the prose was describing. Same defect this
+  # probe already fixed for artifact-provenance and secret-scan-all-triggers;
+  # this sibling row was missed. Reproduced before fixing: a workflow whose
+  # ONLY mention of the tag is a comment gave PASS.
+  il_hits=$(grep -rl -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null || true)
+  il_real=""
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    # drop comment bodies, then look again in what is left
+    if sed 's/#.*$//' "$f" 2>/dev/null | grep -q -- "-tags=$real_tag\|tags: *$real_tag"; then
+      il_real="$f"; break
+    fi
+  done <<<"$il_hits"
+  if [[ -n "$il_real" ]]; then
+    row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into ${il_real#./}"
+  elif [[ -n "$il_hits" ]]; then
+    row "ci-runs-integration-lane" FAIL "'$real_tag' appears ONLY inside comments ($(echo "$il_hits" | tr '\n' ' ' | sed 's/ *$//')) — prose about a lane is not a lane"
+  else
+    row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
+  fi
 fi
 # The probe VENDORS ITSELF into scripts/, and the line you are reading contains
 # the string "changed-line" -- so the old matcher passed this row in every repo
