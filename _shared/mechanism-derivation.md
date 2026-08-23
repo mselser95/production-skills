@@ -42,7 +42,11 @@ served still gets its row, its answer, and its probe.
 
 - **Input:** what the human already gives at Phase 1 — the purpose line, what
   the service OWNS, and the declared capability classes. Plus the tier, which
-  modifies thresholds and never the mechanism set.
+  modifies thresholds and never the mechanism set. **§8 additionally reads
+  signals off the REPO** (listeners, registered routes, declared ports, the
+  shape of the work loop), which is available to `prod-bootstrap` directly and
+  to `prod-new` only as the shape implied by the purpose line — the derivation
+  is the same, the evidence is weaker for greenfield, and §8 says so.
 - **Output:** per mechanism, one of `warranted` / `not warranted` /
   `needs one more question`, **each naming the property that decided it**.
 - **Status:** every verdict is a PROPOSAL. See "The human overturns you".
@@ -303,6 +307,106 @@ and derived views lean group commit), and let the human confirm. A hot path
 that fsyncs under a mutex has chosen; it should say so rather than discover it
 in a latency graph.
 
+## 8. Distributed tracing
+
+**Property:** does a unit of work ENTER this process carrying a caller's
+context?
+
+This is the only derivation here that is not about durable state, and it is
+here because the framework had it wrong in the *other* direction. The standing
+instruction read "tracing wired in `cmd/`, not merely imported" as a universal
+obligation. It is not one. A distributed trace is a causal JOIN across process
+boundaries; a service nothing calls has nothing to join to, and can satisfy a
+universal requirement only by emitting root spans nothing will ever parent —
+which is `dimensions.md` §8's measured 3132-traces-of-one-span failure,
+arrived at on purpose instead of by accident.
+
+**Derive the verdict from the repo. Do not ask.** Unlike §1–§7, this
+derivation's inputs are not the four Phase-1 answers — they are signals a
+`prod-bootstrap` inventory can grep and a reviewer can re-check. For
+`prod-new`, where no code exists yet, read the same signals off the purpose
+line and the declared classes: an `external_read` surface that SERVES is
+inbound; an `event_consumer` loop is not.
+
+| signal | where to look | reads as |
+|---|---|---|
+| a listener that accepts and serves | `ListenAndServe`, `(*http.Server).Serve`, `grpc.NewServer(…).Serve`, a `net.Listen` with an `Accept` loop, in `cmd/` or `internal/adapter/in/` | **inbound** |
+| routes registered that are not the operational surface | `mux.Handle`/`HandleFunc`, `Register<X>Server`, a router table — for any path other than `/healthz`, `/readyz`, `/metrics`, `/debug/pprof*` | **inbound** (the strongest single signal) |
+| an inbound port declared in the deployment artifact | `EXPOSE`, compose `ports:`, a k8s `containerPort` behind a `Service` | inbound, WEAK alone — a metrics port is also a port |
+| a carrier extracted from the work as it arrives | `propagator.Extract`, `otelhttp`/`otelgrpc` server middleware, a handler reading `traceparent` | **inbound** |
+| the top of the work loop is a poll or a tick | a `for` over `Receive`/`Fetch`/`Poll`/`Next`, a `time.Ticker`, a subscribe callback, a `main` that runs once and exits | **headless** |
+| the only in-adapters are the operational surface | `internal/adapter/in/` holds nothing but the health/metrics/pprof equivalents | **headless** |
+
+**Verdicts:**
+
+- **warranted** — at least one inbound signal that is not exclusively the
+  health/metrics/pprof surface. Property: name the route, the listener or the
+  extraction site.
+- **not warranted (headless)** — every entry point is a poll, a tick or a
+  one-shot `main`, and the only listener serves the operational surface.
+- **needs one more question** — the signals contradict each other. The common
+  contradiction is a consumer that ALSO exposes an admin or submit endpoint
+  (`dimensions.md` §9 asks about that same port from the authentication side,
+  and the two questions should be answered together). Others: routes built
+  dynamically from config, or a service reachable only through a sidecar or
+  gateway the repo cannot see. Then it rides in the batched message — *"I see
+  a listener on :8081 registering two non-health routes AND a queue-consumer
+  loop; does work arrive from a caller that waits for a reply?"*
+
+**The mechanism decomposes into three parts, and only the middle one is
+derived.** Collapsing them into one boolean is how this correction gets
+over-applied:
+
+| part | warranted when | derived? |
+|---|---|---|
+| span emission on the service's own critical transitions | there is a multi-step unit of work worth timing — nearly always | no; effectively universal |
+| **context EXTRACTION at the entry point** | work arrives carrying a caller's context | **yes — this is the verdict above** |
+| context INJECTION on egress | the service calls anything at all | no; follows from having an egress boundary |
+
+**The trap, and it swallows a lot of "headless" services.** A queue consumer
+whose PRODUCER stamps trace context onto the message is not tracing-free. It
+is the middle of somebody else's trace, and the message is the carrier — so
+extraction is warranted there for exactly the reason it is warranted at an
+HTTP handler, and dropping it is where most real traces end. The derivation
+question is therefore "does work arrive with a carrier", not "is there an HTTP
+server"; the HTTP server is only the most legible instance of it. If the
+upstream's carrier situation is unknown, that is a `needs one more question`,
+not a decline.
+
+**What the decline does NOT decline.** Correlation is universal: every service
+owes a join key across its own signals — a run id, a job id, a message id —
+whether or not it is a W3C trace id. Egress injection is universal for
+anything that makes an outbound call. And the dimension survives the
+mechanism, as always here: `dimensions.md` §8 still gets its row and its
+answer, and the answer is "work never arrives with a caller's context; here is
+the signal that says so".
+
+**The decline LAPSES the moment an inbound endpoint is added** — same shape as
+`write_surface_authn`'s lapse, and for a related reason, since it is usually
+the same new port.
+
+## 9. Continuous profiling — the entry that is never "not warranted"
+
+**Property:** none. This one is not derived, and it is listed here precisely
+because somebody reading a file titled "which machinery this service actually
+needs" will come looking for it, and finding nothing would read as "optional".
+It is not. §7's durability trade is in this file for the same reason: not
+every entry here returns a boolean.
+
+Continuous profiling is warranted for every service at every tier, headless or
+not — see `dimensions.md` §8 for what "continuous" has to mean and for the
+three vacuous forms (an on-demand endpoint, a benchmark profile, and a profile
+with no build identity). The one thing to derive is not WHETHER but WHICH
+profile types the workload makes worth keeping: a CPU-bound fold wants CPU and
+alloc; a service that blocks on I/O under a mutex wants block and mutex; a
+long-lived process with a growing heap wants heap and goroutine.
+
+The reason this needs saying inside a derivation file: the natural mistake is
+to treat profiling as tracing's sibling and let the headless verdict take both
+away. It is metrics' sibling. Nothing about being headless makes a slow
+process easier to explain — it makes it harder, because there is no request to
+trace.
+
 ---
 
 # Worked examples
@@ -326,6 +430,8 @@ Classes: `event_consumer`, `external_effect`, `event_producer`,
 | reconciliation | **warranted** | its own book vs what the venue actually holds |
 | partition key | **symbol** | books are independent per symbol; the shared cursor is the coupling to watch |
 | durability trade | **fsync_per_event** | folded trades must not be lost; the tail cost is accepted deliberately |
+| distributed tracing | **warranted as CONTINUATION** | no inbound REQUEST boundary — nobody calls it and waits — but work arrives as feed messages, so if that feed carries a context this service is the middle of the upstream's trace: extraction at the fold, injection at both egress boundaries (venue submit, published events). If the feed's carrier situation is unknown, that is `needs one more question`, never a decline |
+| continuous profiling | **warranted** | never derived away; CPU and alloc first, since the hot path is a per-message fold |
 
 Nearly everything warranted — which is what makes this the *unrepresentative*
 case, and why the template built around it needs the other two.
@@ -343,13 +449,15 @@ case, and why the template built around it needs the other two.
 | reconciliation | **not warranted** | one store, no external counterpart to disagree with it |
 | partition key | **tenant id** | rows are naturally per-tenant |
 | durability trade | **fsync_per_event** | delegated to Postgres' own commit |
+| distributed tracing | **warranted** | an HTTP API is the inbound boundary: routes registered that are not the operational surface, every caller waiting for a reply. Extraction at the handler, injection on the Postgres client |
+| continuous profiling | **warranted** | never derived away |
 
-**Six of seven fall away.** What does NOT fall away: `bounded_boot` (does
-startup scale with table size?), `bounded_storage` (does any table grow
-forever, and what prunes it?), `egress_backpressure` (still owed the moment it
-calls anything), the replay corpus, invariant counters, the observability
-contract, and every gate. The dimensions survive intact; only the machinery
-shrinks.
+**Five of the seven state mechanisms fall away — and neither observability
+entry can.** What else does NOT fall away: `bounded_boot` (does startup scale
+with table size?), `bounded_storage` (does any table grow forever, and what
+prunes it?), `egress_backpressure` (still owed the moment it calls anything),
+the replay corpus, invariant counters, the observability contract, and every
+gate. The dimensions survive intact; only the machinery shrinks.
 
 ## C. Periodic batch job: read system A, write system B
 
@@ -364,6 +472,8 @@ shrinks.
 | reconciliation | **warranted** | did B actually receive what A said? the whole job is a claim about two systems agreeing |
 | partition key | **the batch window / shard** | windows share no state, so two runners on disjoint windows need no coordination |
 | durability trade | **group_commit** | a re-run recovers a lost batch; per-row fsync buys nothing |
+| distributed tracing | **not warranted** | the cron tick is the only entry point, nothing waits for a reply, and the only listener serves health/metrics/pprof. It still owes a run id correlating its own signals, and it still injects context on the write to B |
+| continuous profiling | **warranted** | the shape that needs it MOST: a batch 40% slower has no request to trace and no dashboard naming the loop, so the profile of the slow run is the only artifact that explains it |
 
 This is the profile the template handles WORST: an outbox with no event log
 behind it, where the reconstruct-from-log strategy is unavailable and the
@@ -382,12 +492,20 @@ applies is a property of the mechanism, not a judgement call:
 | shape | what "leave it out" means | mechanisms |
 |---|---|---|
 | **package + wiring** | a directory is absent, and everything that named it must stop naming it | event log, inbox, outbox, snapshots |
-| **wiring only** | no directory disappears; a loop or a call site in the composition root is not there | reconciliation |
-| **declaration only** | nothing changes on disk at all; the verdict lives entirely in the spec | partition key, durability trade |
+| **wiring only** | no directory disappears; a loop or a call site in the composition root is not there | reconciliation, distributed tracing |
+| **declaration only** | nothing changes on disk at all; the verdict lives entirely in the spec | partition key, durability trade, continuous profiling (never declined) |
 
 The third row is the one people get wrong in the reassuring direction. A
 partition key is not code; it is a claim about the workload. Declining it
 removes nothing and still owes a written reason.
+
+**Tracing sits in the second row, and only barely — read §8 before acting on
+it.** Declining distributed tracing removes the inbound EXTRACTION path and
+nothing else: not the tracer package, not span emission on the service's own
+transitions, and not outbound injection, both of which stay warranted. An
+agent that reads `distributed_tracing: not warranted` and deletes
+`internal/platform/observability` has removed three mechanisms to decline one,
+and has broken the two that are universal.
 
 **The ROLE changes what comes out, not just whether something does.** A
 `produce` scaffold and a `consume` scaffold both have an event log and omit
@@ -448,6 +566,27 @@ That chain holds today. Verified against the probe: `effect_journal_outbox`,
 `effect_journal_atomic`, `reconciliation` and `backup_restore_test` all take
 `declined <key>` before anything else, and the scalability, `partition_key`,
 `recovery_bound`, `published_contract` and `retention_policy` rows do the same.
+
+**§8's verdict is the one decline the probe ARGUES WITH, and that difference
+is deliberate.** `distributed_tracing: not warranted` in `out_of_scope` turns
+the `tracing-wired-in-prod` row NA — but first the probe looks for the
+derivation's strongest signal, a route registered for a path outside the
+health/metrics/pprof surface. If it finds one, the decline is contradicted by
+the code and the row FAILs instead. Every other decline here rests on a
+semantic fact only the human holds ("this history has no value of its own");
+this one rests on a structural fact the repo can be read for, so letting it
+pass unexamined would be the escape hatch this framework refuses everywhere
+else.
+
+The check is one-directional and the evidence string says so: a non-
+operational route DISPROVES the decline, while finding none proves nothing —
+routes built from config, a gateway outside the repo, or a protocol nobody
+greps for are all invisible to it. Measured against the template's own tree:
+with a decline injected the row goes NA (the health/pprof route registrations
+are correctly excluded, so a legitimate decline is not reddened), with a
+non-health route added it goes FAIL, and neutering the detector flips both
+contradiction cases back to NA — which is the mutation that proves the row is
+not decoration.
 
 **One row deliberately does not honour the decline, and must not.**
 `replay-corpus` requires `regressions/*/events.json` and a green harness
