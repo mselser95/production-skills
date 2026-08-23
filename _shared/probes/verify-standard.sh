@@ -1622,6 +1622,38 @@ count_secret_scan_workflows() {   # <workflows-dir> -> count
   grep -rlE '^[[:space:]]*-?[[:space:]]*uses:.*secret-scan|^[[:space:]]+secret-scan:' "$1" 2>/dev/null | wc -l | tr -d ' '
 }
 
+# A ROW THAT LOOKS FOR A MARKER MUST LOOK AT WHAT THE FILE DOES, NOT AT WHAT IT
+# SAYS ABOUT ITSELF. This exact defect has now been repaired FIVE times in this
+# file -- artifact-provenance, secret-scan-all-triggers, ci-runs-integration-lane,
+# and then sbom and changed-line-coverage -- and every one of the first three
+# fixes landed on one row while a sibling a few lines away kept the bug. Two of
+# those siblings were caught in review, on the branch whose whole subject was
+# this class.
+#
+# Patching row six the same way would be the same mistake a sixth time, so the
+# stripping is a FUNCTION and the rows call it. A new row that greps for a
+# marker either calls this or is wrong by construction.
+#
+# `#` comment bodies are stripped: YAML, Makefiles and shell all use it. `#`
+# inside a quoted string is not honoured, deliberately -- a marker that appears
+# ONLY inside such a string is vanishingly rare beside the failure this
+# prevents, and for a gate the safe direction is FAIL.
+#
+# Only files that matched at all are re-read, so this costs one extra pass over
+# the few files that already hit.
+grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FILES
+  local flags=()
+  while [[ "${1:-}" == -* ]]; do flags+=("$1"); shift; done
+  local pat="$1"; shift
+  local f
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    if sed 's/#.*$//' "$f" 2>/dev/null | grep -qE "${flags[@]+"${flags[@]}"}" -- "$pat"; then
+      printf '%s\n' "$f"
+    fi
+  done < <(grep -rlE "${flags[@]+"${flags[@]}"}" -- "$pat" "$@" 2>/dev/null || true)
+}
+
 toolchain_note() {
   local ran pinned
   ran=$(go env GOVERSION 2>/dev/null || echo "unknown")
@@ -1690,7 +1722,15 @@ if [[ -d $wf ]]; then
   # requires a job DEFINITION (`secret-scan:`) or a real `uses:` invocation.
   sc=$(count_secret_scan_workflows "$wf")
   (( sc >= 2 )) && row "secret-scan-all-triggers" PASS "in $sc workflows" || row "secret-scan-all-triggers" FAIL "only $sc workflow(s) — PR-only is the known gap"
-  grep -rqi "sbom\|syft\|cyclonedx" $wf && row "sbom" PASS "SBOM step present" || row "sbom" FAIL "no SBOM"
+  # Comments stripped: a workflow that only MENTIONS an SBOM in a comment was
+  # scored as having one. Caught in review on re-canary 2026-08-23, in the same
+  # diff that fixed the two rows on either side of it.
+  sbom_hits="$(grep_x -i 'sbom|syft|cyclonedx' $wf)"
+  if [[ -n "$sbom_hits" ]]; then
+    row "sbom" PASS "SBOM step in $(echo "$sbom_hits" | tr '\n' ' ' | sed 's/ *$//')"
+  else
+    row "sbom" FAIL "no SBOM (a comment naming one does not count)"
+  fi
   # Match only real attestation mechanisms, never the English word "provenance"
   # (it appears in benchmark baseline headers — that was a false PASS before).
   # Strip comments before matching: an earlier version PASSed on a comment
@@ -2009,9 +2049,9 @@ fi
 # question opposite ways. So the INVOCATION must appear in a workflow or the
 # Makefile; a script under scripts/ is corroborating evidence, never the whole
 # case.
-cl_invoked=$(grep -rlE "diff-cover|patch coverage|changed-line" Makefile $wf 2>/dev/null \
+cl_invoked=$(grep_x 'diff-cover|patch coverage|changed-line' Makefile $wf \
              | grep -vF "$(basename "$PROBE_SELF")" || true)
-cl_hits=$(grep -rlE "diff-cover|patch coverage|changed-line" Makefile $wf scripts 2>/dev/null \
+cl_hits=$(grep_x 'diff-cover|patch coverage|changed-line' Makefile $wf scripts \
           | grep -vF "$(basename "$PROBE_SELF")" || true)
 if [[ -n "$cl_invoked" ]]; then
   row "changed-line-coverage" PASS "changed-line signal wired in $(echo "$cl_hits" | tr '\n' ' ' | sed 's/ *$//')"
