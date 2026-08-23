@@ -302,6 +302,72 @@ worse than absent.
   - If the human is absent or answers stall, park everything produced so far
     in a branch and BAIL with state — a half-ratified spec is not a spec.
 
+## Field notes — five repos, one session (2026-08-23)
+
+Every line below was paid for once. None of it is theory.
+
+### The warn-first gate, without creating a fail-open
+
+A bootstrap installs a gate that measures ~30 real failures on day one, and the
+guardrail above forbids reddening anything. That is a fail-open by
+construction, so build it honestly:
+
+- **The job NAME says it gates nothing** (`verify-standard-report-only`).
+  Hiding `continue-on-error: true` behind a reassuring name is the defect.
+- **Register the fail-open as debt with an owner and an expiry**, and make the
+  expiry redden something that ACTUALLY BLOCKS — the registry checker runs in
+  the REQUIRED lane, so a lapsed entry turns a required check red on its own.
+  Without that, the "temporary" report is permanent and nothing notices.
+- **Never `|| true` to make the check green.** A green check over a failing
+  probe is a fail-open that also LOOKS clean, which is strictly worse.
+- **`continue-on-error: true` does NOT render the check neutral.** Measured:
+  the PR list shows a red X and `gh pr checks` reports `bucket=fail`. It does
+  not block, but a reviewer sees red — so the PR body MUST say the red is
+  expected and why, or the work reads as broken.
+
+### Measuring the baseline
+
+**Never measure the "before" in the working repo after vendoring the probe.**
+The before-tree then contains part of the after, and the probe's own file is
+exactly what makes some rows pass. Use a clean worktree of the base branch.
+This was caught in review on one repo and had silently inflated its reported
+improvement by a row.
+
+### Do not re-author the selftests
+
+Vendor `_shared/probes/non-vacuity-selftest.sh`. Three repos wrote their own in
+one session and all three shipped the SAME defect — a control case asserting
+with `grep -qF ""`, which matches every input, so the control of the
+non-vacuity checker was itself vacuous in both directions.
+
+### CI jobs a bootstrap adds
+
+- **Pool**: anything that does not talk to a Docker daemon belongs on the
+  medium pool. `clc-ci-large` is 3 nodes at one runner each, org-wide; parking
+  non-docker work there starves the fleet. One repo's bootstrap copied the
+  local pattern and put three jobs on a three-slot pool.
+- **`timeout-minutes`**: declare it. Measured, the full probe takes 19-29 min
+  on a ~1 vCPU runner; with no bound the job inherits GitHub's 6-hour default,
+  and while it runs it BLOCKS `gh run rerun --failed` for every other job in
+  that workflow.
+- **Lint budgets**: a `timeout: 5m` over a lint that takes 25s warm is not the
+  margin it looks like — the budget covers package LOADING, which any cache
+  invalidation blows.
+
+### A toolchain bump is not a one-line change to CI
+
+Changing go.mod's `go` directive invalidates `actions/setup-go`'s cache key, so
+the FIRST run recompiles everything. Measured on one repo: every job 2-4x
+slower and lint timing out at 5m01s, then **25s** on rerun with a warm cache.
+Before touching any config when a bump reddens CI, compare job durations
+PR-to-PR: if EVERY job slowed, it is the cache, and a rerun is the experiment.
+
+Separately: **a vulnerability count is a property of the toolchain.** Same tree
+measured 22 / 6 / 0 called vulnerabilities under go1.26.0 / .5 / .6, and CI
+installs whatever literal sits in go.mod. Never quote a count without naming
+the version beside it — the probe's `vuln-scan` row now does this and flags a
+mismatch between the running toolchain and the pinned one.
+
 ## Bail
 
 Preamble format. Expected `blocked_on` values: `headless` (no human present —

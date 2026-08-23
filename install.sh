@@ -114,6 +114,13 @@ fi
 # standard exists to refuse.
 mirrors=(
   "prod-new/template/scripts/verify-standard.sh:_shared/probes/verify-standard.sh"
+  # The non-vacuity selftest joins the mirrored set for the reason the probe
+  # did: it is the verifier OF the verifier, and it was previously re-authored
+  # per repo instead of vendored. Three repos wrote their own in one session
+  # and all three shipped the same vacuous control (`grep -qF ""`, which
+  # matches every input). A file that gets re-invented is a file that gets
+  # re-broken, so it is now shared, hashed, and drift-checked like the probe.
+  "prod-new/template/scripts/tests/non-vacuity-selftest.sh:_shared/probes/non-vacuity-selftest.sh"
 )
 drift=0
 for m in "${mirrors[@]}"; do
