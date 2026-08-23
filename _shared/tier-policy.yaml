@@ -18,6 +18,15 @@ defaults: &defaults
   # Fault sensitivity — always advisory, all tiers (tooling immaturity + Goodhart)
   mutation: { mode: advisory, scope: changed_code, cap_mutants_per_pr: 20 }
 
+  # Design-time verification (dimension 17) — one level above mutation on the
+  # same fault-sensitivity spectrum: mutation finds what tests miss in code
+  # that exists, this finds what the DESIGN fails to rule out before code
+  # exists. Advisory and narrow-scoped everywhere by default -- the cost only
+  # pays for itself on a genuinely concurrent/distributed protocol core, and
+  # mandating it broadly produces a rubber-stamp model nobody checks against
+  # the implementation, which is worse than no model.
+  formal_methods: { mode: advisory, scope: novel_concurrent_or_distributed_protocol_core }
+
   # Behavioral
   property_tests: required_on_core
   fuzz: required_on_decode_boundaries    # every parse/decode boundary, seed corpus checked in
@@ -187,6 +196,13 @@ defaults: &defaults
   deployment_resource_limits: required_if_deployment_artifacts
 
   # Deployability / operability
+  #
+  # `analysis: automated_plus_invariant_gates` is dimension 17's canary-
+  # analysis requirement: a STATISTICAL comparison of the canary population
+  # against baseline on the service's own invariants/SLOs, with a defined
+  # promote/abort rule -- not an elapsed-time wait and not unaided human
+  # judgment reading a dashboard. See dimension 17 for what "automated" must
+  # actually mean before this counts as satisfied.
   delivery: { progressive: required, analysis: automated_plus_invariant_gates,
               rollback: artifact_repin, rehearsed: required }
   runbooks: { required: true, exercise_cadence: quarterly }
@@ -204,6 +220,12 @@ tiers:
     human_gates: [resolved_context, semantic_declarations, ratification, waivers]
     delivery: { progressive: required, analysis: automated_plus_invariant_gates,
                 rollback: artifact_repin, rehearsed: required, human_ack_before_full: true }
+    # T0 is where a missed interleaving is most expensive; a new
+    # concurrent/distributed protocol at this tier owes a checked model or a
+    # ratified decline saying why one was not worth writing -- advisory
+    # elsewhere, not here.
+    formal_methods: { mode: required_or_ratified_decline,
+                       scope: novel_concurrent_or_distributed_protocol_core }
   "1":
     <<: *defaults
     invariant_flake_rule: incident        # data-correctness tiers keep the T0 rule

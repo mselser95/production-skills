@@ -101,8 +101,9 @@ poison one.
 ## 5. Integration and contracts
 Inventory: what real dependencies are exercised in tests vs faked (does ANY
 test touch a real DB/broker/venue? containerized?); contract/compat checks
-(schema-breaking detection, generated-client drift); consumers of this
-service's surface.
+(schema-breaking detection — an event-driven surface means a broker's schema
+registry or an equivalent compatibility check, not only a synchronous API
+contract — generated-client drift); consumers of this service's surface.
 Ask: which boundaries deserve a real-dependency integration lane vs staying
 hermetic (cost vs fidelity); the compatibility policy (N-1 coexistence?
 expand/contract on schemas? who breaks if the served contract changes?).
@@ -271,10 +272,21 @@ each of those is a line nobody can act on.
 ## 9. Security
 Inventory: authz/authn surface, policy-as-invariant candidates, secret
 scanning (on which triggers), dependency vulnerability scanning, SBOM,
-artifact signing/provenance, secretless presubmit, network policy.
+artifact signing/provenance, secretless presubmit, network policy; a
+semantic/dataflow SAST pass on top of whatever the general linter already
+does (taint from an untrusted input to a sink — injection, deserialization,
+SSRF — is a different question from style, and a linter answers style);
+policy-as-code checks on the deployment artifacts themselves, not only their
+CI (the same class of validation `actionlint` already applies to workflow
+files, extended to whatever this repo ships — Kubernetes manifests,
+Terraform, compose files: an overly permissive RBAC role or an open security
+group is invisible to every gate above and is exactly the kind of defect this
+dimension exists to catch).
 Ask: which authorization rules are invariants ("A can never reach B"); what
 must never be reachable from outside.
-Row: each supply-chain gate present/absent; policy invariants declared or not.
+Row: each supply-chain gate present/absent; policy invariants declared or
+not; SAST dataflow coverage present or linter-only; IaC/manifest policy
+checks present or absent.
 
 **Every WRITE surface needs authentication or a ratified decline naming who
 can reach it.** Read-only health and metrics endpoints are one thing; an
@@ -597,6 +609,74 @@ belonging to a used interface will survive and this row will pass it. Plain
 functions and methods outside any used interface are eliminated precisely.
 That covers the four defects above; it is not a universal reachability proof.
 
+## 17. Progressive delivery and design-time verification
+
+Two different verification moments, grouped here because both sit OUTSIDE the
+suite that runs before merge: one runs AFTER deploy, against real traffic;
+the other runs BEFORE a single line of implementation exists.
+
+**Canary analysis.** Dimension 10 already asks whether canary analysis
+exists and whether it is automated. This entry asks what "automated" is
+actually verifying, because the two things it gets confused with are cheaper
+and are gates in name only:
+
+- **A timer is not an analysis.** "Wait ten minutes, then promote" catches
+  nothing that does not fail in the first ten minutes, and a regression that
+  degrades slowly at 1% traffic sails through it at every stage.
+- **A human staring at a dashboard is not automated**, even where a human is
+  genuinely required to approve — the tier policy already asks for that ack
+  at T0. The analysis and the approval are different steps, and collapsing
+  them hides whether the number that got approved meant anything.
+
+The property worth gating on is a STATISTICAL comparison of the canary
+population against the baseline population, on the metrics the service
+already declares (dimension 8's invariant counters and SLOs, not a bespoke
+set invented for the rollout), with a defined confidence threshold and a
+defined promote/abort rule — not "no alerts fired," which is the
+absence-of-evidence failure this framework refuses everywhere else.
+Inventory: how a canary stage decides to promote or abort today (elapsed
+time, human judgment, automated statistical comparison); which metrics and
+invariants feed that decision; the traffic split and population sizes; the
+abort path and whether it is rehearsed.
+Ask: which invariants and SLOs must hold on the canary population before ANY
+promotion; what confidence or sample size the comparison needs at this
+service's traffic volume to mean anything (a canary at 0.1% traffic for 60
+seconds has no statistical power, whatever dashboard it produces).
+Row: promotion decided by a statistical comparison against baseline, by
+elapsed time, or by unaided human judgment; which metrics feed it; abort path
+tested or assumed.
+
+**Design-time model checking.** Every other dimension in this framework
+verifies code that already exists. This entry is the one exception: for the
+highest-risk slice of a system — a concurrent or distributed protocol whose
+correctness depends on interleavings no unit test enumerates, not the system
+at large — the cheapest place to find a race, a deadlock, or a violated
+invariant is before the first line of implementation, against a model of the
+protocol (TLA+ is the canonical tool here — Lamport, TOPLAS 1994 — and its
+best-known industrial result is AWS finding bugs in production DynamoDB and
+S3 subsystems that years of code review and testing had not surfaced, CACM
+2015).
+
+This is deliberately scoped narrow. It sits one level above mutation testing
+(dimension 2) on the same fault-sensitivity spectrum: mutation finds what
+your tests fail to catch in code that already exists; this finds what your
+DESIGN fails to rule out before any code exists. Modeling the whole system is
+not the claim — mandating it broadly is how a gate like this earns a
+rubber-stamp model nobody actually checks against the implementation, which
+is worse than not having one. Reach for it exactly where a bug would be a
+whole class of interleavings rather than one line.
+
+Inventory: which subsystems are genuinely concurrent/distributed protocols
+(leader election, consensus, distributed locking, exactly-once handoff,
+multi-step sagas) rather than ordinary sequential logic; whether any of them
+has a written model and what it has been checked against.
+Ask: does this system have a protocol whose failure mode is an interleaving
+rather than a line of code — and if so, was the model written before the
+implementation it is meant to constrain, or reconstructed after?
+Row: protocols requiring modeling identified, or none exist and that is
+stated explicitly; which have a checked model and which do not; each model
+checked against the CURRENT implementation, or known to have drifted.
+
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big
   gap localizes weak assertions better than either number alone; both inputs
@@ -682,6 +762,11 @@ and it is written at the moment someone decided they could not fix it, so it
 reads like a wall. The retirement condition says what closing it would take,
 and it is usually the more useful half, because whoever wrote the entry had
 just finished thinking about exactly that.
+
+A feature flag is the paradigm case: it is a liability that already carries
+its own retirement condition — a TTL — so a flag with no expiry is not a
+lighter-weight liability than the others in this section, it is one that has
+already dropped the half that makes it closeable.
 
 **Measured, on one repo, in one session: five liabilities were characterised as
 "external constraints — not closeable from this side". Four were closeable, and
