@@ -633,7 +633,16 @@ population against the baseline population, on the metrics the service
 already declares (dimension 8's invariant counters and SLOs, not a bespoke
 set invented for the rollout), with a defined confidence threshold and a
 defined promote/abort rule — not "no alerts fired," which is the
-absence-of-evidence failure this framework refuses everywhere else.
+absence-of-evidence failure this framework refuses everywhere else. The
+canonical reference implementation is Netflix's Kayenta, which scores a
+canary against baseline with a Mann-Whitney U test over per-metric confidence
+intervals rather than a fixed threshold on each metric in isolation; the same
+team's "Rapid Regression Detection in Software Deployments through
+Sequential Testing" (arXiv:2205.14762) frames the promote/abort decision as
+sequential hypothesis testing specifically to shorten time-to-detection
+without inflating the false-abort rate — the two failure directions of this
+gate are symmetric: an analysis too eager to abort erodes trust and gets
+overridden by hand, which is the same as not having one.
 Inventory: how a canary stage decides to promote or abort today (elapsed
 time, human judgment, automated statistical comparison); which metrics and
 invariants feed that decision; the traffic split and population sizes; the
@@ -676,6 +685,105 @@ implementation it is meant to constrain, or reconstructed after?
 Row: protocols requiring modeling identified, or none exist and that is
 stated explicitly; which have a checked model and which do not; each model
 checked against the CURRENT implementation, or known to have drifted.
+
+## 18. Static analysis — semantic dataflow (SAST)
+
+Dimension 9 already asks whether a semantic/dataflow SAST pass exists on top
+of whatever the general linter does. This entry exists because that
+distinction is not academic pedantry — it is the difference between a gate
+that finds the vulnerability class this framework cares about and one that
+only looks like it does.
+
+A controlled study running standard SAST configurations against codebases
+with confirmed, real vulnerabilities found that the default rulesets missed
+**61.2% of the vulnerabilities actually present** ("Semgrep\* — Improving the
+Limited Performance of SAST Tools", ACM/ESEM 2024, DOI
+10.1145/3661167.3661262). The gap is not tool immaturity so much as scope: a
+pattern-matching or regex-style linter answers "does this code look like a
+known-bad shape", which is a style question with a security label on it. A
+dataflow-capable engine answers a different question — can data that
+originates at an untrusted input (a request body, a query parameter, a
+message payload) reach a sensitive sink (a query, a shell invocation, a
+deserializer, an outbound URL) along some path through the program — and
+that question requires tracking taint through assignments, calls and
+returns, which a linter operating one line at a time structurally cannot do.
+
+**Zero findings is not evidence of no vulnerabilities; it may only be
+evidence that the tool in use cannot see the class of bug being asked
+about.** The vacuous version of this gate is indistinguishable from the real
+one in a passing CI run — both show a green check — so the audit question is
+never "did SAST run" but "did a dataflow-capable engine run, and can it name
+the taint sources and sinks it actually tracks for this codebase's
+language(s)". A dataflow engine configured with zero custom sources/sinks for
+a codebase's actual untrusted-input surface (an internal RPC treated as
+trusted, a message-bus payload never declared as a source) is the same
+vacuity failure in a different shape: it will run clean forever regardless of
+what the code does.
+
+Inventory: what runs today — general linter only, a dataflow/taint-tracking
+engine, or both; which languages and which parts of the codebase are in its
+scope; whether the sources and sinks it tracks are the codebase's actual
+untrusted-input surface (declared explicitly) or only the tool's stock
+defaults; whether findings block the merge or are advisory; the triage
+backlog and its age.
+Ask: nothing structural — this is mechanically checkable from the tool's own
+configuration and coverage report. What may need a human: which boundaries in
+THIS codebase are the untrusted-input sources the dataflow engine should be
+told about, where that is not obvious from the language's own conventions
+(e.g., an internal service treated as trusted by convention but reachable
+from outside the trust boundary in practice).
+Row: dataflow-capable SAST present or linter-only; declared source/sink
+coverage against the codebase's actual untrusted-input surface, or stock
+defaults only; blocking or advisory; findings triaged or backlogged.
+
+## 19. Schema evolution and breaking-change detection
+
+This is industry practice, not an academically-backed dimension — no paper
+is cited here, deliberately, because none was given and none should be
+invented. It earns a place in this framework because it is the mechanical
+half of a semantic event `prod-spec` already detects and routes:
+`changes_schema` pulls a requirement set into a change plan's
+`required_evidence`, and this dimension is what that requirement set should
+actually demand for anything published on an event-driven surface — Avro,
+JSON Schema, protobuf, or an equivalent wire format with independent readers.
+
+This is deliberately distinct from two entries that already touch schemas
+and does not duplicate either: dimension 5's `compatibility` clause is about
+whether an INTEGRATION test exercises a real broker's registry (fidelity —
+does the check run against the real thing); dimension 14's
+`published_contract` is about whether an EMITTED payload to an external
+audience is versioned and pinned by a test (the audience-facing contract,
+checked at the point something ships). This dimension is about neither of
+those — it is about whether a **breaking change is caught mechanically, in
+CI, at merge time, before it lands**, as a distinct gate rather than as a
+side effect of an integration test happening to notice.
+
+The distinction that separates a real gate from a vacuous one here: a schema
+check that only diffs the CURRENT PR's schema file against itself (or
+against nothing) passes trivially on every PR, including the one that
+deletes a field a live consumer reads. A real check computes compatibility
+between the proposed schema and the schema version(s) actual consumers are
+running against — full, backward, or forward compatibility per the
+declared policy — and fails the merge when that computation says a consumer
+would break, not when a human notices a diff in review.
+
+Inventory: which schema formats this repo publishes or consumes on an
+event-driven surface; whether a compatibility check runs in CI on every PR
+that touches a schema, and against what baseline (the immediately prior
+version, the registry's live version, or all versions still in use by known
+consumers); whether the check is advisory or blocking; whether it fires only
+on schema-file changes or can be silently bypassed by a change that alters
+serialization behavior without touching the schema file itself (a default
+value change, a type-widening change in application code that the schema
+technically still allows).
+Ask: what compatibility mode this event-driven surface has actually chosen
+(this may already be answered by dimension 5's `compatibility` question —
+this entry asks whether that policy is ENFORCED mechanically, not merely
+declared); which consumers are on an old schema version today and would be
+the first to break.
+Row: compatibility check present in CI or absent; blocking or advisory; the
+baseline it diffs against (immediately-prior version only, or every version
+still in use); consumers named or their currency unknown.
 
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big
