@@ -141,7 +141,7 @@ if [[ "$(wc -l <<<"$_libsrc")" -lt 5 ]]; then
 fi
 eval "$_libsrc"
 
-for _fn in extract_real_tag count_secret_scan_workflows grep_x toolchain_note fold_makefile spec_field driven_symbol driven_keys implemented_test; do
+for _fn in extract_real_tag count_secret_scan_workflows grep_x toolchain_note fold_makefile spec_field driven_symbol driven_keys implemented_test spec_seq_count; do
   _src="$(sed -n "/^${_fn}() {/,/^}/p" "$PROBE")"
   _first="$(sed -n "/^${_fn}() {/{p;q;}" "$PROBE")"
   case "$_first" in *"}"*) _src="$_first" ;; esac
@@ -244,6 +244,24 @@ check "spec_field: a trailing comment neither opens a block nor rides the value"
 printf 'd:\n  notes: |\n    line # con hash\n' > "${_sfp}/spec.yaml"
 check "spec_field: a block body keeps its own hash" "line # con hash" \
   "$(SPEC="${_sfp}/spec.yaml" spec_field d notes)"
+
+# THE OTHER TWO awks. Sharing the walker reached four of the six that read the
+# spec; `ratified_n` and `pending_n` were the other two, and they counted dashed
+# lines with no block awareness at all. A block scalar inside an entry then
+# inflated the count with its own prose, and the row's evidence claimed more
+# ratified invariants than the spec declares -- an over-count in the direction
+# that flatters. Lifted into `spec_seq_count` so this file can assert it.
+# Reported by agatticelli.
+printf 'invariants:\n  - id: real-1\n    notes: |\n      esto es prosa, no invariantes:\n      - uno\n      - dos\ntier: T1\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_seq_count does not count bullets inside a block body" "1" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_seq_count invariants)"
+
+# CONTROL: real entries ARE counted, or the fix would be a checker that always
+# answers zero.
+printf 'invariants:\n  - id: a\n  - id: b\n  - id: c\ntier: T1\n' > "${_sfp}/spec.yaml"
+check "spec_seq_count counts the real entries" "3" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_seq_count invariants)"
 
 # THE THREE SIBLINGS THAT WALKED BLOCK BODIES AS KEYS. `spec_field` learned to
 # skip a block scalar; `driven_symbol`, `driven_keys` and `implemented_test`

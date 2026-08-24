@@ -499,8 +499,8 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # simply lives alongside them -- and then wrote that inflated number into
     # every evidence record. Ratification is a human act recorded in the spec;
     # a test file cannot confer it on itself.
-    ratified_n=$(awk '/^invariants:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
-    pending_n=$(awk '/^invariants_pending_ratification:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
+    ratified_n=$(spec_seq_count invariants)
+    pending_n=$(spec_seq_count invariants_pending_ratification)
     row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $rat_pass/$n test func(s) ACTUALLY RAN green under -tags='$rat_tags'"
   else row "invariants-ratified" FAIL "ratified tests red"; fi
   # --- non-vacuity: EXECUTE the mutations, do not grep for the word ----------
@@ -1030,6 +1030,32 @@ done
 # would be a worse gate than an honest declaration check. What a declaration
 # check CAN do is refuse the placeholder someone types to get green, which is
 # what every caller below does.
+# spec_seq_count counts the ENTRIES of a top-level sequence in the spec:
+#
+#   spec_seq_count invariants   ->  how many `- ` items `invariants:` declares
+#
+# LIFTED INTO A FUNCTION so the selftest can assert it directly, the same
+# reason extract_real_tag and spec_field were. It was two inline awks that
+# counted dashed lines with no block awareness at all -- sharing the walker had
+# reached four of the six awks that read this file, and these were the other
+# two. A block scalar inside an entry then inflated the count with its own
+# prose: measured on valid YAML with ONE invariant whose `notes: |` body lists
+# two bullet points, `ratified_n` reported 3. The row's evidence then claims
+# more ratified invariants than the spec declares -- an over-count in the
+# direction that flatters. Reported by agatticelli.
+spec_seq_count() {   # spec_seq_count <top-level-key> -> number of `- ` items
+  awk -v block="$1" "$SPEC_AWK_LIB"'
+    $0 ~ "^" block ":" {f=1;next}
+    f && /^[a-z_]+:/ {f=0}
+    f {
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      if (is_block_header(txt())) { blkind = ind; inblk = 1; next }
+      if ($0 ~ /^[[:space:]]*-[[:space:]]/) c++
+    }
+    END{print c+0}' "$SPEC" 2>/dev/null
+}
+
 spec_field() {
   awk -v block="$1" -v key="$2" "$SPEC_AWK_LIB"'
 
