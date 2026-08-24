@@ -688,20 +688,39 @@ run_case "an anchor AND a tag still open a block" \
 # `in_blk` exists as its own flag rather than `[[ -n "$blk_indent" ]]` for that
 # reason: overloading empty as "no block" would leave that body walked as keys.
 #
-# HONEST NOTE ON WHAT THIS CASE PROVES. agatticelli reported that reverting the
-# flag left the suite green, and it still does -- but not because the fixture is
-# weak. Measured both directions, before and after: with the `in_entries` guard
-# in place, `in_blk` and `[[ -n "$blk_indent" ]]` are INDISTINGUISHABLE, because
-# a column-0 key is exactly what now ends the entries list and flushes the open
-# entry, so a top-level block can no longer reach an entry to pollute it.
-# Checked with the block BEFORE `entries:` and AFTER it: `1 expired` in all four
-# combinations. It was load-bearing on the head they measured, which did not
-# have `in_entries` yet.
+# MY REASONING COVERED ONLY HALF OF IT, AND agatticelli SUPPLIED THE OTHER.
 #
-# The flag stays as defence in depth and as the honest expression of intent --
-# if the entry-boundary rule ever changes again, the overload comes back as a
-# fail-open. This case pins that a top-level block does not derail the entry it
-# follows, which is the reachable half.
+# I measured that with the `in_entries` guard in place, `in_blk` and
+# `[[ -n "$blk_indent" ]]` were indistinguishable, and concluded the flag had
+# become moot. The measured half was right: a column-0 key now flushes the open
+# entry before the opener runs, so a walked top-level body can no longer
+# CONTAMINATE an existing entry. Four combinations, `1 expired` in all four.
+#
+# What I missed is that a walked body can MANUFACTURE an entry instead of
+# corrupting one, and that flips the exit code:
+#
+#   policy: |
+#     id: phantom
+#     owner: ghost
+#     expires: 2099-01-01
+#
+# A registry whose only content is a column-0 block, with no real entries at
+# all. Measured:
+#
+#   (( in_blk ))              exit 1 - `0 entries checked` + `no entries found`
+#   [[ -n "$blk_indent" ]]    exit 0 - `1 entries checked, 0 expired`
+#
+# The mutation walks the body, `id: phantom` gives the pending entry an id, and
+# the phantom counts as a CLEAN registry -- defeating the `total == 0`
+# fail-closed guard that lives in this same file. So the flag is load-bearing
+# after all, and the case below is the shape my reasoning did not reach.
+run_case "a walked top-level block cannot manufacture an entry" \
+"policy: |
+  id: phantom
+  owner: ghost
+  expires: 2099-01-01" \
+  1 "no entries found"
+
 run_case "a top-level block does not derail the entry before it" \
 "entries:
   - id: uno
