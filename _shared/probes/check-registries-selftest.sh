@@ -510,6 +510,22 @@ run_case "a tab-indented block body is malformed, not a shallower line" \
 # The case below is that shape. "I could not construct one" is a weaker claim
 # than it sounds, and this is the second time today a structural argument of
 # mine lost to a fixture.
+# A QUOTED KEY MAY LEGITIMATELY CONTAIN ` #`, and the comment strip must not
+# cut there. The first strip cut at the last `#` preceded by whitespace, so
+# `"note #1": |` became `"note`, stopped looking like an opener, and its body
+# was walked again — exit 0, `0 expired`, on an entry that expired in 2020.
+# That is a member of the very class the widened key was written to close, and
+# the branch had banked the win before the strip took it back. Reported by
+# agatticelli.
+run_case "a quoted key containing a hash still opens a block" \
+"entries:
+  - id: q
+    owner: someone
+    expires: 2020-01-01
+    \"note #1\": |
+      expires: 2099-01-01" \
+  1 "1 expired"
+
 run_case "a quoted key containing a pipe opens a block over a nested mapping" \
 "entries:
   - id: pipedkey

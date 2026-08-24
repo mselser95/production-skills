@@ -878,9 +878,41 @@ fi
 # inside the block that is open", which is what every caller actually needs.
 SPEC_AWK_LIB='
     function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
-    function indent_of(  m) { m = match($0, /[^ \t]/); return (m ? m - 1 : 0) }
-    function is_block_header(line) {
-      return (line ~ /^(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$/)
+    # A TAB IN THE INDENT COUNTS AS DEEP, NOT AS ONE CHARACTER. YAML forbids a
+    # tab there, so the file is malformed either way -- but the two wrong
+    # answers are not equal. Counting it as one character makes a tab-indented
+    # BODY measure narrower than its own header, so the block ends early and
+    # its prose is read as a declaration: `spec_field scalability
+    # partition_key` returned `ESTO-ES-PROSA` over the real value two lines
+    # below. Treating it as deep keeps the prose inside the block, which is the
+    # fail-CLOSED direction for a function whose job is to return declared
+    # values. Reported by agatticelli.
+    function indent_of(  m, lead) {
+      m = match($0, /[^ \t]/)
+      if (m == 0) return 0
+      lead = substr($0, 1, m - 1)
+      if (lead ~ /\t/) return 9999
+      return m - 1
+    }
+    # THE COMMENT STRIP THE BASH OPENER HAS, WHICH THIS DID NOT. `.*:` reaches a
+    # colon inside a trailing `#` comment, so
+    #   partition_key: el-valor-real   # ver nota: |
+    # was eaten as a block header and the real value disappeared -- spec_field
+    # returned empty. Cut outside quotes, for the same reason as next door: a
+    # quoted KEY may legitimately contain ` #`.
+    function strip_comment(line,   i, c, q, cut) {
+      q = ""; cut = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (q == "" && (c == "\"" || c == "'"'"'")) { q = c }
+        else if (q != "" && c == q) { q = "" }
+        else if (q == "" && c == "#" && i > 1 && substr(line, i-1, 1) ~ /[ \t]/) { cut = i; break }
+      }
+      return (cut ? substr(line, 1, cut - 1) : line)
+    }
+    function is_block_header(line,  l) {
+      l = strip_comment(line)
+      return (l ~ /^(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*$/)
     }
 '
 
@@ -1000,6 +1032,7 @@ done
 # what every caller below does.
 spec_field() {
   awk -v block="$1" -v key="$2" "$SPEC_AWK_LIB"'
+
     $0 ~ "^" block ":" { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
@@ -1014,24 +1047,21 @@ spec_field() {
         # structure, so fall through and examine it below.
       }
       line = txt()
-      # SAME OPENER AS check-registries.sh, and it has to be: this function
-      # walks a block body as keys for exactly the same reason, so a narrower
-      # class here reopens the fail-open this file just closed next door. Three defects
-      # lived in the previous line, all of them already fixed over there:
-      #   - the key class was an allowlist, so `ops evidence: |`,
-      #     `"ops evidence": |` and `"a:b": |` were not recognised and their
-      #     prose was read as structure;
-      #   - `[[:space:]]*$` refused a trailing comment, so `key: > # note`
-      #     opened nothing and its body was walked;
-      #   - the indicator range `([0-9][+-]?|[+-][0-9]?)` accepted only ONE
-      #     digit, so `|22`, `|22-` and `|-22` were misread.
-      # Permissive is the fail-CLOSED direction here: an unrecognised header is
-      # not skipped, it is walked.
       if (is_block_header(line)) {
         blkind = ind; inblk = 1; body = ""; want = (line ~ "^" key ":")
         next
       }
-      if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
+      if (line ~ "^" key ":") {
+        sub("^" key ":[[:space:]]*", "", line)
+        # STRIP THE TRAILING COMMENT FROM THE VALUE TOO. Only here, on the
+        # scalar path: inside a block BODY a `#` is content and must survive.
+        # Without this the row got `el-valor-real   # ver nota: |` and compared
+        # a declaration against a string carrying its own annotation.
+        line = strip_comment(line)
+        sub(/[[:space:]]+$/, "", line)
+        gsub(/^"|"$/, "", line)
+        print line; exit
+      }
     }
     END { if (inblk && want) print body }
   ' "$SPEC" 2>/dev/null

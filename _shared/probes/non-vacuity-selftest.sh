@@ -217,6 +217,34 @@ for _hdr in '2fa_notes: >' 'ops/notes: >' '"design notes": >' 'notes: >12' 'note
     "$(SPEC="${_sfp}/spec.yaml" spec_field data_lifecycle deletion_mechanism)"
 done
 
+# THE TWO DEFENCES THAT LIVED ONLY IN check-registries.sh. Sharing the walker
+# was right, but `is_block_header`/`indent_of` carried neither the tab guard nor
+# the comment strip -- so all four spec walkers inherited both holes at once
+# instead of one of them having it. Reported by agatticelli.
+#
+# Axis 1, the tab: counting it as ONE character makes a tab-indented body
+# measure narrower than its own header, the block ends early, and the prose is
+# read as a declaration. Returned `ESTO-ES-PROSA` over the real value below.
+printf 'scalability:\n  notes: |\n\tpartition_key: ESTO-ES-PROSA\n  partition_key: el-valor-real\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_field: a tab-indented body stays inside the block" "el-valor-real" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field scalability partition_key)"
+
+# Axis 2, the trailing comment: `.*:` reaches a colon inside a `#`, so the line
+# was eaten as a header and the real value disappeared -- spec_field returned
+# EMPTY. The strip also has to reach the returned value, or the row compares a
+# declaration against a string carrying its own annotation.
+printf 'scalability:\n  partition_key: el-valor-real   # ver nota: |\n  notes: prose\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_field: a trailing comment neither opens a block nor rides the value" "el-valor-real" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field scalability partition_key)"
+
+# AND THE CONTROL THE STRIP NEEDS: inside a block BODY a `#` is content and
+# must survive. Stripping there would silently edit evidence text.
+printf 'd:\n  notes: |\n    line # con hash\n' > "${_sfp}/spec.yaml"
+check "spec_field: a block body keeps its own hash" "line # con hash" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field d notes)"
+
 # THE THREE SIBLINGS THAT WALKED BLOCK BODIES AS KEYS. `spec_field` learned to
 # skip a block scalar; `driven_symbol`, `driven_keys` and `implemented_test`
 # did not, and they read the same file. Measured before the shared library:

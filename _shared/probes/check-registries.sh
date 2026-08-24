@@ -450,8 +450,33 @@ for reg in "${registry_files[@]}"; do
     if [[ "$line" =~ ^[[:space:]]*# ]]; then
       continue
     fi
+    # THE CUT MUST RESPECT QUOTES. The first version cut at the LAST `#`
+    # preceded by whitespace, which truncates a quoted KEY that legitimately
+    # contains one: `"note #1": |` became `"note`, stopped looking like an
+    # opener, and its body was walked again -- exit 0, `0 expired`, on an entry
+    # that expired in 2020. That is a member of the very class the widened key
+    # was written to close, and the branch had already banked the win before
+    # the strip took it back. The old comment claimed a `#` inside quotes "only
+    # ever truncates a line that was not an opener": true of quoted VALUES,
+    # false of quoted KEYS. Reported by agatticelli.
+    #
+    # So walk the line and cut at the first `#` that is preceded by whitespace
+    # AND sits outside quotes. A char loop is fine here: registries are tens of
+    # lines, and the alternative is another regex that cannot count quotes.
     _uncommented="$line"
-    if [[ "$_uncommented" =~ ^(.*[[:space:]])#.*$ ]]; then _uncommented="${BASH_REMATCH[1]}"; fi
+    _qi=0; _qq=""; _qcut=-1
+    while (( _qi < ${#line} )); do
+      _qc="${line:$_qi:1}"
+      if [[ -z "$_qq" ]] && [[ "$_qc" == '"' || "$_qc" == "'" ]]; then
+        _qq="$_qc"
+      elif [[ -n "$_qq" && "$_qc" == "$_qq" ]]; then
+        _qq=""
+      elif [[ -z "$_qq" && "$_qc" == "#" && $_qi -gt 0 ]] && [[ "${line:$((_qi-1)):1}" =~ [[:space:]] ]]; then
+        _qcut=$_qi; break
+      fi
+      _qi=$((_qi+1))
+    done
+    if (( _qcut >= 0 )); then _uncommented="${line:0:$_qcut}"; fi
     if [[ "$_uncommented" =~ $blk_open_re ]]; then
         # WHICH COLUMN THE BODY MUST BEAT depends on whether the header has a
         # key, and getting it wrong makes the fix for `- |` do nothing.
