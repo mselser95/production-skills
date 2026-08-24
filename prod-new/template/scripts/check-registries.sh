@@ -90,6 +90,39 @@ if (( ${#registry_files[@]} == 0 )); then
   exit 1
 fi
 
+# strip_outside_quotes <line> -> the line with any trailing comment removed,
+# where "trailing comment" means the first `#` that is preceded by whitespace
+# AND sits outside quotes.
+#
+# LIFTED INTO A FUNCTION because it was needed in a fourth place and the first
+# three were about to become a transcription. The opener test already had the
+# quote-aware version; the id/owner/expires captures still used `${v%%#*}`,
+# which cuts at the FIRST `#` in the value whatever encloses it:
+#
+#   id: "a#b"                 reported as  '"a'
+#   owner: "team#ops"         reported as  (owner: "team)
+#   expires: "2020-01-01#x"   reported as  expires='"2020-01-01'
+#
+# Not a fail-open -- truncating a date can only make it malformed, never valid,
+# so the expiry axis stays fail-closed and a real trailing comment is still
+# stripped correctly. What it damages is IDENTITY: the entry a human must find
+# to renew is named wrong in the finding. Reported by agatticelli.
+strip_outside_quotes() {
+  local _s="$1" _i=0 _q="" _cut=-1 _c
+  while (( _i < ${#_s} )); do
+    _c="${_s:$_i:1}"
+    if [[ -z "$_q" ]] && [[ "$_c" == '"' || "$_c" == "'" ]]; then
+      _q="$_c"
+    elif [[ -n "$_q" && "$_c" == "$_q" ]]; then
+      _q=""
+    elif [[ -z "$_q" && "$_c" == "#" && $_i -gt 0 ]] && [[ "${_s:$((_i-1)):1}" =~ [[:space:]] ]]; then
+      _cut=$_i; break
+    fi
+    _i=$((_i+1))
+  done
+  if (( _cut >= 0 )); then printf '%s' "${_s:0:$_cut}"; else printf '%s' "$_s"; fi
+}
+
 for reg in "${registry_files[@]}"; do
   [[ -f "$reg" ]] || continue
   # One entry per `- id:`; read its id, owner and expires with a tiny state machine
@@ -506,11 +539,11 @@ for reg in "${registry_files[@]}"; do
     # appear at, and are immune to a body-text line that happens to contain
     # "id:"/"owner:"/"expires:" as a substring of a longer word.
     if [[ "$line" =~ ^[[:space:]]*-?[[:space:]]*id:[[:space:]]*(.*)$ ]]; then
-      id="${BASH_REMATCH[1]}"; id="${id%%#*}"; id="${id// /}"
+      id="${BASH_REMATCH[1]}"; id="$(strip_outside_quotes "$id")"; id="${id// /}"
     elif [[ "$line" =~ ^[[:space:]]*-?[[:space:]]*owner:[[:space:]]*(.*)$ ]]; then
-      owner="${BASH_REMATCH[1]}"; owner="${owner%%#*}"; owner="${owner// /}"
+      owner="${BASH_REMATCH[1]}"; owner="$(strip_outside_quotes "$owner")"; owner="${owner// /}"
     elif [[ "$line" =~ ^[[:space:]]*-?[[:space:]]*expires:[[:space:]]*(.*)$ ]]; then
-      expires="${BASH_REMATCH[1]}"; expires="${expires%%#*}"; expires="${expires// /}"
+      expires="${BASH_REMATCH[1]}"; expires="$(strip_outside_quotes "$expires")"; expires="${expires// /}"
     fi
   done < "$reg"
   flush

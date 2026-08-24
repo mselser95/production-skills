@@ -517,6 +517,34 @@ run_case "a tab-indented block body is malformed, not a shallower line" \
 # That is a member of the very class the widened key was written to close, and
 # the branch had banked the win before the strip took it back. Reported by
 # agatticelli.
+# THE FIELD CAPTURES CUT AT THE FIRST `#` WHATEVER ENCLOSED IT. The opener test
+# already had the quote-aware cut; `id`/`owner`/`expires` still used `${v%%#*}`.
+# Not a fail-open -- truncating a date can only make it malformed, never valid --
+# but it damages IDENTITY: the entry a human must find to renew is named wrong
+# in the finding. Reported by agatticelli.
+run_case "a hash inside a quoted id survives into the finding" \
+"entries:
+  - id: \"a#b\"
+    owner: someone
+    expires: 2020-01-01" \
+  1 "a#b"
+
+run_case "a hash inside a quoted owner survives into the finding" \
+"entries:
+  - id: x
+    owner: \"team#ops\"
+    expires: 2020-01-01" \
+  1 "team#ops"
+
+# CONTROL: a REAL trailing comment must still be stripped, or the fix would
+# trade one wrong answer for another.
+run_case "control: a real trailing comment on expires is still stripped" \
+"entries:
+  - id: x
+    owner: someone
+    expires: 2020-01-01  # renovado en la revision de agosto" \
+  1 "1 expired"
+
 run_case "a quoted key containing a hash still opens a block" \
 "entries:
   - id: q
