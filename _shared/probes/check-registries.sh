@@ -188,26 +188,17 @@ for reg in "${registry_files[@]}"; do
   #
   # Reported by agatticelli (:191/:193) and independently by fd1az (:201).
   blk_indent=""
+  in_blk=0
   blk_open_re='^([[:space:]]*(-[[:space:]]+)?)[A-Za-z_][A-Za-z0-9_.-]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*(#.*)?$'
   while IFS= read -r line; do
     # Inside a block: blank lines stay in, and so does anything indented deeper
     # than the key that opened it. The first line at or left of that column
     # ends the block and is re-examined as structure below.
-    if [[ -n "$blk_indent" ]]; then
+    if (( in_blk )); then
       if [[ -z "${line//[[:space:]]/}" ]]; then continue; fi
       [[ "$line" =~ ^([[:space:]]*) ]]; _cur="${BASH_REMATCH[1]}"
       if (( ${#_cur} > ${#blk_indent} )); then continue; fi
-      blk_indent=""
-    fi
-    # `key: |`, `key: >-`, `- key: |2`, with an optional trailing comment. The
-    # column recorded is the key's own, INCLUDING any "- " before it, so
-    # content has to be strictly deeper to count as inside the block.
-    # The pattern lives in a variable because bash parses `|` and `>` inside
-    # [[ ]] even within a regex bracket expression -- inline, this is a syntax
-    # error, which `bash -n` catches but a substring edit would not.
-    if [[ "$line" =~ $blk_open_re ]]; then
-      blk_indent="${BASH_REMATCH[1]}"
-      continue
+      blk_indent=""; in_blk=0
     fi
     # A new entry starts at ANY top-level list-item dash ("- <key>: ..."),
     # not specifically "- id:". Flushing only on "- id:" made an entry whose
@@ -242,6 +233,26 @@ for reg in "${registry_files[@]}"; do
         in_entry=1
       fi
     fi
+      # THE BLOCK OPENER IS CHECKED AFTER THE ENTRY BOUNDARY, BECAUSE ONE LINE
+      # CAN BE BOTH.
+      #
+      # `- evidence: |` opens an entry AND opens a block. With the opener first
+      # its `continue` jumped over the flush above, so the PREVIOUS entry was
+      # never closed and its expiry vanished: an expired waiver followed by an
+      # entry whose first key is a block scalar reported `1 entries checked,
+      # 0 expired` and exit 0, where the unpatched parser reports `2 entries
+      # checked, 1 expired` and exit 1. That is the same fail-open the guard was
+      # added to close, reintroduced by the guard itself. Found by fd1az on
+      # clcsolutions/marketdata#35.
+      #
+      # `in_blk` is a separate flag rather than `[[ -n "$blk_indent" ]]` because
+      # an empty indent is a legal block column -- a top-level `policy: |` opens
+      # at column 0 -- and overloading empty as "no block" left its body walked
+      # as keys.
+      if [[ "$line" =~ $blk_open_re ]]; then
+        blk_indent="${BASH_REMATCH[1]}"; in_blk=1
+        continue
+      fi
     # id/owner/expires are matched by an ANCHORED key regex (start of line,
     # optional leading "- ", then the exact key), not a bare substring —
     # so they are captured no matter which position in the entry they

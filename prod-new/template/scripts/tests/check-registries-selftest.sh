@@ -243,6 +243,66 @@ run_case "control: a real owner outside the block still passes" \
 # entry written after one is still an entry. Without this the fix would trade a
 # false PASS for a false pass of a different kind: everything after the first
 # block scalar in the file silently unread.
+# THE REGRESSION THE GUARD ITSELF INTRODUCED, AND THE ONE CASE THAT WOULD HAVE
+# CAUGHT IT. `- evidence: |` opens an entry AND opens a block. With the opener
+# checked first, its `continue` jumped the flush, the previous entry was never
+# closed and its expiry vanished -- `1 entries checked, 0 expired`, exit 0,
+# where the unpatched parser gives `2 entries checked, 1 expired`, exit 1. The
+# same fail-open the guard exists to close. Found by fd1az on marketdata#35.
+run_case "an entry opening with a block scalar does not swallow the previous one" \
+"entries:
+  - id: primero
+    owner: someone
+    expires: 2020-01-01
+  - evidence: |
+      texto del bloque
+    id: segundo
+    owner: otro
+    expires: 2099-01-01" \
+  1 "EXPIRED"
+
+# THE TERMINATION COLUMN, PINNED. The dedent case above passes whether the
+# comparison is `>` or `>=`, so it never asserted WHERE the block ends. This one
+# does: at `>=` the `id:` line at the key's own column is read as block content,
+# the entry loses its id and the file reports MALFORMED instead of EXPIRED.
+run_case "a key at the block's own column ends the block, not deeper" \
+"entries:
+  - id: uno
+    owner: someone
+    evidence: |
+      prosa
+    expires: 2020-01-01" \
+  1 "EXPIRED"
+
+# `>` AND THE INDICATORS. Every case above uses `|` with no chomping or indent
+# indicator, so `[|>]` -> `[|]` and deleting `[0-9]*[+-]?` both survived.
+run_case "a folded block scalar is skipped like a literal one" \
+"entries:
+  - id: doblado
+    owner: someone
+    expires: 2020-01-01
+    evidence: >
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "a chomping indicator does not break the opener" \
+"entries:
+  - id: chomped
+    owner: someone
+    expires: 2020-01-01
+    evidence: |-
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "an explicit indent indicator does not break the opener" \
+"entries:
+  - id: indicado
+    owner: someone
+    expires: 2020-01-01
+    evidence: |2
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
 run_case "a block scalar ends at dedent, so later entries are still read" \
 "entries:
   - id: has-block
