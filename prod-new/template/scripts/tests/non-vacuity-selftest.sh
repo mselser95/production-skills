@@ -111,6 +111,115 @@ eval "$(sed -n '/^classify_mutation_result() {/,/^}/p' "$PROBE")"
 declare -F classify_mutation_result >/dev/null || {
   echo "selftest: could not source classify_mutation_result from $PROBE" >&2; exit 2; }
 classify() { classify_mutation_result "$1"; }
+# --- the five lifted helpers, which nothing asserted ---------------------------
+#
+# extract_real_tag, count_secret_scan_workflows, grep_x, toolchain_note and
+# fold_makefile were all lifted OUT of inline code so this file could source and
+# assert them. Two of them carry a comment in the probe saying exactly that.
+# None of the five had a single mention here: measured with
+# `grep -c '\bextract_real_tag\b' non-vacuity-selftest.sh` -> 0, and the same for
+# the other four.
+#
+# So the probe cited a selftest that did not exist, in the file whose whole
+# subject is that a checker cannot tell a citation from a tombstone. fd1az and
+# agatticelli both flagged it, on two repositories, and they were right on both.
+# A ONE-LINE function needs a different extraction, and getting it wrong is not
+# cosmetic: `sed -n "/^fold_makefile() {/,/^}/p"` runs to the NEXT line starting
+# with `}`, which is far below, so it slurped the surrounding code and this file
+# died on an unbound variable from it. Take the single line when the opening
+# line already closes the brace.
+for _fn in extract_real_tag count_secret_scan_workflows grep_x toolchain_note fold_makefile; do
+  _src="$(sed -n "/^${_fn}() {/,/^}/p" "$PROBE")"
+  _first="$(sed -n "/^${_fn}() {/{p;q;}" "$PROBE")"
+  case "$_first" in *"}"*) _src="$_first" ;; esac
+  eval "$_src"
+  declare -F "$_fn" >/dev/null || {
+    echo "selftest: could not source $_fn from $PROBE -- it was renamed or reshaped" >&2
+    fails=$((fails+1))
+  }
+done
+
+# extract_real_tag: the CHOSEN build tag, skipping the two reserved words.
+_tagdir="$(mktemp -d)"
+printf "//go:build candidate\npackage x\n" > "${_tagdir}/a_test.go"
+printf "//go:build ignore\npackage x\n"    > "${_tagdir}/b_test.go"
+printf "//go:build e2e\npackage x\n"       > "${_tagdir}/c_test.go"
+check "extract_real_tag skips candidate and ignore" "e2e" "$(extract_real_tag "$_tagdir")"
+
+# A tag with a digit or a dot is a REAL tag. The character class was
+# [A-Za-z_]* once and truncated `go1.26` to `go`; this is the case that would
+# have caught it.
+_tagdir2="$(mktemp -d)"
+printf "//go:build integration_v2\npackage x\n" > "${_tagdir2}/a_test.go"
+check "extract_real_tag keeps digits" "integration_v2" "$(extract_real_tag "$_tagdir2")"
+
+# And nothing to find is EMPTY, not the first line of noise.
+_tagdir3="$(mktemp -d)"
+printf "package x\n" > "${_tagdir3}/a_test.go"
+check_empty "extract_real_tag finds nothing when there is no build tag" "$(extract_real_tag "$_tagdir3")"
+
+# count_secret_scan_workflows: a MECHANISM, never a mention. Three files, one
+# of which only names it in a comment.
+_wfdir="$(mktemp -d)"
+printf "jobs:\n  build:\n    steps:\n      - uses: org/secret-scan@v1\n"    > "${_wfdir}/a.yaml"
+printf "jobs:\n  secret-scan:\n    runs-on: ubuntu-latest\n"                > "${_wfdir}/b.yaml"
+printf "jobs:\n  build:\n    steps:\n      # secret-scan runs elsewhere\n"  > "${_wfdir}/c.yaml"
+check "count_secret_scan_workflows counts mechanisms, not mentions" "2" \
+  "$(count_secret_scan_workflows "$_wfdir")"
+
+# grep_x: the same distinction, as a helper. A file whose ONLY match is inside
+# a comment must not be returned.
+_gxdir="$(mktemp -d)"
+printf "# diff-cover is not wired here\n"        > "${_gxdir}/only-comment.yaml"
+printf "run: bash scripts/diff-cover.sh\n"       > "${_gxdir}/real.yaml"
+_gxhits="$(grep_x "diff-cover" "$_gxdir")"
+check "grep_x returns the file with a real occurrence" "real.yaml" "$_gxhits"
+if [[ "$_gxhits" == *only-comment.yaml* ]]; then
+  echo "  FAIL grep_x returned a file whose only match is a comment: $_gxhits" >&2
+  fails=$((fails+1))
+else
+  echo "  ok   grep_x does not return a comment-only match"
+fi
+
+# fold_makefile: a backslash continuation is ONE logical line. The fuzz
+# reachability walk parses rules, and an unfolded continuation hides the
+# prerequisites that follow it.
+_mkdir="$(mktemp -d)"
+printf "verify: lint \\\\\n\tfuzz\n\t@echo hi\n" > "${_mkdir}/Makefile"
+# The property is that the continuation LANDS ON THE FIRST LINE, not that the
+# whitespace is normalised -- sed joins the lines and keeps the tab, which is
+# correct. My first expectation here was `verify: lint fuzz` and it failed
+# against `verify: lint \tfuzz`: the assertion was wrong, not the code, and it
+# is worth saying so rather than quietly relaxing it.
+_folded="$(cd "$_mkdir" && fold_makefile | head -1)"
+check "fold_makefile joins a backslash continuation" "fuzz" "$_folded"
+check "the folded line still starts with the target" "verify:" "$_folded"
+# The control: UNFOLDED, `fuzz` is on the second line, so the case above is
+# measuring the fold and not the file.
+_unfolded="$(cd "$_mkdir" && head -1 Makefile)"
+if [[ "$_unfolded" == *fuzz* ]]; then
+  echo "  FAIL the fixture does not need folding, so the case above proves nothing" >&2
+  fails=$((fails+1))
+else
+  echo "  ok   the fixture's first line needs folding to reach fuzz"
+fi
+
+# toolchain_note: it must say WHICH toolchain ran, and warn when go.mod pins a
+# different one -- the row that reports a vulnerability count depends on it.
+_tcdir="$(mktemp -d)"
+printf "module x\n\ngo 0.0.1\n" > "${_tcdir}/go.mod"
+check "toolchain_note warns when go.mod pins another toolchain" "go.mod pins go0.0.1" \
+  "$(cd "$_tcdir" && toolchain_note)"
+_tcdir2="$(mktemp -d)"
+printf "module x\n\ngo %s\n" "$(go env GOVERSION 2>/dev/null | sed "s/^go//")" > "${_tcdir2}/go.mod"
+_note="$(cd "$_tcdir2" && toolchain_note)"
+if [[ "$_note" == *"pins"* ]]; then
+  echo "  FAIL toolchain_note cried wolf when the pin matches the running toolchain: $_note" >&2
+  fails=$((fails+1))
+else
+  echo "  ok   toolchain_note is quiet when the pin matches"
+fi
+
 
 echo "non-vacuity selftest: start"
 
@@ -424,3 +533,4 @@ if (( fails > 0 )); then
   exit 1
 fi
 echo "non-vacuity selftest: all cases behaved"
+
