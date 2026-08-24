@@ -59,6 +59,25 @@ PROBE=scripts/verify-standard.sh
 
 fails=0
 check() { # check <case> <expected-substring> <actual>
+  # REFUSE AN EMPTY EXPECTED, rather than documenting that callers must not
+  # pass one. `grep -qF "" ` matches every input, so an empty pattern turns
+  # this into a control that cannot fail -- and the note above only closed the
+  # LITERAL form. The third site was `check "..." "${sibling_line##*/}"
+  # "${glob_line##*/}"`, where the pattern arrives through a variable: if
+  # either grep finds nothing the expected is empty and a real divergence
+  # between the two denominators goes green. Found by fd1az on
+  # kraken-marketdata after two rounds of fixing the literal form, which is the
+  # argument for closing the CLASS in the helper instead of the instances:
+  # a fourth site cannot be written by accident now.
+  #
+  # A case whose correct output is genuinely nothing uses check_empty below.
+  if [[ -z "${2//[[:space:]]/}" ]]; then
+    echo "  FAIL $1 — check() was given an EMPTY expected pattern, which matches" >&2
+    echo "       anything. Use check_empty for a case whose correct output is nothing," >&2
+    echo "       or fix the producer that returned nothing here. Actual was: $3" >&2
+    fails=$((fails+1))
+    return
+  fi
   if grep -qF "$2" <<<"$3"; then
     echo "  ok   $1"
   else
@@ -142,6 +161,30 @@ declare -F nv_package_reason >/dev/null || {
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
+# SOURCE FILES THE SELFTEST OWNS, not paths borrowed from the host repo.
+#
+# Two cases below used to name `internal/app/hub.go`, which exists in
+# binance-marketdata and does not exist in bitgo-marketdata -- so the SHARED
+# selftest passed in one repo and failed in the other for a reason that had
+# nothing to do with the classifier. Measured: bitgo went 0 FAIL -> 2 FAIL on
+# the selftest alone, with the probe held constant. A shared gate whose verdict
+# depends on which tree it landed in is worse than no gate: it teaches whoever
+# meets the red first that the gate is noise.
+#
+# nv_package_reason tests `[[ -f "$file" ]]`, so an absolute path under the
+# scratch works and depends on nothing outside this file.
+present_src="${scratch}/present.go"
+cat >"$present_src" <<'SRC'
+package app
+
+func admit(t item) bool {
+	if t.Venue == "" {
+		return false
+	}
+	return true
+}
+SRC
+
 reason_for() { # reason_for <yaml-body> -> the classifier's verdict
   local f="${scratch}/pkg.yaml"
   printf '%s' "$1" >"$f"
@@ -157,9 +200,9 @@ statement: a package with no non_vacuity_check block at all
 check "a decayed find-string is find-string-gone" "find-string-gone" \
   "$(reason_for 'id: 901
 non_vacuity_check:
-  file: internal/app/hub.go
+  file: '"$present_src"'
   expect_red: TestInvariant_UnvenuedItemsNeverAdmitted
-  find: '"'"'this exact string is not in hub.go and never was'"'"'
+  find: '"'"'this exact string is not in that file and never was'"'"'
   replace: '"'"'nor is this'"'"'
   requires_tags: '"''"'
 ')"
@@ -167,7 +210,7 @@ non_vacuity_check:
 check "a package naming a missing file is no-such-file" "no-such-file" \
   "$(reason_for 'id: 902
 non_vacuity_check:
-  file: internal/app/this_file_does_not_exist.go
+  file: '"${scratch}"'/this_file_does_not_exist.go
   expect_red: TestInvariant_UnvenuedItemsNeverAdmitted
   find: '"'"'anything'"'"'
   replace: '"'"'anything else'"'"'
@@ -180,7 +223,7 @@ non_vacuity_check:
 check_empty "a complete, applicable package has NO reason (control)" \
   "$(reason_for 'id: 904
 non_vacuity_check:
-  file: internal/app/hub.go
+  file: '"$present_src"'
   expect_red: TestInvariant_UnvenuedItemsNeverAdmitted
   find: '"'"'if t.Venue == ""'"'"'
   replace: '"'"'if false'"'"'

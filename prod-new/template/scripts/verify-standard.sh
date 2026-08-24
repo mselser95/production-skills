@@ -677,7 +677,7 @@ else row "invariants-ratified" FAIL "verification/ratified/ has no tests"; fi
 # repo that deleted every property test but left the word "adequacy" in a
 # comment PASSED, with the evidence reading "0 property tests present". A row
 # whose own evidence says zero is a row that has stopped checking.
-prop_n=$(grep -rho 'func TestProperty[A-Za-z_]*' --include='*_test.go' . 2>/dev/null | sort -u | wc -l | tr -d ' ')
+prop_n=$(grep -rho 'func TestProperty[A-Za-z0-9_]*' --include='*_test.go' . 2>/dev/null | sort -u | wc -l | tr -d ' ')
 prop_n=${prop_n:-0}
 if (( prop_n > 0 )) && grep -rql 'adequacy' --include='*_test.go' . >/dev/null 2>&1; then
   row "property-tests" PASS "$prop_n property test(s), with generator-adequacy assertion(s)"
@@ -1645,10 +1645,19 @@ grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FIL
   local flags=()
   while [[ "${1:-}" == -* ]]; do flags+=("$1"); shift; done
   local pat="$1"; shift
-  local f
+  # `stripped` is LOCAL. It is a new variable in this helper and there is
+  # another `stripped` at top level further down; a leaked global would have
+  # them share storage in a 2000-line script under `set -u`. Benign today
+  # because that one is assigned immediately before use, which is exactly the
+  # kind of "benign today" that stops being true in a later edit.
+  local f stripped
   while IFS= read -r f; do
     [[ -f "$f" ]] || continue
-    if sed 's/#.*$//' "$f" 2>/dev/null | grep -qE "${flags[@]+"${flags[@]}"}" -- "$pat"; then
+    # Not a pipe into `grep -q`: see the SIGPIPE/pipefail note at the series
+    # contract below. This helper is the most-called line in the probe, so an
+    # intermittent 141 here would move ANY row, not one.
+    stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
+    if grep -qE "${flags[@]+"${flags[@]}"}" -- "$pat" <<<"$stripped"; then
       printf '%s\n' "$f"
     fi
   done < <(grep -rlE "${flags[@]+"${flags[@]}"}" -- "$pat" "$@" 2>/dev/null || true)
@@ -1788,6 +1797,14 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
   cited=0; bad=0; missing=""
   if ((${#series_prefixes[@]})); then
     _pat="$(printf '%s|' "${series_prefixes[@]}")"; _pat="(${_pat%|})"
+    # Built ONCE, outside the loop, and NOT piped into `grep -q`: under
+    # pipefail, -q closing the pipe while the producer is still writing makes
+    # the producer take SIGPIPE (141), which pipefail then reports as the
+    # pipeline's status -- turning a MATCH into a FAIL. Same hazard the block
+    # ~60 lines above removed and explained; this instance survived that pass.
+    # It does not change per citation, so building it per iteration was also
+    # just work.
+    declared_blob=$(printf '%s\n' "${declared_series[@]}")
     while read -r m; do
       [[ -n "$m" ]] || continue
       # A Prometheus series name never ENDS in an underscore. A token that does
@@ -1800,7 +1817,7 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
       # sends someone to fix a document that was correct.
       [[ "$m" == *_ ]] && continue
       cited=$((cited+1))
-      printf '%s\n' "${declared_series[@]}" | grep -qx "$m" || { bad=$((bad+1)); missing="${missing} $m"; }
+      grep -qx "$m" <<<"$declared_blob" || { bad=$((bad+1)); missing="${missing} $m"; }
     done < <(grep -ohE "\\b${_pat}[a-z0-9_]+\\b" docs/RUNBOOK.md | sort -u)
   fi
   if (( bad > 0 )); then
@@ -2021,7 +2038,8 @@ if [[ -n "${real_tag:-}" ]]; then
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
     # drop comment bodies, then look again in what is left
-    if sed 's/#.*$//' "$f" 2>/dev/null | grep -q -- "-tags=$real_tag\|tags: *$real_tag"; then
+    stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
+    if grep -q -- "-tags=$real_tag\|tags: *$real_tag" <<<"$stripped"; then
       il_real="$f"; break
     fi
   done <<<"$il_hits"
