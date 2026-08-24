@@ -320,6 +320,35 @@ run_case "a block scalar ends at dedent, so later entries are still read" \
 # ordinary key line and its body was walked as keys, so this exact entry exited
 # 0. The `|2+` twin is the control -- it passed before and must keep passing.
 # Reported by agatticelli on kraken-marketdata#11.
+# A MULTI-DIGIT INDENTATION INDICATOR. Widening the pattern to accept both
+# indicator orders also NARROWED the digit run -- `[0-9]*` accepts any number of
+# digits, `[0-9]` exactly one -- so `|22`, `|22-`, `|-22` and `>22` stopped
+# being recognised as openers and their bodies went back to being walked as
+# keys: four fail-opens introduced while closing one. Found by agatticelli on
+# kraken-marketdata#11.
+#
+# THE DIRECTION IS THE POINT. A header this parser does not RECOGNISE is not
+# skipped, it is walked, so every spelling it fails to match is a silent
+# fail-open -- regardless of whether YAML 1.2 calls that spelling legal. The
+# opener must be permissive precisely so the checker fails closed.
+run_case "a multi-digit indentation indicator is still a block" \
+"entries:
+  - id: twodigit
+    owner: someone
+    expires: 2020-01-01
+    evidence: |22
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "a multi-digit indicator with chomping is still a block" \
+"entries:
+  - id: twodigit-chomp
+    owner: someone
+    expires: 2020-01-01
+    evidence: |-22
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
 run_case "a chomping indicator before the indentation one is still a block" \
 "entries:
   - id: chomp-first
