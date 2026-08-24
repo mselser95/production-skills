@@ -23,6 +23,18 @@ cd "$(git rev-parse --show-toplevel)"
 
 mirrors=(
   "prod-new/template/scripts/verify-standard.sh:_shared/probes/verify-standard.sh"
+  # ADDED AFTER THE ROT WAS MEASURED. check-registries.sh had no canonical
+  # copy at all, so the template drifted in the direction nothing watches:
+  # the adopting repos improved it to 286 lines while the template stayed
+  # at 88, missing REGISTRIES_DIR, the fail-closed on zero entries, the
+  # mandatory owner, the sequence-boundary derivation and the block-scalar
+  # guard. Every repo bootstrapped by prod-new got the 88-line version --
+  # a registry gate that passes an expired waiver whose renewal note
+  # happens to contain an `expires:` line, and passes an EMPTY registries/
+  # directory outright. The install-time refusal cannot see this: it
+  # compares a copy to a source, and there was no source.
+  "prod-new/template/scripts/check-registries.sh:_shared/probes/check-registries.sh"
+  "prod-new/template/scripts/tests/check-registries-selftest.sh:_shared/probes/check-registries-selftest.sh"
 )
 
 synced=0
