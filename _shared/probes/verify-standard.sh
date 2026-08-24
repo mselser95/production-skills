@@ -1992,7 +1992,26 @@ else row "candidate-lane-segregated" FAIL "$((cand-tagged)) of $cand candidate f
 # --- 20. provenance headers on every ADDED test func ------------------------
 # Only functions the diff ADDS are in scope: pre-existing tests in a touched
 # file predate the convention and are not this change's debt.
-if base=$(git merge-base HEAD origin/main 2>/dev/null); then
+# THE OUTER `if` HAD NO `else`, so a checkout where the base ref cannot be
+# resolved emitted NO ROW AT ALL. The not-probed meta-guard then turned that
+# into a counted FAIL whose message says the row "counts in neither PASS, FAIL
+# nor NA" -- a dimension reported as unmeasurable by a guard, rather than by
+# the dimension itself, which is the least actionable form the report can take.
+# Reported by fd1az on okx-marketdata#8.
+#
+# Two halves. First, stop failing to resolve a base that usually exists: a CI
+# checkout may have `main` without `origin/main`, or the default branch may not
+# be called main at all, so try the remote HEAD the repo actually declares
+# before giving up. Second, when none of them resolve, SAY SO in a row of this
+# dimension's own -- and say it as FAIL, because "I could not measure whether
+# added tests carry provenance headers" is not a ratified decline.
+prov_base=""
+for _ref in origin/main main "$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"; do
+  [ -n "$_ref" ] || continue
+  if prov_base=$(git merge-base HEAD "$_ref" 2>/dev/null) && [ -n "$prov_base" ]; then break; fi
+  prov_base=""
+done
+if base="$prov_base"; [ -n "$base" ]; then
   # Benchmarks are excluded: they are neither blocking nor candidate — they
   # live in their own non-gating lane, so a provenance header would claim a
   # lane membership they do not have.
@@ -2002,6 +2021,8 @@ if base=$(git merge-base HEAD origin/main 2>/dev/null); then
   if (( added == 0 )); then row "provenance-headers" NA "no test funcs added"
   elif (( heads >= added )); then row "provenance-headers" PASS "$added added test funcs, $heads provenance lines"
   else row "provenance-headers" FAIL "$added added test funcs but only $heads provenance headers ($((added-heads)) unheaded)"; fi
+else
+  row "provenance-headers" FAIL "no diff base resolves (tried origin/main, main, origin/HEAD) -- this dimension went UNMEASURED, which is not the same as met"
 fi
 
 # --- 21. CI actually runs what the standard requires ------------------------
