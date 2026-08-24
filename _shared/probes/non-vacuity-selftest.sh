@@ -128,7 +128,20 @@ classify() { classify_mutation_result "$1"; }
 # with `}`, which is far below, so it slurped the surrounding code and this file
 # died on an unbound variable from it. Take the single line when the opening
 # line already closes the brace.
-for _fn in extract_real_tag count_secret_scan_workflows grep_x toolchain_note fold_makefile spec_field; do
+# THE SHARED awk LIBRARY COMES FIRST. The four spec walkers interpolate
+# `$SPEC_AWK_LIB` into their awk programs, so sourcing a function without it
+# yields a program that silently produces NOTHING -- every `check` then compares
+# "" against an expectation and reds, which is at least loud. Refuse instead of
+# guessing: if the assignment cannot be lifted, the functions below are not the
+# ones that run in the probe, and nothing this file reports would be about them.
+_libsrc="$(sed -n "/^SPEC_AWK_LIB='/,/^'$/p" "$PROBE")"
+if [[ "$(wc -l <<<"$_libsrc")" -lt 5 ]]; then
+  echo "selftest: could not lift SPEC_AWK_LIB from $PROBE -- it was renamed or reshaped" >&2
+  exit 1
+fi
+eval "$_libsrc"
+
+for _fn in extract_real_tag count_secret_scan_workflows grep_x toolchain_note fold_makefile spec_field driven_symbol driven_keys implemented_test; do
   _src="$(sed -n "/^${_fn}() {/,/^}/p" "$PROBE")"
   _first="$(sed -n "/^${_fn}() {/{p;q;}" "$PROBE")"
   case "$_first" in *"}"*) _src="$_first" ;; esac
@@ -203,6 +216,28 @@ for _hdr in '2fa_notes: >' 'ops/notes: >' '"design notes": >' 'notes: >12' 'note
   check "spec_field skips a block opened by '${_hdr}'" "no_subject_data" \
     "$(SPEC="${_sfp}/spec.yaml" spec_field data_lifecycle deletion_mechanism)"
 done
+
+# THE THREE SIBLINGS THAT WALKED BLOCK BODIES AS KEYS. `spec_field` learned to
+# skip a block scalar; `driven_symbol`, `driven_keys` and `implemented_test`
+# did not, and they read the same file. Measured before the shared library:
+#
+#   driven_symbol durable_outbox  ->  ESTO-ES-PROSA   (the real value,
+#                                     store.OpenDurable, sits two lines below)
+#   driven_keys                   ->  notes durable_outbox durable_outbox
+#                                     (the real key listed TWICE, once from the
+#                                     prose inside the block)
+#
+# This file records the same mistake five times for marker rows: one repaired
+# while a sibling a few lines away keeps the bug. Reported by fd1az, who also
+# named the shape of the fix -- share the walker instead of transcribing it.
+printf 'driven:\n  notes: >\n    prose that imitates keys\n    durable_outbox: ESTO-ES-PROSA\n  durable_outbox: store.OpenDurable\nimplemented:\n  notes: >\n    effect_journal: PROSE\n  effect_journal: TestOutboxSurvivesRestart\n' \
+  > "${_sfp}/spec.yaml"
+check "driven_symbol does not read a key out of a block body" "store.OpenDurable" \
+  "$(SPEC="${_sfp}/spec.yaml" driven_symbol durable_outbox)"
+check "driven_keys does not list a key that only exists as prose" "notes durable_outbox" \
+  "$(SPEC="${_sfp}/spec.yaml" driven_keys | tr '\n' ' ' | sed 's/ *$//')"
+check "implemented_test does not read a test name out of a block body" "TestOutboxSurvivesRestart" \
+  "$(SPEC="${_sfp}/spec.yaml" implemented_test effect_journal)"
 
 # THE CONTROL THE WIDENING NEEDS: a plain `key: value` whose value merely
 # CONTAINS an indicator must NOT be read as a header, or the widening would

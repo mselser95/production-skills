@@ -854,13 +854,46 @@ fi
 # that test and requires it green. Same design as a ratification package's
 # non_vacuity_check: the artifact names an executable check and the probe
 # executes it, rather than the probe guessing from a keyword.
+# ONE LITERAL, INTERPOLATED — not transcribed into each awk program.
+#
+# Four functions walk the spec with an `inblock` state machine, and a block
+# scalar is CONTENT to all four: `notes: >` followed by prose that spells
+# `durable_outbox: TBD` must not be read as a declaration. Only `spec_field`
+# ever learned that. Measured on the three siblings before this change:
+#
+#   driven_symbol durable_outbox  ->  ESTO-ES-PROSA   (the real value is
+#                                     store.OpenDurable, two lines below)
+#   driven_keys                   ->  notes durable_outbox durable_outbox
+#                                     (a phantom key from the body, and the
+#                                     real one listed twice)
+#
+# The previous attempt "shared" the opener by writing it out a second time in
+# awk ERE. That is not sharing: the two had already diverged, and the fix
+# reached one of four call sites. This file records the same mistake FIVE times
+# for marker rows -- one row repaired while a sibling a few lines away kept the
+# bug -- so the sixth repetition is not another per-function patch.
+#
+# `is_block_header` carries the node-property and colon-optional grammar the
+# bash opener in check-registries.sh uses; `block_body` answers "is this line
+# inside the block that is open", which is what every caller actually needs.
+SPEC_AWK_LIB='
+    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
+    function indent_of(  m) { m = match($0, /[^ \t]/); return (m ? m - 1 : 0) }
+    function is_block_header(line) {
+      return (line ~ /^(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$/)
+    }
+'
+
+
 implemented_test() {
-  awk -v key="$1" '
+  awk -v key="$1" "$SPEC_AWK_LIB"'
     /^implemented:/ { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      line = txt()
+      if (is_block_header(line)) { blkind = ind; inblk = 1; next }
       if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); print line; exit }
     }
   ' "$SPEC" 2>/dev/null
@@ -966,12 +999,11 @@ done
 # check CAN do is refuse the placeholder someone types to get green, which is
 # what every caller below does.
 spec_field() {
-  awk -v block="$1" -v key="$2" '
-    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
+  awk -v block="$1" -v key="$2" "$SPEC_AWK_LIB"'
     $0 ~ "^" block ":" { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      ind = match($0, /[^ \t]/) - 1
+      ind = indent_of()
       # INSIDE A BLOCK BODY: consume it whatever key opened it.
       if (inblk) {
         if ($0 ~ /^[[:space:]]*$/) next
@@ -995,7 +1027,7 @@ spec_field() {
       #     digit, so `|22`, `|22-` and `|-22` were misread.
       # Permissive is the fail-CLOSED direction here: an unrecognised header is
       # not skipped, it is walked.
-      if (line ~ /^.*:[[:space:]]*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$/) {
+      if (is_block_header(line)) {
         blkind = ind; inblk = 1; body = ""; want = (line ~ "^" key ":")
         next
       }
@@ -1026,12 +1058,14 @@ placeholder_value() {
 # See the driven-mechanisms row for why this block exists and why it is
 # checked against a LINKED BINARY rather than against source.
 driven_symbol() {
-  awk -v key="$1" '
+  awk -v key="$1" "$SPEC_AWK_LIB"'
     /^driven:/ { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      line = txt()
+      if (is_block_header(line)) { blkind = ind; inblk = 1; next }
       if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
     }
   ' "$SPEC" 2>/dev/null
@@ -1039,11 +1073,15 @@ driven_symbol() {
 
 # driven_keys lists every key declared under `driven:`.
 driven_keys() {
-  awk '
+  awk "$SPEC_AWK_LIB"'
     /^driven:/ { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
-    inblock && /^[[:space:]]+[a-z_]+:/ {
-      line=$0; sub(/^[[:space:]]+/, "", line); sub(/:.*$/, "", line); print line
+    inblock {
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      line = txt()
+      if (is_block_header(line)) { blkind = ind; inblk = 1 }
+      if ($0 ~ /^[[:space:]]+[a-z_]+:/) { sub(/:.*$/, "", line); print line }
     }
   ' "$SPEC" 2>/dev/null
 }
