@@ -1746,7 +1746,243 @@ import sys, json
 # sbom.yaml:52 are the only `-image` consumers. (I had grepped six workflows;
 # fd1az re-derived it across all 27 independently, which is the number that
 # belongs here.) A NEW deleting workflow added later would be invisible to this
-# row.
+# row. The row is scoped per
+# workflow FILE, which is correct because artifacts are per-run: a job in
+# pr.yaml cannot consume an artifact a job in ci.yaml deleted.
+CONSUMES = {"sbom.yaml": "image", "image-push.yaml": "image", "sbom-scan.yaml": "sbom"}
+DELETES  = {"image-push.yaml": "image"}
+
+any_consumer = False
+any_deleter  = False
+problems, proven = [], []
+
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    if not raw or "\t" not in raw:
+        continue
+    fname, payload = raw.split("\t", 1)
+    if payload.strip() == "PARSE_ERROR" or not payload.strip():
+        problems.append("%s is unparseable" % fname)
+        continue
+    try:
+        jobs = {j["job"]: j for j in json.loads(payload)}
+    except Exception:
+        problems.append("%s is unparseable" % fname)
+        continue
+
+    def wf_of(name):
+        u = jobs[name].get("uses") or ""
+        for w in CONSUMES:
+            if w in u:
+                return w
+        return None
+
+    def needs(name):
+        n = jobs[name].get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
+
+    def kind(name):
+        w = wf_of(name)
+        return None if w is None else (CONSUMES[w], jobs[name].get("art") or "")
+
+    any_consumer |= any((wf_of(n) or "") == "sbom.yaml" for n in jobs)
+
+    for d in jobs:
+        w = wf_of(d)
+        if w not in DELETES:
+            continue
+        any_deleter = True
+        gone = (DELETES[w], jobs[d].get("art") or "")
+        seen, stack = set(), list(needs(d))
+        while stack:                                   # transitive: an edge via
+            x = stack.pop()                            # another job counts too
+            if x in seen or x not in jobs:
+                continue
+            seen.add(x)
+            stack.extend(needs(x))
+        # THE SET BEFORE ITS MEMBERS. Checking "every consumer is ordered before
+        # the deleter" says nothing when there are NO consumers: an empty set
+        # satisfies the claim, so this row reached its PASS branch with an empty
+        # `proven` and printed `PASS  SBOM ordered before the artifact deleter ()`
+        # -- certifying ordering on a lane with no sbom job at all, while push
+        # still deleted the image and shipped it to DOCR. Reported by agatticelli
+        # and escalated by fd1az on binance-marketdata#26, and it is the same
+        # shape as the textual row this check replaced: green over a measurement
+        # it never made.
+        same = [c for c in jobs if c != d and kind(c) == gone]
+        if not same:
+            problems.append(
+                "%s: %r deletes the %s artifact and ships it, but NO job in this workflow reads it -- nothing inventories what is deployed"
+                % (fname, d, gone[0]))
+            continue
+        for c in same:
+            if c in seen:
+                proven.append("%s before %s" % (c, d))
+            else:
+                problems.append(
+                    "%s: %r downloads the %s artifact that %r DELETES, and is not in its needs"
+                    % (fname, c, gone[0], d))
+
+if not any_consumer:
+    print("FAIL|no job uses sbom.yaml -- the word may be in comments, the job is not there")
+elif problems:
+    print("FAIL|" + "; ".join(problems[:2]))
+elif not any_deleter:
+    print("PASS|SBOM job present; no artifact-deleting job in the graph to order against")
+elif not proven:
+    print("FAIL|an artifact-deleting job exists but nothing was proven ordered before it -- no evidence to report")
+else:
+    print("PASS|SBOM ordered before the artifact deleter (%s)" % ", ".join(sorted(set(proven))[:3]))
+PYSBOM
+)"
+  if command -v yq >/dev/null 2>&1; then
+    sbom_v="$(
+      for _f in "$wf"/*.yml "$wf"/*.yaml; do
+        [ -e "$_f" ] || continue
+        printf '%s\t' "$(basename "$_f")"
+        yq -o=json -I=0 '[.jobs // {} | to_entries[] | {"job": .key, "uses": (.value.uses // ""), "needs": (.value.needs // []), "art": (.value.with."artifact-name" // "")}]' "$_f" 2>/dev/null || printf 'PARSE_ERROR'
+        printf '\n'
+      done | python3 -c "$_sbom_py"
+    )"
+  else
+    sbom_v="FAIL|yq not installed -- the SBOM ordering invariant went UNCHECKED (pin it with go install github.com/mikefarah/yq/v4, as this job already does for actionlint)"
+  fi
+  # An empty verdict means the pipeline itself failed to run. Treat that as a
+  # FAIL for the same reason: unchecked is not passed.
+  [ -n "$sbom_v" ] || sbom_v="FAIL|the sbom probe produced no verdict -- the ordering invariant went UNCHECKED"
+  row "sbom" "${sbom_v%%|*}" "${sbom_v#*|}"
+  # Match only real attestation mechanisms, never the English word "provenance"
+  # (it appears in benchmark baseline headers — that was a false PASS before).
+  # Strip comments before matching: an earlier version PASSed on a comment
+  # that explained why provenance is impossible. Only executable lines count.
+  # Read once into a variable instead of piping into `grep -q`.
+  #
+  # `producer | grep -q PATTERN` under `set -o pipefail` is a latent race: -q
+  # exits at the first match and closes the pipe, and if the producer is still
+  # writing it takes SIGPIPE (141), which pipefail then reports as the
+  # pipeline's status -- turning a match into a FAIL, nondeterministically. It
+  # does not bite while the input fits the 64KB pipe buffer (this repo's four
+  # workflows are ~683 lines, so the producer always finishes first), which is
+  # exactly what makes it the kind of bug that appears years later on a bigger
+  # repo and looks like anything but a probe defect. A subagent reported seeing
+  # this row alternate; I could not reproduce it in 40 runs across two trees,
+  # so the flake itself stays UNCONFIRMED -- but the hazard is real, removing it
+  # costs nothing, and a gate that might be nondeterministic is not a gate.
+  wf_exec="$(grep -rhE "^[^#]*" $wf/*.yaml 2>/dev/null | sed 's/#.*//' || true)"
+  if grep -qE "cosign|--provenance=|actions/attest|attestations:" <<<"$wf_exec"; then
+    row "artifact-provenance" PASS "signing/attestation step present"
+  elif waived artifact-provenance-signing; then
+    row "artifact-provenance" NA "live waiver with owner+expiry in registries/waivers.yaml"
+  else row "artifact-provenance" FAIL "no provenance and no live waiver (an expired or missing waiver is not an exemption)"; fi
+fi
+
+# --- 15. CI lanes ---------------------------------------------------------
+grep -q "^check-fast:" Makefile 2>/dev/null && row "cheap-gate" PASS "make check-fast exists" || row "cheap-gate" FAIL "no cheap gate"
+grep -q "^test-advisory:" Makefile 2>/dev/null && row "advisory-lane" PASS "make test-advisory exists" || row "advisory-lane" FAIL "no advisory lane"
+ls $wf/nightly* >/dev/null 2>&1 && row "nightly-trends" PASS "nightly workflow present" || row "nightly-trends" FAIL "no scheduled trend lane"
+
+# --- 16. ops artifacts (present AND their citations resolve) --------------
+for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
+  [[ -f $f ]] && row "ops:$(basename "$f")" PASS "present" || row "ops:$(basename "$f")" FAIL "missing"
+done
+if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
+  # Derive the series-name pattern from the MANIFEST, never from one org's
+  # hardcoded prefix.
+  #
+  # This row used to grep for `clc[a-z]*_[a-z0-9_]+`. For any repo whose
+  # series are not clc-prefixed that matched nothing, counted zero failures,
+  # and reported "every cited series exists" having checked NOTHING -- a
+  # green row that had verified precisely zero citations. The template's own
+  # metrics are svc_*, so the standard shipped this row passing vacuously
+  # against ITSELF, which is the exact defect class the whole framework
+  # exists to catch.
+  #
+  # Second defect in the same two lines: the membership test was
+  # `grep -q "$m" <manifest>`, a SUBSTRING search. A truncated or misspelled
+  # citation like `svc_units_conserved` matched the manifest line for
+  # `svc_units_conserved_violations_total` and resolved happily. The test is
+  # now an exact match against the declared names.
+  mapfile -t declared_series < <(grep -oE '^[[:space:]]*-[[:space:]]*name:[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*' observability/emitted-metrics.yaml | awk '{print $NF}' | sort -u)
+  # The prefixes actually in use (token up to and including the first "_").
+  mapfile -t series_prefixes < <(printf '%s\n' "${declared_series[@]}" | sed -E 's/^([a-zA-Z]+_).*/\1/' | sort -u)
+  cited=0; bad=0; missing=""
+  if ((${#series_prefixes[@]})); then
+    _pat="$(printf '%s|' "${series_prefixes[@]}")"; _pat="(${_pat%|})"
+    while read -r m; do
+      [[ -n "$m" ]] || continue
+      # A Prometheus series name never ENDS in an underscore. A token that does
+      # is the prefix half of an alternation the runbook wrote for a human --
+      # `grep -E 'clcbinance_ws_(connects_total|reconnects_total)'` -- and the
+      # extractor stops at the `(`, inventing a series that was never cited.
+      # Measured in clcsolutions/binance-marketdata: two such "missing" series,
+      # `clcbinance_ws_` and `clcmd_venue_`, both from legitimate runbook
+      # commands. A gate that invents a citation and then reports it unresolved
+      # sends someone to fix a document that was correct.
+      [[ "$m" == *_ ]] && continue
+      cited=$((cited+1))
+      printf '%s\n' "${declared_series[@]}" | grep -qx "$m" || { bad=$((bad+1)); missing="${missing} $m"; }
+    done < <(grep -ohE "\\b${_pat}[a-z0-9_]+\\b" docs/RUNBOOK.md | sort -u)
+  fi
+  if (( bad > 0 )); then
+    row "runbook-citations-resolve" FAIL "$bad of $cited cited series do not exist:${missing}"
+  elif (( cited == 0 )); then
+    row "runbook-citations-resolve" FAIL "RUNBOOK cites ZERO of the ${#declared_series[@]} declared series -- nothing was checked, and nothing-checked is not everything-resolves"
+  else
+    row "runbook-citations-resolve" PASS "$cited/${#declared_series[@]} declared series cited, all resolve"
+  fi
+fi
+for r in flags waivers quarantine contract-debt; do
+  [[ -f registries/$r.yaml ]] || { row "registries" FAIL "registries/$r.yaml missing"; break; }
+done
+[[ -f registries/contract-debt.yaml ]] && row "registries" PASS "4 liability registries present"
+if [[ -x scripts/check-registries.sh ]]; then
+  if out=$(bash scripts/check-registries.sh 2>&1); then
+    row "registries-expiry-gated" PASS "$(grep -oE '[0-9]+ entries checked[^,]*' <<<"$out" | head -1); expiry gates the build"
+  else row "registries-expiry-gated" FAIL "$(grep -m1 EXPIRED <<<"$out")"; fi
+else row "registries-expiry-gated" FAIL "registries are recorded but nothing enforces expiry — a stale waiver is a permanent silent exemption"; fi
+
+# --- 17. contract artifacts exist for the work (audit finding: never written) --
+ctxdir="${PROD_CONTEXT_DIR:-.prod/context}"
+if ls "$ctxdir"/*resolved-context*.y*ml >/dev/null 2>&1 && ls "$ctxdir"/*change-plan*.y*ml >/dev/null 2>&1; then
+  row "contract-artifacts" PASS "resolved-context + change-plan present in $ctxdir"
+else row "contract-artifacts" FAIL "no resolved-context/change-plan in $ctxdir — nothing to audit the diff against"; fi
+
+# --- 18. ratification packages back every ratified invariant -----------------
+if ls verification/ratified/*_test.go >/dev/null 2>&1; then
+  # Same class of bug as the fuzz counter above, and it survived that fix
+  # because I repaired the instance that bit instead of sweeping the pattern:
+  # `grep -c` prints "0" AND exits non-zero on zero matches, so `|| echo 0`
+  # appends a SECOND line and every later (( )) throws. This one only fires when
+  # the spec exists with an EMPTY invariants list -- a freshly bootstrapped repo,
+  # precisely the state this probe is pointed at first.
+  inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null | head -1)
+  inv=${inv:-0}
+  pkgs=$(ls "$RATIFY_QUEUE_DIR"/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
+  if (( pkgs > 0 && pkgs >= inv )); then row "ratification-packages" PASS "$pkgs packages for $inv ratified invariants"
+  else row "ratification-packages" FAIL "$pkgs ratification packages for $inv ratified invariants — the queue is the evidence trail"; fi
+
+  # Every package's `test.function` must name a test that EXISTS. The probe
+  # executes `expect_red`, so a package can carry a `function:` naming a test
+  # that was renamed or deleted and stay green forever -- the citation rots
+  # into a tombstone and the package still reads as evidence. Found in
+  # clcsolutions/marketdata: 004 cited TestFailedFetchNeverReplacesLiveCatalog
+  # while the test is TestFailedFetchNeverDestroysLastKnownDrift, and nothing
+  # in the gate could tell.
+  rp_missing=""
+  rp_drift=""
+  rp_checked=0
+  for rp in "$RATIFY_QUEUE_DIR"/*.y*ml; do
+    [[ -f "$rp" ]] || continue
+    # ONE parser, the same one the non-vacuity row uses to decide what to
+    # execute. This used to be two independent awk expressions and they
+    # disagreed in BOTH directions -- measured by a reviewer against the real
+    # packages: `expect_red:Foo` (no space after the colon, which YAML allows
+    # and the stdlib parser reads fine) made the awk return empty, so the drift
+    # check SILENTLY SKIPPED while the row printed PASS claiming it had
+    # compared them; and a legally single-quoted `expect_red: 'Foo'` produced a
+    # false FAIL, because the awk does not strip quoting and the real parser
+    # does. A row that asserts a comparison it did not perform is worse than no
+    # row.
     rp_fn=$(cited_function "$rp")
     rp_red=$(executed_function "$rp")
     [[ -z "$rp_fn" ]] && continue
