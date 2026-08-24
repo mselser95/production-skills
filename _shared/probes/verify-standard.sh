@@ -346,12 +346,27 @@ classify_mutation_result() {
   # "ok" -- which would classify the mutation STAYED-GREEN and accuse a
   # perfectly good invariant of being vacuous. Checking for the skip first is
   # what keeps "not run" from masquerading as either answer.
-  if grep -qE "^--- SKIP|no tests to run|\[no test files\]" <<<"$out"; then
-    echo "NOT-RE-VERIFIED"
-  elif grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
+  # A REAL FAIL OUTRANKS A SIBLING'S "[no test files]".
+  #
+  # The skip test used to run FIRST, and `go test ./...` prints one line per
+  # package: a sibling with no test files puts "[no test files]" in the same
+  # output as the `--- FAIL` that proves the mutation was caught. Skip-first
+  # then reported NOT-RE-VERIFIED over a genuine detection. It fails CLOSED --
+  # the row lands in nv_broken -- so nothing was ever let through, but a
+  # correct red reported under the wrong reason is how a correct red gets
+  # argued away. Reported by agatticelli.
+  #
+  # A `--- FAIL` is a DEFINITE verdict about the mutated package; "[no test
+  # files]" is the ABSENCE of one about another package. The definite answer
+  # wins. The skip test keeps its place above the bare `^ok` branch, which is
+  # the case its own comment was written for: a self-skip prints "ok" and
+  # would otherwise read as STAYED-GREEN.
+  if grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
     echo "MUTATION-BREAKS-BUILD"
   elif grep -qE "^(--- )?FAIL" <<<"$out"; then
     echo "DETECTED"
+  elif grep -qE "^--- SKIP|no tests to run|\[no test files\]" <<<"$out"; then
+    echo "NOT-RE-VERIFIED"
   elif grep -q "^ok" <<<"$out"; then
     echo "STAYED-GREEN"
   else
