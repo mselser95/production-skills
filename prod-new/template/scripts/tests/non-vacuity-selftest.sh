@@ -337,11 +337,29 @@ check_empty "a quoted expect_red is NOT a false drift" \
 
 rm -f "${scratch}/910-citation.yaml"
 
-# The trap itself stays a source assertion, and that is a deliberate exception:
-# driving it means killing the probe mid-mutation, which would leave a
-# production file mutated if the assertion is the thing that is broken. The
-# restore-at-startup path is what actually covers that case now.
-check "the working tree is restored on INT/TERM too" "EXIT INT TERM" "$(cat "$PROBE")"
+# THE TRAP LINE ITSELF, not the probe's whole text.
+#
+# This was `check "..." "EXIT INT TERM" "$(cat "$PROBE")"`, and the note here
+# defended it as a deliberate source assertion. The defence was about the wrong
+# risk: the problem is not that it reads source instead of driving the trap, it
+# is that it read THE WHOLE FILE, so any comment containing the words satisfied
+# it. Measured by fd1az on bitgo-marketdata: weakening the trap to `EXIT` alone,
+# leaving the phrase in a comment, kept the case printing ok -- 24/24, exit 0.
+#
+# Driving it really would mean killing the probe mid-mutation and risking a
+# production file left mutated, so extracting the trap LINE and asserting on its
+# signal list is the strongest form available that costs nothing. A trap that
+# loses INT or TERM now fails here; a comment cannot supply either.
+trap_line=$(grep -m1 -E "^[[:space:]]*trap[[:space:]]+'restore_mutations" "$PROBE" || true)
+if [[ -z "$trap_line" ]]; then
+  echo "  FAIL the restore trap is not installed at all (no 'trap ... restore_mutations' line)" >&2
+  fails=$((fails+1))
+else
+  trap_signals="${trap_line##*\'}"
+  for sig in EXIT INT TERM; do
+    check "the restore trap catches $sig" "$sig" "$trap_signals"
+  done
+fi
 
 # --- the EXTRACTION step, run for real against a fixture ---------------------
 #
