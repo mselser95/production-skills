@@ -485,24 +485,56 @@ run_case "a tab-indented block body is malformed, not a shallower line" \
 # which is what makes them controls rather than more of the same. Reverting the
 # comment strip in check-registries.sh turns two of them red.
 #
-# WHAT THESE CONTROLS DO *NOT* PIN, measured rather than assumed. The two
-# mutations named in the review -- `[|>].*$` (indicator need not be last) and
-# `.*[|>].*$` (a pipe anywhere after any colon) -- leave the whole suite green
-# even with these fixtures, and that is not a gap in the fixtures: those two are
-# EQUIVALENT MUTATIONS over this format.
+# I ARGUED THIS AXIS WAS UNREACHABLE AND I WAS WRONG. The claim was: a block
+# body is "every line indented deeper than the header", so an over-matching
+# opener only matters when the NEXT line is deeper -- and a line carrying a
+# scalar value, the only kind that can hold a stray `|`, can never be followed
+# by a deeper one. I measured three shapes, saw no movement, and concluded the
+# two mutations were equivalent.
 #
-# The reason is structural. A block body is "every line indented deeper than
-# the header", so an over-matching opener only changes anything when the NEXT
-# line is deeper. In valid YAML a line that carries a scalar value -- the only
-# kind that can contain a stray `|` -- can never be followed by a deeper line:
-# deeper lines require the key's value to be empty (a nested mapping or
-# sequence) or a real block scalar, and neither of those has a pipe on the
-# header line. Measured on three shapes -- a sibling value with a pipe, a
-# top-level key with a pipe, and a nested mapping with a pipe -- all three are
-# byte-identical under the mutation and under the fix.
+# The hole in that reasoning: the pipe does not have to be in the VALUE. It can
+# be in the KEY, and then the value is free to be empty -- which is exactly what
+# licenses deeper lines. agatticelli supplied the shape:
 #
-# So the reachable over-match axis is the COMMENT one, which is what these
-# three pin and what the blocker below documents.
+#   entries:
+#     - id: x
+#       owner: someone
+#       "a:|b":
+#         expires: 2020-01-01
+#
+# `yaml.safe_load` reads that as a nested mapping. Measured: the real opener
+# gives `1 expired`; with `.*[|>].*$` it gives `0 expired, 1 malformed` -- the
+# quoted key opens a block, swallows the real expiry, and the entry is reported
+# unenforceable instead of expired.
+#
+# The case below is that shape. "I could not construct one" is a weaker claim
+# than it sounds, and this is the second time today a structural argument of
+# mine lost to a fixture.
+run_case "a quoted key containing a pipe opens a block over a nested mapping" \
+"entries:
+  - id: pipedkey
+    owner: someone
+    \"a:|b\":
+      expires: 2020-01-01" \
+  1 "1 expired"
+
+# A BLANK LINE STAYS INSIDE THE BLOCK. Without the guard the FIRST blank line in
+# an `evidence: |` body ends the block and every prose line after it is read as
+# structure -- the same fail-open as an unrecognised header, and blank lines
+# inside evidence blocks are entirely ordinary. Measured: exit 1 / `1 expired`
+# with the guard, exit 0 / `0 expired` with it replaced by a no-op. Reported by
+# agatticelli.
+run_case "a blank line does not end a block body" \
+"entries:
+  - id: conblanco
+    owner: someone
+    expires: 2020-01-01
+    evidence: |
+      primera linea
+
+      expires: 2099-01-01" \
+  1 "1 expired"
+
 run_case "control: a trailing comment on expires: is not a block opener" \
 "entries:
   - id: commentedexpiry
