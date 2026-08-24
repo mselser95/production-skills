@@ -95,6 +95,7 @@ for reg in "${registry_files[@]}"; do
   # One entry per `- id:`; read its id, owner and expires with a tiny state machine
   # rather than a YAML dependency — this must run before anything is installed.
   id=""; owner=""; expires=""; in_entry=0
+  seq_indent=""; seq_indent_set=""
   flush() {
     if [[ -z "$id" ]]; then
       # AN ENTRY WITH NO USABLE id IS REPORTED, NOT DISCARDED, and the reset
@@ -169,11 +170,32 @@ for reg in "${registry_files[@]}"; do
     # or expires listed first) invisible: that continuation line never
     # matched "- id:" so `id` was never captured, and flush() discards any
     # entry with an empty id -- silently unenforced, key order dependent.
-    if [[ "$line" =~ ^[[:space:]]*-[[:space:]] ]]; then
-      flush
-      # AFTER the flush: this line opens a new entry, so from here on an empty
-      # id is a finding rather than "nothing has started yet".
-      in_entry=1
+    # AN ENTRY BOUNDARY IS A TOP-LEVEL SEQUENCE ITEM, not any dashed line.
+    #
+    # The test used to be `^[[:space:]]*-[[:space:]]` at ANY indentation, which
+    # was harmless while an id-less flush returned silently. Once flush started
+    # REPORTING an id-less entry, every nested list item and every dashed line
+    # inside a literal block began opening an entry that then had to produce an
+    # `id:` -- so one legal entry with `tags:` and an `evidence: |` block was
+    # reported as FIVE, four of them malformed, and the message sent the reader
+    # hunting for an id-less entry that does not exist. Measured by fd1az; I
+    # introduced it in the same commit that fixed the silent-skip.
+    #
+    # The indentation of the FIRST dashed line in the file is the sequence's
+    # level; anything deeper belongs to the entry, not beside it. Derived per
+    # file rather than assumed, because these four registries are hand-written
+    # and nothing forces them to agree on two spaces.
+    if [[ "$line" =~ ^([[:space:]]*)-[[:space:]] ]]; then
+      _ind="${BASH_REMATCH[1]}"
+      if [[ -z "$seq_indent_set" ]]; then
+        seq_indent="$_ind"; seq_indent_set=1
+      fi
+      if [[ "$_ind" == "$seq_indent" ]]; then
+        flush
+        # AFTER the flush: this line opens a new entry, so from here on an
+        # empty id is a finding rather than "nothing has started yet".
+        in_entry=1
+      fi
     fi
     # id/owner/expires are matched by an ANCHORED key regex (start of line,
     # optional leading "- ", then the exact key), not a bare substring —
