@@ -96,6 +96,7 @@ for reg in "${registry_files[@]}"; do
   # rather than a YAML dependency — this must run before anything is installed.
   id=""; owner=""; expires=""; in_entry=0
   seq_indent=""; seq_indent_set=""
+  in_entries=0
   flush() {
     if [[ -z "$id" ]]; then
       # AN ENTRY WITH NO USABLE id IS REPORTED, NOT DISCARDED, and the reset
@@ -266,7 +267,42 @@ for reg in "${registry_files[@]}"; do
     # level; anything deeper belongs to the entry, not beside it. Derived per
     # file rather than assumed, because these four registries are hand-written
     # and nothing forces them to agree on two spaces.
-    if [[ "$line" =~ ^([[:space:]]*)-[[:space:]] ]]; then
+    # ONLY A DASH INSIDE `entries:` IS AN ENTRY BOUNDARY.
+    #
+    # The latch used to take the indentation of the FIRST dashed line anywhere
+    # in the file and then require exact equality. An ordinary metadata list
+    # ahead of `entries:` therefore latched the wrong column, after which no
+    # boundary ever fired again and the whole file collapsed into ONE entry
+    # with last-assignment-wins. Measured on valid YAML that yaml.safe_load
+    # reads as two entries:
+    #
+    #   metadata:
+    #     owners:
+    #       - alice          <- latches column 4
+    #   entries:
+    #     - id: x            <- column 2, never flushes
+    #       expires: 2020-01-01
+    #     - id: y
+    #       expires: 2099-01-01
+    #
+    #   -> `1 entries checked, 0 expired`, exit 0. Entry `x` is not reported,
+    #      not counted and not flagged: an EXPIRED WAIVER PASSING THE BUILD,
+    #      i.e. the exact fail-open this file exists to close, reintroduced by
+    #      the boundary rewrite itself. Reported by fd1az.
+    #
+    # Accepting "any dash at or left of the latch" was the other candidate and
+    # it is not enough: a metadata dash at column 0 ahead of `entries:` puts
+    # every entry dash to its RIGHT and reproduces the same collapse mirrored.
+    # What actually distinguishes an entry boundary is not its column but WHERE
+    # IT SITS, so track the block instead of guessing from indentation.
+    if [[ "$line" =~ ^entries:[[:space:]]*(#.*)?$ ]]; then
+      in_entries=1
+    elif [[ "$line" =~ ^[^[:space:]#] ]]; then
+      # any other top-level key ends the list; close the open entry with it
+      if (( in_entries )); then flush; fi
+      in_entries=0
+    fi
+    if (( in_entries )) && [[ "$line" =~ ^([[:space:]]*)-[[:space:]] ]]; then
       _ind="${BASH_REMATCH[1]}"
       if [[ -z "$seq_indent_set" ]]; then
         seq_indent="$_ind"; seq_indent_set=1
@@ -294,7 +330,29 @@ for reg in "${registry_files[@]}"; do
       # an empty indent is a legal block column -- a top-level `policy: |` opens
       # at column 0 -- and overloading empty as "no block" left its body walked
       # as keys.
-      if [[ "$line" =~ $blk_open_re ]]; then
+      # TEST THE OPENER ON THE LINE WITHOUT ITS TRAILING COMMENT.
+    #
+    # `.*:` spans the whole line, so ANY line whose last token is the indicator
+    # immediately after a colon reads as an opener -- including when that colon
+    # lives inside a `#` comment. Measured:
+    #
+    #   expires: 2020-01-01   # ver nota: |
+    #
+    # was taken as a block header, so the line `continue`d past the id/owner/
+    # expires capture below and the entry was reported `has no expires:` --
+    # a VALID entry declared MALFORMED, and its real expiry never evaluated.
+    # The permissiveness was verified against VALUES (`note: see foo | bar`,
+    # `url: ...a|b`) and never against comments. Reported by agatticelli.
+    #
+    # A YAML comment starts at a `#` preceded by whitespace or start-of-line,
+    # so cutting there is safe for this test: a genuine header (`evidence: |`,
+    # `evidence: | # why`) is unchanged, and a `#` inside a quoted VALUE only
+    # ever truncates a line that was not an opener to begin with. The cut is
+    # used for the TEST only -- `$line` itself is untouched, because the body
+    # of a literal block keeps its `#` characters verbatim.
+    _uncommented="$line"
+    if [[ "$_uncommented" =~ ^(.*[[:space:]])#.*$ ]]; then _uncommented="${BASH_REMATCH[1]}"; fi
+    if [[ "$_uncommented" =~ $blk_open_re ]]; then
         blk_indent="${BASH_REMATCH[1]}"; in_blk=1
         continue
       fi

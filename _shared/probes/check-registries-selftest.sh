@@ -438,28 +438,96 @@ run_case "a tab-indented block body is malformed, not a shallower line" \
 "$(printf 'entries:\n  - id: tabbed\n    owner: someone\n    expires: 2020-01-01\n    evidence: |\n\texpires: 2099-01-01')" \
   1 "1 malformed"
 
-# THE CONTROLS THE PERMISSIVE OPENER NEEDS. Dropping the key class entirely
-# buys coverage at the cost of a new risk -- over-matching -- so these three
-# pin the other direction: a colon followed by prose that merely CONTAINS a
-# pipe must not open a block. What makes a line an opener is that the
-# indicator is the LAST token, not that a `|` appears somewhere.
+# THE CONTROLS THE PERMISSIVE OPENER NEEDS -- AND THEY HAVE TO BE ABLE TO MOVE.
+#
+# The first version of these put the suspicious line at the entry's own indent
+# with the next line at the same indent, so even if it HAD opened a block the
+# block terminated on the very next line and the verdict was unchanged either
+# way. Measured: under both `[|>].*$` (indicator need not be last) and
+# `.*[|>].*$` (a pipe anywhere after any colon), **0 of 34 cases went red**. A
+# control that cannot move is not a control. Reported by agatticelli, who also
+# supplied the shape below.
+#
+# The construct now sits ON the `expires:` line, so an over-match swallows the
+# expiry itself and the verdict flips. Each asserts the ABSENCE of a finding,
+# which is what makes them controls rather than more of the same. Reverting the
+# comment strip in check-registries.sh turns two of them red.
+#
+# WHAT THESE CONTROLS DO *NOT* PIN, measured rather than assumed. The two
+# mutations named in the review -- `[|>].*$` (indicator need not be last) and
+# `.*[|>].*$` (a pipe anywhere after any colon) -- leave the whole suite green
+# even with these fixtures, and that is not a gap in the fixtures: those two are
+# EQUIVALENT MUTATIONS over this format.
+#
+# The reason is structural. A block body is "every line indented deeper than
+# the header", so an over-matching opener only changes anything when the NEXT
+# line is deeper. In valid YAML a line that carries a scalar value -- the only
+# kind that can contain a stray `|` -- can never be followed by a deeper line:
+# deeper lines require the key's value to be empty (a nested mapping or
+# sequence) or a real block scalar, and neither of those has a pipe on the
+# header line. Measured on three shapes -- a sibling value with a pipe, a
+# top-level key with a pipe, and a nested mapping with a pipe -- all three are
+# byte-identical under the mutation and under the fix.
+#
+# So the reachable over-match axis is the COMMENT one, which is what these
+# three pin and what the blocker below documents.
+run_case "control: a trailing comment on expires: is not a block opener" \
+"entries:
+  - id: commentedexpiry
+    owner: someone
+    expires: 2099-01-01  # renew: |
+    evidence: prose" \
+  0 "0 malformed"
+
 run_case "control: a value containing a pipe is not a block opener" \
 "entries:
   - id: pipeinvalue
     owner: someone
-    expires: 2020-01-01
-    note: see foo | bar
-    evidence: expires: 2099-01-01" \
-  1 "EXPIRED"
+    expires: 2099-01-01  # see foo | bar
+    evidence: prose" \
+  0 "0 malformed"
 
-run_case "control: a URL value is not a block opener" \
+run_case "control: a URL in a trailing comment is not a block opener" \
 "entries:
   - id: urlvalue
     owner: someone
+    expires: 2099-01-01  # ref: https://example.com/a|b
+    evidence: prose" \
+  0 "0 malformed"
+
+# THE TRAILING COMMENT AS A BLOCKER, not just a control: `.*:` spans the whole
+# line, so a colon inside a `#` comment followed by the indicator read as a
+# header. The line then skipped the id/owner/expires capture entirely and a
+# VALID entry was reported `has no expires:` -- malformed, with its real expiry
+# never evaluated. Here the expiry is in the past, so the correct verdict names
+# it EXPIRED; before the fix it said `0 expired, 1 malformed`.
+run_case "a trailing comment does not hide the real expiry" \
+"entries:
+  - id: commentedreal
+    owner: someone
+    expires: 2020-01-01   # ver nota: |
+    evidence: prose" \
+  1 "1 expired"
+
+# A NON-ENTRY DASH AHEAD OF `entries:` MUST NOT SET THE BOUNDARY. The latch
+# took the indentation of the first dashed line ANYWHERE and then required
+# exact equality, so an ordinary metadata list latched the wrong column and no
+# boundary ever fired again -- the file collapsed into ONE entry with
+# last-assignment-wins, and the expired entry vanished: `1 entries checked,
+# 0 expired`, exit 0. Valid YAML that yaml.safe_load reads as two entries.
+# Reported by fd1az, whose fixture this is.
+run_case "a non-entry list before entries: is not the boundary" \
+"metadata:
+  owners:
+    - alice
+entries:
+  - id: x
+    owner: someone
     expires: 2020-01-01
-    ref: https://example.com/a|b
-    evidence: expires: 2099-01-01" \
-  1 "EXPIRED"
+  - id: y
+    owner: someone
+    expires: 2099-01-01" \
+  1 "2 entries checked, 1 expired"
 
 # THE CONTROL THE WIDENING NEEDS: a plain `key: value` must NOT be read as an
 # opener just because the key class got permissive. What makes a line an opener
