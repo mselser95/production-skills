@@ -94,9 +94,37 @@ for reg in "${registry_files[@]}"; do
   [[ -f "$reg" ]] || continue
   # One entry per `- id:`; read its id, owner and expires with a tiny state machine
   # rather than a YAML dependency — this must run before anything is installed.
-  id=""; owner=""; expires=""
+  id=""; owner=""; expires=""; in_entry=0
   flush() {
-    [[ -z "$id" ]] && return
+    if [[ -z "$id" ]]; then
+      # AN ENTRY WITH NO USABLE id IS REPORTED, NOT DISCARDED, and the reset
+      # happens on this path too. The bare `[[ -z "$id" ]] && return` got both
+      # wrong at once, and the second half is the one that bites:
+      #
+      #   - id:                      <- empty value
+      #     owner: "@ghost"
+      #     expires: 2099-12-31
+      #   - id: heir                 <- no owner, no expires
+      #
+      # Measured before this fix: `1 entries checked, 0 expired, 0 expiring,
+      # 0 malformed`. The first entry VANISHED -- never counted, never flagged
+      # -- and `heir` passed CLEAN, inheriting the 2099 expiry, because the
+      # early return skipped the reset at the bottom of this function. An entry
+      # the gate cannot see is an exemption with no owner and no expiry, which
+      # is the one thing these registries exist to make impossible. Found by
+      # fd1az on binance-marketdata#24.
+      #
+      # in_entry separates "no entry has started yet" -- the first `- ` line,
+      # and the call after the loop on an empty file -- from "an entry started
+      # and produced no id". Only the second is a finding.
+      if (( in_entry )); then
+        echo "MALFORMED  ${reg}: an entry has an empty or missing id: — it cannot be cited, renewed or attributed" >&2
+        total=$((total+1))
+        malformed=$((malformed+1))
+      fi
+      owner=""; expires=""; in_entry=0
+      return
+    fi
     total=$((total+1))
     # The header documents `{id, owner, created, expires, evidence}` but only
     # `expires` was enforced -- an entry with NO owner counted as clean and the
@@ -132,7 +160,7 @@ for reg in "${registry_files[@]}"; do
         soon=$((soon+1))
       fi
     fi
-    id=""; owner=""; expires=""
+    id=""; owner=""; expires=""; in_entry=0
   }
   while IFS= read -r line; do
     # A new entry starts at ANY top-level list-item dash ("- <key>: ..."),
@@ -143,6 +171,9 @@ for reg in "${registry_files[@]}"; do
     # entry with an empty id -- silently unenforced, key order dependent.
     if [[ "$line" =~ ^[[:space:]]*-[[:space:]] ]]; then
       flush
+      # AFTER the flush: this line opens a new entry, so from here on an empty
+      # id is a finding rather than "nothing has started yet".
+      in_entry=1
     fi
     # id/owner/expires are matched by an ANCHORED key regex (start of line,
     # optional leading "- ", then the exact key), not a bare substring —
