@@ -1639,7 +1639,148 @@ if [[ -d $wf ]]; then
 
   sc=$(grep -rl "secret-scan" $wf 2>/dev/null | wc -l | tr -d ' ')
   (( sc >= 2 )) && row "secret-scan-all-triggers" PASS "in $sc workflows" || row "secret-scan-all-triggers" FAIL "only $sc workflow(s) — PR-only is the known gap"
-  grep -rqi "sbom\|syft\|cyclonedx" $wf && row "sbom" PASS "SBOM step present" || row "sbom" FAIL "no SBOM"
+  # THIS ROW USED TO BE `grep -rqi "sbom\|syft\|cyclonedx" $wf`, i.e. it asked
+  # whether the WORD appears anywhere under .github/workflows. Measured on
+  # clcsolutions/binance-marketdata (PR #26): deleting BOTH the `sbom` and the
+  # `sbom-scan` jobs outright -- zero jobs left, only the explanatory comments
+  # that mention them -- left this row reading `PASS  SBOM step present`. Ten
+  # textual occurrences, no mechanism. Dropping `sbom` from `push`'s `needs`
+  # never moved it either. It is the "matched the text of the thing instead of
+  # the thing" shape, and it PASSed for weeks in a repo where the sbom job had
+  # never once succeeded.
+  #
+  # What it asserts now is the ORDERING that makes an SBOM possible at all:
+  # `image-push.yaml` ends by DELETING the shared image artifact to reclaim
+  # storage, and `sbom.yaml` READS that same artifact. A consumer that is not
+  # ordered before the deleter races a tarball that may already be gone -- the
+  # actual defect this repo shipped, where sbom started 13s after push had
+  # finished and found nothing.
+  #
+  # Fails CLOSED on a missing parser. An "I could not check" that renders as
+  # PASS is the failure mode this whole file exists to prevent, so an absent
+  # PyYAML is a FAIL that says so, never a skip.
+  sbom_v="$(WF="$wf" python3 - <<'PYSBOM' 2>/dev/null
+import os, sys, glob
+try:
+    import yaml
+except Exception:
+    print("FAIL|PyYAML unavailable on this runner -- the SBOM ordering invariant went UNCHECKED")
+    sys.exit(0)
+
+wf = os.environ["WF"]
+files = sorted(glob.glob(os.path.join(wf, "*.yml")) + glob.glob(os.path.join(wf, "*.yaml")))
+
+# Which reusable workflow touches WHICH artifact. Read from the sources at
+# clcsolutions/ci@main, not inferred from job names -- an earlier version of
+# this check listed sbom-scan.yaml as an image consumer and reported a defect
+# that does not exist:
+#
+#   sbom.yaml:52        downloads ${artifact-name}-image, uploads -sbom
+#   sbom-scan.yaml:80   downloads ${artifact-name}-sbom   <-- NOT the image
+#   image-push.yaml:55  downloads ${artifact-name}-image
+#   image-push.yaml:144 DELETES   ${artifact-name}-image
+#
+# So the ordering invariant binds `sbom` and `push`, and says nothing about
+# `sbom-scan`, which reads a different artifact entirely. Whether the deploy
+# should ALSO wait on the vulnerability scan is a policy question, not a race.
+#
+# LIMIT, stated rather than implied: this map is a SNAPSHOT. Swept
+# clcsolutions/ci@main 2026-08-24 -- image-push.yaml is the only reusable
+# workflow there that deletes an artifact (grepped all of image-push,
+# image-promote, release, go-docker-build, sbom, sbom-scan). A NEW deleting
+# workflow added later would be invisible to this row, which would then pass
+# while the defect it guards exists. The row is scoped per workflow FILE, which
+# is correct because artifacts are per-run: a job in pr.yaml cannot consume an
+# artifact a job in ci.yaml deleted.
+CONSUMES = {"sbom.yaml": "image", "image-push.yaml": "image", "sbom-scan.yaml": "sbom"}
+DELETES  = {"image-push.yaml": "image"}
+
+def as_list(n):
+    if n is None:
+        return []
+    return [n] if isinstance(n, str) else list(n)
+
+any_consumer = False
+any_deleter  = False
+problems, proven = [], []
+
+for f in files:
+    try:
+        doc = yaml.safe_load(open(f)) or {}
+    except Exception:
+        problems.append("%s is unparseable" % os.path.basename(f))
+        continue
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        continue
+
+    def uses(j):
+        b = jobs.get(j)
+        return b.get("uses", "") if isinstance(b, dict) else ""
+
+    def needs(j):
+        b = jobs.get(j)
+        return as_list(b.get("needs")) if isinstance(b, dict) else []
+
+    def wf_of(j):
+        u = uses(j)
+        for w in CONSUMES:
+            if w in u:
+                return w
+        return None
+
+    def artifact_name(j):
+        b = jobs.get(j)
+        w = (b.get("with") or {}) if isinstance(b, dict) else {}
+        return w.get("artifact-name")
+
+    # A job is a consumer of the SAME artifact only when both the suffix and
+    # the `artifact-name` input agree -- two images in one workflow must not
+    # cross-talk.
+    def kind(j):
+        w = wf_of(j)
+        return None if w is None else (CONSUMES[w], artifact_name(j))
+
+    sbom_jobs = [j for j in jobs if (wf_of(j) or "") == "sbom.yaml"]
+    any_consumer |= bool(sbom_jobs)
+
+    for d in jobs:
+        w = wf_of(d)
+        if w not in DELETES:
+            continue
+        any_deleter = True
+        gone = (DELETES[w], artifact_name(d))
+        seen, stack = set(), list(needs(d))
+        while stack:                                   # transitive: an edge via
+            x = stack.pop()                            # another job counts too
+            if x in seen:
+                continue
+            seen.add(x)
+            stack.extend(needs(x))
+        for c in jobs:
+            if c == d or kind(c) != gone:
+                continue
+            if c in seen:
+                proven.append("%s before %s" % (c, d))
+            else:
+                problems.append(
+                    "%s: '%s' downloads the %s artifact that '%s' DELETES, and is not in its needs"
+                    % (os.path.basename(f), c, gone[0], d))
+
+if not any_consumer:
+    print("FAIL|no job uses sbom.yaml -- the word may be in comments, the job is not there")
+elif problems:
+    print("FAIL|" + "; ".join(problems[:2]))
+elif not any_deleter:
+    print("PASS|SBOM job present; no artifact-deleting job in the graph to order against")
+else:
+    print("PASS|SBOM ordered before the artifact deleter (%s)" % ", ".join(sorted(set(proven))[:3]))
+PYSBOM
+)"
+  # An empty verdict means the heredoc itself failed to run (no python3 at all).
+  # Treat that as a FAIL for the same reason: unchecked is not passed.
+  [ -n "$sbom_v" ] || sbom_v="FAIL|python3 unavailable -- the SBOM ordering invariant went UNCHECKED"
+  row "sbom" "${sbom_v%%|*}" "${sbom_v#*|}"
   # Match only real attestation mechanisms, never the English word "provenance"
   # (it appears in benchmark baseline headers — that was a false PASS before).
   # Strip comments before matching: an earlier version PASSed on a comment
