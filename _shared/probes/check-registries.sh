@@ -232,7 +232,7 @@ for reg in "${registry_files[@]}"; do
   # The capture indices matter and are deliberately preserved: [1] is still the
   # whole prefix, [2] the `- `, [3] the key -- the block-column logic below
   # reads all three, and inserting a group before them would silently shift it.
-  blk_open_re='^([[:space:]]*(-[[:space:]]+)?)(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
+  blk_open_re='^([[:space:]]*(-[[:space:]]+)*)(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
   # `|| [ -n "$line" ]` KEEPS A FINAL LINE WITH NO TRAILING NEWLINE. `read`
   # returns non-zero when it hits EOF without a delimiter, so a file whose last
   # byte is not `\n` loses that line entirely -- and the last line of a

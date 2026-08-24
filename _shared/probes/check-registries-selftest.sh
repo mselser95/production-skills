@@ -751,6 +751,31 @@ run_case "a whole-line comment is not a block opener" \
 # key the body must beat the KEY's column (so a sibling ends the block), without
 # one it must beat the DASH's, and measuring past the dash made the fix a no-op.
 # Reported by agatticelli.
+# A NESTED SEQUENCE ITEM IS STILL A SEQUENCE ITEM. `(-[[:space:]]+)?` matched
+# exactly ONE dash, so `- - |` went unrecognised and its body was walked: the
+# prose `expires: 2099-01-01` replaced a real expiry from 2020, exit 0. Valid
+# YAML -- `yaml.safe_load` reads the evidence as [['expires: ...']]. Reported by
+# fd1az, who also confirmed the capture indices stay load-bearing under `*`.
+run_case "a nested sequence item is still a block" \
+"entries:
+  - id: nested
+    owner: someone
+    expires: 2020-01-01
+    evidence:
+      - - |
+          expires: 2099-01-01" \
+  1 "1 expired"
+
+run_case "a triply nested sequence item is still a block" \
+"entries:
+  - id: nested3
+    owner: someone
+    expires: 2020-01-01
+    evidence:
+      - - - |
+            expires: 2099-01-01" \
+  1 "1 expired"
+
 run_case "a block scalar as a sequence item is still a block" \
 "entries:
   - id: seqitem
