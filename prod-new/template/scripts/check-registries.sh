@@ -207,7 +207,16 @@ for reg in "${registry_files[@]}"; do
   # actually says. Verified NOT to over-match the plausible false positives:
   # `note: see foo | bar`, `url: https://x.com/a|b` and `plain: value` are all
   # rejected, because after the colon the indicator must be the last token.
-  blk_open_re='^([[:space:]]*(-[[:space:]]+)?).*:[[:space:]]*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
+  #
+  # THE COLON IS OPTIONAL, because YAML does not require it. The comment above
+  # used to say a block header is "anything, then a colon, then the indicator"
+  # and call that "what YAML actually says" -- it is not. A block scalar is
+  # also legal as a SEQUENCE ITEM (`- |`), with no key and no colon at all.
+  # Since the regex demanded one, that spelling went unrecognised, and by this
+  # file's own rule an unrecognised header is WALKED. Measured on an entry
+  # expired in 2020 whose evidence is a list of block scalars carrying a prose
+  # `expires: 2099-01-01`: exit 0, `0 expired`. Reported by agatticelli.
+  blk_open_re='^([[:space:]]*(-[[:space:]]+)?)(.*:[[:space:]]*)?[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
   while IFS= read -r line; do
     # A TAB IN THE INDENTATION IS A MALFORMED FILE, NOT A DEEPER COLUMN.
     #
@@ -350,10 +359,48 @@ for reg in "${registry_files[@]}"; do
     # ever truncates a line that was not an opener to begin with. The cut is
     # used for the TEST only -- `$line` itself is untouched, because the body
     # of a literal block keeps its `#` characters verbatim.
+    # A LINE THAT IS ENTIRELY A COMMENT IS NEVER AN OPENER, and this is the
+    # third over-match the widened key found. `.*` before the colon accepts
+    # anything -- including a `#` -- so
+    #
+    #   # see: |
+    #
+    # matched, and at column 0 it set `blk_indent=""`, which swallows every
+    # following indented line as block body: the rest of the FILE. Measured on
+    # valid YAML with two entries, one expired in 2020:
+    #
+    #   parent      -> exit 1, `2 entries checked, 1 expired`
+    #   with the widening -> exit 0, `1 entries checked, 0 expired`
+    #
+    # The trailing-comment strip below does not catch it: that cuts at a `#`
+    # preceded by whitespace, and a line that STARTS with `#` has none.
+    # Reported by agatticelli.
+    if [[ "$line" =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
     _uncommented="$line"
     if [[ "$_uncommented" =~ ^(.*[[:space:]])#.*$ ]]; then _uncommented="${BASH_REMATCH[1]}"; fi
     if [[ "$_uncommented" =~ $blk_open_re ]]; then
-        blk_indent="${BASH_REMATCH[1]}"; in_blk=1
+        # WHICH COLUMN THE BODY MUST BEAT depends on whether the header has a
+        # key, and getting it wrong makes the fix for `- |` do nothing.
+        #
+        #   `  - evidence: |`  the body must beat the KEY's column (4), because
+        #                      a sibling `    owner:` at 4 has to END the block;
+        #                      measuring from the dash (2) would swallow it.
+        #   `      - |`        there is no key, so the body must beat the DASH's
+        #                      column (6). Measuring from past the dash (8) puts
+        #                      a body at 8 level with the header, the block ends
+        #                      immediately, and its prose is walked as keys --
+        #                      which is exactly the fail-open this is closing.
+        #
+        # [1] is the whole prefix, [2] is the `- ` (empty when there is none)
+        # and [3] is the key (empty for a bare sequence item).
+        if [[ -z "${BASH_REMATCH[3]}" && -n "${BASH_REMATCH[2]}" ]]; then
+          blk_indent="${BASH_REMATCH[1]%"${BASH_REMATCH[2]}"}"
+        else
+          blk_indent="${BASH_REMATCH[1]}"
+        fi
+        in_blk=1
         continue
       fi
     # id/owner/expires are matched by an ANCHORED key regex (start of line,

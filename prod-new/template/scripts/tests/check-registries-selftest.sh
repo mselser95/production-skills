@@ -509,6 +509,59 @@ run_case "a trailing comment does not hide the real expiry" \
     evidence: prose" \
   1 "1 expired"
 
+# A LINE THAT IS ENTIRELY A COMMENT IS NEVER AN OPENER. `.*` before the colon
+# accepts anything, including a `#`, so `# see: |` matched -- and at column 0 it
+# set the block indent to "", which swallows every following indented line as
+# body: the rest of the FILE. The trailing-comment strip does not catch it,
+# because that cuts at a `#` preceded by whitespace and this line starts with
+# one. Measured: exit 0, `1 entries checked`, against the parent's exit 1 and
+# `2 entries, 1 expired`. Reported by agatticelli.
+run_case "a whole-line comment is not a block opener" \
+"entries:
+  - id: uno
+    owner: someone
+    expires: 2099-01-01
+# see: |
+  - id: dos
+    owner: x
+    expires: 2020-01-01" \
+  1 "2 entries checked, 1 expired"
+
+# THE COLON IS OPTIONAL: YAML allows a block scalar as a SEQUENCE ITEM, with no
+# key and no colon. The opener demanded one, so `- |` went unrecognised -- and
+# an unrecognised header is WALKED, so the prose `expires: 2099-01-01` inside it
+# replaced a real expiry from 2020. The header's own column matters here: with a
+# key the body must beat the KEY's column (so a sibling ends the block), without
+# one it must beat the DASH's, and measuring past the dash made the fix a no-op.
+# Reported by agatticelli.
+run_case "a block scalar as a sequence item is still a block" \
+"entries:
+  - id: seqitem
+    owner: someone
+    expires: 2020-01-01
+    notes:
+      - |
+        expires: 2099-01-01
+        owner: nadie" \
+  1 "1 expired"
+
+# THE CONTROL THAT PAIRS WITH IT: with a KEY, a sibling at the entry's own
+# indent must still END the block. If the body column were taken from the dash
+# in that case too, `owner:` and `expires:` would be swallowed as prose.
+# The opener carries a dash AND a key on purpose. A version that measured from
+# the DASH in that case too would put the sibling `owner:`/`expires:` lines
+# inside the block and never read the expiry -- and a fixture whose opener has
+# no dash cannot see that, because the branch never runs. First attempt at this
+# control had exactly that hole and stayed green under the mutation.
+run_case "control: a dashed AND keyed block still ends at the next sibling" \
+"entries:
+  - evidence: |
+      some prose
+    id: dashkeyed
+    owner: someone
+    expires: 2020-01-01" \
+  1 "1 expired"
+
 # A NON-ENTRY DASH AHEAD OF `entries:` MUST NOT SET THE BOUNDARY. The latch
 # took the indentation of the first dashed line ANYWHERE and then required
 # exact equality, so an ordinary metadata list latched the wrong column and no
