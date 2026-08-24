@@ -35,6 +35,12 @@ mirrors=(
   # compares a copy to a source, and there was no source.
   "prod-new/template/scripts/check-registries.sh:_shared/probes/check-registries.sh"
   "prod-new/template/scripts/tests/check-registries-selftest.sh:_shared/probes/check-registries-selftest.sh"
+  # ADDED WITH THE ROW IT COVERS. The sbom ordering selftest lifts the probe's
+  # program out by its PYSBOM marker, so a template copy that drifts from
+  # _shared would extract a marker that no longer exists -- and the selftest
+  # would refuse to run in every repo prod-new scaffolds, which is the loud
+  # failure, but only because it was built to refuse. Mirror it anyway.
+  "prod-new/template/scripts/tests/sbom-ordering-selftest.sh:_shared/probes/sbom-ordering-selftest.sh"
 )
 
 synced=0

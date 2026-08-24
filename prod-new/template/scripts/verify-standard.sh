@@ -1678,14 +1678,14 @@ if [[ -d $wf ]]; then
   #
   # Fails CLOSED on a missing parser. An "I could not check" that renders as
   # PASS is the failure mode this whole file exists to prevent.
-  if command -v yq >/dev/null 2>&1; then
-    sbom_v="$(
-      for _f in "$wf"/*.yml "$wf"/*.yaml; do
-        [ -e "$_f" ] || continue
-        printf '%s\t' "$(basename "$_f")"
-        yq -o=json -I=0 '[.jobs // {} | to_entries[] | {"job": .key, "uses": (.value.uses // ""), "needs": (.value.needs // []), "art": (.value.with."artifact-name" // "")}]' "$_f" 2>/dev/null || printf 'PARSE_ERROR'
-        printf '\n'
-      done | python3 -c '
+  # THE PROGRAM LIVES IN A MARKED HEREDOC so the selftest can lift it out and
+  # run it over scratch fixtures instead of restating its logic -- the same
+  # shape `non-vacuity-selftest.sh` already uses for the PYNV block, and for the
+  # same reason: a selftest that reimplements the parser tests the copy, not the
+  # thing that runs. It is assigned to a variable rather than piped directly so
+  # stdin stays free for the yq output the program actually reads.
+  _sbom_py="$(cat <<'PYSBOM'
+
 import sys, json
 
 # Which reusable workflow touches WHICH artifact. Read from the sources at
@@ -1793,7 +1793,16 @@ elif not proven:
     print("FAIL|an artifact-deleting job exists but nothing was proven ordered before it -- no evidence to report")
 else:
     print("PASS|SBOM ordered before the artifact deleter (%s)" % ", ".join(sorted(set(proven))[:3]))
-'
+PYSBOM
+)"
+  if command -v yq >/dev/null 2>&1; then
+    sbom_v="$(
+      for _f in "$wf"/*.yml "$wf"/*.yaml; do
+        [ -e "$_f" ] || continue
+        printf '%s\t' "$(basename "$_f")"
+        yq -o=json -I=0 '[.jobs // {} | to_entries[] | {"job": .key, "uses": (.value.uses // ""), "needs": (.value.needs // []), "art": (.value.with."artifact-name" // "")}]' "$_f" 2>/dev/null || printf 'PARSE_ERROR'
+        printf '\n'
+      done | python3 -c "$_sbom_py"
     )"
   else
     sbom_v="FAIL|yq not installed -- the SBOM ordering invariant went UNCHECKED (pin it with go install github.com/mikefarah/yq/v4, as this job already does for actionlint)"
