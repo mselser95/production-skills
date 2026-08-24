@@ -338,6 +338,29 @@ run_case "control: the indentation indicator first still works" \
       expires: 2099-01-01" \
   1 "EXPIRED"
 
+# THE BOUNDARY COVERAGE WAS ONE-DIRECTIONAL, AND THIS IS THE FIXTURE IT LACKED.
+#
+# Mutating the `seq_indent` latch's `==` to `!=` was caught, but `== -> true`
+# and deleting the latch outright BOTH stayed green: no fixture here contained a
+# NESTED PLAIN LIST, so every dashed line already sat at the sequence's own
+# indent and the comparison could not distinguish "at the level" from "any dash
+# at all". Reported by agatticelli on binance-marketdata#24.
+#
+# The nested list comes BEFORE the `id:` on purpose. With the latch working this
+# is one entry, unexpired, 0 malformed, exit 0. With every dash treated as a
+# boundary the `- alpha`/`- beta` lines flush id-less entries first, so the file
+# becomes 3 entries / 2 malformed and the verdict FLIPS -- which is what makes
+# this case bidirectional where the old ones only moved the reason.
+run_case "a nested plain list is not an entry boundary" \
+"entries:
+  - tags:
+      - alpha
+      - beta
+    id: solo
+    owner: someone
+    expires: 2099-01-01" \
+  0 "0 malformed"
+
 run_case "a registry file with NO entries fails closed" \
 '# a comment and nothing else
 ' \
