@@ -315,6 +315,29 @@ run_case "a block scalar ends at dedent, so later entries are still read" \
     expires: 2020-01-01" \
   1 "EXPIRED"
 
+# BOTH ORDERS OF THE BLOCK INDICATORS. YAML 1.2 allows chomping and indentation
+# either way round, and `[0-9]*[+-]?` accepted only one: `|+2` fell through as an
+# ordinary key line and its body was walked as keys, so this exact entry exited
+# 0. The `|2+` twin is the control -- it passed before and must keep passing.
+# Reported by agatticelli on kraken-marketdata#11.
+run_case "a chomping indicator before the indentation one is still a block" \
+"entries:
+  - id: chomp-first
+    owner: someone
+    expires: 2020-01-01
+    evidence: |+2
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "control: the indentation indicator first still works" \
+"entries:
+  - id: indent-first
+    owner: someone
+    expires: 2020-01-01
+    evidence: |2+
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
 run_case "a registry file with NO entries fails closed" \
 '# a comment and nothing else
 ' \
