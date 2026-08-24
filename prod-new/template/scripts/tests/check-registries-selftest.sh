@@ -509,6 +509,117 @@ run_case "a trailing comment does not hide the real expiry" \
     evidence: prose" \
   1 "1 expired"
 
+# THE MANDATORY `owner` GUARD HAD NO CASE OF ITS OWN.
+# Three selftest expansions went by and the branch that refuses an entry with no
+# `owner:` was never driven directly -- every fixture carried one, so deleting
+# the guard left the whole file green. Reported by agatticelli. The control is
+# the same entry WITH an owner: the guard has to reject one and accept the
+# other, or it is a checker that always fails rather than one that checks.
+run_case "an entry with no owner is malformed" \
+"entries:
+  - id: sin-dueno
+    expires: 2099-01-01" \
+  1 "owner"
+
+run_case "control: the same entry with an owner passes" \
+"entries:
+  - id: con-dueno
+    owner: someone
+    expires: 2099-01-01" \
+  0 "0 malformed"
+
+# THE `in_blk` HALF, WHICH HAD NO CASE. A block opened at COLUMN 0 gives an
+# empty BASH_REMATCH[1], and the old `[[ -n "$blk_indent" ]]` test could not
+# tell that from "no block open" -- so a top-level `notes: |` body was walked as
+# keys and its `expires:` overwrote the pending entry. Reverting `in_blk` alone
+# left every other case in this file green. Reported by agatticelli.
+run_case "a block opened at column 0 is entered, not walked as keys" \
+"entries:
+  - id: solo
+    owner: someone
+    expires: 2020-01-01
+notes: |
+  expires: 2099-01-01" \
+  1 "EXPIRED"
+
+# THE `.yml` HALF OF THE GLOB HAD NO CASE AT ALL.
+#
+# registry_files globs BOTH `*.yaml` and `*.yml`, and every fixture in this file
+# was written as `.yaml` -- so deleting the `.yml` arm left the suite green
+# while every registry written with the short extension silently stopped being
+# checked. Reported by agatticelli. run_case writes `fixture.yaml`, so this one
+# builds its own directory to control the extension.
+_ymlcase() {
+  _d="$(mktemp -d)"
+  printf '%s\n' "entries:
+  - id: short-extension
+    owner: someone
+    expires: 2020-01-01" > "${_d}/waiver.yml"
+  # set +e around the call, exactly like run_case: under `set -e` a command
+  # substitution that exits non-zero aborts the script BEFORE $? is read, so the
+  # case that expects a non-zero exit kills the suite instead of reporting.
+  set +e
+  _out="$(REGISTRIES_DIR="${_d}" bash "$SCRIPT" 2>&1)"; _rc=$?
+  set -e
+  rm -rf "$_d"
+  if [ "$_rc" -eq 1 ] && [ "${_out#*EXPIRED}" != "$_out" ]; then
+    echo "  ok   a registry written as .yml is checked like a .yaml"
+  else
+    echo "  FAIL a registry written as .yml is checked like a .yaml — exit ${_rc}, output: ${_out}" >&2
+    fails=$((fails+1))
+  fi
+}
+_ymlcase
+
+# A SEQUENCE AT COLUMN 0 IS STILL THE ENTRIES LIST. YAML lets a sequence sit at
+# the same indentation as the key that owns it, and that is not a corner case:
+# it is what `yaml.dump(default_flow_style=False)`, `yq` and `js-yaml` emit. The
+# entries-block guard read the first `- id:` as "another top-level key", closed
+# the list on the very first entry, and never fired again -- exit 0,
+# `1 entries checked, 0 expired`, on a file whose second entry expired in 2020.
+# Reported by fd1az; the third time closing one fail-open opened another, and
+# the first that triggers on the standard serializer's own output.
+run_case "a sequence at column 0 is still the entries list" \
+"entries:
+- id: expired-one
+  owner: someone
+  expires: 2020-01-01
+- id: fine
+  owner: someone
+  expires: 2099-01-01" \
+  1 "2 entries checked, 1 expired"
+
+# NODE PROPERTIES SIT BETWEEN THE COLON AND THE INDICATOR. A block scalar is a
+# node, so it may carry an anchor, a tag, or both. All three parse; all three
+# went unrecognised, because the opener allowed only whitespace after the colon
+# and the property occupies exactly the indicator's position. Reported by fd1az.
+run_case "an anchor before the indicator still opens a block" \
+"entries:
+  - id: anchored
+    owner: someone
+    expires: 2020-01-01
+    evidence: &ancla |
+      expires: 2099-01-01" \
+  1 "1 expired"
+
+run_case "a tag before the indicator still opens a block" \
+"entries:
+  - id: tagged
+    owner: someone
+    expires: 2020-01-01
+    evidence: !!str |
+      expires: 2099-01-01" \
+  1 "1 expired"
+
+run_case "an anchor AND a tag still open a block" \
+"entries:
+  - id: both
+    owner: someone
+    expires: 2020-01-01
+    evidence: &a !!str |
+      expires: 2099-01-01" \
+  1 "1 expired"
+
 # A TOP-LEVEL BLOCK OPENS AT COLUMN 0, so its indent IS the empty string.
 # `in_blk` exists as its own flag rather than `[[ -n "$blk_indent" ]]` for that
 # reason: overloading empty as "no block" would leave that body walked as keys.

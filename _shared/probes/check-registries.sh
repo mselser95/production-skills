@@ -216,7 +216,23 @@ for reg in "${registry_files[@]}"; do
   # file's own rule an unrecognised header is WALKED. Measured on an entry
   # expired in 2020 whose evidence is a list of block scalars carrying a prose
   # `expires: 2099-01-01`: exit 0, `0 expired`. Reported by agatticelli.
-  blk_open_re='^([[:space:]]*(-[[:space:]]+)?)(.*:[[:space:]]*)?[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
+  #
+  # NODE PROPERTIES SIT BETWEEN THE COLON AND THE INDICATOR. YAML lets a node
+  # carry an anchor and/or a tag before its content, and a block scalar is a
+  # node like any other:
+  #
+  #   evidence: &ancla |        evidence: !!str |        evidence: &a !!str |
+  #
+  # All three parse, and all three went unrecognised because the keyed branch
+  # allowed only whitespace after the colon -- so the property sat exactly where
+  # the indicator had to be. Measured on an entry expired in 2020 whose block
+  # carries a prose `expires: 2099-01-01`: exit 0, `0 expired`, all three.
+  # Reported by fd1az.
+  #
+  # The capture indices matter and are deliberately preserved: [1] is still the
+  # whole prefix, [2] the `- `, [3] the key -- the block-column logic below
+  # reads all three, and inserting a group before them would silently shift it.
+  blk_open_re='^([[:space:]]*(-[[:space:]]+)?)(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
   while IFS= read -r line; do
     # A TAB IN THE INDENTATION IS A MALFORMED FILE, NOT A DEEPER COLUMN.
     #
@@ -306,7 +322,24 @@ for reg in "${registry_files[@]}"; do
     # IT SITS, so track the block instead of guessing from indentation.
     if [[ "$line" =~ ^entries:[[:space:]]*(#.*)?$ ]]; then
       in_entries=1
-    elif [[ "$line" =~ ^[^[:space:]#] ]]; then
+    elif [[ "$line" =~ ^[^[:space:]#] ]] && ! [[ "$line" =~ ^-([[:space:]]|$) ]]; then
+      # A SEQUENCE ITEM AT COLUMN 0 IS NOT "ANOTHER TOP-LEVEL KEY". YAML lets a
+      # sequence sit at the same indentation as the key that owns it, and that
+      # is not exotic -- it is what `yaml.dump(default_flow_style=False)`,
+      # `yq` and `js-yaml` all emit:
+      #
+      #   entries:
+      #   - id: expired-one
+      #     expires: 2020-01-01
+      #   - id: fine
+      #     expires: 2099-01-01
+      #
+      # Without the exclusion the FIRST `- id:` matched `^[^[:space:]#]`, closed
+      # the entries list on the very first entry, and the guard below never
+      # fired again: exit 0, `1 entries checked, 0 expired`, against the
+      # pre-guard parser's exit 1 and `2 entries, 1 expired`. Reported by
+      # fd1az -- the third time closing one fail-open opened another, and the
+      # first that triggers on the output of the standard serializer.
       # any other top-level key ends the list; close the open entry with it
       if (( in_entries )); then flush; fi
       in_entries=0
