@@ -1667,36 +1667,26 @@ if [[ -d $wf ]]; then
 
   sc=$(grep -rl "secret-scan" $wf 2>/dev/null | wc -l | tr -d ' ')
   (( sc >= 2 )) && row "secret-scan-all-triggers" PASS "in $sc workflows" || row "secret-scan-all-triggers" FAIL "only $sc workflow(s) — PR-only is the known gap"
-  # THIS ROW USED TO BE `grep -rqi "sbom\|syft\|cyclonedx" $wf`, i.e. it asked
-  # whether the WORD appears anywhere under .github/workflows. Measured on
-  # clcsolutions/binance-marketdata (PR #26): deleting BOTH the `sbom` and the
-  # `sbom-scan` jobs outright -- zero jobs left, only the explanatory comments
-  # that mention them -- left this row reading `PASS  SBOM step present`. Ten
-  # textual occurrences, no mechanism. Dropping `sbom` from `push`'s `needs`
-  # never moved it either. It is the "matched the text of the thing instead of
-  # the thing" shape, and it PASSed for weeks in a repo where the sbom job had
-  # never once succeeded.
-  #
-  # What it asserts now is the ORDERING that makes an SBOM possible at all:
-  # `image-push.yaml` ends by DELETING the shared image artifact to reclaim
-  # storage, and `sbom.yaml` READS that same artifact. A consumer that is not
-  # ordered before the deleter races a tarball that may already be gone -- the
-  # actual defect this repo shipped, where sbom started 13s after push had
-  # finished and found nothing.
+  # PARSED BY yq, NOT BY A REGEX, and not by PyYAML either. Measured on
+  # clc-ci-medium (binance-marketdata#26, job 97552813207): the runner has no
+  # PyYAML, so the first version of this row reported
+  # `FAIL  PyYAML unavailable ... went UNCHECKED` -- correct behaviour, and
+  # useless as a gate. `yq` is a Go binary pinned and installed by the same
+  # `go install ...@version` step that already brings actionlint and
+  # govulncheck into this job, so it costs no new kind of dependency. The
+  # LOGIC then runs on python3 + the `json` stdlib, which is always present.
   #
   # Fails CLOSED on a missing parser. An "I could not check" that renders as
-  # PASS is the failure mode this whole file exists to prevent, so an absent
-  # PyYAML is a FAIL that says so, never a skip.
-  sbom_v="$(WF="$wf" python3 - <<'PYSBOM' 2>/dev/null
-import os, sys, glob
-try:
-    import yaml
-except Exception:
-    print("FAIL|PyYAML unavailable on this runner -- the SBOM ordering invariant went UNCHECKED")
-    sys.exit(0)
-
-wf = os.environ["WF"]
-files = sorted(glob.glob(os.path.join(wf, "*.yml")) + glob.glob(os.path.join(wf, "*.yaml")))
+  # PASS is the failure mode this whole file exists to prevent.
+  if command -v yq >/dev/null 2>&1; then
+    sbom_v="$(
+      for _f in "$wf"/*.yml "$wf"/*.yaml; do
+        [ -e "$_f" ] || continue
+        printf '%s\t' "$(basename "$_f")"
+        yq -o=json -I=0 '[.jobs // {} | to_entries[] | {"job": .key, "uses": (.value.uses // ""), "needs": (.value.needs // []), "art": (.value.with."artifact-name" // "")}]' "$_f" 2>/dev/null || printf 'PARSE_ERROR'
+        printf '\n'
+      done | python3 -c '
+import sys, json
 
 # Which reusable workflow touches WHICH artifact. Read from the sources at
 # clcsolutions/ci@main, not inferred from job names -- an earlier version of
@@ -1716,84 +1706,82 @@ files = sorted(glob.glob(os.path.join(wf, "*.yml")) + glob.glob(os.path.join(wf,
 # clcsolutions/ci@main 2026-08-24 -- image-push.yaml is the only reusable
 # workflow there that deletes an artifact (grepped all of image-push,
 # image-promote, release, go-docker-build, sbom, sbom-scan). A NEW deleting
-# workflow added later would be invisible to this row, which would then pass
-# while the defect it guards exists. The row is scoped per workflow FILE, which
-# is correct because artifacts are per-run: a job in pr.yaml cannot consume an
-# artifact a job in ci.yaml deleted.
+# workflow added later would be invisible to this row. The row is scoped per
+# workflow FILE, which is correct because artifacts are per-run: a job in
+# pr.yaml cannot consume an artifact a job in ci.yaml deleted.
 CONSUMES = {"sbom.yaml": "image", "image-push.yaml": "image", "sbom-scan.yaml": "sbom"}
 DELETES  = {"image-push.yaml": "image"}
-
-def as_list(n):
-    if n is None:
-        return []
-    return [n] if isinstance(n, str) else list(n)
 
 any_consumer = False
 any_deleter  = False
 problems, proven = [], []
 
-for f in files:
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    if not raw or "\t" not in raw:
+        continue
+    fname, payload = raw.split("\t", 1)
+    if payload.strip() == "PARSE_ERROR" or not payload.strip():
+        problems.append("%s is unparseable" % fname)
+        continue
     try:
-        doc = yaml.safe_load(open(f)) or {}
+        jobs = {j["job"]: j for j in json.loads(payload)}
     except Exception:
-        problems.append("%s is unparseable" % os.path.basename(f))
-        continue
-    jobs = doc.get("jobs")
-    if not isinstance(jobs, dict):
+        problems.append("%s is unparseable" % fname)
         continue
 
-    def uses(j):
-        b = jobs.get(j)
-        return b.get("uses", "") if isinstance(b, dict) else ""
-
-    def needs(j):
-        b = jobs.get(j)
-        return as_list(b.get("needs")) if isinstance(b, dict) else []
-
-    def wf_of(j):
-        u = uses(j)
+    def wf_of(name):
+        u = jobs[name].get("uses") or ""
         for w in CONSUMES:
             if w in u:
                 return w
         return None
 
-    def artifact_name(j):
-        b = jobs.get(j)
-        w = (b.get("with") or {}) if isinstance(b, dict) else {}
-        return w.get("artifact-name")
+    def needs(name):
+        n = jobs[name].get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
 
-    # A job is a consumer of the SAME artifact only when both the suffix and
-    # the `artifact-name` input agree -- two images in one workflow must not
-    # cross-talk.
-    def kind(j):
-        w = wf_of(j)
-        return None if w is None else (CONSUMES[w], artifact_name(j))
+    def kind(name):
+        w = wf_of(name)
+        return None if w is None else (CONSUMES[w], jobs[name].get("art") or "")
 
-    sbom_jobs = [j for j in jobs if (wf_of(j) or "") == "sbom.yaml"]
-    any_consumer |= bool(sbom_jobs)
+    any_consumer |= any((wf_of(n) or "") == "sbom.yaml" for n in jobs)
 
     for d in jobs:
         w = wf_of(d)
         if w not in DELETES:
             continue
         any_deleter = True
-        gone = (DELETES[w], artifact_name(d))
+        gone = (DELETES[w], jobs[d].get("art") or "")
         seen, stack = set(), list(needs(d))
         while stack:                                   # transitive: an edge via
             x = stack.pop()                            # another job counts too
-            if x in seen:
+            if x in seen or x not in jobs:
                 continue
             seen.add(x)
             stack.extend(needs(x))
-        for c in jobs:
-            if c == d or kind(c) != gone:
-                continue
+        # THE SET BEFORE ITS MEMBERS. Checking "every consumer is ordered before
+        # the deleter" says nothing when there are NO consumers: an empty set
+        # satisfies the claim, so this row reached its PASS branch with an empty
+        # `proven` and printed `PASS  SBOM ordered before the artifact deleter ()`
+        # -- certifying ordering on a lane with no sbom job at all, while push
+        # still deleted the image and shipped it to DOCR. Reported by agatticelli
+        # and escalated by fd1az on binance-marketdata#26, and it is the same
+        # shape as the textual row this check replaced: green over a measurement
+        # it never made.
+        same = [c for c in jobs if c != d and kind(c) == gone]
+        if not same:
+            problems.append(
+                "%s: %r deletes the %s artifact and ships it, but NO job in this workflow reads it -- nothing inventories what is deployed"
+                % (fname, d, gone[0]))
+            continue
+        for c in same:
             if c in seen:
                 proven.append("%s before %s" % (c, d))
             else:
                 problems.append(
-                    "%s: '%s' downloads the %s artifact that '%s' DELETES, and is not in its needs"
-                    % (os.path.basename(f), c, gone[0], d))
+                    "%s: %r downloads the %s artifact that %r DELETES, and is not in its needs"
+                    % (fname, c, gone[0], d))
 
 if not any_consumer:
     print("FAIL|no job uses sbom.yaml -- the word may be in comments, the job is not there")
@@ -1801,13 +1789,18 @@ elif problems:
     print("FAIL|" + "; ".join(problems[:2]))
 elif not any_deleter:
     print("PASS|SBOM job present; no artifact-deleting job in the graph to order against")
+elif not proven:
+    print("FAIL|an artifact-deleting job exists but nothing was proven ordered before it -- no evidence to report")
 else:
     print("PASS|SBOM ordered before the artifact deleter (%s)" % ", ".join(sorted(set(proven))[:3]))
-PYSBOM
-)"
-  # An empty verdict means the heredoc itself failed to run (no python3 at all).
-  # Treat that as a FAIL for the same reason: unchecked is not passed.
-  [ -n "$sbom_v" ] || sbom_v="FAIL|python3 unavailable -- the SBOM ordering invariant went UNCHECKED"
+'
+    )"
+  else
+    sbom_v="FAIL|yq not installed -- the SBOM ordering invariant went UNCHECKED (pin it with go install github.com/mikefarah/yq/v4, as this job already does for actionlint)"
+  fi
+  # An empty verdict means the pipeline itself failed to run. Treat that as a
+  # FAIL for the same reason: unchecked is not passed.
+  [ -n "$sbom_v" ] || sbom_v="FAIL|the sbom probe produced no verdict -- the ordering invariant went UNCHECKED"
   row "sbom" "${sbom_v%%|*}" "${sbom_v#*|}"
   # Match only real attestation mechanisms, never the English word "provenance"
   # (it appears in benchmark baseline headers — that was a false PASS before).
