@@ -258,7 +258,12 @@ for reg in "${registry_files[@]}"; do
     # obvious to whoever hits it; the alternative error is a waiver that
     # expired years ago exiting 0.
     if [[ "$line" == *$'\t'* && "$line" =~ ^[[:space:]]*$'\t' ]]; then
-      echo "MALFORMED  ${reg}: tab used for indentation (YAML forbids it); the line is: ${line}"
+      # >&2 LIKE EVERY OTHER DIAGNOSTIC. This was the only one on stdout, where
+      # stdout carries the machine-readable summary and stderr carries the
+      # findings -- so a consumer reading stderr, which is where this script
+      # puts everything it wants a human to act on, would not see it at all.
+      # Reported by fd1az.
+      echo "MALFORMED  ${reg}: tab used for indentation (YAML forbids it); the line is: ${line}" >&2
       malformed=$((malformed+1))
       continue
     fi
