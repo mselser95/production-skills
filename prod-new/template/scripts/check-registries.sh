@@ -189,8 +189,53 @@ for reg in "${registry_files[@]}"; do
   # Reported by agatticelli (:191/:193) and independently by fd1az (:201).
   blk_indent=""
   in_blk=0
-  blk_open_re='^([[:space:]]*(-[[:space:]]+)?)[^:[:space:]]+:[[:space:]]*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
+  # PERMISSIVE ON PURPOSE, and this is the third widening -- which is the
+  # argument for stopping the enumeration entirely.
+  #
+  # Every previous version named the shapes a key may take, and every one of
+  # them fails OPEN on a shape nobody thought of: an unrecognised header is not
+  # skipped, it is WALKED, so its prose is read as keys and a body line reading
+  # `expires: 2099-01-01` REPLACES the real expiry (last assignment wins) and an
+  # expired waiver exits 0. The list of spellings that defeated the previous
+  # classes, each measured: `2fa_evidence:` (leading digit), `ops/evidence:`
+  # (slash), `"evidence":` and `'evidence':` (quoted), then `ops evidence:`,
+  # `"ops evidence":` and `"a:b":` (whitespace and a colon INSIDE a quoted key).
+  #
+  # So the key half stops being an allowlist. A block header is "anything, then
+  # a colon, then the indicator, then end of line" -- which is what YAML
+  # actually says. Verified NOT to over-match the plausible false positives:
+  # `note: see foo | bar`, `url: https://x.com/a|b` and `plain: value` are all
+  # rejected, because after the colon the indicator must be the last token.
+  blk_open_re='^([[:space:]]*(-[[:space:]]+)?).*:[[:space:]]*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
   while IFS= read -r line; do
+    # A TAB IN THE INDENTATION IS A MALFORMED FILE, NOT A DEEPER COLUMN.
+    #
+    # YAML excludes tabs from indentation outright, so this is not a style
+    # rule. It has to be handled here because the block-body test below
+    # compares indent WIDTHS in characters: a tab counts as one character but
+    # stands for a deeper column, so a tab-indented body measures as NARROWER
+    # than the key that opened it, ends the block early, and its prose is read
+    # as keys again -- measured exit 0, "0 expired", on a live expired waiver.
+    # Reported by agatticelli.
+    #
+    # Rejecting is the honest fix. Expanding tabs would mean inventing a tab
+    # width the format does not define, and any width chosen is a guess that
+    # decides whether a waiver is enforced.
+    #
+    # KNOWN OVER-REJECTION, stated rather than discovered later. The test is
+    # "the run of leading whitespace contains a tab", which also catches a
+    # block-scalar CONTENT line whose first character after a space indent is a
+    # tab -- there the tab is content and the file is legal. Measured both
+    # sides: `      col1<TAB>col2` is NOT flagged (the tab follows a non-space,
+    # so it is plainly content), `      <TAB>sangrado` IS. That is the
+    # fail-CLOSED direction and the message names the exact line, so the fix is
+    # obvious to whoever hits it; the alternative error is a waiver that
+    # expired years ago exiting 0.
+    if [[ "$line" == *$'\t'* && "$line" =~ ^[[:space:]]*$'\t' ]]; then
+      echo "MALFORMED  ${reg}: tab used for indentation (YAML forbids it); the line is: ${line}"
+      malformed=$((malformed+1))
+      continue
+    fi
     # Inside a block: blank lines stay in, and so does anything indented deeper
     # than the key that opened it. The first line at or left of that column
     # ends the block and is re-examined as structure below.
@@ -291,7 +336,19 @@ if (( expired > 0 || malformed > 0 )); then
     echo "(--warn: reporting only. Remove --warn to make expiry gate the build.)"
     exit 0
   fi
-  echo "An expired waiver is a silent permanent exemption. Renew it with a reason, or meet the obligation." >&2
+  # SAY WHICH OF THE TWO FIRED. This branch is `expired > 0 || malformed > 0`
+  # and it printed the expiry sentence either way, so a run that failed purely
+  # on a malformed file reported a reason that had not happened. That was
+  # tolerable while malformed was rare; the tab guard above makes
+  # malformed-only a routine outcome, so the message would now be wrong more
+  # often than right. A gate that names the wrong cause is one people learn to
+  # read past.
+  if (( expired > 0 )); then
+    echo "An expired waiver is a silent permanent exemption. Renew it with a reason, or meet the obligation." >&2
+  fi
+  if (( malformed > 0 )); then
+    echo "A malformed entry is an unenforceable one: the parser could not read its expiry, so nothing gates it." >&2
+  fi
   exit 1
 fi
 exit 0

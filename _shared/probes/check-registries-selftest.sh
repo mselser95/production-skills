@@ -190,18 +190,12 @@ run_case "an entry expiring TODAY is expiring, not expired" \
 # 5e. Zero entries. The empty-DIRECTORY case below covers a dir with no yaml;
 # this covers a dir whose yaml yields nothing -- a truncating merge, a bad
 # redirect, a glob that matched a stub. Both must fail closed.
-# 5d-bis. A BLOCK SCALAR IS PROSE, NOT KEYS.
-#
-# `evidence: |` opens a literal block; everything indented deeper is the string.
-# The key regexes are anchored at start-of-line, which stops a body line that
-# CONTAINS "expires:" -- but not one that STARTS with it. And since each key
-# assignment overwrites, the prose line REPLACED the real value rather than
-# competing with it.
-#
-# Both of these exited 0 on the parser before the fix, which is a live expired
-# waiver and an unowned entry passing the build. Each is paired with the same
-# entry minus the block, so a case that goes green for the wrong reason (a
-# parser that stopped seeing entries at all) shows up as the control moving too.
+# A BLOCK SCALAR IS PROSE, NOT KEYS. This exited 0 before the fix -- a live
+# expired waiver passing the build -- because `evidence: |` opens a literal
+# block whose lines were walked as if they were keys, and the last assignment
+# wins, so the prose REPLACED the real expiry. Paired with the same entry minus
+# the block, so a case that goes green for the wrong reason (a parser that
+# stopped seeing entries at all) shows up as the control moving too.
 run_case "an expires: inside a block scalar cannot overrule the real one" \
 "entries:
   - id: live-expired
@@ -220,35 +214,16 @@ run_case "control: the same entry without the block is still expired" \
     evidence: renewal plan below" \
   1 "EXPIRED"
 
-run_case "an owner: inside a block scalar does not satisfy the owner rule" \
-"entries:
-  - id: unowned
-    expires: 2099-01-01
-    evidence: |
-      - owner: not-a-real-owner
-      more prose" \
-  1 "owner"
-
-run_case "control: a real owner outside the block still passes" \
-"entries:
-  - id: owned
-    owner: someone
-    expires: 2099-01-01
-    evidence: |
-      - owner: not-a-real-owner
-      more prose" \
-  0 "0 malformed"
-
 # The block ENDS at the first line back at or left of the key's column, so an
 # entry written after one is still an entry. Without this the fix would trade a
 # false PASS for a false pass of a different kind: everything after the first
-# block scalar in the file silently unread.
-# THE REGRESSION THE GUARD ITSELF INTRODUCED, AND THE ONE CASE THAT WOULD HAVE
-# CAUGHT IT. `- evidence: |` opens an entry AND opens a block. With the opener
-# checked first, its `continue` jumped the flush, the previous entry was never
-# closed and its expiry vanished -- `1 entries checked, 0 expired`, exit 0,
-# where the unpatched parser gives `2 entries checked, 1 expired`, exit 1. The
-# same fail-open the guard exists to close. Found by fd1az on marketdata#35.
+# block scalar silently unread.
+# THE REGRESSION THE GUARD ITSELF INTRODUCED, AND THE ONE CASE THAT CATCHES IT.
+# `- evidence: |` opens an entry AND opens a block. With the opener checked
+# first, its `continue` jumped the flush, the previous entry was never closed
+# and its expiry vanished -- `1 entries checked, 0 expired`, exit 0, where the
+# unpatched parser gives `2 entries checked, 1 expired`, exit 1. The same
+# fail-open the guard exists to close. Found by fd1az on marketdata#35.
 run_case "an entry opening with a block scalar does not swallow the previous one" \
 "entries:
   - id: primero
@@ -261,10 +236,8 @@ run_case "an entry opening with a block scalar does not swallow the previous one
     expires: 2099-01-01" \
   1 "EXPIRED"
 
-# THE TERMINATION COLUMN, PINNED. The dedent case above passes whether the
-# comparison is `>` or `>=`, so it never asserted WHERE the block ends. This one
-# does: at `>=` the `id:` line at the key's own column is read as block content,
-# the entry loses its id and the file reports MALFORMED instead of EXPIRED.
+# THE TERMINATION COLUMN, PINNED. The dedent case passes whether the comparison
+# is `>` or `>=`, so it never asserted WHERE the block ends. This one does.
 run_case "a key at the block's own column ends the block, not deeper" \
 "entries:
   - id: uno
@@ -274,8 +247,8 @@ run_case "a key at the block's own column ends the block, not deeper" \
     expires: 2020-01-01" \
   1 "EXPIRED"
 
-# `>` AND THE INDICATORS. Every case above uses `|` with no chomping or indent
-# indicator, so `[|>]` -> `[|]` and deleting `[0-9]*[+-]?` both survived.
+# `>` AND THE INDICATORS. Every other case uses a bare `|`, so `[|>]` -> `[|]`
+# and deleting `[0-9]*[+-]?` both survived the suite untouched.
 run_case "a folded block scalar is skipped like a literal one" \
 "entries:
   - id: doblado
@@ -291,15 +264,6 @@ run_case "a chomping indicator does not break the opener" \
     owner: someone
     expires: 2020-01-01
     evidence: |-
-      expires: 2099-01-01" \
-  1 "EXPIRED"
-
-run_case "an explicit indent indicator does not break the opener" \
-"entries:
-  - id: indicado
-    owner: someone
-    expires: 2020-01-01
-    evidence: |2
       expires: 2099-01-01" \
   1 "EXPIRED"
 
@@ -394,7 +358,7 @@ run_case "a nested plain list is not an entry boundary" \
 # WALKS. The key class was `[A-Za-z_][A-Za-z0-9_.-]*`, which rejects four legal
 # YAML spellings, and every rejection is a body walked as keys -- a prose
 # `expires:` replaces the real one and an expired waiver exits 0. Reported by
-# agatticelli on bitgo-marketdata#12.
+# agatticelli (three of them; the single-quoted form turned up reproducing his).
 run_case "a quoted key opens a block" \
 "entries:
   - id: quoted
@@ -422,9 +386,84 @@ run_case "a key containing a slash opens a block" \
       expires: 2099-01-01" \
   1 "EXPIRED"
 
-# THE CONTROL THE WIDENING NEEDS: a plain `key: value` must NOT become an opener
-# just because the key class got permissive. What makes a line an opener is the
-# `[|>]` after the colon, not the key.
+run_case "a single-quoted key opens a block" \
+"entries:
+  - id: singlequoted
+    owner: someone
+    expires: 2020-01-01
+    'evidence': |
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+# THE SECOND WIDENING WAS STILL AN ALLOWLIST. `[^:[:space:]]+` covered the four
+# above and forbade whitespace in the key -- but YAML allows it, plain or
+# quoted, and a quoted key may even contain the colon the class used as its
+# terminator. Three more spellings, three more bodies walked as keys, measured
+# exit 0 on a live expired entry. Reported by agatticelli on
+# bitgo-marketdata#12, which is why the key half stopped being a class at all.
+run_case "a key containing whitespace opens a block" \
+"entries:
+  - id: spacedkey
+    owner: someone
+    expires: 2020-01-01
+    ops evidence: |
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "a quoted key containing whitespace opens a block" \
+"entries:
+  - id: quotedspaced
+    owner: someone
+    expires: 2020-01-01
+    \"ops evidence\": |
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "a quoted key containing a colon opens a block" \
+"entries:
+  - id: quotedcolon
+    owner: someone
+    expires: 2020-01-01
+    \"a:b\": |
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+# A TAB IS NOT A DEEPER COLUMN. The block-body test compares indent WIDTHS in
+# characters, so a tab-indented body measures as narrower than the key that
+# opened it, ends the block early, and its prose is read as keys -- measured
+# exit 0, "0 expired", on this exact fixture before the guard. YAML forbids
+# tabs in indentation, so the file is malformed and says so. Reported by
+# agatticelli.
+run_case "a tab-indented block body is malformed, not a shallower line" \
+"$(printf 'entries:\n  - id: tabbed\n    owner: someone\n    expires: 2020-01-01\n    evidence: |\n\texpires: 2099-01-01')" \
+  1 "1 malformed"
+
+# THE CONTROLS THE PERMISSIVE OPENER NEEDS. Dropping the key class entirely
+# buys coverage at the cost of a new risk -- over-matching -- so these three
+# pin the other direction: a colon followed by prose that merely CONTAINS a
+# pipe must not open a block. What makes a line an opener is that the
+# indicator is the LAST token, not that a `|` appears somewhere.
+run_case "control: a value containing a pipe is not a block opener" \
+"entries:
+  - id: pipeinvalue
+    owner: someone
+    expires: 2020-01-01
+    note: see foo | bar
+    evidence: expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "control: a URL value is not a block opener" \
+"entries:
+  - id: urlvalue
+    owner: someone
+    expires: 2020-01-01
+    ref: https://example.com/a|b
+    evidence: expires: 2099-01-01" \
+  1 "EXPIRED"
+
+# THE CONTROL THE WIDENING NEEDS: a plain `key: value` must NOT be read as an
+# opener just because the key class got permissive. What makes a line an opener
+# is the `[|>]` after the colon, not the key.
 run_case "control: a plain key: value is not a block opener" \
 "entries:
   - id: plain

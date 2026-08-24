@@ -967,13 +967,41 @@ done
 # what every caller below does.
 spec_field() {
   awk -v block="$1" -v key="$2" '
+    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
     $0 ~ "^" block ":" { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
+      ind = match($0, /[^ \t]/) - 1
+      # INSIDE A BLOCK BODY: consume it whatever key opened it.
+      if (inblk) {
+        if ($0 ~ /^[[:space:]]*$/) next
+        if (ind > blkind) { if (want) body = (body == "" ? txt() : body " " txt()); next }
+        inblk = 0
+        if (want) { print body; exit }
+        # not the requested key: this line ended the block and is still
+        # structure, so fall through and examine it below.
+      }
+      line = txt()
+      # SAME OPENER AS check-registries.sh, and it has to be: this function
+      # walks a block body as keys for exactly the same reason, so a narrower
+      # class here reopens the fail-open this file just closed next door. Three defects
+      # lived in the previous line, all of them already fixed over there:
+      #   - the key class was an allowlist, so `ops evidence: |`,
+      #     `"ops evidence": |` and `"a:b": |` were not recognised and their
+      #     prose was read as structure;
+      #   - `[[:space:]]*$` refused a trailing comment, so `key: > # note`
+      #     opened nothing and its body was walked;
+      #   - the indicator range `([0-9][+-]?|[+-][0-9]?)` accepted only ONE
+      #     digit, so `|22`, `|22-` and `|-22` were misread.
+      # Permissive is the fail-CLOSED direction here: an unrecognised header is
+      # not skipped, it is walked.
+      if (line ~ /^.*:[[:space:]]*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$/) {
+        blkind = ind; inblk = 1; body = ""; want = (line ~ "^" key ":")
+        next
+      }
       if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
     }
+    END { if (inblk && want) print body }
   ' "$SPEC" 2>/dev/null
 }
 
