@@ -177,7 +177,10 @@ somebody goes looking), whether distributed tracing is WARRANTED here at all
 wired, and **operational determinism**: are code, config, schema and flag
 versions surfaced in the signals? (`Output = F(code, config, state, inputs)`
 — without all four versioned, a replay cannot reproduce production, so this
-is a precondition of dimension 7, not a nicety.)
+is a precondition of dimension 7, not a nicety.) And, for every observability
+BACKEND this service is expected to feed — metric store, trace store, profile
+store, code-quality scanner — **the named producer that ships to it** (see
+below); a backend is inventoried by its producers, never by its own health.
 Ask: which state transitions MUST be observable for 3am debugging. **Not**
 whether the service is headless — that is derived from the repo, and asking
 it is the rule against asking what you can derive being broken in the one
@@ -186,7 +189,10 @@ Row: contract checked mechanically or documentation-only; build/config
 identity surfaced or absent; profiles collected continuously in production or
 on demand only; tracing warranted (with the deriving signal named) and wired,
 or declined (with the deriving signal named) — and if declined, whether
-inbound carriers are still continued and outbound calls still injected.
+inbound carriers are still continued and outbound calls still injected; every
+declared observability backend paired with at least one named producer, and
+where the backend is queryable, ingest confirmed per producer over a named
+window rather than inferred from the producer's configuration.
 
 **Profiling is the fourth signal, it is CONTINUOUS, and every service owes it
 — headless ones included.**
@@ -223,6 +229,14 @@ first one:**
   deploy requires knowing which binary produced each side, which is
   dimension 11's version record pointed at the fourth signal. A profile store
   with no build label holds artifacts nobody can attribute.
+- **A profile store with no shipper is not continuous profiling**, and this is
+  the vacuous form that looks most like success, because standing the store up
+  is the half with a URL and a dashboard. Measured: a Pyroscope server
+  deployed, healthy and reachable, with `PYROSCOPE_SERVER_ADDRESS` set in
+  **zero** deployments — and the client only starts when that variable is
+  present, so always-on collection was configured nowhere while the thing that
+  displays it was up. The inventory question is which PROCESSES ship profiles,
+  named one by one. The server is not evidence about any of them.
 
 "Headless services are exempt" is the specific mistake this entry rules out.
 A batch job that got 40% slower has exactly one useful artifact — a profile
@@ -276,6 +290,47 @@ each fooled by the next shape. Treat a grep as an existence signal and nothing
 more — the only evidence that instrumentation REACHES production is a test that
 exercises the entrypoint's own construction path, or the signal appearing in a
 real environment. Say which one you have.
+
+**A deployed backend is not a wired backend — the same defect, arriving from
+the receiving end.** The entry above is written from the emitter's side: a
+tracer that is never injected is a no-op. Point it at the destination and it
+becomes a failure that is much harder to notice, because standing a backend up
+is the half with a URL, a login and a dashboard, while an empty dashboard and a
+busy one differ by a number nobody is looking at. The standing rule at the top
+of this file already says to query the destination rather than the emitter;
+this entry is that rule turned into a row of §8, because until now every
+question here asked whether the service EMITS and none asked whether the
+destination RECEIVES.
+
+Measured, in one afternoon, on two backends declared delivered:
+
+- **SonarQube, up and reachable, with ZERO scanners.** No analysis workflow
+  anywhere in the shared CI repo, and no `sonar-project.properties` in any repo
+  it was meant to cover.
+- **Pyroscope, up and reachable, with ZERO shippers** — the case above, from
+  the store's side.
+
+A code-quality server is not an observability signal store, and it belongs in
+the same list anyway: the rule is about DESTINATIONS. Anywhere data is supposed
+to land, the same question applies and the same answer is available for free.
+
+So: **every backend the system declares owes at least one NAMED producer, and
+the producer is the artifact, not the server.** Name it the way §16 names a
+wiring symbol — the workflow that runs the scanner, the deployment that carries
+the exporter's address, the job that pushes the report. A backend with none is
+not partial coverage; it is a dimension recorded as answered by an artifact that
+measures nothing, which is worse than an absence, because the absence would
+have been visible.
+
+The check, and its limit, take the shape this dimension already uses for
+propagators below. **Absence of any producer is proof of the defect**, and it
+is cheap, because a producer is a configuration artifact rather than a call
+site — a workflow file, an env var in a manifest — so counting them is
+legitimate where grepping a call site is not. **Presence is only necessary.** A
+variable set in a manifest is not a profile in the store. The property lives at the far end, so verify it
+there: query the backend for ingest per producer over a named window. *"Which
+services sent data in the last 24 hours, and is that list the one we declared?"*
+is one query, and it is the only form of this check that intent cannot satisfy.
 
 **A span is not a trace.** The question a tracing check must ask is not "are
 spans emitted" but "can two spans ever end up in the same trace". Measured on
@@ -390,7 +445,10 @@ Ask: which authorization rules are invariants ("A can never reach B"); what
 must never be reachable from outside.
 Row: each supply-chain gate present/absent; policy invariants declared or
 not; SAST dataflow coverage present or linter-only; IaC/manifest policy
-checks present or absent.
+checks present or absent. **And, for each gate this row calls blocking,
+whether its check-run context is actually a REQUIRED context** — the
+distinction §10 draws, recorded here because the gate that proved it was
+`sbom`, which lives in this dimension.
 
 **Every WRITE surface needs authentication or a ratified decline naming who
 can reach it.** Read-only health and metrics endpoints are one thing; an
@@ -410,9 +468,13 @@ they are part of this inventory.
 ## 10. Deployability and operability
 Inventory: promotion path, canary/progressive delivery and its analysis,
 rollback mechanism and its rehearsal, migration discipline, runbooks, alerts
-and SLOs, ownership, liability registries.
+and SLOs, ownership, liability registries; and **every declared surface that
+no reconciler applies** — the paths a GitOps controller does not watch, each
+with the procedure that applies it and the owner who runs it (see below).
 Ask: the promotion gate for this tier (automatic? human ack?); what an
-operator must be able to do at 3am without reading the code.
+operator must be able to do at 3am without reading the code; for each
+non-reconciled surface, who runs the apply and how anyone learns it is
+overdue.
 Row: canary analysis automated or manual, rollback rehearsed or assumed,
 runbooks tested or stale.
 
@@ -426,6 +488,101 @@ a gate that passes, which makes this the same failure as a vacuous test — the
 oracle has to sit outside the thing it judges. Validate the CI definitions in
 the local cheap gate and in the probe, never only in CI. Row: gates proven
 runnable from outside, or assumed runnable because nothing was red.
+
+**"Blocking" is a property of the WORKFLOW. "Required" is a property of the
+BRANCH PROTECTION. Only the second stops a merge.** The entry above covers a
+gate that cannot run; this one covers a gate that runs, fails, and gates
+nothing. It is the more corrosive of the two: the evidence of the defect and
+the absence of any consequence arrive together, and a red that never blocks
+anything is training for ignoring the reds that do.
+
+Measured: an `sbom` job that had **never passed since the day it was
+introduced** — red in every run in which it existed. Two conditions hid it, and
+either alone would have been survivable. It ran on the push lane and not on
+`pull_request`, so no PR ever displayed it; and its check context was not in
+the repository's required list, so no merge ever waited for it. It failed
+loudly, on `main`, where nobody was gated by it. The spec called it a blocking
+supply-chain gate the entire time, and the spec was describing the workflow
+file — accurate, and about the wrong object.
+
+The vacuous form to name: **declaring a gate blocking in the spec without
+verifying that its check-run context appears in the repository's required
+contexts.** That verification is one call to the forge's protection API, it
+needs no CI, and the forge is the only place the answer lives — a workflow file
+cannot state it and a green run cannot imply it. This is the same
+oracle-outside argument as the entry above, one level up: the workflow cannot
+tell you whether anything is subscribed to its verdict.
+
+Three readings that are easy to get wrong, each cheap to check:
+
+- **A gate that runs only on the push lane is not on the merge path at all.**
+  Whatever it proves, it proves after the decision it was supposed to inform.
+- **A required context is a name, and names drift.** Rename a job and the
+  required context it satisfied goes unfulfilled — or, worse, the old name is
+  quietly dropped from the required set to unblock the queue, which is this
+  defect being created deliberately and in a hurry.
+- **A red trunk lane needs a subscriber.** A job whose only possible failure is
+  on `main` is decoration unless someone is paged, or unless it blocks the next
+  promotion. "It was failing visibly" is only true if visibility had an
+  addressee.
+- **Where branch protection does not exist, NOTHING is required**, and that is
+  an answer this row must carry rather than leave implied. This framework's own
+  `install.sh` says it in its second paragraph: protection is unavailable on a
+  private repo without a paid plan, which is why the TCB is defended by a hash
+  manifest instead. A repo in that position has no blocking gates at all, only
+  gates it runs, and every claim of enforcement in its spec has to say so.
+
+Row: for every gate the spec calls blocking, its check context confirmed
+present in the repo's required contexts (read from the forge, not from the
+workflow); every such gate confirmed to run on the PR lane; trunk-only failures
+owned by a named subscriber or acknowledged as unowned.
+
+**Declared in git is not applied in the system — name every surface no
+reconciler reads.** Where a GitOps controller watches a path, merged IS applied
+and the controller is the oracle; that equivalence is so useful that it gets
+generalised silently to everything in the repository. For every path the
+controller does NOT watch, merged means *intended*, and the gap between
+intention and effect has no upper bound and no alarm.
+
+Measured: two services sat in `CreateContainerConfigError` for three hours with
+CI green on every repository involved. The Kubernetes auth role their secret
+operator logged in with was declared in a provisioning script and merged to
+`main` — into a `vault-config/` tree that Flux deliberately does not reconcile,
+as that tree's own README states. Vault answered `400 invalid role name` at
+LOGIN, so the operator never got as far as requesting a secret, and the error
+everyone was reading named the secret rather than the auth role one step
+earlier. The declaration was correct, reviewed, merged, and inert: a grant on
+`main` is a grant in Vault only after a human runs the script.
+
+Its vacuous form is precise and worth stating exactly: **a check that verifies
+the role is DECLARED in the file and reports it as though the role existed.**
+It turns green at the exact moment the incident begins — the declaration
+landing is what makes it pass — and it stays green for as long as nobody runs
+the script. A check whose signal is produced by the same act that creates the
+outage is not a weak check; it is an inverted one.
+
+What can be verified mechanically, and what genuinely cannot:
+
+- **The inventory can.** Which paths the reconciler watches is declared in the
+  reconciler's own sources, so the complement is computable. A file under a
+  non-reconciled path with no apply procedure naming it, and no owner, is a
+  finding — and this one costs nothing and needs no credentials.
+- **Drift can, given a receipt.** Have the apply step record what it applied:
+  the commit SHA of the declaring files at the moment it ran, written beside
+  the declaration. Then *"the declared files have changed since the last
+  recorded apply"* is a diff, and it fires exactly when intent has outrun the
+  system. This is dimension 11's evidence record pointed at an out-of-band
+  surface, and it is the only half of this lesson that becomes a real gate.
+- **The live state cannot — not from CI.** Whether the role exists in Vault is
+  answerable only by asking Vault, with a credential a presubmit pipeline
+  should not be holding for the purpose. Say so. An unverifiable half declared
+  unverified is worth more than a green check that read the declaration and let
+  everyone infer the rest, which is the vacuous form above wearing a report.
+
+Row: every surface outside the reconciler named, with its apply procedure and
+its owner; a last-applied receipt recorded per surface, or drift stated as
+unknowable; and, for each, which half was checked — the declaration, or the
+live system.
 
 ## 11. Reproducibility
 Inventory: are code, config, data/schema and environment each versioned and

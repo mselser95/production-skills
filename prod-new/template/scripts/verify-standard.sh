@@ -998,31 +998,28 @@ grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FIL
 
 spec_field() {
   awk -v block="$1" -v key="$2" '
+    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
     $0 ~ "^" block ":" { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      line=$0
-      keyind = match($0, /[^ \t]/) - 1
-      sub(/^[[:space:]]+/, "", line)
-      if (line ~ "^" key ":") {
-        sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line)
-        # `|`, `>`, with any chomping or explicit-indent indicator: the value is
-        # the following lines indented deeper than the key. Folded onto one line
-        # because every caller compares or prints it as a scalar.
-        if (line ~ /^[|>][0-9]*[+-]?$/) {
-          out = ""
-          while ((getline nl) > 0) {
-            if (nl ~ /^[[:space:]]*$/) continue
-            nind = match(nl, /[^ \t]/) - 1
-            if (nind <= keyind) break
-            sub(/^[[:space:]]+/, "", nl)
-            out = (out == "" ? nl : out " " nl)
-          }
-          print out; exit
-        }
-        print line; exit
+      ind = match($0, /[^ \t]/) - 1
+      # INSIDE A BLOCK BODY: consume it whatever key opened it.
+      if (inblk) {
+        if ($0 ~ /^[[:space:]]*$/) next
+        if (ind > blkind) { if (want) body = (body == "" ? txt() : body " " txt()); next }
+        inblk = 0
+        if (want) { print body; exit }
+        # not the requested key: this line ended the block and is still
+        # structure, so fall through and examine it below.
       }
+      line = txt()
+      if (line ~ /^[A-Za-z_][A-Za-z0-9_.-]*:[[:space:]]*[|>]([0-9][+-]?|[+-][0-9]?)?[[:space:]]*$/) {
+        blkind = ind; inblk = 1; body = ""; want = (line ~ "^" key ":")
+        next
+      }
+      if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
     }
+    END { if (inblk && want) print body }
   ' "$SPEC" 2>/dev/null
 }
 
@@ -1945,7 +1942,7 @@ if grep -rqE "commit|git_sha|config_version|schema_version|build_info" observabi
     # symbols and sets nothing, so the image ships revision="" while this row
     # reports the revision as stampable. An `-X <pkg>.<Var>=` assignment is what
     # makes it a stamp, and GIT_SHA stays a separate, sufficient build-arg path.
-    if [[ -n "$(grep_x -- '-X[[:space:]]*[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+=' docker/)" ]]; then
+    if [[ -n "$(grep_x -- '-X[[:space:]=]+[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+=[A-Za-z0-9_${(/.-]' docker/)" ]]; then
       stampable="ldflags"
     elif [[ -n "$(grep_x 'GIT_SHA' docker/)" ]]; then
       stampable="build-arg"

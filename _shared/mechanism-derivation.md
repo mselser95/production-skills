@@ -407,6 +407,16 @@ away. It is metrics' sibling. Nothing about being headless makes a slow
 process easier to explain — it makes it harder, because there is no request to
 trace.
 
+**The mechanism is the SHIPPER, not the server.** A profiling backend running
+somewhere in the cluster says nothing about this service, and reading it as
+though it did is the second way this entry gets mis-answered. Measured, and
+recorded in `dimensions.md` §8: a Pyroscope server deployed and healthy with
+`PYROSCOPE_SERVER_ADDRESS` set in ZERO deployments, and a client that starts
+only when that variable is present. What this file derives is the process
+shipping profiles out and the types it ships; whether a store exists to receive
+them is a platform obligation, checked from the producer side. Collapsing the
+two is how a service inherits a satisfied fourth signal from a URL.
+
 ---
 
 # Worked examples
