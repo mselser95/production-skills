@@ -390,6 +390,49 @@ run_case "a nested plain list is not an entry boundary" \
     expires: 2099-01-01" \
   0 "0 malformed"
 
+# ANY KEY SHAPE OPENS A BLOCK, BECAUSE WHAT THE OPENER DOES NOT RECOGNISE IT
+# WALKS. The key class was `[A-Za-z_][A-Za-z0-9_.-]*`, which rejects four legal
+# YAML spellings, and every rejection is a body walked as keys -- a prose
+# `expires:` replaces the real one and an expired waiver exits 0. Reported by
+# agatticelli on bitgo-marketdata#12.
+run_case "a quoted key opens a block" \
+"entries:
+  - id: quoted
+    owner: someone
+    expires: 2020-01-01
+    \"evidence\": |
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "a key starting with a digit opens a block" \
+"entries:
+  - id: digitfirst
+    owner: someone
+    expires: 2020-01-01
+    2fa_evidence: |
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+run_case "a key containing a slash opens a block" \
+"entries:
+  - id: slashed
+    owner: someone
+    expires: 2020-01-01
+    ops/evidence: |
+      expires: 2099-01-01" \
+  1 "EXPIRED"
+
+# THE CONTROL THE WIDENING NEEDS: a plain `key: value` must NOT become an opener
+# just because the key class got permissive. What makes a line an opener is the
+# `[|>]` after the colon, not the key.
+run_case "control: a plain key: value is not a block opener" \
+"entries:
+  - id: plain
+    owner: someone
+    expires: 2020-01-01
+    evidence: some prose mentioning expires: 2099-01-01" \
+  1 "EXPIRED"
+
 run_case "a registry file with NO entries fails closed" \
 '# a comment and nothing else
 ' \

@@ -189,7 +189,7 @@ for reg in "${registry_files[@]}"; do
   # Reported by agatticelli (:191/:193) and independently by fd1az (:201).
   blk_indent=""
   in_blk=0
-  blk_open_re='^([[:space:]]*(-[[:space:]]+)?)[A-Za-z_][A-Za-z0-9_.-]*:[[:space:]]*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
+  blk_open_re='^([[:space:]]*(-[[:space:]]+)?)[^:[:space:]]+:[[:space:]]*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
   while IFS= read -r line; do
     # Inside a block: blank lines stay in, and so does anything indented deeper
     # than the key that opened it. The first line at or left of that column
