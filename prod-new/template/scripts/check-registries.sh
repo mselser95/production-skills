@@ -233,7 +233,18 @@ for reg in "${registry_files[@]}"; do
   # whole prefix, [2] the `- `, [3] the key -- the block-column logic below
   # reads all three, and inserting a group before them would silently shift it.
   blk_open_re='^([[:space:]]*(-[[:space:]]+)?)(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*(#.*)?$'
-  while IFS= read -r line; do
+  # `|| [ -n "$line" ]` KEEPS A FINAL LINE WITH NO TRAILING NEWLINE. `read`
+  # returns non-zero when it hits EOF without a delimiter, so a file whose last
+  # byte is not `\n` loses that line entirely -- and the last line of a
+  # registry is usually the last entry's `expires:`. Measured on a file ending
+  # `  - id: ghost` with no newline: `0 entries checked` against `1 entry,
+  # 2 malformed` for the same bytes plus one. One byte at EOF decided whether
+  # the gate saw an entry at all.
+  #
+  # Not introduced here -- `main` behaves the same -- but a parser this file
+  # spent a day making fail-closed should not lose an entry to a missing byte.
+  # Reported by fd1az.
+  while IFS= read -r line || [ -n "$line" ]; do
     # A TAB IN THE INDENTATION IS A MALFORMED FILE, NOT A DEEPER COLUMN.
     #
     # YAML excludes tabs from indentation outright, so this is not a style

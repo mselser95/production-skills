@@ -428,6 +428,38 @@ run_case "a quoted key containing a colon opens a block" \
       expires: 2099-01-01" \
   1 "EXPIRED"
 
+# THE OTHER SIDE OF THE TAB RULE, which the code comment declares and nothing
+# pinned: a tab that FOLLOWS a non-space is plainly content, not indentation,
+# and must NOT be flagged. Without this the guard could be widened to "any tab
+# anywhere" and the suite would not notice -- and that widening would reject
+# legitimate registries whose evidence blocks contain tabular prose.
+run_case "control: a tab inside a content line is not indentation" \
+"$(printf 'entries:\n  - id: tabcontent\n    owner: someone\n    expires: 2099-01-01\n    evidence: |\n      col1\tcol2')" \
+  0 "0 malformed"
+
+# A FINAL LINE WITH NO TRAILING NEWLINE IS STILL A LINE. `read` returns
+# non-zero at EOF without a delimiter, so the loop dropped it -- and the last
+# line of a registry is usually the last entry's `expires:`. Measured on
+# `  - id: uno / owner / expires: 2020-01-01` with no closing newline:
+# `0 entries checked` before, `1 expired` after. One byte at EOF decided
+# whether the gate saw the entry. `run_case` cannot express this (its
+# `printf '%s\n'` always adds one), so this case writes the fixture itself.
+# Reported by fd1az.
+_nonlcase() {
+  local d out rc
+  d="$(mktemp -d)"
+  printf 'entries:\n  - id: sin-newline\n    owner: someone\n    expires: 2020-01-01' > "${d}/waiver.yaml"
+  set +e; out="$(REGISTRIES_DIR="$d" bash "$SCRIPT" 2>&1)"; rc=$?; set -e
+  rm -rf "$d"
+  if [[ "$rc" -eq 1 && "$out" == *"1 expired"* ]]; then
+    echo "  ok   a final line with no trailing newline is still read"
+  else
+    echo "  FAIL a final line with no trailing newline is still read — rc=$rc out: $out" >&2
+    fails=$((fails+1))
+  fi
+}
+_nonlcase
+
 # A TAB IS NOT A DEEPER COLUMN. The block-body test compares indent WIDTHS in
 # characters, so a tab-indented body measures as narrower than the key that
 # opened it, ends the block early, and its prose is read as keys -- measured
