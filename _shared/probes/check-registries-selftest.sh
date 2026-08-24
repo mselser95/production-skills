@@ -509,6 +509,48 @@ run_case "a trailing comment does not hide the real expiry" \
     evidence: prose" \
   1 "1 expired"
 
+# A TOP-LEVEL BLOCK OPENS AT COLUMN 0, so its indent IS the empty string.
+# `in_blk` exists as its own flag rather than `[[ -n "$blk_indent" ]]` for that
+# reason: overloading empty as "no block" would leave that body walked as keys.
+#
+# HONEST NOTE ON WHAT THIS CASE PROVES. agatticelli reported that reverting the
+# flag left the suite green, and it still does -- but not because the fixture is
+# weak. Measured both directions, before and after: with the `in_entries` guard
+# in place, `in_blk` and `[[ -n "$blk_indent" ]]` are INDISTINGUISHABLE, because
+# a column-0 key is exactly what now ends the entries list and flushes the open
+# entry, so a top-level block can no longer reach an entry to pollute it.
+# Checked with the block BEFORE `entries:` and AFTER it: `1 expired` in all four
+# combinations. It was load-bearing on the head they measured, which did not
+# have `in_entries` yet.
+#
+# The flag stays as defence in depth and as the honest expression of intent --
+# if the entry-boundary rule ever changes again, the overload comes back as a
+# fail-open. This case pins that a top-level block does not derail the entry it
+# follows, which is the reachable half.
+run_case "a top-level block does not derail the entry before it" \
+"entries:
+  - id: uno
+    owner: someone
+    expires: 2020-01-01
+policy: |
+  expires: 2099-01-01" \
+  1 "1 expired"
+
+# `in_entry` IN THE DIRECTION THAT MATTERS. Forcing the flag TRUE reddens six
+# cases, so the suite looked covered; forcing it FALSE left everything green --
+# and false is the direction that restores the early `return` for an id-less
+# entry, i.e. the silent skip this flag exists to close. An entry that STARTS
+# and has no usable id must be REPORTED, and the entry after it must survive.
+run_case "an id-less entry is reported, and the next entry still counts" \
+"entries:
+  - id:
+    owner: \"@ghost\"
+    expires: 2099-12-31
+  - id: heredero
+    owner: someone
+    expires: 2020-01-01" \
+  1 "2 entries checked, 1 expired"
+
 # A LINE THAT IS ENTIRELY A COMMENT IS NEVER AN OPENER. `.*` before the colon
 # accepts anything, including a `#`, so `# see: |` matched -- and at column 0 it
 # set the block indent to "", which swallows every following indented line as
