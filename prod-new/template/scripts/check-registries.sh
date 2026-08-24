@@ -96,7 +96,8 @@ for reg in "${registry_files[@]}"; do
   # rather than a YAML dependency — this must run before anything is installed.
   id=""; owner=""; expires=""; in_entry=0
   seq_indent=""; seq_indent_set=""
-  in_entries=0
+  in_entries=0; entries_key_seen=0; saw_dash=0
+  entries_key_re='^[[:space:]]*("entries"|'"'"'entries'"'"'|entries)[[:space:]]*:[[:space:]]*(#.*)?$'
   flush() {
     if [[ -z "$id" ]]; then
       # AN ENTRY WITH NO USABLE id IS REPORTED, NOT DISCARDED, and the reset
@@ -336,8 +337,29 @@ for reg in "${registry_files[@]}"; do
     # every entry dash to its RIGHT and reproduces the same collapse mirrored.
     # What actually distinguishes an entry boundary is not its column but WHERE
     # IT SITS, so track the block instead of guessing from indentation.
-    if [[ "$line" =~ ^entries:[[:space:]]*(#.*)?$ ]]; then
-      in_entries=1
+    # THE KEY MATCHER IS TOLERANT, AND WHAT BACKS IT IS THE FAIL-CLOSED GUARD
+    # BELOW -- not this pattern.
+    #
+    # Written first as the exact string `^entries:`, one screen below the
+    # lesson that a key class cannot be an exact-string list. It missed
+    # `"entries":`, `entries :` (space before the colon), a nested
+    # `  entries:`, and a registry written as a bare top-level sequence with no
+    # `entries:` key at all. Measured on two-entry files whose FIRST entry
+    # expired in 2020: all four gave exit 0, `1 entries checked, 0 expired` --
+    # the expired entry vanished and the gate passed. Reported by fd1az.
+    #
+    # A single-entry file hides this: the pending entry is flushed at EOF
+    # regardless, so only a file with a SECOND entry shows the first being
+    # swallowed. My first reproduction used one entry and reported "does not
+    # reproduce", which was my fixture and not the finding.
+    # THE PATTERN LIVES IN A VARIABLE. Inside `[[ =~ ]]` bash consumes quote
+    # characters as quoting, so writing `("entries"|'entries'|entries)` inline
+    # collapses to `(entries|entries|entries)` and the quoted spellings never
+    # match -- silently, with the regex looking correct in the source. This
+    # file already records the same trap for `[|>]`; a variable is the fix
+    # there and here.
+    if [[ "$line" =~ $entries_key_re ]]; then
+      in_entries=1; entries_key_seen=1
     elif [[ "$line" =~ ^[^[:space:]#] ]] && ! [[ "$line" =~ ^-([[:space:]]|$) ]]; then
       # A SEQUENCE ITEM AT COLUMN 0 IS NOT "ANOTHER TOP-LEVEL KEY". YAML lets a
       # sequence sit at the same indentation as the key that owns it, and that
@@ -360,6 +382,7 @@ for reg in "${registry_files[@]}"; do
       if (( in_entries )); then flush; fi
       in_entries=0
     fi
+    [[ "$line" =~ ^[[:space:]]*-[[:space:]] ]] && saw_dash=1
     if (( in_entries )) && [[ "$line" =~ ^([[:space:]]*)-[[:space:]] ]]; then
       _ind="${BASH_REMATCH[1]}"
       if [[ -z "$seq_indent_set" ]]; then
@@ -466,6 +489,25 @@ for reg in "${registry_files[@]}"; do
     fi
   done < "$reg"
   flush
+  # A FILE THE TRACKER COULD NOT PARSE IS NOT A FILE THAT PASSED.
+  #
+  # The `entries:` matcher is tolerant now, but tolerance is an enumeration and
+  # this is the SEVENTH hole found in one -- so what backs it is this guard, not
+  # the pattern. If a file has dashed lines and the tracker never found its key,
+  # the shape is outside the format this script parses, and the honest answer to
+  # an out-of-contract registry is MALFORMED, never exit 0. Measured before the
+  # guard on a registry written as a bare top-level sequence (no `entries:` at
+  # all, two entries, the first expired in 2020): exit 0, `1 entries checked,
+  # 0 expired` -- the expired entry gone and the gate green.
+  #
+  # This file already applies exactly this discipline twice: the empty-directory
+  # guard and the `total == 0` guard. Reported by fd1az, who also named the
+  # principle: a file the tracker cannot parse is a file it silently passes,
+  # which is the one outcome this script exists to make impossible.
+  if (( saw_dash )) && ! (( entries_key_seen )); then
+    echo "MALFORMED  ${reg}: has list items but no \`entries:\` key the parser can find — the file is outside the format this gate reads, so nothing in it is enforced" >&2
+    malformed=$((malformed+1))
+  fi
 done
 
 echo "registries: ${total} entries checked, ${expired} expired, ${soon} expiring within ${soon_days}d, ${malformed} malformed"

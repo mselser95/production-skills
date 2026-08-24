@@ -643,6 +643,55 @@ _ymlcase
 # `1 entries checked, 0 expired`, on a file whose second entry expired in 2020.
 # Reported by fd1az; the third time closing one fail-open opened another, and
 # the first that triggers on the standard serializer's own output.
+# THE `entries:` KEY MATCHER WAS AN EXACT STRING, one screen below the lesson
+# that a key class cannot be one. Three spellings defeated it, and each hid the
+# FIRST entry of the file -- a two-entry fixture is required to see it, because
+# a single pending entry is flushed at EOF either way.
+run_case "a quoted entries key is still the entries list" \
+"\"entries\":
+  - id: x
+    owner: someone
+    expires: 2020-01-01
+  - id: y
+    owner: someone
+    expires: 2099-01-01" \
+  1 "2 entries checked, 1 expired"
+
+run_case "a space before the entries colon is still the entries list" \
+"entries :
+  - id: x
+    owner: someone
+    expires: 2020-01-01
+  - id: y
+    owner: someone
+    expires: 2099-01-01" \
+  1 "2 entries checked, 1 expired"
+
+run_case "a nested entries key is still the entries list" \
+"registry:
+  entries:
+    - id: x
+      owner: someone
+      expires: 2020-01-01
+    - id: y
+      owner: someone
+      expires: 2099-01-01" \
+  1 "2 entries checked, 1 expired"
+
+# AND THE GUARD THAT BACKS THE MATCHER, which is the part that scales: a file
+# with list items whose `entries:` key the parser never found is OUTSIDE the
+# format, and the honest answer is MALFORMED, not exit 0. Before the guard this
+# shape gave exit 0 / `1 entries checked, 0 expired` -- the entry expired in
+# 2020 simply gone.
+run_case "list items with no entries: key at all are malformed, not passed" \
+"- id: x
+  owner: someone
+  expires: 2020-01-01
+- id: y
+  owner: someone
+  expires: 2099-01-01" \
+  1 "1 malformed"
+
 run_case "a sequence at column 0 is still the entries list" \
 "entries:
 - id: expired-one
