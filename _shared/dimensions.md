@@ -101,8 +101,9 @@ poison one.
 ## 5. Integration and contracts
 Inventory: what real dependencies are exercised in tests vs faked (does ANY
 test touch a real DB/broker/venue? containerized?); contract/compat checks
-(schema-breaking detection, generated-client drift); consumers of this
-service's surface.
+(schema-breaking detection — an event-driven surface means a broker's schema
+registry or an equivalent compatibility check, not only a synchronous API
+contract — generated-client drift); consumers of this service's surface.
 Ask: which boundaries deserve a real-dependency integration lane vs staying
 hermetic (cost vs fidelity); the compatibility policy (N-1 coexistence?
 expand/contract on schemas? who breaks if the served contract changes?).
@@ -116,6 +117,14 @@ is asserted anywhere or only relative regression; capacity safety margin.
 Row: benchmark baseline exists or not (SIGNAL, statistical, never absolute in
 shared CI), scalability curve known or unknown, capacity margin measured or
 unmeasured.
+
+**The PRODUCTION profile belongs to dimension 8, not here.** This dimension
+owns the profile you take of a benchmark, on your hardware, to explain a
+regression you can already reproduce. That is a performance instrument and it
+is the easy half. Whether a profile of the process that was actually slow —
+last Tuesday, in production, on the build that was deployed then — exists at
+all is an observability question, because it is about what signal was being
+recorded before anybody knew to look. See §8.
 
 ## 7. Resilience and recovery
 Inventory: fault-injection harness, crash/restart tests, outbox/journal on
@@ -153,15 +162,111 @@ Row: recovery semantics tested or assumed; reconciliation present, N/A, or
 missing; restore test cadence.
 
 ## 8. Observability
+
+**There are FOUR signals, not three.** Metrics, traces, logs — and profiles.
+The fourth is the one this framework left out for a year, and the two entries
+below are the correction: profiling is owed by every service including the
+headless ones, and tracing is owed only by some and the condition is
+derivable.
+
 Inventory: metrics/traces/logs inventory, correlation ids, cardinality
 discipline, invariant counters, whether an observability contract is checked
-in CI, and **operational determinism**: are code, config, schema and flag
+in CI, **continuous profiling** (see below — collected always, or only when
+somebody goes looking), whether distributed tracing is WARRANTED here at all
+(derived, not asked — `mechanism-derivation.md` §8) and if so whether it is
+wired, and **operational determinism**: are code, config, schema and flag
 versions surfaced in the signals? (`Output = F(code, config, state, inputs)`
 — without all four versioned, a replay cannot reproduce production, so this
 is a precondition of dimension 7, not a nicety.)
-Ask: which state transitions MUST be observable for 3am debugging.
+Ask: which state transitions MUST be observable for 3am debugging. **Not**
+whether the service is headless — that is derived from the repo, and asking
+it is the rule against asking what you can derive being broken in the one
+place it is easiest to break.
 Row: contract checked mechanically or documentation-only; build/config
-identity surfaced or absent.
+identity surfaced or absent; profiles collected continuously in production or
+on demand only; tracing warranted (with the deriving signal named) and wired,
+or declined (with the deriving signal named) — and if declined, whether
+inbound carriers are still continued and outbound calls still injected.
+
+**Profiling is the fourth signal, it is CONTINUOUS, and every service owes it
+— headless ones included.**
+
+Metrics say a latency moved. Traces say which span it moved in. Neither says
+which code did it, and that answer decays faster than any other: by the time
+somebody reproduces the regression, the process that had it has been
+redeployed. A profile is only useful if it was already being taken.
+
+The reference result is fleet-wide continuous profiling: a sampling profiler
+left running everywhere, at an overhead low enough that nobody has to decide
+whether to switch it on — Ren, Tune, Moseley, Shi, Rus and Hundt,
+"Google-Wide Profiling: A Continuous Profiling Infrastructure for Data
+Centers", IEEE Micro 30(4), 2010 (DOI 10.1109/MM.2010.68). The property worth
+copying is the unconditional collection, not any particular implementation:
+the OSS system built to that shape today is Grafana Pyroscope, named the way
+this file names Kayenta and TLA+ — as the thing to look at, not as the thing
+to require. Anything that keeps timestamped, symbolized profiles you can
+retrieve for a past window and diff across a deploy satisfies this.
+
+**Three vacuous forms, and this framework's own probe currently accepts the
+first one:**
+
+- **An endpoint is not a profile.** `net/http/pprof` on a debug port means a
+  profile can be taken by whoever happens to be logged in while the incident
+  is live. It says nothing about last Tuesday. The probe's `profiling` row
+  asks for a capture script plus a live endpoint — that is the on-demand
+  half, it is worth having, and it is not this.
+- **A benchmark profile is not a production profile.** `benchmarks/profile.sh`
+  profiles the workload you wrote on the hardware you had. Production
+  allocates differently, and the entire reason to profile is that you were
+  wrong about where the time went.
+- **A profile with no build identity is unreadable.** Comparing across a
+  deploy requires knowing which binary produced each side, which is
+  dimension 11's version record pointed at the fourth signal. A profile store
+  with no build label holds artifacts nobody can attribute.
+
+"Headless services are exempt" is the specific mistake this entry rules out.
+A batch job that got 40% slower has exactly one useful artifact — a profile
+of the run that was slow — because there is no request to trace and no
+dashboard that names the loop.
+
+Inventory specifically: whether profiles are collected continuously in
+production (always-on sampling, shipped to a store with a retention window)
+or only on demand; which types (CPU, heap, goroutine/thread, mutex, block,
+alloc); the sampling overhead MEASURED rather than assumed; whether a profile
+can be retrieved for a named past window and a named build; when anyone last
+read one.
+
+**Tracing is CONDITIONAL — and the condition is DERIVED, never asked.**
+
+A distributed trace is a causal join across process boundaries. A service
+nothing calls has nothing to join to, so requiring "a tracer wired in `cmd/`"
+of every service — as this framework's own standing instruction did — is a
+requirement a queue consumer, a cron job or a daemon can satisfy only by
+emitting root spans nothing can parent. That is not observability. It is the
+3132-traces-of-one-span failure measured below, reached deliberately instead
+of by accident.
+
+So "does this service owe distributed tracing" has an answer sitting in the
+repo, and the derivation that reads it off is `mechanism-derivation.md` §8: a
+listener serving routes that are not the health/metrics/pprof surface,
+handlers registered for them, an inbound port declared in the deployment
+artifact, an extractable carrier arriving with the work — against a poll
+loop, a ticker, or a `main` that runs once and exits. **Derive it. Ask the
+human only when the signals contradict each other**, which in practice means
+a consumer that also exposes an admin or submit endpoint (§9 asks about that
+same port from the authentication side).
+
+Three things a decline does NOT excuse, because collapsing them into "no
+tracing" is how this correction gets over-applied:
+
+- **Continuation.** A consumer whose producer stamped trace context onto the
+  message is not the start of anything — it is the middle of somebody else's
+  trace, and dropping the carrier there is where most real traces end.
+- **Egress injection.** A headless service that calls anything still injects,
+  or it truncates the trace of everything downstream of it.
+- **Correlation.** Every service owes a join key across its own signals — a
+  run id, a job id, a message id — whether or not it is a W3C trace id. That
+  obligation is universal; only the *distributed* half is conditional.
 
 **Wiring cannot be grepped.** A tracer, a metric or a hook that is imported,
 constructed, or merely defined satisfies every text search you can write and
@@ -271,10 +376,21 @@ each of those is a line nobody can act on.
 ## 9. Security
 Inventory: authz/authn surface, policy-as-invariant candidates, secret
 scanning (on which triggers), dependency vulnerability scanning, SBOM,
-artifact signing/provenance, secretless presubmit, network policy.
+artifact signing/provenance, secretless presubmit, network policy; a
+semantic/dataflow SAST pass on top of whatever the general linter already
+does (taint from an untrusted input to a sink — injection, deserialization,
+SSRF — is a different question from style, and a linter answers style);
+policy-as-code checks on the deployment artifacts themselves, not only their
+CI (the same class of validation `actionlint` already applies to workflow
+files, extended to whatever this repo ships — Kubernetes manifests,
+Terraform, compose files: an overly permissive RBAC role or an open security
+group is invisible to every gate above and is exactly the kind of defect this
+dimension exists to catch).
 Ask: which authorization rules are invariants ("A can never reach B"); what
 must never be reachable from outside.
-Row: each supply-chain gate present/absent; policy invariants declared or not.
+Row: each supply-chain gate present/absent; policy invariants declared or
+not; SAST dataflow coverage present or linter-only; IaC/manifest policy
+checks present or absent.
 
 **Every WRITE surface needs authentication or a ratified decline naming who
 can reach it.** Read-only health and metrics endpoints are one thing; an
@@ -597,6 +713,443 @@ belonging to a used interface will survive and this row will pass it. Plain
 functions and methods outside any used interface are eliminated precisely.
 That covers the four defects above; it is not a universal reachability proof.
 
+## 17. Progressive delivery and design-time verification
+
+Two different verification moments, grouped here because both sit OUTSIDE the
+suite that runs before merge: one runs AFTER deploy, against real traffic;
+the other runs BEFORE a single line of implementation exists.
+
+**Canary analysis.** Dimension 10 already asks whether canary analysis
+exists and whether it is automated. This entry asks what "automated" is
+actually verifying, because the two things it gets confused with are cheaper
+and are gates in name only:
+
+- **A timer is not an analysis.** "Wait ten minutes, then promote" catches
+  nothing that does not fail in the first ten minutes, and a regression that
+  degrades slowly at 1% traffic sails through it at every stage.
+- **A human staring at a dashboard is not automated**, even where a human is
+  genuinely required to approve — the tier policy already asks for that ack
+  at T0. The analysis and the approval are different steps, and collapsing
+  them hides whether the number that got approved meant anything.
+
+The property worth gating on is a STATISTICAL comparison of the canary
+population against the baseline population, on the metrics the service
+already declares (dimension 8's invariant counters and SLOs, not a bespoke
+set invented for the rollout), with a defined confidence threshold and a
+defined promote/abort rule — not "no alerts fired," which is the
+absence-of-evidence failure this framework refuses everywhere else. The
+canonical reference implementation is Netflix's Kayenta, which scores a
+canary against baseline with a Mann-Whitney U test over per-metric confidence
+intervals rather than a fixed threshold on each metric in isolation; the same
+team's "Rapid Regression Detection in Software Deployments through
+Sequential Testing" (arXiv:2205.14762) frames the promote/abort decision as
+sequential hypothesis testing specifically to shorten time-to-detection
+without inflating the false-abort rate — the two failure directions of this
+gate are symmetric: an analysis too eager to abort erodes trust and gets
+overridden by hand, which is the same as not having one.
+Inventory: how a canary stage decides to promote or abort today (elapsed
+time, human judgment, automated statistical comparison); which metrics and
+invariants feed that decision; the traffic split and population sizes; the
+abort path and whether it is rehearsed.
+Ask: which invariants and SLOs must hold on the canary population before ANY
+promotion; what confidence or sample size the comparison needs at this
+service's traffic volume to mean anything (a canary at 0.1% traffic for 60
+seconds has no statistical power, whatever dashboard it produces).
+Row: promotion decided by a statistical comparison against baseline, by
+elapsed time, or by unaided human judgment; which metrics feed it; abort path
+tested or assumed.
+
+**Design-time model checking.** Every other dimension in this framework
+verifies code that already exists. This entry is the one exception: for the
+highest-risk slice of a system — a concurrent or distributed protocol whose
+correctness depends on interleavings no unit test enumerates, not the system
+at large — the cheapest place to find a race, a deadlock, or a violated
+invariant is before the first line of implementation, against a model of the
+protocol (TLA+ is the canonical tool here — Lamport, TOPLAS 1994 — and its
+best-known industrial result is AWS finding bugs in production DynamoDB and
+S3 subsystems that years of code review and testing had not surfaced, CACM
+2015).
+
+This is deliberately scoped narrow. It sits one level above mutation testing
+(dimension 2) on the same fault-sensitivity spectrum: mutation finds what
+your tests fail to catch in code that already exists; this finds what your
+DESIGN fails to rule out before any code exists. Modeling the whole system is
+not the claim — mandating it broadly is how a gate like this earns a
+rubber-stamp model nobody actually checks against the implementation, which
+is worse than not having one. Reach for it exactly where a bug would be a
+whole class of interleavings rather than one line.
+
+Inventory: which subsystems are genuinely concurrent/distributed protocols
+(leader election, consensus, distributed locking, exactly-once handoff,
+multi-step sagas) rather than ordinary sequential logic; whether any of them
+has a written model and what it has been checked against.
+Ask: does this system have a protocol whose failure mode is an interleaving
+rather than a line of code — and if so, was the model written before the
+implementation it is meant to constrain, or reconstructed after?
+Row: protocols requiring modeling identified, or none exist and that is
+stated explicitly; which have a checked model and which do not; each model
+checked against the CURRENT implementation, or known to have drifted.
+
+## 18. Static analysis — semantic dataflow (SAST)
+
+Dimension 9 already asks whether a semantic/dataflow SAST pass exists on top
+of whatever the general linter does. This entry exists because that
+distinction is not academic pedantry — it is the difference between a gate
+that finds the vulnerability class this framework cares about and one that
+only looks like it does.
+
+A controlled study running standard SAST configurations against codebases
+with confirmed, real vulnerabilities found that the default rulesets missed
+**61.2% of the vulnerabilities actually present** ("Semgrep\* — Improving the
+Limited Performance of SAST Tools", ACM/ESEM 2024, DOI
+10.1145/3661167.3661262). The gap is not tool immaturity so much as scope: a
+pattern-matching or regex-style linter answers "does this code look like a
+known-bad shape", which is a style question with a security label on it. A
+dataflow-capable engine answers a different question — can data that
+originates at an untrusted input (a request body, a query parameter, a
+message payload) reach a sensitive sink (a query, a shell invocation, a
+deserializer, an outbound URL) along some path through the program — and
+that question requires tracking taint through assignments, calls and
+returns, which a linter operating one line at a time structurally cannot do.
+
+**Zero findings is not evidence of no vulnerabilities; it may only be
+evidence that the tool in use cannot see the class of bug being asked
+about.** The vacuous version of this gate is indistinguishable from the real
+one in a passing CI run — both show a green check — so the audit question is
+never "did SAST run" but "did a dataflow-capable engine run, and can it name
+the taint sources and sinks it actually tracks for this codebase's
+language(s)". A dataflow engine configured with zero custom sources/sinks for
+a codebase's actual untrusted-input surface (an internal RPC treated as
+trusted, a message-bus payload never declared as a source) is the same
+vacuity failure in a different shape: it will run clean forever regardless of
+what the code does.
+
+Inventory: what runs today — general linter only, a dataflow/taint-tracking
+engine, or both; which languages and which parts of the codebase are in its
+scope; whether the sources and sinks it tracks are the codebase's actual
+untrusted-input surface (declared explicitly) or only the tool's stock
+defaults; whether findings block the merge or are advisory; the triage
+backlog and its age.
+Ask: nothing structural — this is mechanically checkable from the tool's own
+configuration and coverage report. What may need a human: which boundaries in
+THIS codebase are the untrusted-input sources the dataflow engine should be
+told about, where that is not obvious from the language's own conventions
+(e.g., an internal service treated as trusted by convention but reachable
+from outside the trust boundary in practice).
+Row: dataflow-capable SAST present or linter-only; declared source/sink
+coverage against the codebase's actual untrusted-input surface, or stock
+defaults only; blocking or advisory; findings triaged or backlogged.
+
+## 19. Schema evolution and breaking-change detection
+
+This is industry practice, not an academically-backed dimension — no paper
+is cited here, deliberately, because none was given and none should be
+invented. It earns a place in this framework because it is the mechanical
+half of a semantic event `prod-spec` already detects and routes:
+`changes_schema` pulls a requirement set into a change plan's
+`required_evidence`, and this dimension is what that requirement set should
+actually demand for anything published on an event-driven surface — Avro,
+JSON Schema, protobuf, or an equivalent wire format with independent readers.
+
+This is deliberately distinct from two entries that already touch schemas
+and does not duplicate either: dimension 5's `compatibility` clause is about
+whether an INTEGRATION test exercises a real broker's registry (fidelity —
+does the check run against the real thing); dimension 14's
+`published_contract` is about whether an EMITTED payload to an external
+audience is versioned and pinned by a test (the audience-facing contract,
+checked at the point something ships). This dimension is about neither of
+those — it is about whether a **breaking change is caught mechanically, in
+CI, at merge time, before it lands**, as a distinct gate rather than as a
+side effect of an integration test happening to notice.
+
+The distinction that separates a real gate from a vacuous one here: a schema
+check that only diffs the CURRENT PR's schema file against itself (or
+against nothing) passes trivially on every PR, including the one that
+deletes a field a live consumer reads. A real check computes compatibility
+between the proposed schema and the schema version(s) actual consumers are
+running against — full, backward, or forward compatibility per the
+declared policy — and fails the merge when that computation says a consumer
+would break, not when a human notices a diff in review.
+
+Inventory: which schema formats this repo publishes or consumes on an
+event-driven surface; whether a compatibility check runs in CI on every PR
+that touches a schema, and against what baseline (the immediately prior
+version, the registry's live version, or all versions still in use by known
+consumers); whether the check is advisory or blocking; whether it fires only
+on schema-file changes or can be silently bypassed by a change that alters
+serialization behavior without touching the schema file itself (a default
+value change, a type-widening change in application code that the schema
+technically still allows).
+Ask: what compatibility mode this event-driven surface has actually chosen
+(this may already be answered by dimension 5's `compatibility` question —
+this entry asks whether that policy is ENFORCED mechanically, not merely
+declared); which consumers are on an old schema version today and would be
+the first to break.
+Row: compatibility check present in CI or absent; blocking or advisory; the
+baseline it diffs against (immediately-prior version only, or every version
+still in use); consumers named or their currency unknown.
+
+## 20. Chaos in production, and consistency checked against a history
+
+Two instruments that both look like §7 and are neither.
+
+**Chaos experiments are not a CI fault-injection suite.** §4's matrix has a
+`chaos` lane, §7 inventories a fault-injection harness, and §13 requires a
+test that INDUCES a failure and times the return. All three run before merge,
+against a hermetic or containerized system, on the faults the author thought
+of. Basiri et al. define the discipline differently, and the difference is
+the whole value: **experiments run against a system carrying production
+traffic, each stated in advance as a hypothesis about a steady-state metric,
+drawn from real-world event classes, automated to run continuously, with a
+minimized blast radius** ("Chaos Engineering", IEEE Software 33(3), 2016, DOI
+10.1109/MS.2016.60). A fault-injection suite verifies the faults you
+enumerated. A chaos experiment is a claim about the ones you did not.
+
+Its vacuous forms:
+
+- **A chaos lane containing no fault.** This framework's own template ships
+  `make chaos` as `-race -count=N` and says so in a comment — an honest
+  placeholder, and a repo that leaves it there has a lane whose NAME is the
+  only chaotic thing about it.
+- **An experiment with no steady-state hypothesis.** "Kill a pod and see what
+  happens" produces a story, not a result: with no metric declared in advance
+  and no threshold that decides pass from fail, the outcome is whatever the
+  person watching concluded, and nothing can regress against it later.
+- **A blast radius that is an intention.** "We only run it at 1% of traffic"
+  is a property of the experiment only if something enforces the split and
+  something aborts on the hypothesis breaking. Otherwise it is the same
+  missing-abort-path failure §17 names for canaries.
+
+**Consistency is the second half, and it needs a different instrument.** This
+framework asks every stateful capability to declare its consistency
+semantics — `source_of_truth`'s `consistency_semantics` obligation, and the
+`semantics.consistency` line in the spec. Nothing in the standard set then
+checks that declaration. Recovery tests ask whether the system comes back;
+they never ask whether what it served *while* partitioned was linearizable.
+The instrument for that is a recorded HISTORY of concurrent client operations
+checked against the model, which is what Jepsen does generally and what Elle
+does for transactional isolation specifically — recovering the dependency
+graph from ordinary client-observable reads and writes rather than requiring
+the store to be instrumented or to report on itself (Kingsbury & Alvaro,
+"Elle: Inferring Isolation Anomalies from Experimental Observations", PODC
+2021, DOI 10.1145/3465084.3467483).
+
+Its vacuous form is the sharpest here: **a consistency model declared in the
+spec and checked by nothing.** One line saying `consistency: linearizable`
+reads as rigour, costs nothing, and is true right up to the first partition.
+A history checker that runs only against a healthy single node is the same
+failure with a test suite attached — the anomalies it exists to find are
+reachable only under partition, failover or clock skew, so a green run
+without one of those is a green run of nothing.
+
+Inventory: whether any fault is injected against a system carrying real
+traffic, or only in CI; per experiment, the steady-state metric, the
+hypothesis, the abort condition, and what enforces the blast radius; whether
+experiments run on a schedule or were run once and written up; the declared
+consistency model of every stateful capability; whether any check exercises
+that model against a recorded history under partition/failover, and whether
+the checker infers anomalies from client-observable operations or trusts the
+store's own reporting.
+
+Ask: which failure classes are real-world for THIS deployment (zone loss,
+dependency brownout, leader failover, clock skew) rather than theoretically
+possible; what steady-state metric an operator would accept as "the system is
+fine"; the maximum acceptable blast radius and who authorizes an experiment
+at it; whether each declared consistency model is a promise made to a
+consumer or an internal description of current behavior.
+
+Row: chaos experiments run against production traffic, run in CI only, or
+absent; each experiment's steady-state hypothesis and abort path declared or
+absent; the declared consistency model checked against a recorded history
+under an induced partition, or declared only.
+
+## 21. Consumer-driven contracts
+
+Ian Robinson, "Consumer-Driven Contracts: A Service Evolution Pattern"
+(martinfowler.com, 2006). Industry pattern with a written source, not an
+empirical result — cited as the pattern's definition, nothing more.
+
+Three existing dimensions touch this surface and none of them covers it. §5
+asks whether an integration lane exercises a real dependency (fidelity). §14
+asks whether an emitted payload is versioned and pinned by a test
+(provider-side, at the point of shipping). §19 asks whether a breaking schema
+change is caught mechanically at merge (the gate). All three are written from
+the PROVIDER's side, and they share one blind spot: **the provider is also
+the author of the expectation.** A pinned shape is pinned to what the
+provider decided to emit, so a provider can rename a field and update its own
+pin in the same commit with every gate green — and the consumer reading that
+field finds out in production.
+
+Consumer-driven contracts invert the authorship. The expectation is written
+by the CONSUMER, states only the subset of the surface that consumer actually
+depends on, and is verified inside the PROVIDER's build. What that buys is
+not more testing; it is a different oracle. The provider learns which fields
+have a reader before deleting one — and, the half that pays for the
+ceremony, which fields have NO reader, which is the only mechanical way this
+framework offers to SHRINK a published surface instead of accreting it
+forever.
+
+Vacuous forms:
+
+- **The provider writes the consumer's contract.** Both sides of the check
+  now have one author, and it degenerates into §14's pin with more
+  infrastructure around it.
+- **Verification against a mock of the provider.** A consumer test passing
+  against its own stub proves the stub matches the expectation. The
+  verification has to run in the provider's build against the provider's real
+  handler, or it is checking a fixture against a fixture.
+- **A stale contract nobody re-publishes.** A consumer that changed what it
+  reads and did not update its contract leaves the provider defending a shape
+  nobody wants, while believing it has coverage of the shape that is now
+  load-bearing. Contracts need the currency question every liability in this
+  framework has: last published when, by a consumer still deployed?
+- **Contracts only for the consumers you own.** The internal consumer in the
+  same monorepo is the one you can fix in an afternoon. §14's whole argument
+  is that the expensive audience is the one you cannot.
+
+Inventory: named consumers per published surface (§14 already asks who they
+are; this asks whether each has expressed WHAT it reads); which consumer
+expectations exist as executable artifacts and where they live; whether
+provider verification runs in the provider's CI on every change to the
+surface, and whether it blocks or is advisory; the age of each contract and
+whether its author is still deployed; fields on the published surface that no
+contract claims.
+
+Ask: for each consumer, is it inside the trust boundary (fixable by the same
+team on the same day) or outside it; which consumers are unwilling or unable
+to publish a contract at all, so their expectation must be inferred or their
+surface frozen.
+
+Row: consumer contracts present per named consumer, or absent; verified in
+the provider's build, blocking or advisory; contract currency (last
+published, consumer still live); unclaimed fields on the published surface
+identified or unknown.
+
+## 22. SLO and error budget as a MECHANISM
+
+Beyer, Jones, Petoff and Murphy (eds.), *Site Reliability Engineering*
+(O'Reilly, 2016) — the error-budget formulation this entry uses.
+
+SLOs already appear in this framework three times, and every appearance is
+declarative: §6 inventories "declared SLOs" and asks whether an absolute SLO
+is asserted anywhere; §10 lists "alerts and SLOs" among operability
+artifacts; §17 scores the canary against "the metrics the service already
+declares". None of them asks the question that turns an SLO into an
+instrument: **what CHANGES when the objective is missed.**
+
+The error budget is that mechanism. "99.9% over 30 days" is also the
+statement that roughly 43 minutes of unavailability are BUDGETED — spendable,
+deliberately — and the remaining balance is a number a release decision can
+read. Without the budget, an SLO is a sentence in a document. With it, it is
+the input to a policy.
+
+Vacuous forms, and this framework's own scaffold demonstrates the honest way
+to be short of one:
+
+- **An objective with no SLI behind it.** A number asserted against a
+  quantity nothing measures. `prod-new`'s template says exactly this about
+  its outbox-latency objective — "the SLI itself needs a metric first" — and
+  saying so is the correct answer; inventing the objective anyway is not.
+- **An SLI measured from the server's own success counter.** A request the
+  load balancer dropped never reaches the denominator, so availability is
+  computed over the traffic that worked. This is §13's progress-metric
+  failure in a different costume: a number that is correct exactly while the
+  system is healthy. State the measurement VANTAGE POINT, and prefer one
+  outside the process being measured.
+- **A budget nothing consumes.** A burn-rate panel that no release gate, no
+  alert and no prioritization decision reads is a dashboard. The mechanical
+  question is which decision the remaining balance changes, and where that is
+  written down.
+- **Paging on the SLI instead of the burn rate.** A page for every dip is a
+  page nobody reads by week three; burn-rate alerting at two windows (a fast
+  one for the outage, a slow one for the drip) is the shape that survives.
+- **An objective set to what the system already does.** Derived from last
+  month's measured availability, it cannot be missed and therefore decides
+  nothing. The objective comes from what a consumer needs, which is why it is
+  the one number in this dimension a human must supply.
+
+Inventory: per user-facing capability, the SLI (the exact query, and the
+vantage point it is measured from), the objective, the window, and whether
+the window rolls or resets; whether remaining error budget is computed
+anywhere and by what; burn-rate alerts and their windows; the policy the
+budget feeds — what is not allowed to ship once it is exhausted; whether that
+policy has ever actually fired.
+
+Ask: what a consumer of this service actually needs (a product decision, not
+an engineering measurement); who may spend the budget and who declares it
+exhausted; which capabilities have no meaningful percentage form at all — a
+correctness invariant is 100%-or-page, and saying so is a complete answer,
+which is how this framework's own units-conservation SLI is written.
+
+Row: SLI defined with its measurement vantage point, or an objective with no
+SLI behind it; error budget computed or not; burn-rate alerts at more than
+one window or single-window/absent; the exhaustion policy declared, and
+whether anything enforces it.
+
+## 23. Dependency currency and version pinning
+
+**Industry practice, no paper.** Dependabot, Renovate and their equivalents
+are a widely adopted operational discipline with no academic result behind
+them that this framework can cite, and inventing one would be worse than
+leaving the entry uncited.
+
+Two properties in tension, which is why they are one dimension. A build must
+be REPRODUCIBLE — the same inputs at a later date produce the same artifact —
+and a deployment must be CURRENT — the version running is not one with a
+published advisory. Pinning alone buys the first and quietly destroys the
+second: a lockfile is a commitment to keep using exactly the version that
+will eventually be the vulnerable one. Automation alone buys the second and
+destroys the first.
+
+What is already covered, and where the hole is: §9 inventories dependency
+vulnerability scanning and the tier policy requires it, so a KNOWN vulnerable
+dependency is caught. §11 asks whether the environment is versioned and
+recoverable for a past run. Neither asks whether anything moves a dependency
+forward on a cadence, and neither looks at the versions of the TOOLS the
+gates themselves run on. That second half is the sharper one here, because in
+this framework the gates ARE the standard: a workflow step written
+`actions/checkout@v4` is pinned to a MUTABLE tag its owner can repoint, so
+the trusted computing base of every gate in that repo is whatever the tag
+resolved to this morning. Named against this framework rather than in the
+abstract: `prod-new`'s CI template pins its Go tools to exact versions
+(`golangci-lint@v2.12.2`, `govulncheck@v1.7.0`) and its third-party actions
+to floating major tags (`actions/checkout@v4`, `actions/setup-go@v5`,
+`gitleaks/gitleaks-action@v2`). A framework that files this as a finding
+elsewhere and not against itself is doing the thing it exists to stop.
+
+Vacuous forms:
+
+- **A lockfile with no update cadence** — reproducible and rotting. The
+  vulnerability scanner finds it eventually, which means the first signal is
+  an advisory rather than a routine bump.
+- **Automated PRs nobody merges.** An open bot backlog is not currency; its
+  AGE is the measurement, and a bot opening PRs into a queue is indexing the
+  debt rather than paying it.
+- **A pin to a mutable tag.** `@v4` and `:latest` are not pins. Only a commit
+  SHA or a content digest is.
+- **Auto-merge on green, where green is a gate the update itself can
+  weaken.** An update that changes a linter's ruleset, a scanner's database,
+  or a tool a gate shells out to is a change to the ORACLE, and it needs the
+  review a change to the gate would get. Auto-merging it is letting the thing
+  under test approve itself.
+
+Inventory: which manifests are locked, whether the lockfile is committed, and
+whether CI enforces it rather than regenerating it (`--frozen-lockfile`,
+`--locked`, `go mod verify` / `-mod=readonly`); whether an automated update
+mechanism exists, its cadence, its grouping and its auto-merge policy; open
+update-PR count and the age of the oldest; every third-party ACTION and every
+TOOL the gates invoke, and whether each is pinned to an immutable identifier
+or a mutable tag; whether a build from a past commit still resolves today.
+
+Ask: which dependency classes may auto-merge on green, and which need a human
+because the update can change what a gate MEASURES; the acceptable lag for a
+security update versus an ordinary one.
+
+Row: lockfile committed and CI-enforced, or advisory; update automation
+present with a stated cadence, or manual; age of the oldest open update PR;
+gate tooling and third-party actions pinned to immutable identifiers, or to
+mutable tags.
+
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big
   gap localizes weak assertions better than either number alone; both inputs
@@ -682,6 +1235,11 @@ and it is written at the moment someone decided they could not fix it, so it
 reads like a wall. The retirement condition says what closing it would take,
 and it is usually the more useful half, because whoever wrote the entry had
 just finished thinking about exactly that.
+
+A feature flag is the paradigm case: it is a liability that already carries
+its own retirement condition — a TTL — so a flag with no expiry is not a
+lighter-weight liability than the others in this section, it is one that has
+already dropped the half that makes it closeable.
 
 **Measured, on one repo, in one session: five liabilities were characterised as
 "external constraints — not closeable from this side". Four were closeable, and

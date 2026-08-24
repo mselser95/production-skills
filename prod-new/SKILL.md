@@ -56,16 +56,28 @@ a starting point to grow into it.
 - **RULE FOUR-QUESTIONS:** the human is asked exactly four things, in ONE
   batched message with your proposal pre-filled for each (see Phase 1). Never
   an interrogation, never a question whose answer you can derive.
-- **RULE BORN-COMPLETE:** the scaffold ships tracing, metrics, the
-  observability contract, invariant counters, conformance kits, the replay
-  corpus, registries + expiry gate, and all lanes wired. A dimension the
-  service genuinely cannot have yet is a **ratified decline recorded in the
-  spec**, never an omission.
+- **RULE BORN-COMPLETE:** the scaffold ships metrics, continuous profiling,
+  the observability contract, invariant counters, conformance kits, the replay
+  corpus, registries + expiry gate, and all lanes wired — plus tracing wherever
+  RULE DERIVED-MECHANISMS says it is warranted. A dimension the service
+  genuinely cannot have yet is a **ratified decline recorded in the spec**,
+  never an omission.
 - **RULE DERIVED-MECHANISMS:** the ARCHITECTURAL machinery — event log,
-  inbox/dedup, outbox, snapshots, reconciliation — is not shipped
-  unconditionally. It is DERIVED from the Phase-1 answers per
-  `references/mechanism-derivation.md`, and a mechanism derived NOT WARRANTED
-  is left out with its deriving property recorded in `out_of_scope`.
+  inbox/dedup, outbox, snapshots, reconciliation, and the INBOUND half of
+  distributed tracing — is not shipped unconditionally. It is DERIVED from the
+  Phase-1 answers per `references/mechanism-derivation.md`, and a mechanism
+  derived NOT WARRANTED is left out with its deriving property recorded in
+  `out_of_scope`.
+
+  **Tracing is the derived mechanism people get wrong in both directions.** A
+  headless service — a queue consumer, a cron batch, a daemon nothing calls —
+  owes no inbound trace extraction, and demanding it produces root spans
+  nothing can parent. But the decline covers ONLY that half: span emission and
+  EGRESS injection stay warranted, a correlation id is universal, and
+  continuous profiling is never derived away at all (`mechanism-derivation.md`
+  §8 and §9). Deleting the observability package because tracing was declined
+  removes three mechanisms to decline one. The verdict is READ OFF the repo's
+  own signals, never asked.
 
   **The mechanism is derived; the dimension is not.** Declining the event log
   does not decline `bounded_boot` — that question is still owed and still
@@ -248,6 +260,19 @@ a metrics manifest, a spans manifest, and the contract test that scrapes the
 real endpoint and fails on drift in BOTH directions. One counter per ratified
 invariant, each asserted to stay 0 and asserted to increment under a
 deliberately violating call so it is never dead code.
+
+**Four signals, not three.** Profiles are the fourth, and they are the one the
+scaffold ships only half of: `pprofhttp` plus `benchmarks/profile.sh` is the
+ON-DEMAND half — someone taking a profile while the incident is still live.
+`dimensions.md` §8 requires the CONTINUOUS half too, in every service headless
+or not, because the profile that explains a regression is the one that was
+already being taken when it happened. That half lives in the deployment (an
+always-on sampling profiler shipping to a store with retention), so the
+scaffold cannot ship it and must not imply it did: say what the template gives
+(on-demand) and what the service owner still owes (continuous collection, with
+the build identity attached so profiles are comparable across a deploy). The
+inbound half of tracing, by contrast, is derived — see RULE
+DERIVED-MECHANISMS.
 
 **Verification** — `verification/ratified/` (seed invariants as executable
 tests, each with its non-vacuity mutation recorded), `verification/conformance/`

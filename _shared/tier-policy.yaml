@@ -18,6 +18,15 @@ defaults: &defaults
   # Fault sensitivity — always advisory, all tiers (tooling immaturity + Goodhart)
   mutation: { mode: advisory, scope: changed_code, cap_mutants_per_pr: 20 }
 
+  # Design-time verification (dimension 17) — one level above mutation on the
+  # same fault-sensitivity spectrum: mutation finds what tests miss in code
+  # that exists, this finds what the DESIGN fails to rule out before code
+  # exists. Advisory and narrow-scoped everywhere by default -- the cost only
+  # pays for itself on a genuinely concurrent/distributed protocol core, and
+  # mandating it broadly produces a rubber-stamp model nobody checks against
+  # the implementation, which is worse than no model.
+  formal_methods: { mode: advisory, scope: novel_concurrent_or_distributed_protocol_core }
+
   # Behavioral
   property_tests: required_on_core
   fuzz: required_on_decode_boundaries    # every parse/decode boundary, seed corpus checked in
@@ -29,6 +38,47 @@ defaults: &defaults
   # Integration / contracts
   integration_fidelity: hermetic_plus_one_real   # ≥1 lane against a real dependency
   compatibility: { policy: n_minus_1, schema: expand_contract, breaking_check: required }
+  # Schema evolution (dimension 19) -- names what `breaking_check: required`
+  # above must actually mean, for any event-driven surface (Avro, JSON
+  # Schema, protobuf, or an equivalent format with independent readers): a
+  # MECHANICAL, CI-BLOCKING compatibility check computed against every
+  # schema version still in use by a named consumer -- not a diff against
+  # the PR's own prior state, which passes trivially on the PR that deletes
+  # a field a live consumer still reads. Connects to prod-spec's
+  # `changes_schema` semantic event: this is the requirement that event is
+  # meant to pull in. Industry practice, deliberately uncited -- no academic
+  # source was given for this one and none should be invented.
+  schema_evolution: { enforcement: ci_blocking,
+                       baseline: all_versions_in_use_by_named_consumers }
+  # Consumer-driven contracts (dimension 21). Ian Robinson, "Consumer-Driven
+  # Contracts: A Service Evolution Pattern" (martinfowler.com, 2006) -- the
+  # pattern's definition, cited as such; there is no empirical result behind
+  # it and none is implied.
+  #
+  # `published_contract.shape_pinned` below already makes the provider pin
+  # what it emits. That check has one author on both sides: a provider can
+  # rename a field and update its own pin in the same commit, every gate
+  # green, and the consumer reading that field finds out in production. This
+  # key inverts the authorship -- the CONSUMER states the subset it depends
+  # on, and the PROVIDER's build verifies it. What it buys is not more tests
+  # but a different oracle, plus the only mechanical way this framework has to
+  # SHRINK a published surface: fields no contract claims.
+  #
+  # `verified_in_provider_build: required` is the anti-vacuity key. A consumer
+  # test passing against its own stub proves the stub matches the expectation.
+  # `currency` is the second: a contract from a consumer that has since
+  # changed what it reads leaves the provider defending a shape nobody wants
+  # while believing it is covered.
+  consumer_contracts:
+    mode: required_if_publishes           # same trigger as
+                                          # published_contract.versioned
+    authored_by: consumer                 # never the provider; one author on
+                                          # both sides is the vacuous form
+    verified_in_provider_build: required  # against the real handler, blocking
+    currency: declared                    # last published, and whether that
+                                          # consumer is still deployed
+    unclaimed_fields: reported            # published surface no contract
+                                          # reads -- the shrink signal
 
   # Performance
   benchmarks: { baseline: required, comparison: statistical_relative_only,
@@ -37,6 +87,49 @@ defaults: &defaults
 
   # Resilience / recovery
   fault_injection: required_per_capability_class
+  # Chaos engineering (dimension 20) is NOT `fault_injection` above with a
+  # bigger budget. That key covers a CI harness exercising the faults the
+  # author enumerated, per capability class. This one covers experiments
+  # against a system carrying production traffic, each stated in advance as a
+  # hypothesis about a steady-state metric, drawn from real-world event
+  # classes, automated, with an enforced blast radius (Basiri et al., "Chaos
+  # Engineering", IEEE Software 33(3), 2016, DOI 10.1109/MS.2016.60). The
+  # first verifies the faults you thought of; the second is a claim about the
+  # ones you did not.
+  #
+  # `steady_state_hypothesis: required_per_experiment` is the anti-vacuity
+  # key. Without a metric declared BEFORE the run and a threshold that decides
+  # pass from fail, the outcome is whatever the person watching concluded, and
+  # nothing can regress against it later. Same shape as dimension 17's refusal
+  # of "no alerts fired" as a canary verdict.
+  chaos_engineering:
+    production_experiments: required      # T2 relaxes this to recommended
+    steady_state_hypothesis: required_per_experiment
+    abort_path: required_and_rehearsed    # an unenforced blast radius is an
+                                          # intention, not a property
+    cadence: declared                     # continuous/scheduled, or the once
+                                          # it was run and written up
+  # Consistency verification (dimension 20's second half) -- a DIFFERENT
+  # instrument from recovery testing, and the gap it fills is one this file
+  # creates: `capability_classes.source_of_truth` obligates
+  # `consistency_semantics`, and nothing anywhere checks the declaration. A
+  # recovery test asks whether the system comes back; it never asks whether
+  # what it served WHILE partitioned was linearizable. The instrument is a
+  # recorded history of concurrent client operations checked against the
+  # declared model, inferring anomalies from client-observable reads and
+  # writes rather than trusting the store to report on itself (Kingsbury &
+  # Alvaro, "Elle: Inferring Isolation Anomalies from Experimental
+  # Observations", PODC 2021, DOI 10.1145/3465084.3467483).
+  #
+  # `under_induced_fault: required` is the anti-vacuity key: the anomalies
+  # this exists to find are reachable only under partition, failover or clock
+  # skew, so a green run against a healthy single node is a green run of
+  # nothing.
+  consistency_verification:
+    mode: required_if_declared_consistency_model
+    history_checked: required             # against a recorded history, not
+                                          # against the store's own reporting
+    under_induced_fault: required         # partition / failover / clock skew
   # effect_journal_atomic: the outbox row must commit ATOMICALLY with the state
   # change it belongs to -- same transaction, or a boot-time projection of the
   # event log. Journaling the effect AFTER the state commit is the shape
@@ -53,6 +146,87 @@ defaults: &defaults
   invariant_counters: required            # ratified invariants mirrored to prod
   operational_determinism: required       # code+config+schema+flag versions in signals
   isolation_and_backpressure: required    # explicit, tested, per-partition
+  # Profiles are the FOURTH signal (dimension 8), not a performance chore.
+  # `benchmarks.profiling: periodic` above is a different thing and stays: it
+  # is the profile you take of a benchmark, on your hardware, to explain a
+  # regression you can already reproduce. This key is about whether a profile
+  # of the process that was actually slow -- in production, on the build that
+  # was deployed then -- exists AT ALL, which is decided before anybody knows
+  # to look. Continuous, low-overhead, fleet-wide sampling is the shape (Ren,
+  # Tune, Moseley, Shi, Rus, Hundt, "Google-Wide Profiling: A Continuous
+  # Profiling Infrastructure for Data Centers", IEEE Micro 30(4), 2010, DOI
+  # 10.1109/MM.2010.68); Grafana Pyroscope is the OSS system built to it,
+  # named as an example the way this file's dimension 17 names Kayenta.
+  #
+  # REQUIRED AT EVERY TIER AND FOR EVERY SERVICE, headless included -- that
+  # exemption is the specific mistake this key exists to rule out. A batch job
+  # that got 40% slower has no request to trace and no dashboard naming the
+  # loop; the profile of the slow run is the only artifact that explains it.
+  #
+  # `build_identity_attached` is not decoration: a profile you cannot
+  # attribute to a binary cannot be diffed across a deploy, which is the one
+  # operation that makes a profile store worth keeping. It is dimension 11's
+  # version record pointed at the fourth signal.
+  continuous_profiling:
+    collection: required                  # always-on sampling in production,
+                                          # NOT an endpoint somebody scrapes
+                                          # while the incident is still live
+    retention: declared                   # how far back a profile can be
+                                          # retrieved for a named window
+    build_identity_attached: required     # every profile labelled with the
+                                          # build that produced it
+    overhead: measured                    # measured, never assumed -- "it is
+                                          # only 1%" is a claim, and an
+                                          # unmeasured one is how a profiler
+                                          # gets switched off in an incident
+    types: declared                       # cpu | heap | goroutine | mutex |
+                                          # block | alloc -- which of these the
+                                          # workload makes worth keeping IS
+                                          # derivable (mechanism-derivation.md
+                                          # §9); whether to profile at all is
+                                          # not
+  # Distributed tracing is CONDITIONAL, and the condition is DERIVED from the
+  # repo -- never asked, and never assumed universal.
+  #
+  # A trace is a causal JOIN across process boundaries. A service nothing
+  # calls has nothing to join to, so a universal requirement can only be
+  # satisfied by emitting root spans nothing will ever parent -- which is
+  # dimensions.md §8's measured 3132-spans-in-3132-traces failure, reached
+  # deliberately instead of by accident. The derivation and its signals live
+  # in mechanism-derivation.md §8: a listener serving routes outside the
+  # health/metrics/pprof surface, registered handlers, an inbound port in the
+  # deployment artifact, or a carrier extracted from arriving work -- against
+  # a poll loop, a ticker, or a main that runs once and exits.
+  #
+  # THE DECLINE IS NOT FREE. verify-standard.sh turns `tracing-wired-in-prod`
+  # NA on a ratified `distributed_tracing` decline ONLY after failing to find
+  # a route registered outside the operational surface; find one and the row
+  # FAILs, because a decline of fact that the code contradicts is the escape
+  # this framework refuses everywhere else. Mutation-verified: neutering that
+  # detector flips the contradiction cases back to NA.
+  #
+  # The three sub-keys are not one boolean, and collapsing them is how this
+  # correction gets over-applied. Only `inbound_extraction` is derived.
+  distributed_tracing:
+    span_emission: required               # the service's own critical
+                                          # transitions; universal
+    inbound_extraction: derived_or_ratified_decline
+                                          # THE derived one. Warranted iff
+                                          # work arrives carrying a caller's
+                                          # context -- including a queue
+                                          # message whose PRODUCER stamped
+                                          # one, which is the case most often
+                                          # mislabelled "headless". Unknown
+                                          # upstream carrier => ask, never
+                                          # decline
+    egress_injection: required            # universal for anything that makes
+                                          # an outbound call: dropping context
+                                          # on the way out truncates the trace
+                                          # of everything downstream
+    correlation_id: required              # a run id, job id or message id
+                                          # joining a service's OWN signals,
+                                          # whether or not it is a W3C trace
+                                          # id. Never declined
 
   # Wiring (dimension 16) — REQUIRED at every tier, with no relaxation.
   # A mechanism that nothing calls passes its own tests and does nothing in
@@ -176,6 +350,56 @@ defaults: &defaults
   # Security
   supply_chain: { secret_scan: all_triggers, vuln_scan: required, sbom: required,
                   artifact_provenance: required, secretless_presubmit: required }
+  # Dependency currency and version pinning (dimension 23). INDUSTRY PRACTICE,
+  # NO PAPER -- Dependabot/Renovate and equivalents have no academic result
+  # behind them that this framework can cite, and inventing one would be worse
+  # than leaving the entry uncited.
+  #
+  # Two properties in tension, which is why they are one key. `vuln_scan`
+  # above catches a KNOWN-vulnerable dependency; nothing today moves a
+  # dependency forward on a cadence, and a lockfile with no cadence is a
+  # commitment to keep using exactly the version that will eventually be the
+  # vulnerable one.
+  #
+  # `gate_tooling_pinned: immutable_identifier` is the sharper half FOR THIS
+  # FRAMEWORK SPECIFICALLY, because here the gates ARE the standard. A step
+  # written `actions/checkout@v4` is pinned to a MUTABLE tag its owner can
+  # repoint, so the trusted computing base of every gate in the repo is
+  # whatever that tag resolved to this morning. prod-new's own CI template
+  # does exactly this today -- exact versions for its Go tools
+  # (golangci-lint@v2.12.2, govulncheck@v1.7.0) and floating major tags for
+  # actions/checkout@v4, actions/setup-go@v5, gitleaks/gitleaks-action@v2.
+  # Applying this key files a finding against the framework's own template,
+  # which is the correct outcome and should not be softened away.
+  #
+  # `auto_merge: gate_affecting_excluded` is the anti-vacuity key: an update
+  # that changes a linter's ruleset, a scanner's database, or a tool a gate
+  # shells out to is a change to the ORACLE. Auto-merging it on green is
+  # letting the thing under test approve itself.
+  dependency_currency:
+    lockfile: committed_and_ci_enforced   # --frozen-lockfile / --locked /
+                                          # -mod=readonly, not regenerated in
+                                          # CI
+    update_automation: required           # with a stated cadence
+    open_pr_age: reported                 # an unmerged bot backlog is not
+                                          # currency; its AGE is the
+                                          # measurement
+    gate_tooling_pinned: immutable_identifier   # commit SHA or digest. @v4
+                                                # and :latest are not pins
+    auto_merge: gate_affecting_excluded
+    security_update_lag: declared         # distinct from the ordinary bump
+  # Semantic/dataflow SAST (dimension 18) -- distinct from whatever the
+  # general linter already does. A controlled study found default SAST
+  # rulesets miss the majority of real, confirmed vulnerabilities present
+  # in their target codebases -- 61.2% missed (Semgrep* -- Improving the
+  # Limited Performance of SAST Tools, ACM/ESEM 2024, DOI
+  # 10.1145/3661167.3661262). "SAST ran" is therefore not itself evidence;
+  # scope must be the codebase's DECLARED untrusted-input surface (request
+  # bodies, queue payloads, RPC boundaries treated as trusted by convention),
+  # not the tool's stock source/sink defaults, or the gate is vacuous by
+  # construction -- it will run clean regardless of what the code does.
+  sast_specialized: { mode: required, scope: declared_untrusted_input_surface,
+                       blocking: required }
   authz_invariants: required_if_multi_tenant
   # A surface that ACCEPTS WORK needs a credential or a ratified decline
   # naming who may reach it. Read-only health/metrics endpoints are exempt;
@@ -187,10 +411,51 @@ defaults: &defaults
   deployment_resource_limits: required_if_deployment_artifacts
 
   # Deployability / operability
+  #
+  # `analysis: automated_plus_invariant_gates` is dimension 17's canary-
+  # analysis requirement: a STATISTICAL comparison of the canary population
+  # against baseline on the service's own invariants/SLOs, with a defined
+  # promote/abort rule -- not an elapsed-time wait and not unaided human
+  # judgment reading a dashboard. See dimension 17 for what "automated" must
+  # actually mean before this counts as satisfied.
   delivery: { progressive: required, analysis: automated_plus_invariant_gates,
               rollback: artifact_repin, rehearsed: required }
   runbooks: { required: true, exercise_cadence: quarterly }
   liability_registries: required          # flags, waivers, quarantine, contract debt
+  # SLO and error budget as a MECHANISM (dimension 22). Beyer, Jones, Petoff &
+  # Murphy (eds.), "Site Reliability Engineering" (O'Reilly, 2016).
+  #
+  # SLOs already appear in this file and in dimensions.md three times, and
+  # every appearance is DECLARATIVE -- `benchmarks.absolute_slo`, the
+  # runbooks/alerts inventory, and dimension 17's canary scoring. None asks
+  # the question that turns an SLO into an instrument: what CHANGES when the
+  # objective is missed. "99.9% over 30 days" is also the statement that ~43
+  # minutes are BUDGETED, and the remaining balance is a number a release
+  # decision can read.
+  #
+  # `sli.vantage_point: declared` is the anti-vacuity key, and it is the same
+  # defect as dimension 13's progress metric: availability computed from the
+  # server's own success counter omits every request the load balancer
+  # dropped, so the number is correct exactly while the system is healthy.
+  # `exhaustion_policy` is the other: a burn-rate panel no decision reads is a
+  # dashboard, not a budget.
+  #
+  # `objective: human_ratified` is deliberate -- the objective comes from what
+  # a consumer needs, not from last month's measured availability, which
+  # cannot be missed and therefore decides nothing. A correctness invariant
+  # with no meaningful percentage form (100%-or-page) is a COMPLETE answer
+  # here, not a missing one.
+  slo:
+    sli: { defined: required_per_user_facing_capability,
+           vantage_point: declared }
+    objective: human_ratified
+    window: declared                      # and whether it rolls or resets
+    error_budget: computed                # a balance, not a prose target
+    burn_rate_alerts: two_windows         # a fast one for the outage and a
+                                          # slow one for the drip; paging on
+                                          # the SLI itself is a page nobody
+                                          # reads by week three
+    exhaustion_policy: declared_and_enforced
 
 tiers:
   "0":
@@ -204,6 +469,12 @@ tiers:
     human_gates: [resolved_context, semantic_declarations, ratification, waivers]
     delivery: { progressive: required, analysis: automated_plus_invariant_gates,
                 rollback: artifact_repin, rehearsed: required, human_ack_before_full: true }
+    # T0 is where a missed interleaving is most expensive; a new
+    # concurrent/distributed protocol at this tier owes a checked model or a
+    # ratified decline saying why one was not worth writing -- advisory
+    # elsewhere, not here.
+    formal_methods: { mode: required_or_ratified_decline,
+                       scope: novel_concurrent_or_distributed_protocol_core }
   "1":
     <<: *defaults
     invariant_flake_rule: incident        # data-correctness tiers keep the T0 rule
@@ -214,6 +485,10 @@ tiers:
     fuzz: recommended
     benchmarks: { baseline: recommended, comparison: statistical_relative_only }
     fault_injection: recommended
+    chaos_engineering: { production_experiments: recommended,
+                         steady_state_hypothesis: required_per_experiment,
+                         abort_path: required_and_rehearsed,
+                         cadence: declared }
     invariant_flake_rule: quarantine_allowed
     human_gates: [waivers]
 

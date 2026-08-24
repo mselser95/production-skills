@@ -101,7 +101,12 @@ Before formulating a single question, resolve from the policy files:
   `references/dimensions.md`;
 - **which architectural mechanisms this service warrants** →
   `references/mechanism-derivation.md`, run against the Phase-1 INVENTORY
-  rather than a purpose line, since the code already shows what exists;
+  rather than a purpose line, since the code already shows what exists.
+  **Brownfield is where §8's tracing derivation is at its strongest**, because
+  its inputs are repo signals — listeners, registered routes, declared ports,
+  the shape of the work loop — and here they are all present to read. Derive
+  the verdict; put it to the human only if the signals contradict each other
+  (the usual case being a consumer that also exposes an admin endpoint);
 - the cheap-gate and presubmit commands → read the repo's build files;
   propose, don't ask.
 Anything still unresolved after this step is either a Phase-2 semantic

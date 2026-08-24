@@ -408,10 +408,26 @@ if grep -rql 'func Benchmark' --include='*_test.go' . 2>/dev/null; then
 else row "benchmarks" FAIL "no benchmarks"; fi
 
 # --- 11. profiling (capture path AND live endpoint) ------------------------
+#
+# WHAT THIS ROW MEASURES, AND THE HALF IT DOES NOT.
+#
+# Both halves below are ON-DEMAND: a capture script somebody runs, and an
+# endpoint somebody scrapes while the incident is still live. dimensions.md §8
+# makes profiling the FOURTH observability signal and requires it CONTINUOUS
+# in production -- always-on sampling shipped to a store with retention, so a
+# profile of the process that was slow last Tuesday exists at all (Ren, Tune,
+# Moseley, Shi, Rus, Hundt, "Google-Wide Profiling", IEEE Micro 30(4), 2010).
+#
+# This row cannot see that: continuous collection lives in a deployment's
+# agent/sidecar/SDK configuration, not in the repo's Go source, so a grep
+# here would be a keyword check standing in for a property -- the mistake
+# this file has made four times. So the row keeps measuring what it can and
+# the EVIDENCE STRING states the gap, rather than a PASS quietly implying a
+# requirement it never checked.
 prof_capture=$([[ -f benchmarks/profile.sh ]] && echo yes || echo no)
 prof_live=$(grep -rql "net/http/pprof" --include='*.go' . 2>/dev/null && echo yes || echo no)
 if [[ "$prof_capture" == yes && "$prof_live" == yes ]]; then
-  row "profiling" PASS "capture script + env-gated live endpoint"
+  row "profiling" PASS "capture script + env-gated live endpoint — the ON-DEMAND half only. Whether profiles are collected CONTINUOUSLY in production (dimensions.md §8) is not checkable from source and is NOT claimed by this row"
 elif [[ "$prof_capture" == yes || "$prof_live" == yes ]]; then
   row "profiling" FAIL "only half present (capture=$prof_capture live=$prof_live)"
 else row "profiling" FAIL "no profiling at all (claiming 'documented' is the known lie)"; fi
@@ -835,9 +851,49 @@ fi
 # not the wiring. Counting it here let a repo pass with every real injection
 # commented out and only the test's own call sites remaining, which is how the
 # first attempt at tightening this row was still fooled.
+#
+# DISTRIBUTED TRACING IS CONDITIONAL, and this row used to pretend otherwise.
+# A queue consumer, a cron batch or a daemon with no inbound request boundary
+# has nothing to join a trace TO: it can only satisfy a universal requirement
+# by emitting root spans nothing will ever parent, which is precisely the
+# 3132-traces-of-one-span failure the next row exists to catch, reached on
+# purpose. So a ratified `distributed_tracing` decline turns this row NA --
+# see dimensions.md §8 and mechanism-derivation.md §8, where the verdict is
+# DERIVED from repo signals rather than asked.
+#
+# But the decline is not free, because an unexamined decline is how every
+# other requirement in this framework gets escaped. The derivation's strongest
+# signal is mechanically checkable: routes registered for paths that are not
+# the operational surface. If the repo has any, the decline is CONTRADICTED by
+# the code and this row FAILs rather than going quietly NA.
+#
+# The check is deliberately one-directional and the evidence says so. Presence
+# of a non-operational route disproves the decline. ABSENCE proves nothing --
+# routes built from config, a gateway the repo cannot see, or a protocol
+# nobody greps for would all be missed -- so the NA states that it is a
+# ratified decline the probe could not contradict, never that headlessness was
+# verified.
+#
+# The pattern requires a "/-prefixed literal IN THE CALL (or a gRPC service
+# registration), not a bare `.Handle(`: `errHandler.Handle(err)` is an
+# ordinary method call, and a row that reds a correctly-declined headless
+# service is a row somebody switches off -- the same false-positive lesson
+# the mechanisms-driven row learned about inlining.
+inbound_route_sites() {
+  grep -rnE '\.(Handle|HandleFunc|GET|POST|PUT|PATCH|DELETE|Any|Route)\([^)]*"/|Register[A-Za-z0-9_]*Server\(' \
+    --include='*.go' --exclude='*_test.go' cmd/ internal/ 2>/dev/null \
+    | grep -vE 'healthhttp|pprofhttp|"/healthz|"/readyz|"/livez|"/startupz|"/metrics|"/debug/pprof'
+}
 tracer_sites=$(grep -rn --include='*.go' --exclude='*_test.go' \
   "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null | wc -l | tr -d ' ')
-if [[ "${tracer_sites:-0}" -gt 0 ]]; then
+if declined "distributed_tracing"; then
+  n_inbound=$(inbound_route_sites | wc -l | tr -d ' ')
+  if (( n_inbound > 0 )); then
+    row "tracing-wired-in-prod" FAIL "$SPEC declines distributed_tracing, but the code registers $n_inbound route(s) outside the health/metrics/pprof surface — e.g. $(inbound_route_sites | head -1 | cut -c1-120). A decline of fact that the fact contradicts is the escape this framework refuses; re-derive per mechanism-derivation.md §8 or narrow the decline"
+  else
+    row "tracing-wired-in-prod" NA "ratified decline in $SPEC and the probe found no route registered outside the health/metrics/pprof surface to contradict it — this is a decline it could not disprove, NOT a verification that work never arrives with a caller's context. Correlation ids and EGRESS injection are still owed; only the inbound extraction half is declined"
+  fi
+elif [[ "${tracer_sites:-0}" -gt 0 ]]; then
   # The evidence string says what was OBSERVED and what it does not prove.
   #
   # Three attempts at this row were fooled in turn: matching the identifier
@@ -885,6 +941,14 @@ fi
 # the whole row -- silently -- for any repo using the SDK directly, which is
 # the more common case. Caught by testing the row against a scratch module
 # that used the SDK and got no output at all.
+#
+# DELIBERATELY NOT gated on the `distributed_tracing` decline above, and the
+# asymmetry is the point. That decline is about the INBOUND extraction half --
+# whether work arrives carrying a caller's context. EGRESS injection is owed
+# by anything that makes an outbound call, headless or not: a batch job that
+# writes to another system and drops the context truncates the trace of
+# everything downstream of it. See mechanism-derivation.md §8's three-part
+# table, where only the middle part is derived.
 if grep -rqlE 'StartSpan|otel\.Tracer\(|TracerProvider|trace\.Tracer' \
      --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
   egress=$(grep -rlE 'http\.NewRequest|http\.Client|\.Publish\(|PublishMsg\(|grpc\.Dial|NewClient\(' \
