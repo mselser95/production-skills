@@ -205,7 +205,13 @@ mutation baseline, fuzz coverage of decode boundaries, the failure-mode matrix
 completeness per capability, integration fidelity (any real dependency?),
 compatibility/breaking-change detection, benchmark baseline + capacity margin,
 recovery/reconciliation/restore, observability contract, every supply-chain
-gate, and delivery/rollback/runbooks.
+gate, and delivery/rollback/runbooks. Three more, each of which hid a live
+defect for weeks and each of which is one cheap read: for every gate the spec
+calls BLOCKING, whether its check context is in the repo's REQUIRED contexts
+(from the forge, never from the workflow file — `references/dimensions.md`
+§10); every declared surface that no reconciler applies, with its apply
+procedure and owner (§10); and every declared backend paired with the producer
+that ships to it, or the fact that it has none (§8).
 Severity is impact-based for the tier. Nothing is omitted for being
 embarrassing, and "not applicable" is a legal state ONLY with its reason.
 
