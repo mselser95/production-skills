@@ -305,6 +305,16 @@ row() { # row <dimension> <verdict> <evidence>
   ROWS+=("$1|$2|$3")
   case "$2" in PASS) passes=$((passes+1));; FAIL) fails=$((fails+1));; NA) nas=$((nas+1));; esac
 }
+code_lines_only() { # filter `grep -rn` output down to lines that are CODE
+  # `grep -rn` prints path:lineno:content. A content that starts with `//` is
+  # PROSE, and every row in this file that greps for a call site is one doc
+  # comment away from certifying it. Not hypothetical: clc-bitgo-marketdata's
+  # internal/platform/obs/tracing.go documents the function by naming
+  # `otel.SetTracerProvider` in its doc comment, ten lines above the call --
+  # delete the call, keep the sentence, and an unfiltered count still reports a
+  # wired provider.
+  grep -vE '^[^:]*:[0-9]+:[[:space:]]*//'
+}
 declined() { # declined <key> -> 0 if the spec ratifies this decline
   [[ -f "$SPEC" ]] && grep -qE "^[[:space:]]*-[[:space:]]*$1:" "$SPEC"
 }
@@ -802,30 +812,104 @@ if ((${#bench_files[@]})); then
   fi
 else row "benchmarks" FAIL "no benchmarks"; fi
 
-# --- 11. profiling (capture path AND live endpoint) ------------------------
+# --- 11. profiling (on-demand capture, live endpoint, AND continuous) -------
 #
-# WHAT THIS ROW MEASURES, AND THE HALF IT DOES NOT.
+# WHAT THIS ROW MEASURES, AND THE PART IT STILL DOES NOT.
 #
-# Both halves below are ON-DEMAND: a capture script somebody runs, and an
-# endpoint somebody scrapes while the incident is still live. dimensions.md §8
-# makes profiling the FOURTH observability signal and requires it CONTINUOUS
-# in production -- always-on sampling shipped to a store with retention, so a
-# profile of the process that was slow last Tuesday exists at all (Ren, Tune,
-# Moseley, Shi, Rus, Hundt, "Google-Wide Profiling", IEEE Micro 30(4), 2010).
+# Two of the three signals below are ON-DEMAND: a capture script somebody runs,
+# and an endpoint somebody scrapes while the incident is still live.
+# dimensions.md §8 makes profiling the FOURTH observability signal and requires
+# it CONTINUOUS in production -- always-on sampling shipped to a store with
+# retention, so a profile of the process that was slow last Tuesday exists at
+# all (Ren, Tune, Moseley, Shi, Rus, Hundt, "Google-Wide Profiling", IEEE Micro
+# 30(4), 2010).
 #
-# This row cannot see that: continuous collection lives in a deployment's
-# agent/sidecar/SDK configuration, not in the repo's Go source, so a grep
-# here would be a keyword check standing in for a property -- the mistake
-# this file has made four times. So the row keeps measuring what it can and
-# the EVIDENCE STRING states the gap, rather than a PASS quietly implying a
-# requirement it never checked.
+# This row used to say the continuous half "is not checkable from source" and
+# measure only the two on-demand ones. That was true when it was written; it is
+# now FALSE, and the cost of leaving it standing was measured, not imagined.
+# clc-bitgo-marketdata shipped continuous profiling -- a Pyroscope client
+# started from cmd/, mds_profiling_* series, an architecture test holding the
+# wiring in place -- and this row still reported "no profiling at all", because
+# that repo has neither benchmarks/profile.sh nor net/http/pprof. A repo with
+# the STRONGER form failing a row about the absence of the WEAKER one is a row
+# people learn to switch off. Five services shipping continuous profiling while
+# the org gate reports zero is this file's own recurring failure, one level up:
+# the row asserted more than it measured, in the direction that hides work.
+#
+# What IS checkable was DERIVED from the two repos that implement it
+# (clc-binance-marketdata cmd/{aggregator,streamer}/main.go, clc-bitgo-marketdata
+# cmd/{api,ingester}/main.go), not invented here:
+#
+#   1. the profiler is started AT THE COMPOSITION ROOT and its handle is KEPT --
+#      `profiler := profiling.StartFromEnv(...)` in non-test cmd/ code, or the
+#      underlying `pyroscope.Start(` for a repo that skips the house wrapper.
+#      Matching the ASSIGNMENT rather than the identifier is the same discipline
+#      the tracing row below had to learn three times: a grep for "pyroscope"
+#      anywhere is satisfied by an import line and a comment.
+#   2. whether it is actually running is OBSERVABLE in production -- a
+#      `*_profiling_enabled` gauge, matched only inside a STRING LITERAL so the
+#      paragraph of prose above a metric does not count as the metric.
+#
+# Both are required, because either alone is fooled: a start site with no gauge
+# is a profiler nobody in production can confirm is up, and a gauge with no
+# start site is a series that can only ever read 0.
+#
+# What is STILL not checkable from source, and is therefore still NOT claimed by
+# a PASS: that a deployment actually sets the profiler's server address, that
+# the uploads land, and that the store retains them. That lives in deployment
+# config this repo cannot see -- which is precisely why signal (2) is required
+# rather than nice to have: the gauge is what makes it answerable there.
 prof_capture=$([[ -f benchmarks/profile.sh ]] && echo yes || echo no)
 prof_live=$(grep -rql "net/http/pprof" --include='*.go' . 2>/dev/null && echo yes || echo no)
-if [[ "$prof_capture" == yes && "$prof_live" == yes ]]; then
-  row "profiling" PASS "capture script + env-gated live endpoint — the ON-DEMAND half only. Whether profiles are collected CONTINUOUSLY in production (dimensions.md §8) is not checkable from source and is NOT claimed by this row"
+
+# -i on the package qualifier only: `profiling.`, `Profiling.`, `pyroscope.`.
+prof_cont_sites=$(grep -rnEi ':?=[[:space:]]*(profil|pyroscope)[A-Za-z0-9_]*\.[A-Za-z0-9_]*Start[A-Za-z0-9_]*\(' \
+  --include='*.go' --exclude='*_test.go' cmd/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+prof_cont_gauge=$(grep -rnE '"[A-Za-z0-9_]*_profiling_enabled' \
+  --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only \
+  | grep -oE '"[A-Za-z0-9_]*_profiling_enabled' | tr -d '"' | sort -u | head -1)
+
+# Cross-check against the emitted-metrics manifest when the repo has one. NOT a
+# gate here -- observability-contract-checked below already owns "the manifest
+# exists and a test reads it", and gating the same fact twice makes one repo's
+# missing file red two rows and teaches nobody anything new. Reported, so a
+# series that is emitted but undeclared is visible instead of silent.
+prof_manifest=$(find . -path ./.git -prune -o -name 'emitted-metrics.*' -print 2>/dev/null | head -1)
+if [[ -z "$prof_cont_gauge" ]]; then prof_manifest_note=""
+elif [[ -z "$prof_manifest" ]]; then
+  prof_manifest_note="; no emitted-metrics.* manifest exists to cross-check it against — see observability-contract-checked"
+elif grep -q "$prof_cont_gauge" "$prof_manifest" 2>/dev/null; then
+  prof_manifest_note="; declared in $prof_manifest"
+else
+  prof_manifest_note="; NOT declared in $prof_manifest — emitted but invisible to the manifest drift check"
+fi
+
+if (( prof_cont_sites > 0 )) && [[ -n "$prof_cont_gauge" ]]; then
+  prof_continuous=yes
+else
+  prof_continuous=no
+  if (( prof_cont_sites == 0 )) && [[ -z "$prof_cont_gauge" ]]; then
+    prof_cont_why="no profiler started at a composition root in non-test cmd/, and no *_profiling_enabled series in source"
+  elif (( prof_cont_sites == 0 )); then
+    prof_cont_why="a $prof_cont_gauge series exists but nothing starts a profiler at a composition root in non-test cmd/ — a gauge that can only ever read 0"
+  else
+    prof_cont_why="$prof_cont_sites composition-root start site(s) in cmd/ but no *_profiling_enabled series in source — nothing in production can tell whether the profiler is actually up"
+  fi
+fi
+
+prof_ondemand="capture=$prof_capture live=$prof_live"
+prof_unproven="NOT proven here: that a deployment sets the profiler's server address, that uploads land, or that the store retains them — deployment config this repo cannot see; $prof_cont_gauge is what answers it in production"
+if [[ "$prof_continuous" == yes && "$prof_capture" == yes && "$prof_live" == yes ]]; then
+  row "profiling" PASS "CONTINUOUS ($prof_cont_sites composition-root start site(s) in non-test cmd/ keeping the profiler handle, observable as $prof_cont_gauge$prof_manifest_note) AND both on-demand halves ($prof_ondemand). $prof_unproven"
+elif [[ "$prof_continuous" == yes ]]; then
+  row "profiling" PASS "CONTINUOUS ($prof_cont_sites composition-root start site(s) in non-test cmd/ keeping the profiler handle, observable as $prof_cont_gauge$prof_manifest_note) — the form dimensions.md §8 actually requires. The weaker ON-DEMAND path is incomplete ($prof_ondemand): no ad-hoc capture for an incident that needs a profile of THIS process now. $prof_unproven"
+elif [[ "$prof_capture" == yes && "$prof_live" == yes ]]; then
+  row "profiling" PASS "capture script + env-gated live endpoint — the ON-DEMAND half only. The CONTINUOUS half dimensions.md §8 requires was CHECKED FOR AND NOT FOUND: $prof_cont_why"
 elif [[ "$prof_capture" == yes || "$prof_live" == yes ]]; then
-  row "profiling" FAIL "only half present (capture=$prof_capture live=$prof_live)"
-else row "profiling" FAIL "no profiling at all (claiming 'documented' is the known lie)"; fi
+  row "profiling" FAIL "only half of the on-demand path present ($prof_ondemand), and no continuous profiling either: $prof_cont_why"
+else
+  row "profiling" FAIL "no profiling at all: $prof_ondemand, and $prof_cont_why (claiming 'documented' is the known lie)"
+fi
 
 # --- 12. recovery / replay corpus -----------------------------------------
 if ls regressions/*/events.json >/dev/null 2>&1; then
@@ -1324,6 +1408,61 @@ inbound_route_sites() {
 }
 tracer_sites=$(grep -rn --include='*.go' --exclude='*_test.go' \
   "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null | wc -l | tr -d ' ')
+
+# THE SECOND WIRING SHAPE: a process-wide TracerProvider instead of a threaded
+# tracer.
+#
+# `tracer_sites` above looks for a tracer THREADED through constructors --
+# `hub.SetTracer(...)`, `WithTracer(...)`, `Tracer:` in a struct literal. That
+# is one of the two ways OTel is used. The other installs a GLOBAL provider once
+# at boot -- `otel.SetTracerProvider(tp)` inside a setupTracing() the entrypoint
+# calls -- and then instruments with otelhttp/otelgrpc, which read the global.
+# Nothing is ever passed to anything, so the threading grep counts zero sites and
+# the row fell through to "cmd/ names a tracer but never passes or assigns it".
+#
+# Measured on clc-bitgo-marketdata, where that verdict is FALSE:
+# cmd/api/main.go calls setupTracing(ctx, "mds-api") and keeps its shutdown func,
+# obs.SetupTracing calls otel.SetTracerProvider(tp) plus SetTextMapPropagator,
+# and serve() wraps the whole router in otelhttp.NewHandler. The tracing is
+# wired; only the pattern was unrecognised.
+#
+# This false positive is expensive out of proportion to itself. It is the SAME
+# dimension that was just gated on clc-binance-marketdata, WHERE THE HOLE WAS
+# REAL -- and a row that reds a correctly-wired service is a row people learn to
+# discount, which is exactly how the genuinely-unwired one gets waved through.
+# Same lesson the mechanisms-driven row learned about inlining, in the other
+# direction.
+#
+# TWO signals, both required, because either alone is fooled:
+#   - cmd/ KEEPS the result of a tracing bootstrap call (the shutdown func), not
+#     merely names one -- the same assignment discipline the threaded shape
+#     needed, so a helper that is defined and never called does not count; and
+#   - the codebase actually installs the global provider in non-test code, so a
+#     `setupTracing` that configures nothing does not count either.
+#
+# Like the branch above this is an EXISTENCE check over the entrypoints: it
+# cannot prove the call is reached in production, and the evidence says so
+# rather than claiming "installed".
+global_tp_install=$(grep -rn --include='*.go' --exclude='*_test.go' \
+  'otel\.SetTracerProvider(' cmd/ internal/ pkg/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+# The callee must be a BOOTSTRAP -- a verb (setup/init/new/start/configure/...)
+# next to "trac", in either order: `setupTracing(...)` or `tracing.New(...)`.
+#
+# The first version of this pattern accepted any assigned call whose name
+# contained "trac", and mutation testing caught it before it shipped: deleting
+# both `tracingShutdown, err := setupTracing(ctx, ...)` calls from cmd/ left the
+# row GREEN at 2 sites, because `if err := tracingShutdown(shutdownCtx)` -- the
+# leftover USE of the handle -- still matched. A row that survives the deletion
+# of the thing it checks is decoration, which is the exact defect this row was
+# being fixed for.
+cmd_tracing_boot=$(grep -rnE --include='*.go' --exclude='*_test.go' \
+  '^[[:space:]]*[A-Za-z_][A-Za-z0-9_,[:space:]]*(:=|=)[[:space:]]*(([A-Za-z0-9_]+\.)?([Ss]etup|[Ii]nit|[Nn]ew|[Ss]tart|[Cc]onfigure|[Bb]ootstrap|[Ee]nable|[Ii]nstall|[Pp]rovide)[A-Za-z0-9_]*[Tt]rac[A-Za-z0-9_]*|[A-Za-z0-9_]*[Tt]rac[A-Za-z0-9_]*\.([Ss]etup|[Ii]nit|[Nn]ew|[Ss]tart|[Cc]onfigure|[Bb]ootstrap|[Ee]nable|[Ii]nstall|[Pp]rovide)[A-Za-z0-9_]*)\(' \
+  cmd/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+# Named only in the evidence, never required: a gRPC-only service uses otelgrpc,
+# a worker neither, and demanding one of them would red a correct repo for the
+# transport it happens to speak.
+global_tp_instr=$(grep -rn --include='*.go' --exclude='*_test.go' \
+  'otelhttp\.New\|otelgrpc\.\|otelgin\.\|otelecho\.\|otelfiber\.' cmd/ internal/ pkg/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
 if declined "distributed_tracing"; then
   n_inbound=$(inbound_route_sites | wc -l | tr -d ' ')
   if (( n_inbound > 0 )); then
@@ -1342,6 +1481,8 @@ elif [[ "${tracer_sites:-0}" -gt 0 ]]; then
   # -- the row asserted more than it measured, which is the same failure it was
   # written to catch one level down.
   row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; the mechanisms-driven row proves reachability properly, and this one is kept as the earlier, weaker signal"
+elif (( ${global_tp_install:-0} > 0 && ${cmd_tracing_boot:-0} > 0 )); then
+  row "tracing-wired-in-prod" PASS "GLOBAL TracerProvider shape: $cmd_tracing_boot non-test cmd/ line(s) keep the result of a tracing bootstrap call, and $global_tp_install non-test otel.SetTracerProvider( call site(s) install the provider they read${global_tp_instr:+, with $global_tp_instr otelhttp/otelgrpc instrumentation site(s) reading that global} — existence only, same as the threaded shape above: this proves the wiring EXISTS in the entrypoints, not that it is reached in production; only a contract test exercising the entrypoint can"
 elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
   row "tracing-wired-in-prod" FAIL "cmd/ names a tracer but never passes or assigns it — constructed and discarded is a no-op in production"
 else
