@@ -878,7 +878,13 @@ prof_manifest=$(find . -path ./.git -prune -o -name 'emitted-metrics.*' -print 2
 if [[ -z "$prof_cont_gauge" ]]; then prof_manifest_note=""
 elif [[ -z "$prof_manifest" ]]; then
   prof_manifest_note="; no emitted-metrics.* manifest exists to cross-check it against — see observability-contract-checked"
-elif grep -q "$prof_cont_gauge" "$prof_manifest" 2>/dev/null; then
+# -wF, not a bare -q: this row's neighbour (runbook-citations-resolve) already
+# had to be fixed once for exactly this, where a SUBSTRING search let
+# `svc_units_conserved` resolve against the manifest line for
+# `svc_units_conserved_violations_total`. `mds_profiling_enabled` must not be
+# satisfied by a declared `mds_profiling_enabled_something`. Underscore is a
+# word constituent, so -w is the right boundary here.
+elif grep -qwF -- "$prof_cont_gauge" "$prof_manifest" 2>/dev/null; then
   prof_manifest_note="; declared in $prof_manifest"
 else
   prof_manifest_note="; NOT declared in $prof_manifest — emitted but invisible to the manifest drift check"
