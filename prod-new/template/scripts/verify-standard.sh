@@ -1463,6 +1463,18 @@ cmd_tracing_boot=$(grep -rnE --include='*.go' --exclude='*_test.go' \
 # transport it happens to speak.
 global_tp_instr=$(grep -rn --include='*.go' --exclude='*_test.go' \
   'otelhttp\.New\|otelgrpc\.\|otelgin\.\|otelecho\.\|otelfiber\.' cmd/ internal/ pkg/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+# `${x:+...}` fires on the STRING "0", so the first draft of the evidence read
+# "with 0 instrumentation site(s) reading that global" -- a clause asserting
+# something over a count of nothing, which is the evidence-free-PASS shape the
+# row() guard exists to catch, smuggled in as prose. Zero is worth SAYING, not
+# hiding: a global provider nobody instruments against creates no spans through
+# it. Not a FAIL, because a repo can call otel.Tracer("x").Start directly and
+# reding it would be a new false positive of exactly the kind being fixed here.
+if (( ${global_tp_instr:-0} > 0 )); then
+  global_tp_instr_note=", with $global_tp_instr otelhttp/otelgrpc instrumentation site(s) reading that global"
+else
+  global_tp_instr_note=", but NO otelhttp/otelgrpc instrumentation site reading that global was found — if nothing else calls otel.Tracer(...).Start directly, the installed provider creates no spans"
+fi
 if declined "distributed_tracing"; then
   n_inbound=$(inbound_route_sites | wc -l | tr -d ' ')
   if (( n_inbound > 0 )); then
@@ -1482,7 +1494,7 @@ elif [[ "${tracer_sites:-0}" -gt 0 ]]; then
   # written to catch one level down.
   row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; the mechanisms-driven row proves reachability properly, and this one is kept as the earlier, weaker signal"
 elif (( ${global_tp_install:-0} > 0 && ${cmd_tracing_boot:-0} > 0 )); then
-  row "tracing-wired-in-prod" PASS "GLOBAL TracerProvider shape: $cmd_tracing_boot non-test cmd/ line(s) keep the result of a tracing bootstrap call, and $global_tp_install non-test otel.SetTracerProvider( call site(s) install the provider they read${global_tp_instr:+, with $global_tp_instr otelhttp/otelgrpc instrumentation site(s) reading that global} — existence only, same as the threaded shape above: this proves the wiring EXISTS in the entrypoints, not that it is reached in production; only a contract test exercising the entrypoint can"
+  row "tracing-wired-in-prod" PASS "GLOBAL TracerProvider shape: $cmd_tracing_boot non-test cmd/ line(s) keep the result of a tracing bootstrap call, and $global_tp_install non-test otel.SetTracerProvider( call site(s) install the provider they read$global_tp_instr_note — existence only, same as the threaded shape above: this proves the wiring EXISTS in the entrypoints, not that it is reached in production; only a contract test exercising the entrypoint can"
 elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
   row "tracing-wired-in-prod" FAIL "cmd/ names a tracer but never passes or assigns it — constructed and discarded is a no-op in production"
 else
@@ -1850,7 +1862,35 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
       # sends someone to fix a document that was correct.
       [[ "$m" == *_ ]] && continue
       cited=$((cited+1))
-      printf '%s\n' "${declared_series[@]}" | grep -qx "$m" || { bad=$((bad+1)); missing="${missing} $m"; }
+      # A HERE-STRING, not a pipe, and the reason is a false FAIL this row
+      # actually produced.
+      #
+      # `printf ... | grep -qx "$m"` under this file's `set -o pipefail` reports
+      # the PIPELINE's status, and `grep -q` exits the instant it matches. If
+      # printf has not finished writing by then it takes SIGPIPE and the
+      # pipeline returns 141 -- so a series that WAS found is counted as
+      # missing. Reproduced deterministically by making printf block:
+      #
+      #   set -uo pipefail
+      #   printf '%s\n' "${big[@]}" | grep -qx "series_1"   # -> 141, grep MATCHED
+      #   printf '%s\n' "${big[@]}" | grep -qx "series_200000" # -> 0
+      #
+      # It fires with a small manifest too, just rarely. Measured on
+      # clcsolutions/binance-marketdata: the same unchanged tree, probed
+      # repeatedly, reported
+      #   "2 of 28 cited series do not exist: clcbinance_bar_duplicates_total
+      #    clcbinance_bar_gap_days_total"
+      # on one run and PASS on the others. Those two are entries #2 and #3 of
+      # the sorted declared list -- the positions where grep -q exits earliest
+      # and printf's window is widest. Both series are declared in the manifest.
+      #
+      # A gate that intermittently reds a correct repo is worse than one that is
+      # merely weak: it is the thing that teaches people the row is noise. The
+      # here-string is fully written before grep starts, so there is no reader to
+      # die against. -F because a series name is a literal, `--` because a name
+      # must never be read as an option.
+      grep -qxF -- "$m" <<<"$(printf '%s\n' "${declared_series[@]}")" \
+        || { bad=$((bad+1)); missing="${missing} $m"; }
     done < <(grep -ohE "\\b${_pat}[a-z0-9_]+\\b" docs/RUNBOOK.md | sort -u)
   fi
   if (( bad > 0 )); then
