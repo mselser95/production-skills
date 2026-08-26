@@ -3,8 +3,17 @@
 # actually enforces expiry, instead of assuming it does.
 #
 # The gate's whole value is that an entry cannot silently escape enforcement.
-# Each case here is a way that used to happen (or could easily happen again
-# in a rewrite):
+#
+# The five below are the ORIGINAL five escapes this file was written for. They
+# are NOT its case list: it now runs 65 cases (count them with
+# `grep -cE '^\s*run_case|^\s*run_empty_case'`), the rest added by the
+# block-scalar, nested-sequence and fail-closed work. Scope clarified at the
+# reconciliation merge of 2026-08-26 -- as written, "Each case here is a way..."
+# read as an exhaustive index of a file it had come to cover about a thirteenth
+# of. That is how a header quietly stops describing its own file.
+#
+# Each of the five is a way an entry used to escape (or could easily escape
+# again in a rewrite):
 #
 #   1. id-not-first    -- an entry whose `id:` key is not the first line of
 #                          the entry used to be invisible to the gate: the

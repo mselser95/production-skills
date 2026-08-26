@@ -17,7 +17,11 @@
 #
 # The template's copy has to be a real file -- it is COPIED OUT into a new repo
 # and a symlink would dangle on the way -- which is exactly why it can rot. The
-# other ten copies are symlinks and cannot.
+# other NINE copies are symlinks into _shared/ and cannot; the eleventh tracked
+# path is the canonical file itself, which is what those symlinks point at.
+# (Said "ten" until 2026-08-26; re-measured with
+# `git ls-files -s | awk '$1=="120000"'`, which counts 9. The old number
+# counted the canonical file as one of its own symlinks.)
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 

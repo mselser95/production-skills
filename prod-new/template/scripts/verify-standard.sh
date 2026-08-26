@@ -1153,10 +1153,23 @@ fi
 # executes it, rather than the probe guessing from a keyword.
 # ONE LITERAL, INTERPOLATED — not transcribed into each awk program.
 #
-# Four functions walk the spec with an `inblock` state machine, and a block
-# scalar is CONTENT to all four: `notes: >` followed by prose that spells
+# FIVE functions walk the spec with an `inblock` state machine, and a block
+# scalar is CONTENT to all five: `notes: >` followed by prose that spells
 # `durable_outbox: TBD` must not be read as a declaration. Only `spec_field`
-# ever learned that. Measured on the three siblings before this change:
+# ever learned that.
+#
+# The count was "four" until the reconciliation merge of 2026-08-26 and is
+# re-measured here rather than carried: `spec_seq_count` joined the walkers on
+# fix/registry-gate-block-scalars-and-template-rot, which is a different branch
+# from the one that wrote this sentence, so no single diff ever showed both. The
+# authority is the interpolation count -- `grep -c 'SPEC_AWK_LIB"'` in this file
+# -- which is 5: implemented_test, spec_seq_count, spec_field, driven_symbol,
+# driven_keys.
+#
+# The three readings below are the ORIGINAL measurement, taken on spec_field's
+# three siblings at the time -- they are kept exactly as measured and are not
+# re-run here. They document why the walker had to be shared; they were never a
+# census of the walkers:
 #
 #   driven_symbol durable_outbox  ->  ESTO-ES-PROSA   (the real value is
 #                                     store.OpenDurable, two lines below)
@@ -1373,7 +1386,11 @@ grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FIL
 # reason extract_real_tag and spec_field were. It was two inline awks that
 # counted dashed lines with no block awareness at all -- sharing the walker had
 # reached four of the six awks that read this file, and these were the other
-# two. A block scalar inside an entry then inflated the count with its own
+# two. (That "six" counts awk PROGRAMS at the time of this change, before the
+# two below were folded into this one function. Today the walker is shared by
+# FIVE functions -- the authority is `grep -c 'SPEC_AWK_LIB"'` in this file, not
+# this sentence, which is kept as the record of why the lift happened.)
+# A block scalar inside an entry then inflated the count with its own
 # prose: measured on valid YAML with ONE invariant whose `notes: |` body lists
 # two bullet points, `ratified_n` reported 3. The row's evidence then claims
 # more ratified invariants than the spec declares -- an over-count in the
@@ -2490,14 +2507,32 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
   cited=0; bad=0; missing=""
   if ((${#series_prefixes[@]})); then
     _pat="$(printf '%s|' "${series_prefixes[@]}")"; _pat="(${_pat%|})"
-    # Built ONCE, outside the loop, and NOT piped into `grep -q`: under
-    # pipefail, -q closing the pipe while the producer is still writing makes
-    # the producer take SIGPIPE (141), which pipefail then reports as the
-    # pipeline's status -- turning a MATCH into a FAIL. Same hazard the block
-    # ~60 lines above removed and explained; this instance survived that pass.
-    # It does not change per citation, so building it per iteration was also
-    # just work.
-    declared_blob=$(printf '%s\n' "${declared_series[@]}")
+    # A `declared_blob=$(printf '%s\n' "${declared_series[@]}")` used to sit
+    # here, under a comment explaining that it was built once and deliberately
+    # not piped into `grep -q`. BOTH ARE GONE, and the reason is worth keeping,
+    # because the variable outlived its reader by a whole merge.
+    #
+    # Two branches fixed the SAME SIGPIPE race in THIS row by different means:
+    # fix/probe-defects-and-shared-selftest introduced this blob plus a
+    # `grep -qx "$m" <<<"$declared_blob"` membership test, and
+    # fix/probe-sigpipe-pipefail-membership replaced the test with the
+    # subprocess-free array join now at the `[[ " ${declared_series[*]-} " ... ]]`
+    # line below. The reconciliation merge kept the array join -- the stronger
+    # fix -- but kept this branch's ASSIGNMENT too, because the two edits touched
+    # different lines and git had no conflict to raise. The result compiled, cost
+    # a subshell per invocation, and was read by nothing.
+    #
+    # That is the same defect class as the duplicated `grep_x` this merge also
+    # had to repair: a clean three-way merge silently composing two halves of two
+    # different fixes. The dangerous part was never the wasted subshell -- it was
+    # this comment, which sat in the file's longest SIGPIPE explanation asserting
+    # that the safe-membership mechanism lived HERE. Anyone repairing this row
+    # would have read it as load-bearing and reasoned from it. A comment that
+    # describes a variable nothing consumes is worse than no comment: it is a
+    # false map of the gate.
+    #
+    # The live membership test, and the full argument for it, are on the
+    # `[[ " ${declared_series[*]-} " == *" $m "* ]]` line further down.
     while read -r m; do
       [[ -n "$m" ]] || continue
       # A Prometheus series name never ENDS in an underscore. A token that does

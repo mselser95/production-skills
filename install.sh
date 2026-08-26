@@ -98,9 +98,18 @@ fi
 
 # --- source consistency, BEFORE anything enters the trusted set -------------
 #
-# Ten of the eleven on-disk copies of the shared probe are symlinks into
-# _shared/ and cannot drift. The greenfield TEMPLATE's copy is a real file --
-# correctly so, because the template is COPIED OUT into a new repo and a
+# NINE of the eleven tracked copies of the shared probe are symlinks into
+# _shared/ and cannot drift. The other two are real files: the CANONICAL copy at
+# _shared/probes/verify-standard.sh, which is what the symlinks point at, and the
+# greenfield TEMPLATE's copy.
+#
+# Re-measured at the reconciliation merge of 2026-08-26 -- it said "ten of the
+# eleven", which double-counted the canonical file as one of its own symlinks.
+# Authority: `git ls-files -s | awk '$1=="120000"'` over paths named
+# verify-standard.sh gives 9, against 11 tracked paths in total.
+#
+# The template's copy is a real file correctly so, because the template is
+# COPIED OUT into a new repo and a
 # symlink would dangle the moment it left. That correctness is exactly what
 # lets it rot, and it did: it sat 186 lines behind _shared for long enough that
 # a commit added a `driven:` block to the template's production.yaml declaring

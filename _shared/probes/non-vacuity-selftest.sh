@@ -111,7 +111,16 @@ eval "$(sed -n '/^classify_mutation_result() {/,/^}/p' "$PROBE")"
 declare -F classify_mutation_result >/dev/null || {
   echo "selftest: could not source classify_mutation_result from $PROBE" >&2; exit 2; }
 classify() { classify_mutation_result "$1"; }
-# --- the five lifted helpers, which nothing asserted ---------------------------
+# --- the lifted helpers, which nothing asserted --------------------------------
+#
+# HEADING SCOPE CORRECTED 2026-08-26: this said "the five lifted helpers", and
+# the sourcing loop below now carries TEN. The five named in the paragraph below
+# are still exactly the five this section was ORIGINALLY written for; what moved
+# is the section, not them. The other five -- spec_field, driven_symbol,
+# driven_keys, implemented_test, spec_seq_count -- arrived with the spec-walker
+# sharing work on a different branch and were folded into the same loop. A
+# heading that names a count is a heading that goes stale silently, so it no
+# longer names one; the loop is the authority.
 #
 # extract_real_tag, count_secret_scan_workflows, grep_x, toolchain_note and
 # fold_makefile were all lifted OUT of inline code so this file could source and
@@ -128,7 +137,7 @@ classify() { classify_mutation_result "$1"; }
 # with `}`, which is far below, so it slurped the surrounding code and this file
 # died on an unbound variable from it. Take the single line when the opening
 # line already closes the brace.
-# THE SHARED awk LIBRARY COMES FIRST. The four spec walkers interpolate
+# THE SHARED awk LIBRARY COMES FIRST. The five spec walkers interpolate
 # `$SPEC_AWK_LIB` into their awk programs, so sourcing a function without it
 # yields a program that silently produces NOTHING -- every `check` then compares
 # "" against an expectation and reds, which is at least loud. Refuse instead of
