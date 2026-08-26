@@ -28,6 +28,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
   echo "    brew install bash   # then re-run" >&2
   exit 2
 fi
+PROBE_SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 root="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$root" || exit 2
 
@@ -466,6 +467,74 @@ if ls internal/architecture/*_test.go >/dev/null 2>&1 || grep -rql "forbidden\|I
     row "fitness-functions" PASS "architecture test green; wall-clock allowlist entries: $empty"
   else row "fitness-functions" FAIL "architecture test red"; fi
 else row "fitness-functions" FAIL "no architecture/fitness test found"; fi
+
+# THE PROBE'S OWN FITNESS FUNCTION. `producer | grep -q PATTERN` under this
+# file's `set -o pipefail` is the SIGPIPE race documented on the
+# artifact-provenance and runbook-citations rows: -q exits at the first match,
+# the producer takes SIGPIPE, and pipefail turns a MATCH into a FAIL. It cost
+# clcsolutions/binance-marketdata a row that named a different set of
+# declared-but-"missing" series on ~71% of runs.
+#
+# The rule lived only in a comment saying "do not reintroduce the pipe", and a
+# comment is the weakest possible gate for a rule in a file that is VENDORED
+# into every repo and edited mostly by agents -- it is how this defect survived
+# being described correctly at least three times in this very file.
+#
+# `$PROBE_SELF`, NEVER `${BASH_SOURCE[0]}`. BASH_SOURCE is the raw invocation
+# path and this row runs hundreds of lines AFTER `cd "$root"`, so with the
+# documented `verify-standard.sh [repo-root]` usage it resolves against the
+# TARGET repo: a two-repo fixture showed the row reporting PASS while the
+# RUNNING probe carried the defect -- constructive proof of vacuity, on the one
+# invocation this file's own header recommends. PROBE_SELF is absolute and
+# computed before the cd. No fallback: if it is unset the row FAILS, because a
+# self-check that cannot locate itself is not a check.
+#
+# WHAT THIS CATCHES, measured against a 24-case corpus: the plain pipe, inside
+# `$(...)`, inside a function body, egrep/fgrep/zgrep/rg/ag, `--quiet` and any
+# short flag containing q in any order, absolute paths, `command grep`, env-
+# prefixed `LC_ALL=C grep -q`, no-space `a|grep -q`, tabs, and BOTH
+# continuation shapes (trailing `\` and trailing `|`) including a `|` in
+# column 0 -- logical lines are rejoined before matching, because an anchor
+# that fits only the shape you happened to write is this file's own lesson.
+#
+# WHAT IT DOES NOT CATCH, stated so nobody reads more into a PASS than is
+# there: indirection through a variable or alias (`G="grep -q"; ... | $G x`) is
+# out of reach of static text matching; `grep PATTERN -q` with the flag after
+# the pattern is not matched, because a pattern-position match would make this
+# row fire on its own regex text; and other early-exit readers (`| head`,
+# `| grep -m1`) are the same hazard class but are NOT covered here -- in this
+# file they sit in `$(...)` value captures whose exit status is discarded.
+#
+# Second condition, same row: a GLOBAL `IFS=` assignment. The runbook-citations
+# membership test joins with `"${declared_series[*]}"`, which uses the FIRST
+# CHARACTER OF IFS, so a global IFS would make that row report declared series
+# as missing again. Only standalone/exported assignments count: `local IFS=,`
+# is the canonical safe array-join idiom and `IFS=$'\n' cmd` is scoped to its
+# command -- forbidding those would be forbidding the correct fix.
+#
+# Line numbers are taken BEFORE comments are stripped. Numbering the stripped
+# stream cited a line that does not exist (measured: real 2084 reported as 927)
+# in a file whose header calls the dangling citation the defect it exists to
+# refuse.
+if [[ -n "${PROBE_SELF:-}" && -r "${PROBE_SELF:-}" ]]; then
+  _nl=$'\001'
+  _logical=$(grep -vE '^[[:space:]]*#' "$PROBE_SELF" | tr '\n' "$_nl" \
+    | sed -e "s/\\\\${_nl}[[:space:]]*/ /g" -e "s/|${_nl}[[:space:]]*/| /g" | tr "$_nl" '\n')
+  _greplike='(([A-Za-z_]+=[^[:space:]]*[[:space:]]+)*(command[[:space:]]+)?([^[:space:]|]*/)?(grep|egrep|fgrep|zgrep|rg|ag))'
+  _quietfl='([[:space:]]+-[A-Za-z]*)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)([[:space:]]|$)'
+  _pipegrep=$(printf '%s\n' "$_logical" | grep -E "(^|[^|])\|[[:space:]]*${_greplike}${_quietfl}" || true)
+  _globalifs=$(grep -n '' "$PROBE_SELF" | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | grep -E '^[0-9]+:[[:space:]]*(export[[:space:]]+)?IFS=[^[:space:];]*[[:space:]]*(;|$)' || true)
+  if [[ -n "$_pipegrep" ]]; then
+    row "probe-self:no-pipe-into-grep-q" FAIL "this probe pipes a producer into a quiet grep -- the SIGPIPE-under-pipefail race that reports a MATCH as a FAIL: ${_pipegrep//$'\n'/; }"
+  elif [[ -n "$_globalifs" ]]; then
+    row "probe-self:no-pipe-into-grep-q" FAIL "this probe sets a global IFS, which changes the join in \"\${declared_series[*]}\" and breaks the runbook-citations membership test: ${_globalifs//$'\n'/; }"
+  else
+    row "probe-self:no-pipe-into-grep-q" PASS "no producer piped into a quiet grep; no global IFS assignment"
+  fi
+else
+  row "probe-self:no-pipe-into-grep-q" FAIL "PROBE_SELF unset or unreadable, so this probe cannot check itself -- a self-check that cannot run is not a check"
+fi
 
 # --- 4. ratified invariants (exist AND run AND provably non-vacuous) --------
 if ls verification/ratified/*_test.go >/dev/null 2>&1; then
@@ -1646,17 +1715,46 @@ if [[ -d $wf ]]; then
   # that explained why provenance is impossible. Only executable lines count.
   # Read once into a variable instead of piping into `grep -q`.
   #
-  # `producer | grep -q PATTERN` under `set -o pipefail` is a latent race: -q
-  # exits at the first match and closes the pipe, and if the producer is still
-  # writing it takes SIGPIPE (141), which pipefail then reports as the
-  # pipeline's status -- turning a match into a FAIL, nondeterministically. It
-  # does not bite while the input fits the 64KB pipe buffer (this repo's four
-  # workflows are ~683 lines, so the producer always finishes first), which is
-  # exactly what makes it the kind of bug that appears years later on a bigger
-  # repo and looks like anything but a probe defect. A subagent reported seeing
-  # this row alternate; I could not reproduce it in 40 runs across two trees,
-  # so the flake itself stays UNCONFIRMED -- but the hazard is real, removing it
-  # costs nothing, and a gate that might be nondeterministic is not a gate.
+  # `producer | grep -q PATTERN` under `set -o pipefail` is a race: -q exits at
+  # the first match and closes the pipe, and if the producer is still writing it
+  # takes SIGPIPE (141), which pipefail then reports as the pipeline's status --
+  # turning a MATCH into a FAIL, nondeterministically.
+  #
+  # [WITHDRAWN] "It does not bite while the input fits the 64KB pipe buffer (this
+  # [WITHDRAWN]  repo's four workflows are ~683 lines, so the producer always
+  # [WITHDRAWN]  finishes first)"
+  # [WITHDRAWN] "I could not reproduce it in 40 runs across two trees, so the
+  # [WITHDRAWN]  flake itself stays UNCONFIRMED"
+  #
+  # Both are withdrawn as of 2026-08-25. The sibling runbook-citations row had the
+  # same shape with a BUILTIN producer, and on clcsolutions/binance-marketdata's
+  # real manifest it reported a DIFFERENT set of "nonexistent" series on MOST
+  # runs, every one of them declared. Aggregated over five samples that day:
+  # 207 of 290 runs, ~71%, no sample below 13/30 and the largest 82/100. The rate
+  # tracks machine load; it is not "sometimes".
+  #
+  # THE 64KB FIGURE WAS NOT A SAFETY MARGIN. Threshold is not a function of input
+  # size alone: it depends on the producer (a shell builtin in a forked subshell
+  # races from the first element; an external command may buffer first), on how
+  # many stages sit between producer and reader (an intervening `sed` absorbs a
+  # sub-64KB stream and hides the race entirely), on where the match falls, and on
+  # load. A first pass measured a two-stage external producer clean at 9KB and
+  # racy at 72KB and concluded the boundary was the 64KB pipe buffer; a second
+  # measured the same shape racy at 21-35KB. NEITHER READING WAS WRONG -- the
+  # first pass simply never sampled 21-45KB. The data lie on one monotone curve;
+  # only the conclusion drawn from the gap was wrong.
+  #
+  # Match position is the one absolute here, and it was measured rather than
+  # assumed: a match on the LAST line never races (0/300 at 182KB, where a
+  # first-line match gives 300/300), because grep reads to EOF and the producer
+  # finishes.
+  #
+  # That is the whole lesson. Deciding per row whether THIS instance is safe is
+  # the reasoning that produced "UNCONFIRMED" the first time, and it was wrong.
+  # So the rule is unconditional and not a judgement call: read the producer into
+  # a variable, or use a here-string. Never pipe a producer into `grep -q`. That
+  # rule is now enforced mechanically by the `probe-self:no-pipe-into-grep-q` row
+  # below, not just asserted here.
   wf_exec="$(grep -rhE "^[^#]*" $wf/*.yaml 2>/dev/null | sed 's/#.*//' || true)"
   if grep -qE "cosign|--provenance=|actions/attest|attestations:" <<<"$wf_exec"; then
     row "artifact-provenance" PASS "signing/attestation step present"
@@ -1709,7 +1807,78 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
       # sends someone to fix a document that was correct.
       [[ "$m" == *_ ]] && continue
       cited=$((cited+1))
-      printf '%s\n' "${declared_series[@]}" | grep -qx "$m" || { bad=$((bad+1)); missing="${missing} $m"; }
+      # NOT `printf ... | grep -qx "$m"`. Under this file's `set -o pipefail` that
+      # pipeline is the SIGPIPE race the artifact-provenance row above describes --
+      # and here it is CONFIRMED, because the producer is a BUILTIN in a forked
+      # subshell, which races from the very first element instead of buffering first.
+      # `grep -q` exits at the first match and closes the pipe, printf takes SIGPIPE
+      # (141), pipefail reports the pipeline as failed, and a series that IS declared
+      # gets reported missing.
+      #
+      # Measured on clcsolutions/binance-marketdata 2026-08-25, unchanged tree, real
+      # manifest and RUNBOOK. THE RATE IS LOAD-DEPENDENT, so it is given as a spread
+      # and not as one number: four samples that day gave 65/100, 24/30, 23/30 and
+      # 13/30 pre-fix -- between a third and two thirds of runs. Post-fix: 0/100 and
+      # 0/30, every sample. In the 100-run sample, 23 DISTINCT series were reported
+      # nonexistent across runs and all 23 are in the manifest (56 declared, 28
+      # cited). An earlier draft of this comment said "23 of 30 ... and 15 of 30 in
+      # an independent replication"; the 15 was never measured by anyone and is
+      # withdrawn. A wrong number in a comment about a gate that reports a different
+      # answer every run is the exact failure this row is being repaired for.
+      #
+      # Isolated, match at the FIRST element: ~1-5/100 at 10 elements, ~5-9/100 at
+      # 100, ~38-51/100 at 2000, 100% at 20000, always exit 141. Match at the LAST
+      # element: 0/100 -- grep reads to EOF so printf finishes. A small manifest does
+      # not make this safe, only rarer.
+      #
+      # A gate that reports a different finding every run trains people to re-run it
+      # until it is green, which is worse than no gate at all.
+      #
+      # The joined-array membership test has no pipeline, no subprocess and no race.
+      # The delimiter is safe STRUCTURALLY, not by convention: `declared_series` is
+      # built by `awk '{print $NF}'`, which yields a whitespace-delimited field, so an
+      # element cannot contain a space or tab. The surrounding spaces make it an
+      # exact-token test rather than the substring search this row's comment above
+      # already had to fix once.
+      #
+      # It is also a LITERAL test where `-x` was a REGEX one, and that is a real
+      # semantic difference, not a no-op. Three inputs make the two disagree:
+      # `$m` containing `.` or `^` (regex to grep, literal here), and an array element
+      # containing a space (impossible per the awk argument above). All three are
+      # unreachable with today's extractor -- but note the extractor at the mapfile
+      # above is `[a-zA-Z_][a-zA-Z0-9_]*`, which admits UPPERCASE; it is the DATA that
+      # is all lowercase, not the code. No uppercase letter is a metacharacter, so the
+      # conclusion holds either way. Glob metacharacters in `$m` are already inert
+      # because `" $m "` is quoted inside `[[ ]]`; verified with `*` and `?`.
+      #
+      # `[*]-` and not `[*]`: on bash before 4.4 an EMPTY array under `set -u` is
+      # treated as unbound, and this file's guard is `BASH_VERSINFO[0] < 4`, so
+      # 4.0-4.3 gets in. PURELY DEFENSIVE -- no live bug. Two drafts of this comment
+      # got the rationale wrong and both are withdrawn: it does not prevent an abort.
+      # Review established that on 4.4+ the line IS reached with an empty manifest and
+      # does NOT abort (`printf '%s\n'` with no arguments still emits a newline, so
+      # `series_prefixes` has one element and the guard passes), while on 4.0-4.3 the
+      # process substitution feeding `mapfile -t series_prefixes` dies first and the
+      # line is UNREACHABLE. In the version where it is reached it does not abort; in
+      # the version where it would abort it is not reached. The `-` costs nothing and
+      # removes the question. Semantics checked on bash 5.3.15, the real runtime, and
+      # on 3.2.57 as a PROXY for pre-4.4 nounset behaviour only -- 3.2 is NOT
+      # supported here (no `mapfile`; the version guard exits first). NOBODY HAS
+      # TESTED 4.0-4.3: none was available. That range is reasoned about, not measured.
+      #
+      # ONE COUPLING THIS TEST HAS AND THE OLD ONE DID NOT: `"${arr[*]}"` joins
+      # with the FIRST CHARACTER OF IFS, not with a space. This file assigns IFS
+      # ZERO times outside the `IFS= read` prefix form (which is scoped to its
+      # own command), so the join is a space and the test is exact. If anyone
+      # ever sets a global IFS above this line, this row starts reporting
+      # declared series as missing -- the exact failure it was just repaired for.
+      # This is CHECKED MECHANICALLY by the `probe-self:no-pipe-into-grep-q` row
+      # near the lint section, which fails on a global IFS assignment as well as
+      # on a piped `grep -q`. An earlier draft of this comment claimed the check
+      # was mechanical when it was a grep someone had run by hand once; review
+      # caught that, and the honest repair was to build the check rather than to
+      # soften the sentence.
+      [[ " ${declared_series[*]-} " == *" $m "* ]] || { bad=$((bad+1)); missing="${missing} $m"; }
     done < <(grep -ohE "\\b${_pat}[a-z0-9_]+\\b" docs/RUNBOOK.md | sort -u)
   fi
   if (( bad > 0 )); then
