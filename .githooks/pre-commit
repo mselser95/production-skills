@@ -21,9 +21,35 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-mirrors=(
-  "prod-new/template/scripts/verify-standard.sh:_shared/probes/verify-standard.sh"
-)
+# The list is DERIVED from install.sh, never restated here. It used to be a
+# copy, and the copy did exactly what copies do: install.sh grew a second
+# mirror (the non-vacuity selftest) and this hook kept syncing one, so the new
+# mirror was unprotected at commit time while the commit message claimed the
+# gate had run. Two lists that must agree are one list and one latent defect --
+# which is the same lesson the comment above already records, applied to the
+# comment's own file.
+mirrors=()
+while IFS= read -r m; do
+  [[ -n "$m" ]] && mirrors+=("$m")
+# Comment lines are stripped BEFORE the match. The array carries explanatory
+# comments (this change added some), and a comment containing a quoted
+# colon-string -- `# see "foo:bar" for the format` -- would be extracted as a
+# phantom mirror. It could not write a wrong file (the `-f "$orig"` guard below
+# skips it), but it would inflate the count, so the hook would report
+# "N mirror(s) already in step" for work it never did. A gate that reports a
+# number it did not measure is the defect this repo exists to refuse.
+done < <(sed -n '/^mirrors=(/,/^)/p' install.sh | grep -v '^[[:space:]]*#' | grep -oE '"[^"]+:[^"]+"' | tr -d '"')
+
+# A derivation that silently returns nothing would make this hook a no-op that
+# still prints a reassuring line. If the extraction breaks -- install.sh
+# reformatted, the array renamed -- FAIL loudly instead of mirroring zero
+# files: silence is not a verdict.
+if (( ${#mirrors[@]} == 0 )); then
+  echo "pre-commit: could not derive any mirror from install.sh -- refusing to" >&2
+  echo "            report success on a check that did not run. Fix the parse" >&2
+  echo "            or the array, do not bypass this." >&2
+  exit 1
+fi
 
 synced=0
 for m in "${mirrors[@]}"; do

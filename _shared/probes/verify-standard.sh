@@ -3,7 +3,14 @@
 #
 # This script's OUTPUT IS THE COMPLETION REPORT. It probes EFFECTS, not
 # artifacts: it runs the tools, greps the entrypoints for wiring, and reads the
-# spec's ratified declines. See ../verification-probes.md for why.
+# spec's ratified declines.
+#
+# The rationale lives in the production-skills repo at
+# _shared/verification-probes.md. It is deliberately NOT cited as a relative
+# path: this file is VENDORED into each repo as scripts/verify-standard.sh, and
+# `../verification-probes.md` resolves to nothing there -- a dangling citation
+# in every repo that adopts the standard, which is the citation-vs-tombstone
+# defect this file exists to refuse, appearing in its own header.
 #
 # Usage:  bash verify-standard.sh [repo-root]
 # Exit:   0 = every probe PASS or NA; 1 = at least one FAIL.
@@ -28,6 +35,18 @@ if (( BASH_VERSINFO[0] < 4 )); then
   echo "    brew install bash   # then re-run" >&2
   exit 2
 fi
+# Resolved BEFORE the cd below, and that ordering is the whole point.
+#
+# The not-probed guard derives the declared dimension list by grepping this
+# script. It read "$0", which for the documented invocation
+# `bash scripts/verify-standard.sh /path/to/other/repo` is a RELATIVE path --
+# and by the time it is read, the cd has already moved out from under it. The
+# derivation came back empty and the meta-guard fired with
+# `row-derivation FAIL ... the not-probed guard is inert`: a red row on correct
+# usage, on exactly the invocation that produced the two best findings of this
+# change set (pointing the probe at a C++ repo).
+#
+# BASH_SOURCE[0] rather than $0 so it is right when sourced as well as executed.
 PROBE_SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 root="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$root" || exit 2
@@ -486,12 +505,50 @@ if have golangci-lint || [[ -x "$(gobin)/golangci-lint" ]]; then
   else row "lint" FAIL "golangci-lint reported issues"; fi
 else row "lint" FAIL "golangci-lint not installed"; fi
 
-if ls internal/architecture/*_test.go >/dev/null 2>&1 || grep -rql "forbidden\|ImportsOnly" --include='*_test.go' . 2>/dev/null; then
-  if go test ./internal/architecture/... -count=1 >/dev/null 2>&1; then
-    empty=$(grep -A3 'wallClockAllowlist = map\[string\]bool{' internal/architecture/*_test.go 2>/dev/null | grep -c '"' || true)
-    row "fitness-functions" PASS "architecture test green; wall-clock allowlist entries: $empty"
-  else row "fitness-functions" FAIL "architecture test red"; fi
-else row "fitness-functions" FAIL "no architecture/fitness test found"; fi
+# The suite's DIRECTORY was hardcoded to internal/architecture, which is
+# binance-marketdata's name for it, not the standard's. bitgo-marketdata calls
+# the same suite internal/arch: the `||` fallback found its tests, then
+# `go test ./internal/architecture/...` failed on a path that does not exist,
+# and the row reported "architecture test red" for a suite that is green. A
+# probe that hardcodes one repo's layout reports the FLEET's other repos as
+# broken -- and a red row nobody can reproduce locally is how a gate loses its
+# audience. Locate the package that holds the fitness tests instead.
+# Locate it by NAME first. A keyword sweep alone is far too loose: matching
+# /forbidden|ImportsOnly/ across every _test.go picked
+# internal/adapter/out/bitgooracle in bitgo-marketdata, because the word
+# "forbidden" appears in an error-message assertion there -- so the row would
+# have run the wrong package and called it the fitness suite. Measured before
+# claiming the fix.
+fitness_dir=""
+for _cand in internal/architecture internal/arch internal/fitness architecture arch; do
+  if ls "$_cand"/*_test.go >/dev/null 2>&1; then fitness_dir="./$_cand"; break; fi
+done
+# Fallback keyed on what a fitness test DOES -- walk the import graph -- rather
+# than on words that appear in ordinary assertions.
+if [[ -z "$fitness_dir" ]]; then
+  fitness_dir=$(grep -rlE 'go/parser|go/ast|tools/go/packages' --include='*_test.go' . 2>/dev/null \
+                | xargs -I{} dirname {} 2>/dev/null | sort -u | head -1)
+fi
+if [[ -n "$fitness_dir" ]]; then
+  if go test "$fitness_dir/..." -count=1 >/dev/null 2>&1; then
+    empty=$(grep -A3 'wallClockAllowlist = map\[string\]bool{' "$fitness_dir"/*_test.go 2>/dev/null | grep -c '"' || true)
+    row "fitness-functions" PASS "fitness suite green in ${fitness_dir#./}; wall-clock allowlist entries: $empty"
+  else row "fitness-functions" FAIL "fitness suite in ${fitness_dir#./} is RED"; fi
+else
+  # Deliberately NOT widened to accept a shell script. kraken-marketdata and
+  # okx-marketdata both carry scripts/check-architecture.sh wired into their
+  # cheap gate, and that IS a fitness function -- but "a file with that name
+  # exists" is the citation-vs-tombstone trap this standard exists to refuse,
+  # and this row's contract is a suite the probe can RUN and read a verdict
+  # from. So it stays FAIL and says exactly what it looked for, rather than
+  # turning green on a filename.
+  _shell_fitness=$(ls scripts/check-architecture.sh scripts/check-arch.sh 2>/dev/null | head -1)
+  if [[ -n "$_shell_fitness" ]]; then
+    row "fitness-functions" FAIL "no Go fitness suite in internal/{architecture,arch,fitness}; $_shell_fitness exists but this row does not certify a script by its name"
+  else
+    row "fitness-functions" FAIL "no architecture/fitness test found anywhere in the tree"
+  fi
+fi
 
 # THE PROBE'S OWN FITNESS FUNCTION. `producer | grep -q PATTERN` under this
 # file's `set -o pipefail` is the SIGPIPE race documented on the
@@ -713,7 +770,7 @@ else row "invariants-ratified" FAIL "verification/ratified/ has no tests"; fi
 # repo that deleted every property test but left the word "adequacy" in a
 # comment PASSED, with the evidence reading "0 property tests present". A row
 # whose own evidence says zero is a row that has stopped checking.
-prop_n=$(grep -rho 'func TestProperty[A-Za-z_]*' --include='*_test.go' . 2>/dev/null | sort -u | wc -l | tr -d ' ')
+prop_n=$(grep -rho 'func TestProperty[A-Za-z0-9_]*' --include='*_test.go' . 2>/dev/null | sort -u | wc -l | tr -d ' ')
 prop_n=${prop_n:-0}
 if (( prop_n > 0 )) && grep -rql 'adequacy' --include='*_test.go' . >/dev/null 2>&1; then
   row "property-tests" PASS "$prop_n property test(s), with generator-adequacy assertion(s)"
@@ -804,8 +861,29 @@ else row "scenario-matrix" FAIL "no .prod/failure-modes.md — denominator unkno
 # A real-dependency lane is one that talks to something OUTSIDE the process:
 # a real socket, a container, or a live provider. The advisory `candidate` tag
 # is NOT one — matching it was a false PASS in an earlier version of this probe.
-real_tag=$(grep -rho 'go:build [a-z_]*' --include='*_test.go' . 2>/dev/null | awk '{print $2}' \
-           | grep -vE '^(candidate|ignore)$' | sort -u | head -1)
+# `[a-z_]*` stops at the first DIGIT, so `//go:build e2e` yielded the tag `e`.
+# Every downstream use then looked for `-tags=e`, and the row named a tag that
+# does not exist in the repo. Digits belong in the class: build tags are
+# [A-Za-z0-9_.] and `e2e` is the single most common integration tag there is.
+# `*` matches ZERO characters, so a constraint starting outside the class --
+# `//go:build !unit` -- matched the bare `go:build ` prefix, awk emitted an
+# EMPTY line, and `sort -u` sorts the empty string FIRST, so `head -1` took it
+# and real_tag came back "". Widening the class fixed `e2e` and left that.
+# `+` requires at least one character, so a negated leading constraint simply
+# does not match instead of winning. Empty lines are dropped as well, because
+# a guard that depends on one regex quantifier is a guard with one point of
+# failure. NOTE, stated rather than hidden: `//go:build !unit && integration`
+# still yields nothing -- the positive tag is not first. That is a narrower
+# gap than "empty string wins" and it fails CLOSED (row not emitted), not open.
+# Lifted into a FUNCTION so scripts/tests/non-vacuity-selftest.sh can source
+# and assert it instead of restating it. A selftest that reimplements the logic
+# tests the reimplementation -- this file already learned that with
+# classify_mutation_result.
+extract_real_tag() {   # extract_real_tag [dir] -> the chosen build tag, or empty
+  grep -rhoE 'go:build [A-Za-z0-9_.]+' --include='*_test.go' "${1:-.}" 2>/dev/null | awk '{print $2}' \
+    | grep -v '^$' | grep -vE '^(candidate|ignore)$' | sort -u | head -1
+}
+real_tag=$(extract_real_tag .)
 live_gate=$(grep -rlE 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
 if [[ -n "$real_tag" ]]; then
   # Scope the run to the packages that actually CONTAIN the tagged files, and
@@ -1878,6 +1956,76 @@ else
 fi
 
 # --- 14. security: RUN the scanners ---------------------------------------
+# A vulnerability count is a property of the TOOLCHAIN, not of this code, so a
+# row that prints a number without naming the Go version is not a measurement.
+# Measured 2026-08-23 on clcsolutions/okx-marketdata, SAME TREE:
+#   go1.26.0 -> 22 called | go1.26.5 -> 6 called | go1.26.6 -> 0 called.
+# Two different readers of that surface BOTH got it wrong -- one reported "6"
+# (its laptop's version), one concluded "false alarm" (0 under the newest).
+# The number that matters is the one under the toolchain CI INSTALLS, and these
+# repos derive that from go.mod's literal and feed it to setup-go. So the row
+# names what ran AND flags a mismatch with what go.mod pins: a local scan on a
+# different toolchain does not describe what ships.
+# Lifted into a FUNCTION for the same reason extract_real_tag was: the selftest
+# asserts it directly. Counts workflows that DEFINE the job or invoke it with a
+# real `uses:`, never files that merely MENTION the string -- a comment naming
+# secret-scan used to flip this row to PASS with nothing wired.
+count_secret_scan_workflows() {   # <workflows-dir> -> count
+  grep -rlE '^[[:space:]]*-?[[:space:]]*uses:.*secret-scan|^[[:space:]]+secret-scan:' "$1" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# A ROW THAT LOOKS FOR A MARKER MUST LOOK AT WHAT THE FILE DOES, NOT AT WHAT IT
+# SAYS ABOUT ITSELF. This exact defect has now been repaired FIVE times in this
+# file -- artifact-provenance, secret-scan-all-triggers, ci-runs-integration-lane,
+# and then sbom and changed-line-coverage -- and every one of the first three
+# fixes landed on one row while a sibling a few lines away kept the bug. Two of
+# those siblings were caught in review, on the branch whose whole subject was
+# this class.
+#
+# Patching row six the same way would be the same mistake a sixth time, so the
+# stripping is a FUNCTION and the rows call it. A new row that greps for a
+# marker either calls this or is wrong by construction.
+#
+# `#` comment bodies are stripped: YAML, Makefiles and shell all use it. `#`
+# inside a quoted string is not honoured, deliberately -- a marker that appears
+# ONLY inside such a string is vanishingly rare beside the failure this
+# prevents, and for a gate the safe direction is FAIL.
+#
+# Only files that matched at all are re-read, so this costs one extra pass over
+# the few files that already hit.
+grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FILES
+  local flags=()
+  while [[ "${1:-}" == -* ]]; do flags+=("$1"); shift; done
+  local pat="$1"; shift
+  # `stripped` is LOCAL. It is a new variable in this helper and there is
+  # another `stripped` at top level further down; a leaked global would have
+  # them share storage in a 2000-line script under `set -u`. Benign today
+  # because that one is assigned immediately before use, which is exactly the
+  # kind of "benign today" that stops being true in a later edit.
+  local f stripped
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    # Not a pipe into `grep -q`: see the SIGPIPE/pipefail note at the series
+    # contract below. This helper is the most-called line in the probe, so an
+    # intermittent 141 here would move ANY row, not one.
+    stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
+    if grep -qE "${flags[@]+"${flags[@]}"}" -- "$pat" <<<"$stripped"; then
+      printf '%s\n' "$f"
+    fi
+  done < <(grep -rlE "${flags[@]+"${flags[@]}"}" -- "$pat" "$@" 2>/dev/null || true)
+}
+
+toolchain_note() {
+  local ran pinned
+  ran=$(go env GOVERSION 2>/dev/null || echo "unknown")
+  pinned=$(awk '/^go [0-9]/{print "go"$2; exit}' go.mod 2>/dev/null || echo "")
+  if [[ -n "$pinned" && "$ran" != "$pinned" ]]; then
+    printf '(ran under %s, but go.mod pins %s -- CI installs the PINNED one, so this count may not describe what ships)' "$ran" "$pinned"
+  else
+    printf '(under %s)' "$ran"
+  fi
+}
+
 if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
   vout=$(PATH="$(gobin):$PATH" govulncheck ./... 2>&1)
   # govulncheck has TWO clean phrasings and the difference is not cosmetic: a
@@ -1894,15 +2042,16 @@ if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
   # form, and a module with no non-stdlib dependencies at all printed "No
   # vulnerabilities found." Both are clean verdicts; only the phrasing differs.
   if grep -qE "affected by 0 vulnerabilities|No vulnerabilities found" <<<"$vout"; then
-    row "vuln-scan" PASS "govulncheck: 0 called vulnerabilities"
+    row "vuln-scan" PASS "govulncheck: 0 called vulnerabilities $(toolchain_note)"
   elif found=$(grep -m1 -E 'affected by [0-9]+ vulnerabilit' <<<"$vout"); then
-    row "vuln-scan" FAIL "$found"
+    row "vuln-scan" FAIL "$found $(toolchain_note)"
   else
     # Neither a clean verdict nor a count: the scanner did not complete (module
     # resolution, network, toolchain). That is an unproven gate, not a clean one.
     row "vuln-scan" FAIL "govulncheck produced no verdict — gate unproven: $(head -1 <<<"$vout")"
   fi
 else row "vuln-scan" FAIL "govulncheck not installed — gate unproven"; fi
+
 
 wf=".github/workflows"
 if [[ -d $wf ]]; then
@@ -1926,9 +2075,23 @@ if [[ -d $wf ]]; then
     fi
   else row "workflow-definitions-valid" FAIL "actionlint not installed — CI definitions unvalidated, and an invalid one yields NO checks at all"; fi
 
-  sc=$(grep -rl "secret-scan" $wf 2>/dev/null | wc -l | tr -d ' ')
+  # Counted FILES THAT MENTION the string, not workflows that run the job -- so a
+  # comment naming secret-scan flipped this row to PASS with nothing wired. Caught
+  # 2026-08-23 on kraken-marketdata: a comment added by the very branch installing
+  # the standard turned this row FAIL -> PASS. A checker cannot tell a citation
+  # from a tombstone unless it is made to look for the mechanism, so this now
+  # requires a job DEFINITION (`secret-scan:`) or a real `uses:` invocation.
+  sc=$(count_secret_scan_workflows "$wf")
   (( sc >= 2 )) && row "secret-scan-all-triggers" PASS "in $sc workflows" || row "secret-scan-all-triggers" FAIL "only $sc workflow(s) — PR-only is the known gap"
-  grep -rqi "sbom\|syft\|cyclonedx" $wf && row "sbom" PASS "SBOM step present" || row "sbom" FAIL "no SBOM"
+  # Comments stripped: a workflow that only MENTIONS an SBOM in a comment was
+  # scored as having one. Caught in review on re-canary 2026-08-23, in the same
+  # diff that fixed the two rows on either side of it.
+  sbom_hits="$(grep_x -i 'sbom|syft|cyclonedx' $wf)"
+  if [[ -n "$sbom_hits" ]]; then
+    row "sbom" PASS "SBOM step in $(echo "$sbom_hits" | tr '\n' ' ' | sed 's/ *$//')"
+  else
+    row "sbom" FAIL "no SBOM (a comment naming one does not count)"
+  fi
   # Match only real attestation mechanisms, never the English word "provenance"
   # (it appears in benchmark baseline headers — that was a false PASS before).
   # Strip comments before matching: an earlier version PASSed on a comment
@@ -2015,6 +2178,14 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
   cited=0; bad=0; missing=""
   if ((${#series_prefixes[@]})); then
     _pat="$(printf '%s|' "${series_prefixes[@]}")"; _pat="(${_pat%|})"
+    # Built ONCE, outside the loop, and NOT piped into `grep -q`: under
+    # pipefail, -q closing the pipe while the producer is still writing makes
+    # the producer take SIGPIPE (141), which pipefail then reports as the
+    # pipeline's status -- turning a MATCH into a FAIL. Same hazard the block
+    # ~60 lines above removed and explained; this instance survived that pass.
+    # It does not change per citation, so building it per iteration was also
+    # just work.
+    declared_blob=$(printf '%s\n' "${declared_series[@]}")
     while read -r m; do
       [[ -n "$m" ]] || continue
       # A Prometheus series name never ENDS in an underscore. A token that does
@@ -2260,6 +2431,56 @@ fuzz_make_targets=$(awk '
   /^[a-zA-Z0-9_.\-]+:/ { split($0, a, ":"); cur = a[1]; next }
   /^\t/ && (/-fuzz[= ]/ || /Fuzz[A-Za-z0-9_]*/) { if (cur != "") print cur }
 ' Makefile 2>/dev/null | sort -u)
+# RECONCILIACION (merge de fix/probe-defects-and-shared-selftest): este bloque
+# COMPONE dos arreglos independientes que chocaron aca. No es "gano uno".
+#   - la clausura de prerequisitos de make (abajo) viene de esta rama y quita un
+#     FAIL FALSO medido en kraken-marketdata, donde el fuzz corre via `make verify`;
+#   - el `grep_x` de la condicion viene de fix/probe-block-scalars-and-comment-stripping
+#     y quita el defecto opuesto: un COMENTARIO que menciona `-fuzz=` compraba la fila.
+# Quedarse con uno solo reintroduce el defecto del otro, en direcciones opuestas.
+# A target whose RECIPE fuzzes is not the only way a workflow runs the fuzz lane:
+# `verify: lint race fuzz` + a job that runs `make verify` is the same lane, and
+# the recipe-only matcher called that "NO workflow invokes any of them".
+# Measured on kraken-marketdata 2026-08-23: fuzz ran on every PR and this row
+# read FAIL. A false FAIL is not the safe direction -- it trains people to widen
+# the gate until it is gone. So expand UPWARD through prerequisite chains to a
+# fixed point (bounded: Makefiles are shallow, and an unbounded loop in a probe
+# is its own outage).
+# Two traps, both caught by mutating this loop instead of reading it:
+#  - `awk -v seeds="$multiline"` dies with "newline in string"; awk -v processes
+#    escapes and rejects a literal newline. Seeds travel space-separated.
+#  - `.PHONY: fuzz verify` parses as a rule whose prerequisites include `fuzz`,
+#    so the closure "reached" .PHONY and the row proposed `make .PHONY`. Special
+#    dot-targets are excluded: they are declarations, not lanes.
+# make JOINS `\`-continued lines; the closure read one PHYSICAL line, so
+# `verify: lint \` + `fuzz \` + `race` dropped verify and everything above it.
+# Measured on a synthetic Makefile: seed [fuzz], closure [fuzz] where the
+# correct answer is [fuzz verify ci]. Both that and `::` rules landed as the
+# false FAIL this block was written to remove, and both were silent.
+fold_makefile() { sed -e :a -e '/\\$/N; s/\\\n//; ta' Makefile 2>/dev/null; }
+
+fuzz_reachable="$fuzz_make_targets"
+for _ in 1 2 3 4 5 6; do
+  # shellcheck disable=SC2086  # deliberate: collapse the newline-separated
+  # seed list into one space-separated -v value; awk -v rejects a literal
+  # newline ("newline in string").
+  more=$(fold_makefile | awk -v seeds="$(echo $fuzz_reachable | tr '\n' ' ')" '
+    BEGIN { n = split(seeds, sd, /[ \t]+/); for (i = 1; i <= n; i++) if (sd[i] != "") want[sd[i]] = 1 }
+    /^[a-zA-Z0-9_.\-]+[ \t]*::?[^=]/ {
+      # Double-colon rules split to an EMPTY prerequisite field on a naive
+      # split(":"), so `verify:: fuzz lint` dropped verify and everything above
+      # it -- the exact false FAIL this block exists to remove. Take everything
+      # after the FIRST colon run instead of trusting field 2.
+      t = $0; sub(/[ \t]*::?.*$/, "", t)
+      if (t ~ /^\./) next
+      rest = $0; sub(/^[^:]*::?[ \t]*/, "", rest)
+      m = split(rest, pq, /[ \t]+/)
+      for (j = 1; j <= m; j++) if (pq[j] != "" && (pq[j] in want)) print t
+    }' 2>/dev/null | sort -u)
+  new_reach=$(printf '%s\n%s\n' "$fuzz_reachable" "$more" | sort -u | sed '/^$/d')
+  [[ "$new_reach" == "$fuzz_reachable" ]] && break
+  fuzz_reachable="$new_reach"
+done
 fuzz_ci_evidence=""
 # grep_x, NOT grep: a workflow COMMENT mentioning `-fuzz=` bought this row
 # outright, and the row's whole claim is that fuzzing is EXECUTED in CI.
@@ -2272,7 +2493,7 @@ else
     if grep -rqE "make (--[a-z-]+ )*$mt( |\$|\")" $wf 2>/dev/null; then
       fuzz_ci_evidence="a workflow runs 'make $mt'"; break
     fi
-  done <<<"$fuzz_make_targets"
+  done <<<"$fuzz_reachable"
 fi
 if (( nfuzz == 0 )); then
   row "ci-runs-fuzz" FAIL "no fuzz targets exist, so nothing is wired: $inmake fuzz name(s) in Makefile"
@@ -2284,9 +2505,60 @@ else
   row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets named in the Makefile — the rest run nowhere ($fuzz_ci_evidence)"
 fi
 if [[ -n "${real_tag:-}" ]]; then
-  grep -rq -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null     && row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into make/CI"     || row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
+  # COMMENTS ARE STRIPPED BEFORE MATCHING. Found on re-canary 2026-08-23: a
+  # comment written INTO pr.yaml, explaining that the lane runs with
+  # `-tags=chaos`, satisfied this row for four commits -- prose about the gate
+  # bought the gate, in the file the prose was describing. Same defect this
+  # probe already fixed for artifact-provenance and secret-scan-all-triggers;
+  # this sibling row was missed. Reproduced before fixing: a workflow whose
+  # ONLY mention of the tag is a comment gave PASS.
+  il_hits=$(grep -rl -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null || true)
+  il_real=""
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    # drop comment bodies, then look again in what is left
+    stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
+    if grep -q -- "-tags=$real_tag\|tags: *$real_tag" <<<"$stripped"; then
+      il_real="$f"; break
+    fi
+  done <<<"$il_hits"
+  if [[ -n "$il_real" ]]; then
+    row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into ${il_real#./}"
+  elif [[ -n "$il_hits" ]]; then
+    row "ci-runs-integration-lane" FAIL "'$real_tag' appears ONLY inside comments ($(echo "$il_hits" | tr '\n' ' ' | sed 's/ *$//')) — prose about a lane is not a lane"
+  else
+    row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
+  fi
 fi
-grep -rq "diff-cover\|patch coverage\|changed-line" Makefile $wf scripts 2>/dev/null   && row "changed-line-coverage" PASS "changed-line signal wired"   || row "changed-line-coverage" FAIL "changed-line coverage (every tier's SIGNAL) is measured nowhere"
+# The probe VENDORS ITSELF into scripts/, and the line you are reading contains
+# the string "changed-line" -- so the old matcher passed this row in every repo
+# that installed the standard, by finding its own source. A gate that certifies
+# itself is worse than an absent one: it reports green for the exact repos that
+# just adopted it and have wired nothing yet. Measured on kraken-marketdata
+# 2026-08-23: the only matching file was scripts/verify-standard.sh.
+# The probe's own file is therefore excluded, and the row now carries the list
+# of files that DID match as its evidence, so a PASS names what wired it.
+# Excluding the probe's own copy closed the pure self-reference, but the
+# `scripts` arm still passed on a file's mere PRESENCE -- a repo that copies in
+# changed-line-coverage.sh and wires it into no workflow got a PASS naming that
+# script. That is the citation-vs-tombstone trap this same file refuses for
+# `fitness-functions`, and two rows in one probe cannot answer the same
+# question opposite ways. So the INVOCATION must appear in a workflow or the
+# Makefile; a script under scripts/ is corroborating evidence, never the whole
+# case.
+cl_invoked=$(grep_x 'diff-cover|patch coverage|changed-line' Makefile $wf \
+             | grep -vF "$(basename "$PROBE_SELF")" || true)
+cl_hits=$(grep_x 'diff-cover|patch coverage|changed-line' Makefile $wf scripts \
+          | grep -vF "$(basename "$PROBE_SELF")" || true)
+if [[ -n "$cl_invoked" ]]; then
+  row "changed-line-coverage" PASS "changed-line signal wired in $(echo "$cl_hits" | tr '\n' ' ' | sed 's/ *$//')"
+else
+  if [[ -n "$cl_hits" ]]; then
+    row "changed-line-coverage" FAIL "a changed-line script exists ($(echo "$cl_hits" | tr '\n' ' ' | sed 's/ *$//')) but NO workflow or Makefile target invokes it — a file with that name is not a measurement"
+  else
+    row "changed-line-coverage" FAIL "changed-line coverage (every tier's SIGNAL) is measured nowhere — the probe's own vendored copy does not count as wiring"
+  fi
+fi
 
 # --- 22. reproducibility / operational determinism (restored dimension) -----
 # Probe the EFFECT: a revision that CAN be non-empty in the shipped artifact.
@@ -2338,9 +2610,55 @@ else row "operational-determinism" FAIL "Output=F(code,config,state,inputs): the
 #
 # Rows whose name is built from a variable are invisible to this derivation and
 # are simply extra; the guard is one-directional on purpose.
-declared_rows=$(grep -oE '^[[:space:]]*(el)?(se)?[[:space:]]*row "[a-zA-Z][^"$]*"' "$0" \
-  | sed -E 's/.*row "([^"]*)".*/\1/' | sort -u)
-if (( $(grep -c . <<<"$declared_rows") < 20 )); then
+# Matched ANYWHERE on the line, not anchored to its start.
+#
+# The first version anchored at `^[[:space:]]*(el)?(se)?[[:space:]]*row "` and
+# was blind to part of the declared rows, because this file's dominant idiom for
+# one-liners puts `row` mid-line after `&&` or `||`.
+#
+# NUMBERS RE-MEASURED AT THE RECONCILIATION MERGE (2026-08-26), not carried
+# over. They had gone stale in the ordinary way: the merge was clean, so nothing
+# forced anyone to look at them. As written here they said "9 of the 55"; both
+# halves had moved. Measured on the merged tree:
+#
+#   total declared rows (unanchored)  56   was 55 -- the sigpipe branch added
+#                                          probe-self:no-pipe-into-grep-q
+#   seen by the anchored form         50
+#   blind set                          6   was 9
+#
+#   advisory-lane, auto-recovery:self_recovery, cheap-gate, nightly-trends,
+#   registries, secret-scan-all-triggers
+#
+# The three that LEFT the blind set -- changed-line-coverage,
+# ci-runs-integration-lane and sbom -- were rewritten from one-liners into
+# multi-line forms by branches merged alongside this one, so they now start
+# their line. That is an argument for the unanchored form getting STRONGER, not
+# weaker: the blind set is a property of whichever idiom is in use on a given
+# day, which is exactly why the derivation must not depend on it.
+#
+# `registries`/`secret-scan-all-triggers` remain two of the §14/§15 rows the
+# sentence below names. A guard blind to its own worked examples is worse than
+# no guard: it reads as covering them.
+#
+# Caught by a reviewer, not by me, and the lesson is the one this file keeps
+# relearning -- an anchor that fits the shape you happened to look at.
+declared_rows=$(grep -oE 'row "[a-zA-Z][^"$]*"' "$PROBE_SELF" \
+  | sed -E 's/row "([^"]*)"/\1/' | sort -u)
+# 50, not 20: the real count is 56 (re-measured 2026-08-26 at the reconciliation
+# merge; it was 55 when this line was written), and a floor low enough to be met
+# by a half-broken matcher is a floor that would have accepted the 46 above.
+#
+# WHAT THIS FLOOR DOES NOT CATCH, said plainly so nobody reads more into it than
+# is there: it does NOT catch a regression to the anchored matcher. That form
+# derives exactly 50 on this tree, and 50 is not < 50, so it would pass clean.
+# The floor catches a derivation that COLLAPSES -- an empty or near-empty list,
+# which is the fail-open shape it was written for -- and nothing finer. Raising
+# it to bracket the anchored form would turn it into a number that has to be
+# edited every time a row is added, i.e. a number that gets edited without being
+# thought about, and it would still only fence one known-bad matcher. The real
+# guard against that regression is the comment above plus review, and stating
+# the limit here is preferable to a floor that looks stronger than it is.
+if (( $(grep -c . <<<"$declared_rows") < 50 )); then
   # The derivation itself must not fail open. If it stops matching, this guard
   # would silently protect nothing -- exactly the shape it exists to catch.
   ROWS+=("row-derivation|FAIL|could not derive the declared dimension list from this script -- the not-probed guard is inert")

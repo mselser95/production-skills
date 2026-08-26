@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # check-registries.sh — the liability registries' teeth.
 #
-# Four registries record live exceptions: waived obligations, feature
-# flags, quarantined tests, contract-migration debt. Recording them is
-# worthless without expiry enforcement: a waiver nobody revisits is a
-# permanent silent exemption, which is how a "temporary" gate suppression
-# becomes policy.
+# Four registries record live exceptions: waived obligations, feature flags,
+# quarantined tests, contract-migration debt. Recording them is worthless
+# without expiry enforcement: a waiver nobody revisits is a permanent silent
+# exemption, which is how a "temporary" gate suppression becomes policy.
 #
-# This script fails when ANY entry's `expires:` date is in the past, naming
-# the entry and its owner. Wired into presubmit (make check-fast / verify):
-# at expiry the obligation returns to force and the build reddens on its
-# own, with no human remembering to check.
+# This script fails when ANY entry's `expires:` date is in the past, naming the
+# entry and its owner. Wire it into presubmit: at expiry the obligation returns
+# to force and the build reddens on its own, with no human remembering to check.
 #
 #   check-registries.sh            fail on expired entries
 #   check-registries.sh --warn     report but exit 0 (grace period)
@@ -22,6 +20,13 @@
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
 
+# Overridable so scripts/tests/check-registries-selftest.sh can point this at
+# a scratch directory of crafted fixture entries and run the REAL parser
+# end-to-end, instead of re-implementing its logic (a selftest that
+# reimplements the parser tests the copy, not the thing that runs). Absolute
+# paths work regardless of the `cd` above; the default is unchanged.
+registries_dir="${REGISTRIES_DIR:-registries}"
+
 mode="fail"; soon_days=14
 while (($#)); do
   case "$1" in
@@ -31,21 +36,122 @@ while (($#)); do
   shift
 done
 
-today_s=$(date -u +%s)
+today=$(date -u +%Y-%m-%d)
+# epoch_utc_midnight <YYYY-MM-DD> -- print the UTC-midnight epoch for that date,
+# or fail if the date is not real.
+#
+# Two implementations of date(1), one answer required. Beyond the time-of-day
+# divergence explained at today_s, BSD date NORMALISES an impossible date --
+# 2026-02-30 becomes 2026-03-02 -- so `2027-02-30` sailed through on macOS and
+# failed on Linux. Rendering the parsed timestamp back to YYYY-MM-DD and
+# requiring it to equal the input catches that on BOTH platforms, without
+# needing to know which one is running.
+epoch_utc_midnight() {
+  local want="$1" secs back
+  if secs=$(TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "${want} 00:00:00" +%s 2>/dev/null); then
+    back=$(TZ=UTC date -j -f "%s" "$secs" +%Y-%m-%d 2>/dev/null)
+  elif secs=$(date -u -d "${want} 00:00:00 UTC" +%s 2>/dev/null); then
+    back=$(date -u -d "@${secs}" +%Y-%m-%d 2>/dev/null)
+  else
+    return 1
+  fi
+  [[ "$back" == "$want" ]] || return 1   # date(1) normalised an impossible date
+  printf '%s' "$secs"
+}
+
+# UTC MIDNIGHT, not "now", and the expiry below is parsed the same way. Both
+# halves matter and both were wrong.
+#
+# GNU `date -d 2026-08-18 +%s` returns that day's midnight; BSD
+# `date -j -f "%Y-%m-%d"` fills H:M:S from the CURRENT time. So on the expiry
+# day itself the same entry read EXPIRED on Linux (exit 1) and EXPIRING in 0d
+# (exit 0) on macOS -- same input, opposite verdict, which is precisely what
+# the comment below the shape gate says must not happen. Comparing two UTC
+# midnights removes both the time-of-day and the local-timezone term.
+today_s=$(epoch_utc_midnight "$(date -u +%Y-%m-%d)")
 expired=0; soon=0; total=0; malformed=0
 
-for reg in registries/*.yaml; do
+# Fail CLOSED when there is nothing to check. The loop below skips silently on
+# a directory with no .yaml in it, so `registries: 0 entries checked` exited 0
+# and DELETING the registries satisfied the gate -- the one outcome a liability
+# registry exists to make impossible. Measured against a scratch empty
+# directory before this guard: exit 0.
+shopt -s nullglob
+# `.yaml` AND `.yml`. A registry filed with the other extension was invisible
+# to this gate: measured here, a waiver expiring 2026-01-02 named extra.yml
+# gave "0 expired" and exit 0, while the SAME file renamed to .yaml gave exit
+# 1. An expiry gate a file extension can hide from is the silent permanent
+# exemption this script exists to refuse. (The probe's ratify-queue loop hit
+# the same defect separately and already globs *.y*ml.)
+registry_files=( "${registries_dir}"/*.yaml "${registries_dir}"/*.yml )
+shopt -u nullglob
+if (( ${#registry_files[@]} == 0 )); then
+  echo "registries: NO registry files in '${registries_dir}' -- an empty registry set is not a clean one; deleting the registries must not pass this gate." >&2
+  exit 1
+fi
+
+for reg in "${registry_files[@]}"; do
   [[ -f "$reg" ]] || continue
-  id=""; owner=""; expires=""
+  # One entry per `- id:`; read its id, owner and expires with a tiny state machine
+  # rather than a YAML dependency — this must run before anything is installed.
+  id=""; owner=""; expires=""; in_entry=0
+  seq_indent=""; seq_indent_set=""
   flush() {
-    [[ -z "$id" ]] && return
+    if [[ -z "$id" ]]; then
+      # AN ENTRY WITH NO USABLE id IS REPORTED, NOT DISCARDED, and the reset
+      # happens on this path too. The bare `[[ -z "$id" ]] && return` got both
+      # wrong at once, and the second half is the one that bites:
+      #
+      #   - id:                      <- empty value
+      #     owner: "@ghost"
+      #     expires: 2099-12-31
+      #   - id: heir                 <- no owner, no expires
+      #
+      # Measured before this fix: `1 entries checked, 0 expired, 0 expiring,
+      # 0 malformed`. The first entry VANISHED -- never counted, never flagged
+      # -- and `heir` passed CLEAN, inheriting the 2099 expiry, because the
+      # early return skipped the reset at the bottom of this function. An entry
+      # the gate cannot see is an exemption with no owner and no expiry, which
+      # is the one thing these registries exist to make impossible. Found by
+      # fd1az on binance-marketdata#24.
+      #
+      # in_entry separates "no entry has started yet" -- the first `- ` line,
+      # and the call after the loop on an empty file -- from "an entry started
+      # and produced no id". Only the second is a finding.
+      if (( in_entry )); then
+        echo "MALFORMED  ${reg}: an entry has an empty or missing id: — it cannot be cited, renewed or attributed" >&2
+        total=$((total+1))
+        malformed=$((malformed+1))
+      fi
+      owner=""; expires=""; in_entry=0
+      return
+    fi
     total=$((total+1))
+    # The header documents `{id, owner, created, expires, evidence}` but only
+    # `expires` was enforced -- an entry with NO owner counted as clean and the
+    # summary said "0 malformed". A liability with no name on it is one nobody
+    # carries. Measured: an owner-less entry passed.
+    if [[ -z "$owner" ]]; then
+      echo "MALFORMED  ${reg}: entry '${id}' has no owner: — an unowned liability is one nobody carries" >&2
+      malformed=$((malformed+1))
+    fi
     if [[ -z "$expires" ]]; then
       echo "MALFORMED  ${reg}: entry '${id}' has no expires: — every entry needs one ('never' only for permanent levers)" >&2
       malformed=$((malformed+1))
     elif [[ "$expires" != "never" ]]; then
-      if ! exp_s=$(date -j -f "%Y-%m-%d" "$expires" +%s 2>/dev/null || date -d "$expires" +%s 2>/dev/null); then
+      # Validate the SHAPE before handing it to date(1). GNU date happily parses
+      # relative expressions -- "tomorrow", "next-tuesday", "+30 days" -- so on
+      # Linux a waiver could carry `expires: tomorrow` and be recomputed as one
+      # day away on every run: a waiver that never expires, which is exactly the
+      # permanent silent exemption this registry exists to prevent. BSD date
+      # rejects those, so the behaviour also differed by platform, and the gate
+      # that decides whether an exception is still live must not depend on which
+      # machine ran it. Found by the selftest on CI, passing on macOS.
+      if [[ ! "$expires" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
         echo "MALFORMED  ${reg}: entry '${id}' has expires='${expires}' which is not YYYY-MM-DD" >&2
+        malformed=$((malformed+1))
+      elif ! exp_s=$(epoch_utc_midnight "$expires"); then
+        echo "MALFORMED  ${reg}: entry '${id}' has expires='${expires}' which is not a real YYYY-MM-DD date" >&2
         malformed=$((malformed+1))
       elif (( exp_s < today_s )); then
         echo "EXPIRED    ${reg}: '${id}' expired ${expires} (owner: ${owner:-unassigned}) — the obligation is back in force" >&2
@@ -55,28 +161,75 @@ for reg in registries/*.yaml; do
         soon=$((soon+1))
       fi
     fi
-    id=""; owner=""; expires=""
+    id=""; owner=""; expires=""; in_entry=0
   }
   while IFS= read -r line; do
-    # Skip comment lines FIRST. The patterns below match anywhere on the
-    # line, so a commented-out entry -- the natural way to record what a
-    # registry used to hold, or to stage one before it is real -- was parsed
-    # as a LIVE entry. Its long-past expiry then failed the build, and the
-    # only way to describe a retired waiver was to delete every trace of it.
-    # Trailing comments after a value are already handled per-field.
-    if [[ "$line" =~ ^[[:space:]]*# ]]; then
-      continue
+    # A new entry starts at ANY top-level list-item dash ("- <key>: ..."),
+    # not specifically "- id:". Flushing only on "- id:" made an entry whose
+    # `id:` is written on a later, non-dashed continuation line (e.g. owner
+    # or expires listed first) invisible: that continuation line never
+    # matched "- id:" so `id` was never captured, and flush() discards any
+    # entry with an empty id -- silently unenforced, key order dependent.
+    # AN ENTRY BOUNDARY IS A TOP-LEVEL SEQUENCE ITEM, not any dashed line.
+    #
+    # The test used to be `^[[:space:]]*-[[:space:]]` at ANY indentation, which
+    # was harmless while an id-less flush returned silently. Once flush started
+    # REPORTING an id-less entry, every nested list item and every dashed line
+    # inside a literal block began opening an entry that then had to produce an
+    # `id:` -- so one legal entry with `tags:` and an `evidence: |` block was
+    # reported as FIVE, four of them malformed, and the message sent the reader
+    # hunting for an id-less entry that does not exist. Measured by fd1az; I
+    # introduced it in the same commit that fixed the silent-skip.
+    #
+    # The indentation of the FIRST dashed line in the file is the sequence's
+    # level; anything deeper belongs to the entry, not beside it. Derived per
+    # file rather than assumed, because these four registries are hand-written
+    # and nothing forces them to agree on two spaces.
+    if [[ "$line" =~ ^([[:space:]]*)-[[:space:]] ]]; then
+      _ind="${BASH_REMATCH[1]}"
+      if [[ -z "$seq_indent_set" ]]; then
+        seq_indent="$_ind"; seq_indent_set=1
+      fi
+      if [[ "$_ind" == "$seq_indent" ]]; then
+        flush
+        # AFTER the flush: this line opens a new entry, so from here on an
+        # empty id is a finding rather than "nothing has started yet".
+        in_entry=1
+      fi
     fi
-    case "$line" in
-      *-\ id:*)      flush; id="${line#*id:}";      id="${id// /}" ;;
-      *owner:*)      owner="${line#*owner:}";      owner="${owner// /}" ;;
-      *expires:*)    expires="${line#*expires:}";  expires="${expires%%#*}"; expires="${expires// /}" ;;
-    esac
+    # id/owner/expires are matched by an ANCHORED key regex (start of line,
+    # optional leading "- ", then the exact key), not a bare substring —
+    # so they are captured no matter which position in the entry they
+    # appear at, and are immune to a body-text line that happens to contain
+    # "id:"/"owner:"/"expires:" as a substring of a longer word.
+    if [[ "$line" =~ ^[[:space:]]*-?[[:space:]]*id:[[:space:]]*(.*)$ ]]; then
+      id="${BASH_REMATCH[1]}"; id="${id%%#*}"; id="${id// /}"
+    elif [[ "$line" =~ ^[[:space:]]*-?[[:space:]]*owner:[[:space:]]*(.*)$ ]]; then
+      owner="${BASH_REMATCH[1]}"; owner="${owner%%#*}"; owner="${owner// /}"
+    elif [[ "$line" =~ ^[[:space:]]*-?[[:space:]]*expires:[[:space:]]*(.*)$ ]]; then
+      expires="${BASH_REMATCH[1]}"; expires="${expires%%#*}"; expires="${expires// /}"
+    fi
   done < "$reg"
   flush
 done
 
 echo "registries: ${total} entries checked, ${expired} expired, ${soon} expiring within ${soon_days}d, ${malformed} malformed"
+# total == 0 is a FAIL, not a clean run.
+#
+# The empty-DIRECTORY case was already fail-closed; this is the same hole one
+# step in: a directory whose files yield no entries -- a glob that matches
+# nothing useful, a truncating merge, a REGISTRIES_DIR override pointing
+# somewhere harmless -- printed "0 entries checked, 0 expired" and exited 0,
+# after which verify-standard recorded
+# `registries-expiry-gated PASS "0 entries checked; expiry gates the build"`.
+# A gate reporting that it gates the build while enforcing nothing is the exact
+# shape this change hard-failed one directory over (require_floors_file) and
+# inside the probe itself (nv_total == 0). This gate was the outlier.
+if (( total == 0 )); then
+  echo "MALFORMED  no entries found in ${REGISTRIES_DIR:-registries/} — a registry gate that checks zero entries reports green while enforcing nothing" >&2
+  exit 1
+fi
+
 if (( expired > 0 || malformed > 0 )); then
   if [[ "$mode" == "warn" ]]; then
     echo "(--warn: reporting only. Remove --warn to make expiry gate the build.)"

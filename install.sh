@@ -114,6 +114,22 @@ fi
 # standard exists to refuse.
 mirrors=(
   "prod-new/template/scripts/verify-standard.sh:_shared/probes/verify-standard.sh"
+  # The non-vacuity selftest joins the mirrored set for the reason the probe
+  # did: it is the verifier OF the verifier, and it was previously re-authored
+  # per repo instead of vendored. Three repos wrote their own in one session
+  # and all three shipped the same vacuous control (`grep -qF ""`, which
+  # matches every input). A file that gets re-invented is a file that gets
+  # re-broken, so it is now shared, hashed, and drift-checked like the probe.
+  "prod-new/template/scripts/tests/non-vacuity-selftest.sh:_shared/probes/non-vacuity-selftest.sh"
+  # REGISTERED AT THE RECONCILIATION MERGE (2026-08-26), and the gap is worth
+  # recording because it is the exact shape this array exists to prevent.
+  # fix/probe-sigpipe-pipefail-membership added this selftest in BOTH locations
+  # and they were byte-identical on that branch -- but the branch predates the
+  # derivation-based drift check that arrived with
+  # fix/probe-defects-and-shared-selftest, so nothing was ever going to notice
+  # them diverging. Two correct copies with no gate between them is not a
+  # mirrored file, it is two files that happen to agree today.
+  "prod-new/template/scripts/tests/probe-self-gate-selftest.sh:_shared/probes/tests/probe-self-gate-selftest.sh"
 )
 drift=0
 for m in "${mirrors[@]}"; do
