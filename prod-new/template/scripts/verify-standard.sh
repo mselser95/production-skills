@@ -357,12 +357,27 @@ classify_mutation_result() {
   # "ok" -- which would classify the mutation STAYED-GREEN and accuse a
   # perfectly good invariant of being vacuous. Checking for the skip first is
   # what keeps "not run" from masquerading as either answer.
-  if grep -qE "^--- SKIP|no tests to run|\[no test files\]" <<<"$out"; then
-    echo "NOT-RE-VERIFIED"
-  elif grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
+  # A REAL FAIL OUTRANKS A SIBLING'S "[no test files]".
+  #
+  # The skip test used to run FIRST, and `go test ./...` prints one line per
+  # package: a sibling with no test files puts "[no test files]" in the same
+  # output as the `--- FAIL` that proves the mutation was caught. Skip-first
+  # then reported NOT-RE-VERIFIED over a genuine detection. It fails CLOSED --
+  # the row lands in nv_broken -- so nothing was ever let through, but a
+  # correct red reported under the wrong reason is how a correct red gets
+  # argued away. Reported by agatticelli.
+  #
+  # A `--- FAIL` is a DEFINITE verdict about the mutated package; "[no test
+  # files]" is the ABSENCE of one about another package. The definite answer
+  # wins. The skip test keeps its place above the bare `^ok` branch, which is
+  # the case its own comment was written for: a self-skip prints "ok" and
+  # would otherwise read as STAYED-GREEN.
+  if grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
     echo "MUTATION-BREAKS-BUILD"
   elif grep -qE "^(--- )?FAIL" <<<"$out"; then
     echo "DETECTED"
+  elif grep -qE "^--- SKIP|no tests to run|\[no test files\]" <<<"$out"; then
+    echo "NOT-RE-VERIFIED"
   elif grep -q "^ok" <<<"$out"; then
     echo "STAYED-GREEN"
   else
@@ -1124,15 +1139,61 @@ done
 # would be a worse gate than an honest declaration check. What a declaration
 # check CAN do is refuse the placeholder someone types to get green, which is
 # what every caller below does.
+grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FILES
+  local flags=()
+  # `--` ENDS THE FLAGS. Without this, a pattern that legitimately starts with a
+  # dash is eaten by the loop and never reaches grep: `grep_x -- '-fuzz=' $wf`
+  # consumed BOTH `--` and `-fuzz=` as flags, so the pattern position fell to a
+  # path and the call returned empty -- a row silently reporting "not found" for
+  # something present. Reproduced on this tree: `grep_x -- '-fuzz='` returned
+  # nothing where `grep_x 'fuzz='` returned the file. Reported by fd1az.
+  while [[ "${1:-}" == -* ]]; do
+    if [[ "$1" == "--" ]]; then shift; break; fi
+    flags+=("$1"); shift
+  done
+  local pat="$1"; shift
+  # `stripped` is LOCAL. It is a new variable in this helper and there is
+  # another `stripped` at top level further down; a leaked global would have
+  # them share storage in a 2000-line script under `set -u`. Benign today
+  # because that one is assigned immediately before use, which is exactly the
+  # kind of "benign today" that stops being true in a later edit.
+  local f stripped
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    # Not a pipe into `grep -q`: see the SIGPIPE/pipefail note at the series
+    # contract below. This helper is the most-called line in the probe, so an
+    # intermittent 141 here would move ANY row, not one.
+    stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
+    if grep -qE "${flags[@]+"${flags[@]}"}" -- "$pat" <<<"$stripped"; then
+      printf '%s\n' "$f"
+    fi
+  done < <(grep -rlE "${flags[@]+"${flags[@]}"}" -- "$pat" "$@" 2>/dev/null || true)
+}
+
 spec_field() {
   awk -v block="$1" -v key="$2" '
+    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
     $0 ~ "^" block ":" { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
+      ind = match($0, /[^ \t]/) - 1
+      # INSIDE A BLOCK BODY: consume it whatever key opened it.
+      if (inblk) {
+        if ($0 ~ /^[[:space:]]*$/) next
+        if (ind > blkind) { if (want) body = (body == "" ? txt() : body " " txt()); next }
+        inblk = 0
+        if (want) { print body; exit }
+        # not the requested key: this line ended the block and is still
+        # structure, so fall through and examine it below.
+      }
+      line = txt()
+      if (line ~ /^[A-Za-z_][A-Za-z0-9_.-]*:[[:space:]]*[|>]([0-9][+-]?|[+-][0-9]?)?[[:space:]]*$/) {
+        blkind = ind; inblk = 1; body = ""; want = (line ~ "^" key ":")
+        next
+      }
       if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
     }
+    END { if (inblk && want) print body }
   ' "$SPEC" 2>/dev/null
 }
 
@@ -2200,7 +2261,10 @@ fuzz_make_targets=$(awk '
   /^\t/ && (/-fuzz[= ]/ || /Fuzz[A-Za-z0-9_]*/) { if (cur != "") print cur }
 ' Makefile 2>/dev/null | sort -u)
 fuzz_ci_evidence=""
-if grep -rqE -- '-fuzz=' $wf 2>/dev/null; then
+# grep_x, NOT grep: a workflow COMMENT mentioning `-fuzz=` bought this row
+# outright, and the row's whole claim is that fuzzing is EXECUTED in CI.
+# Needed grep_x's `--` handling too, since the pattern starts with a dash.
+if [[ -n "$(grep_x -- '-fuzz=' $wf)" ]]; then
   fuzz_ci_evidence="a workflow step fuzzes directly"
 else
   while IFS= read -r mt; do
@@ -2233,7 +2297,18 @@ grep -rq "diff-cover\|patch coverage\|changed-line" Makefile $wf scripts 2>/dev/
 if grep -rqE "commit|git_sha|config_version|schema_version|build_info" observability/*.yaml observability/*.md 2>/dev/null; then
   stampable="unknown"
   if [[ -f .dockerignore ]] && grep -qxE '\.git/?' .dockerignore; then
-    grep -rq "GIT_SHA\|ldflags" docker/ 2>/dev/null && stampable="ldflags" || stampable="no"
+    # TWO DEFECTS IN ONE LINE. Plain `grep`, so a Dockerfile COMMENT bought the
+    # row; and the WORD `ldflags` is not a stamp -- `-ldflags="-s -w"` strips
+    # symbols and sets nothing, so the image ships revision="" while this row
+    # reports the revision as stampable. An `-X <pkg>.<Var>=` assignment is what
+    # makes it a stamp, and GIT_SHA stays a separate, sufficient build-arg path.
+    if [[ -n "$(grep_x -- '-X[[:space:]=]+[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+=[A-Za-z0-9_${(/.-]' docker/)" ]]; then
+      stampable="ldflags"
+    elif [[ -n "$(grep_x 'GIT_SHA' docker/)" ]]; then
+      stampable="build-arg"
+    else
+      stampable="no"
+    fi
   else stampable="buildvcs"; fi
   case "$stampable" in
     no) row "operational-determinism" FAIL "signals declare a revision but .dockerignore excludes .git and no ldflags path exists — every image ships revision=\"\"" ;;
