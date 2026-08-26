@@ -367,8 +367,8 @@ waived() { # waived <id> -> 0 if a NON-EXPIRED waiver covers this obligation.
 # not a copy of it. It already regressed once as a copy -- the FAIL test used to
 # sit after the ok test, so a sibling package's "ok" line matched first and every
 # mutation was reported STAYED-GREEN.
-classify_mutation_result() {
-  local out="$1"
+classify_mutation_result() {   # <go-test-output> [test-name]
+  local out="$1" tname="${2:-}"
   # A test that did not RUN is not a verdict, in either direction. Two live
   # traps, both observed: an integration-tagged invariant test without the tag
   # yields "[no test files]" (neither ok nor FAIL -> NO-VERDICT), and WITH the
@@ -391,9 +391,49 @@ classify_mutation_result() {
   # wins. The skip test keeps its place above the bare `^ok` branch, which is
   # the case its own comment was written for: a self-skip prints "ok" and
   # would otherwise read as STAYED-GREEN.
+  # THE SECOND ARGUMENT, ADDED AT THE RECONCILIATION MERGE (2026-08-26), and
+  # the reason it is not just a reordering.
+  #
+  # Two branches changed this function in OPPOSITE directions, each fixing a
+  # real defect the other reintroduces:
+  #
+  #   fix/probe-block-scalars-and-comment-stripping moved FAIL ABOVE skip,
+  #   because a sibling package's "[no test files]" was masking a genuine
+  #   `--- FAIL` and reporting a real detection as NOT-RE-VERIFIED.
+  #
+  #   fix/registry-gate-block-scalars-and-template-rot shipped a selftest case
+  #   requiring the OPPOSITE, because with FAIL above skip a run where OUR test
+  #   SKIPPED and a SIBLING's test FAILED classifies as DETECTED -- certifying
+  #   an invariant that was never measured. That is the fail-OPEN direction and
+  #   the more dangerous of the two. Reported by fd1az on binance-marketdata#24.
+  #
+  # Ordering alone cannot satisfy both, because the question was never which
+  # line comes first: it is WHOSE FAIL it is. So the caller passes the test it
+  # mutated and the FAIL has to NAME it. With a name, both cases fall out:
+  # a sibling's FAIL no longer matches, so the skip branch is reached and the
+  # answer is NOT-RE-VERIFIED; our own FAIL matches and is DETECTED even when a
+  # sibling printed "[no test files]".
+  #
+  # The name is OPTIONAL and the unscoped form keeps FAIL above skip, which is
+  # the block-scalars ordering. That is deliberate: an unnamed call cannot tell
+  # whose FAIL it is, and for that call the masking defect is the live one.
+  #
+  # WIRED, not merely offered. Branch B shipped the selftest case for this and
+  # left both call sites passing one argument, so the scoping would have been
+  # inert in production -- a guard that exists only in its own test. The call
+  # sites below now pass "$nv_test".
+  local _fail_re
+  if [[ -n "$tname" ]]; then
+    # Anchored to `--- FAIL: <name>` and bounded on the right so a mutation of
+    # TestFoo is not certified by a failure of TestFooBar. `/` is allowed for
+    # subtests (`--- FAIL: TestFoo/case_1`), which ARE our test failing.
+    _fail_re="^[[:space:]]*--- FAIL: ${tname}([[:space:]]|/|\$)"
+  else
+    _fail_re="^(--- )?FAIL"
+  fi
   if grep -qE "build failed|cannot use|undefined:|declared and not used|syntax error" <<<"$out"; then
     echo "MUTATION-BREAKS-BUILD"
-  elif grep -qE "^(--- )?FAIL" <<<"$out"; then
+  elif grep -qE "$_fail_re" <<<"$out"; then
     echo "DETECTED"
   elif grep -qE "^--- SKIP|no tests to run|\[no test files\]" <<<"$out"; then
     echo "NOT-RE-VERIFIED"
@@ -650,8 +690,8 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # simply lives alongside them -- and then wrote that inflated number into
     # every evidence record. Ratification is a human act recorded in the spec;
     # a test file cannot confer it on itself.
-    ratified_n=$(awk '/^invariants:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
-    pending_n=$(awk '/^invariants_pending_ratification:/{f=1;next} /^[a-z_]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]/{c++} END{print c+0}' "$SPEC" 2>/dev/null)
+    ratified_n=$(spec_seq_count invariants)
+    pending_n=$(spec_seq_count invariants_pending_ratification)
     row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $rat_pass/$n test func(s) ACTUALLY RAN green under -tags='$rat_tags'"
   else row "invariants-ratified" FAIL "ratified tests red"; fi
   # --- non-vacuity: EXECUTE the mutations, do not grep for the word ----------
@@ -748,9 +788,14 @@ open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$
     [[ -n "${nv_reqtags:-}" ]] && nv_tags="-tags=${nv_reqtags}"
     # shellcheck disable=SC2086
     nv_out=$(go test $nv_tags -v "$nv_pkg" -run "^${nv_test}\$" -count=1 2>&1)
-    case "$(classify_mutation_result "$nv_out")" in
+    # "$nv_test" is passed so a FAIL belonging to a SIBLING test cannot certify
+    # this mutation as detected. Computed once: calling the classifier twice
+    # risked the two calls disagreeing, and it is the verdict that goes in the
+    # evidence string.
+    nv_verdict=$(classify_mutation_result "$nv_out" "$nv_test")
+    case "$nv_verdict" in
       DETECTED)              nv_proven=$((nv_proven+1)) ;;
-      *)                     nv_broken="${nv_broken} ${nv_test}:$(classify_mutation_result "$nv_out")" ;;
+      *)                     nv_broken="${nv_broken} ${nv_test}:${nv_verdict}" ;;
     esac
     mv "${nv_file}.nvbak" "$nv_file"
   done
@@ -1106,13 +1151,78 @@ fi
 # that test and requires it green. Same design as a ratification package's
 # non_vacuity_check: the artifact names an executable check and the probe
 # executes it, rather than the probe guessing from a keyword.
+# ONE LITERAL, INTERPOLATED — not transcribed into each awk program.
+#
+# Four functions walk the spec with an `inblock` state machine, and a block
+# scalar is CONTENT to all four: `notes: >` followed by prose that spells
+# `durable_outbox: TBD` must not be read as a declaration. Only `spec_field`
+# ever learned that. Measured on the three siblings before this change:
+#
+#   driven_symbol durable_outbox  ->  ESTO-ES-PROSA   (the real value is
+#                                     store.OpenDurable, two lines below)
+#   driven_keys                   ->  notes durable_outbox durable_outbox
+#                                     (a phantom key from the body, and the
+#                                     real one listed twice)
+#
+# The previous attempt "shared" the opener by writing it out a second time in
+# awk ERE. That is not sharing: the two had already diverged, and the fix
+# reached one of four call sites. This file records the same mistake FIVE times
+# for marker rows -- one row repaired while a sibling a few lines away kept the
+# bug -- so the sixth repetition is not another per-function patch.
+#
+# `is_block_header` carries the node-property and colon-optional grammar the
+# bash opener in check-registries.sh uses; `block_body` answers "is this line
+# inside the block that is open", which is what every caller actually needs.
+SPEC_AWK_LIB='
+    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
+    # A TAB IN THE INDENT COUNTS AS DEEP, NOT AS ONE CHARACTER. YAML forbids a
+    # tab there, so the file is malformed either way -- but the two wrong
+    # answers are not equal. Counting it as one character makes a tab-indented
+    # BODY measure narrower than its own header, so the block ends early and
+    # its prose is read as a declaration: `spec_field scalability
+    # partition_key` returned `ESTO-ES-PROSA` over the real value two lines
+    # below. Treating it as deep keeps the prose inside the block, which is the
+    # fail-CLOSED direction for a function whose job is to return declared
+    # values. Reported by agatticelli.
+    function indent_of(  m, lead) {
+      m = match($0, /[^ \t]/)
+      if (m == 0) return 0
+      lead = substr($0, 1, m - 1)
+      if (lead ~ /\t/) return 9999
+      return m - 1
+    }
+    # THE COMMENT STRIP THE BASH OPENER HAS, WHICH THIS DID NOT. `.*:` reaches a
+    # colon inside a trailing `#` comment, so
+    #   partition_key: el-valor-real   # ver nota: |
+    # was eaten as a block header and the real value disappeared -- spec_field
+    # returned empty. Cut outside quotes, for the same reason as next door: a
+    # quoted KEY may legitimately contain ` #`.
+    function strip_comment(line,   i, c, q, cut) {
+      q = ""; cut = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (q == "" && (c == "\"" || c == "'"'"'")) { q = c }
+        else if (q != "" && c == q) { q = "" }
+        else if (q == "" && c == "#" && i > 1 && substr(line, i-1, 1) ~ /[ \t]/) { cut = i; break }
+      }
+      return (cut ? substr(line, 1, cut - 1) : line)
+    }
+    function is_block_header(line,  l) {
+      l = strip_comment(line)
+      return (l ~ /^(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*$/)
+    }
+'
+
+
 implemented_test() {
-  awk -v key="$1" '
+  awk -v key="$1" "$SPEC_AWK_LIB"'
     /^implemented:/ { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      line = txt()
+      if (is_block_header(line)) { blkind = ind; inblk = 1; next }
       if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); print line; exit }
     }
   ' "$SPEC" 2>/dev/null
@@ -1217,6 +1327,13 @@ done
 # would be a worse gate than an honest declaration check. What a declaration
 # check CAN do is refuse the placeholder someone types to get green, which is
 # what every caller below does.
+# RECONCILIACION (merge de fix/registry-gate-block-scalars-and-template-rot):
+# aca chocaron DOS FUNCIONES DISTINTAS, no dos versiones de una. grep_x viene de
+# la linea de comment-stripping y lo usan ci-runs-integration-lane,
+# changed-line-coverage, artifact-provenance y secret-scan-all-triggers;
+# spec_seq_count viene de esta rama y le da conciencia de block scalars al conteo
+# de entradas del spec. Se quedan las dos. Git las marco en conflicto solo porque
+# ambas ramas insertaron en el mismo punto, delante de spec_field().
 grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FILES
   local flags=()
   # `--` ENDS THE FLAGS. Without this, a pattern that legitimately starts with a
@@ -1248,13 +1365,39 @@ grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FIL
   done < <(grep -rlE "${flags[@]+"${flags[@]}"}" -- "$pat" "$@" 2>/dev/null || true)
 }
 
+# spec_seq_count counts the ENTRIES of a top-level sequence in the spec:
+#
+#   spec_seq_count invariants   ->  how many `- ` items `invariants:` declares
+#
+# LIFTED INTO A FUNCTION so the selftest can assert it directly, the same
+# reason extract_real_tag and spec_field were. It was two inline awks that
+# counted dashed lines with no block awareness at all -- sharing the walker had
+# reached four of the six awks that read this file, and these were the other
+# two. A block scalar inside an entry then inflated the count with its own
+# prose: measured on valid YAML with ONE invariant whose `notes: |` body lists
+# two bullet points, `ratified_n` reported 3. The row's evidence then claims
+# more ratified invariants than the spec declares -- an over-count in the
+# direction that flatters. Reported by agatticelli.
+spec_seq_count() {   # spec_seq_count <top-level-key> -> number of `- ` items
+  awk -v block="$1" "$SPEC_AWK_LIB"'
+    $0 ~ "^" block ":" {f=1;next}
+    f && /^[a-z_]+:/ {f=0}
+    f {
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      if (is_block_header(txt())) { blkind = ind; inblk = 1; next }
+      if ($0 ~ /^[[:space:]]*-[[:space:]]/) c++
+    }
+    END{print c+0}' "$SPEC" 2>/dev/null
+}
+
 spec_field() {
-  awk -v block="$1" -v key="$2" '
-    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
+  awk -v block="$1" -v key="$2" "$SPEC_AWK_LIB"'
+
     $0 ~ "^" block ":" { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      ind = match($0, /[^ \t]/) - 1
+      ind = indent_of()
       # INSIDE A BLOCK BODY: consume it whatever key opened it.
       if (inblk) {
         if ($0 ~ /^[[:space:]]*$/) next
@@ -1265,11 +1408,21 @@ spec_field() {
         # structure, so fall through and examine it below.
       }
       line = txt()
-      if (line ~ /^[A-Za-z_][A-Za-z0-9_.-]*:[[:space:]]*[|>]([0-9][+-]?|[+-][0-9]?)?[[:space:]]*$/) {
+      if (is_block_header(line)) {
         blkind = ind; inblk = 1; body = ""; want = (line ~ "^" key ":")
         next
       }
-      if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
+      if (line ~ "^" key ":") {
+        sub("^" key ":[[:space:]]*", "", line)
+        # STRIP THE TRAILING COMMENT FROM THE VALUE TOO. Only here, on the
+        # scalar path: inside a block BODY a `#` is content and must survive.
+        # Without this the row got `el-valor-real   # ver nota: |` and compared
+        # a declaration against a string carrying its own annotation.
+        line = strip_comment(line)
+        sub(/[[:space:]]+$/, "", line)
+        gsub(/^"|"$/, "", line)
+        print line; exit
+      }
     }
     END { if (inblk && want) print body }
   ' "$SPEC" 2>/dev/null
@@ -1296,12 +1449,14 @@ placeholder_value() {
 # See the driven-mechanisms row for why this block exists and why it is
 # checked against a LINKED BINARY rather than against source.
 driven_symbol() {
-  awk -v key="$1" '
+  awk -v key="$1" "$SPEC_AWK_LIB"'
     /^driven:/ { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
     inblock {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      line = txt()
+      if (is_block_header(line)) { blkind = ind; inblk = 1; next }
       if (line ~ "^" key ":") { sub("^" key ":[[:space:]]*", "", line); gsub(/^"|"$/, "", line); print line; exit }
     }
   ' "$SPEC" 2>/dev/null
@@ -1309,11 +1464,15 @@ driven_symbol() {
 
 # driven_keys lists every key declared under `driven:`.
 driven_keys() {
-  awk '
+  awk "$SPEC_AWK_LIB"'
     /^driven:/ { inblock=1; next }
     inblock && /^[a-z_]+:/ { inblock=0 }
-    inblock && /^[[:space:]]+[a-z_]+:/ {
-      line=$0; sub(/^[[:space:]]+/, "", line); sub(/:.*$/, "", line); print line
+    inblock {
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      line = txt()
+      if (is_block_header(line)) { blkind = ind; inblk = 1 }
+      if ($0 ~ /^[[:space:]]+[a-z_]+:/) { sub(/:.*$/, "", line); print line }
     }
   ' "$SPEC" 2>/dev/null
 }
@@ -1971,7 +2130,31 @@ fi
 # real `uses:`, never files that merely MENTION the string -- a comment naming
 # secret-scan used to flip this row to PASS with nothing wired.
 count_secret_scan_workflows() {   # <workflows-dir> -> count
-  grep -rlE '^[[:space:]]*-?[[:space:]]*uses:.*secret-scan|^[[:space:]]+secret-scan:' "$1" 2>/dev/null | wc -l | tr -d ' '
+  # THE COMMENT MUST BE STRIPPED BEFORE MATCHING, not merely anchored away.
+  #
+  # The `^` anchor only rejects a comment that owns its LINE. It does nothing
+  # about a TRAILING one, and `.*secret-scan` happily reaches across into it:
+  #
+  #   - uses: actions/checkout@v4  # secret-scan runs in ci.yaml, not here
+  #
+  # is a real `uses:` line for a DIFFERENT action, and it was counted as a
+  # secret-scan mechanism. A file that says in prose that it does NOT scan was
+  # scored as scanning -- the reading is exactly inverted. Reported by
+  # agatticelli on kraken-marketdata#11.
+  #
+  # Found at the reconciliation merge (2026-08-26) and worth recording HOW,
+  # because it is the argument for merging tests and code from different
+  # branches instead of picking one: the fixture that catches this came from
+  # fix/registry-gate-block-scalars-and-template-rot, the implementation came
+  # from fix/probe-defects-and-shared-selftest, and NEITHER BRANCH HAD BOTH.
+  # The test passed on its own branch (no implementation to run) and the
+  # implementation passed on its own branch (no fixture with a trailing
+  # comment). Only together do they go red.
+  #
+  # grep_x, which strips comment bodies before matching, is the fix the rest of
+  # this file already uses for the same class -- sbom, artifact-provenance,
+  # ci-runs-integration-lane and changed-line-coverage all had this defect.
+  grep_x '^[[:space:]]*-?[[:space:]]*uses:.*secret-scan|^[[:space:]]+secret-scan:' "$1" 2>/dev/null | wc -l | tr -d ' '
 }
 
 # A ROW THAT LOOKS FOR A MARKER MUST LOOK AT WHAT THE FILE DOES, NOT AT WHAT IT
@@ -1993,27 +2176,19 @@ count_secret_scan_workflows() {   # <workflows-dir> -> count
 #
 # Only files that matched at all are re-read, so this costs one extra pass over
 # the few files that already hit.
-grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FILES
-  local flags=()
-  while [[ "${1:-}" == -* ]]; do flags+=("$1"); shift; done
-  local pat="$1"; shift
-  # `stripped` is LOCAL. It is a new variable in this helper and there is
-  # another `stripped` at top level further down; a leaked global would have
-  # them share storage in a 2000-line script under `set -u`. Benign today
-  # because that one is assigned immediately before use, which is exactly the
-  # kind of "benign today" that stops being true in a later edit.
-  local f stripped
-  while IFS= read -r f; do
-    [[ -f "$f" ]] || continue
-    # Not a pipe into `grep -q`: see the SIGPIPE/pipefail note at the series
-    # contract below. This helper is the most-called line in the probe, so an
-    # intermittent 141 here would move ANY row, not one.
-    stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
-    if grep -qE "${flags[@]+"${flags[@]}"}" -- "$pat" <<<"$stripped"; then
-      printf '%s\n' "$f"
-    fi
-  done < <(grep -rlE "${flags[@]+"${flags[@]}"}" -- "$pat" "$@" 2>/dev/null || true)
-}
+# NOTA DE LA RECONCILIACION (2026-08-26): aca habia una SEGUNDA definicion de
+# grep_x, identica a la de arriba salvo que su bucle de flags NO cortaba en `--`.
+# La trajo fix/probe-block-scalars-and-comment-stripping y la de arriba viene de
+# fix/probe-defects-and-shared-selftest; como cada rama la inserto en un punto
+# distinto del archivo, git mergeo LAS DOS sin marcar conflicto. En bash gana la
+# ULTIMA, asi que la version activa era la debil y `grep_x -- '-fuzz=' $wf` se
+# comia `--` y `-fuzz=` como flags: devolvia vacio y ci-runs-fuzz reportaba
+# "NO workflow invokes any of them" en cualquier repo que fuzzee directo.
+# Reproducido antes de borrarla, sobre un workflow que SI fuzzea:
+#   debil  -> []                (+ "grep: --: No such file or directory")
+#   fuerte -> [.../pr.yaml]
+# Un merge limpio que compila no es un merge que gatea: esto no genero ni un
+# conflicto. Se elimino la duplicada y quedo la que maneja `--`.
 
 toolchain_note() {
   local ran pinned
@@ -2083,15 +2258,152 @@ if [[ -d $wf ]]; then
   # requires a job DEFINITION (`secret-scan:`) or a real `uses:` invocation.
   sc=$(count_secret_scan_workflows "$wf")
   (( sc >= 2 )) && row "secret-scan-all-triggers" PASS "in $sc workflows" || row "secret-scan-all-triggers" FAIL "only $sc workflow(s) — PR-only is the known gap"
-  # Comments stripped: a workflow that only MENTIONS an SBOM in a comment was
-  # scored as having one. Caught in review on re-canary 2026-08-23, in the same
-  # diff that fixed the two rows on either side of it.
-  sbom_hits="$(grep_x -i 'sbom|syft|cyclonedx' $wf)"
-  if [[ -n "$sbom_hits" ]]; then
-    row "sbom" PASS "SBOM step in $(echo "$sbom_hits" | tr '\n' ' ' | sed 's/ *$//')"
+  # PARSED BY yq, NOT BY A REGEX, and not by PyYAML either. Measured on
+  # clc-ci-medium (binance-marketdata#26, job 97552813207): the runner has no
+  # PyYAML, so the first version of this row reported
+  # `FAIL  PyYAML unavailable ... went UNCHECKED` -- correct behaviour, and
+  # useless as a gate. `yq` is a Go binary pinned and installed by the same
+  # `go install ...@version` step that already brings actionlint and
+  # govulncheck into this job, so it costs no new kind of dependency. The
+  # LOGIC then runs on python3 + the `json` stdlib, which is always present.
+  #
+  # Fails CLOSED on a missing parser. An "I could not check" that renders as
+  # PASS is the failure mode this whole file exists to prevent.
+  # THE PROGRAM LIVES IN A MARKED HEREDOC so the selftest can lift it out and
+  # run it over scratch fixtures instead of restating its logic -- the same
+  # shape `non-vacuity-selftest.sh` already uses for the PYNV block, and for the
+  # same reason: a selftest that reimplements the parser tests the copy, not the
+  # thing that runs. It is assigned to a variable rather than piped directly so
+  # stdin stays free for the yq output the program actually reads.
+  _sbom_py="$(cat <<'PYSBOM'
+
+import sys, json
+
+# Which reusable workflow touches WHICH artifact. Read from the sources at
+# clcsolutions/ci@main, not inferred from job names -- an earlier version of
+# this check listed sbom-scan.yaml as an image consumer and reported a defect
+# that does not exist:
+#
+#   sbom.yaml:52        downloads ${artifact-name}-image, uploads -sbom
+#   sbom-scan.yaml:80   downloads ${artifact-name}-sbom   <-- NOT the image
+#   image-push.yaml:55  downloads ${artifact-name}-image
+#   image-push.yaml:144 DELETES   ${artifact-name}-image
+#
+# So the ordering invariant binds `sbom` and `push`, and says nothing about
+# `sbom-scan`, which reads a different artifact entirely. Whether the deploy
+# should ALSO wait on the vulnerability scan is a policy question, not a race.
+#
+# LIMIT, stated rather than implied: this map is a SNAPSHOT. Swept
+# clcsolutions/ci@main 2026-08-24 -- image-push.yaml:145 is the only artifact
+# deletion in ALL 27 reusable workflows there, and image-push.yaml:55 plus
+# sbom.yaml:52 are the only `-image` consumers. (I had grepped six workflows;
+# fd1az re-derived it across all 27 independently, which is the number that
+# belongs here.) A NEW deleting workflow added later would be invisible to this
+# row. The row is scoped per
+# workflow FILE, which is correct because artifacts are per-run: a job in
+# pr.yaml cannot consume an artifact a job in ci.yaml deleted.
+CONSUMES = {"sbom.yaml": "image", "image-push.yaml": "image", "sbom-scan.yaml": "sbom"}
+DELETES  = {"image-push.yaml": "image"}
+
+any_consumer = False
+any_deleter  = False
+problems, proven = [], []
+
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    if not raw or "\t" not in raw:
+        continue
+    fname, payload = raw.split("\t", 1)
+    if payload.strip() == "PARSE_ERROR" or not payload.strip():
+        problems.append("%s is unparseable" % fname)
+        continue
+    try:
+        jobs = {j["job"]: j for j in json.loads(payload)}
+    except Exception:
+        problems.append("%s is unparseable" % fname)
+        continue
+
+    def wf_of(name):
+        u = jobs[name].get("uses") or ""
+        for w in CONSUMES:
+            if w in u:
+                return w
+        return None
+
+    def needs(name):
+        n = jobs[name].get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
+
+    def kind(name):
+        w = wf_of(name)
+        return None if w is None else (CONSUMES[w], jobs[name].get("art") or "")
+
+    any_consumer |= any((wf_of(n) or "") == "sbom.yaml" for n in jobs)
+
+    for d in jobs:
+        w = wf_of(d)
+        if w not in DELETES:
+            continue
+        any_deleter = True
+        gone = (DELETES[w], jobs[d].get("art") or "")
+        seen, stack = set(), list(needs(d))
+        while stack:                                   # transitive: an edge via
+            x = stack.pop()                            # another job counts too
+            if x in seen or x not in jobs:
+                continue
+            seen.add(x)
+            stack.extend(needs(x))
+        # THE SET BEFORE ITS MEMBERS. Checking "every consumer is ordered before
+        # the deleter" says nothing when there are NO consumers: an empty set
+        # satisfies the claim, so this row reached its PASS branch with an empty
+        # `proven` and printed `PASS  SBOM ordered before the artifact deleter ()`
+        # -- certifying ordering on a lane with no sbom job at all, while push
+        # still deleted the image and shipped it to DOCR. Reported by agatticelli
+        # and escalated by fd1az on binance-marketdata#26, and it is the same
+        # shape as the textual row this check replaced: green over a measurement
+        # it never made.
+        same = [c for c in jobs if c != d and kind(c) == gone]
+        if not same:
+            problems.append(
+                "%s: %r deletes the %s artifact and ships it, but NO job in this workflow reads it -- nothing inventories what is deployed"
+                % (fname, d, gone[0]))
+            continue
+        for c in same:
+            if c in seen:
+                proven.append("%s before %s" % (c, d))
+            else:
+                problems.append(
+                    "%s: %r downloads the %s artifact that %r DELETES, and is not in its needs"
+                    % (fname, c, gone[0], d))
+
+if not any_consumer:
+    print("FAIL|no job uses sbom.yaml -- the word may be in comments, the job is not there")
+elif problems:
+    print("FAIL|" + "; ".join(problems[:2]))
+elif not any_deleter:
+    print("PASS|SBOM job present; no artifact-deleting job in the graph to order against")
+elif not proven:
+    print("FAIL|an artifact-deleting job exists but nothing was proven ordered before it -- no evidence to report")
+else:
+    print("PASS|SBOM ordered before the artifact deleter (%s)" % ", ".join(sorted(set(proven))[:3]))
+PYSBOM
+)"
+  if command -v yq >/dev/null 2>&1; then
+    sbom_v="$(
+      for _f in "$wf"/*.yml "$wf"/*.yaml; do
+        [ -e "$_f" ] || continue
+        printf '%s\t' "$(basename "$_f")"
+        yq -o=json -I=0 '[.jobs // {} | to_entries[] | {"job": .key, "uses": (.value.uses // ""), "needs": (.value.needs // []), "art": (.value.with."artifact-name" // "")}]' "$_f" 2>/dev/null || printf 'PARSE_ERROR'
+        printf '\n'
+      done | python3 -c "$_sbom_py"
+    )"
   else
-    row "sbom" FAIL "no SBOM (a comment naming one does not count)"
+    sbom_v="FAIL|yq not installed -- the SBOM ordering invariant went UNCHECKED (pin it with go install github.com/mikefarah/yq/v4, as this job already does for actionlint)"
   fi
+  # An empty verdict means the pipeline itself failed to run. Treat that as a
+  # FAIL for the same reason: unchecked is not passed.
+  [ -n "$sbom_v" ] || sbom_v="FAIL|the sbom probe produced no verdict -- the ordering invariant went UNCHECKED"
+  row "sbom" "${sbom_v%%|*}" "${sbom_v#*|}"
   # Match only real attestation mechanisms, never the English word "provenance"
   # (it appears in benchmark baseline headers — that was a false PASS before).
   # Strip comments before matching: an earlier version PASSed on a comment
@@ -2398,7 +2710,26 @@ else row "candidate-lane-segregated" FAIL "$((cand-tagged)) of $cand candidate f
 # --- 20. provenance headers on every ADDED test func ------------------------
 # Only functions the diff ADDS are in scope: pre-existing tests in a touched
 # file predate the convention and are not this change's debt.
-if base=$(git merge-base HEAD origin/main 2>/dev/null); then
+# THE OUTER `if` HAD NO `else`, so a checkout where the base ref cannot be
+# resolved emitted NO ROW AT ALL. The not-probed meta-guard then turned that
+# into a counted FAIL whose message says the row "counts in neither PASS, FAIL
+# nor NA" -- a dimension reported as unmeasurable by a guard, rather than by
+# the dimension itself, which is the least actionable form the report can take.
+# Reported by fd1az on okx-marketdata#8.
+#
+# Two halves. First, stop failing to resolve a base that usually exists: a CI
+# checkout may have `main` without `origin/main`, or the default branch may not
+# be called main at all, so try the remote HEAD the repo actually declares
+# before giving up. Second, when none of them resolve, SAY SO in a row of this
+# dimension's own -- and say it as FAIL, because "I could not measure whether
+# added tests carry provenance headers" is not a ratified decline.
+prov_base=""
+for _ref in origin/main main "$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"; do
+  [ -n "$_ref" ] || continue
+  if prov_base=$(git merge-base HEAD "$_ref" 2>/dev/null) && [ -n "$prov_base" ]; then break; fi
+  prov_base=""
+done
+if base="$prov_base"; [ -n "$base" ]; then
   # Benchmarks are excluded: they are neither blocking nor candidate — they
   # live in their own non-gating lane, so a provenance header would claim a
   # lane membership they do not have.
@@ -2408,6 +2739,8 @@ if base=$(git merge-base HEAD origin/main 2>/dev/null); then
   if (( added == 0 )); then row "provenance-headers" NA "no test funcs added"
   elif (( heads >= added )); then row "provenance-headers" PASS "$added added test funcs, $heads provenance lines"
   else row "provenance-headers" FAIL "$added added test funcs but only $heads provenance headers ($((added-heads)) unheaded)"; fi
+else
+  row "provenance-headers" FAIL "no diff base resolves (tried origin/main, main, origin/HEAD) -- this dimension went UNMEASURED, which is not the same as met"
 fi
 
 # --- 21. CI actually runs what the standard requires ------------------------

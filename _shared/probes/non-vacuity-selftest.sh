@@ -128,7 +128,20 @@ classify() { classify_mutation_result "$1"; }
 # with `}`, which is far below, so it slurped the surrounding code and this file
 # died on an unbound variable from it. Take the single line when the opening
 # line already closes the brace.
-for _fn in extract_real_tag count_secret_scan_workflows grep_x toolchain_note fold_makefile; do
+# THE SHARED awk LIBRARY COMES FIRST. The four spec walkers interpolate
+# `$SPEC_AWK_LIB` into their awk programs, so sourcing a function without it
+# yields a program that silently produces NOTHING -- every `check` then compares
+# "" against an expectation and reds, which is at least loud. Refuse instead of
+# guessing: if the assignment cannot be lifted, the functions below are not the
+# ones that run in the probe, and nothing this file reports would be about them.
+_libsrc="$(sed -n "/^SPEC_AWK_LIB='/,/^'$/p" "$PROBE")"
+if [[ "$(wc -l <<<"$_libsrc")" -lt 5 ]]; then
+  echo "selftest: could not lift SPEC_AWK_LIB from $PROBE -- it was renamed or reshaped" >&2
+  exit 1
+fi
+eval "$_libsrc"
+
+for _fn in extract_real_tag count_secret_scan_workflows grep_x toolchain_note fold_makefile spec_field driven_symbol driven_keys implemented_test spec_seq_count; do
   _src="$(sed -n "/^${_fn}() {/,/^}/p" "$PROBE")"
   _first="$(sed -n "/^${_fn}() {/{p;q;}" "$PROBE")"
   case "$_first" in *"}"*) _src="$_first" ;; esac
@@ -164,8 +177,137 @@ _wfdir="$(mktemp -d)"
 printf "jobs:\n  build:\n    steps:\n      - uses: org/secret-scan@v1\n"    > "${_wfdir}/a.yaml"
 printf "jobs:\n  secret-scan:\n    runs-on: ubuntu-latest\n"                > "${_wfdir}/b.yaml"
 printf "jobs:\n  build:\n    steps:\n      # secret-scan runs elsewhere\n"  > "${_wfdir}/c.yaml"
+# THE SHAPE THE DEFECT ACTUALLY NEEDS: a trailing comment on a REAL `uses:`
+# line. The `c.yaml` fixture puts the comment on its OWN line, which the `^`
+# anchor already rejects -- so it passed for a reason the defect does not depend
+# on. Reported by agatticelli on kraken-marketdata#11.
+printf "jobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4  # secret-scan runs in ci.yaml, not here\n" > "${_wfdir}/d.yaml"
 check "count_secret_scan_workflows counts mechanisms, not mentions" "2" \
   "$(count_secret_scan_workflows "$_wfdir")"
+
+# spec_field OWES TWO OBLIGATIONS, AND THE FIRST FIX MET ONE.
+# It both SCANS lines for `^key:` and RETURNS a value, so it has to read the
+# body when the block belongs to the requested key AND skip it when it does
+# not. Only the first landed: a folded retention_policy whose prose spelled
+# `deletion_mechanism: TBD` returned TBD, over a real value two lines below.
+# Found by agatticelli on kraken-marketdata#11. The second case is the control.
+_sfp="$(mktemp -d)"
+printf 'data_lifecycle:\n  retention_policy: >\n    We keep nothing.\n    deletion_mechanism: TBD\n  deletion_mechanism: no_subject_data\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_field does not read a key out of ANOTHER key's block body" "no_subject_data" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field data_lifecycle deletion_mechanism)"
+check "spec_field reads the block that IS the requested key" "We keep nothing." \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field data_lifecycle retention_policy)"
+
+# THE TWO CASES ABOVE OPEN THEIR BLOCK WITH A PLAIN LOWERCASE KEY, which the
+# NARROW class matched too -- so they pin that spec_field skips a block at all,
+# and pin nothing about WHICH block headers it recognises. Reverting the
+# widening left the whole suite green. Reported by agatticelli.
+#
+# Each shape below defeated a different class: a leading digit, a slash, a
+# quote, a two-digit indentation indicator, a trailing comment, whitespace in
+# the key, and a colon INSIDE a quoted key -- the last three being why the key
+# half stopped being a character class at all. An unrecognised header is not
+# skipped, it is WALKED, so every one of these returned the prose `TBD` over
+# the real value two lines below.
+for _hdr in '2fa_notes: >' 'ops/notes: >' '"design notes": >' 'notes: >12' 'notes: > # why' "'notes': >" 'ops notes: >' '"a:b": >'; do
+  printf 'data_lifecycle:\n  %s\n    We keep nothing.\n    deletion_mechanism: TBD\n  deletion_mechanism: no_subject_data\n' "$_hdr" \
+    > "${_sfp}/spec.yaml"
+  check "spec_field skips a block opened by '${_hdr}'" "no_subject_data" \
+    "$(SPEC="${_sfp}/spec.yaml" spec_field data_lifecycle deletion_mechanism)"
+done
+
+# THE TWO DEFENCES THAT LIVED ONLY IN check-registries.sh. Sharing the walker
+# was right, but `is_block_header`/`indent_of` carried neither the tab guard nor
+# the comment strip -- so all four spec walkers inherited both holes at once
+# instead of one of them having it. Reported by agatticelli.
+#
+# Axis 1, the tab: counting it as ONE character makes a tab-indented body
+# measure narrower than its own header, the block ends early, and the prose is
+# read as a declaration. Returned `ESTO-ES-PROSA` over the real value below.
+printf 'scalability:\n  notes: |\n\tpartition_key: ESTO-ES-PROSA\n  partition_key: el-valor-real\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_field: a tab-indented body stays inside the block" "el-valor-real" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field scalability partition_key)"
+
+# Axis 2, the trailing comment: `.*:` reaches a colon inside a `#`, so the line
+# was eaten as a header and the real value disappeared -- spec_field returned
+# EMPTY. The strip also has to reach the returned value, or the row compares a
+# declaration against a string carrying its own annotation.
+printf 'scalability:\n  partition_key: el-valor-real   # ver nota: |\n  notes: prose\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_field: a trailing comment neither opens a block nor rides the value" "el-valor-real" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field scalability partition_key)"
+
+# AND THE CONTROL THE STRIP NEEDS: inside a block BODY a `#` is content and
+# must survive. Stripping there would silently edit evidence text.
+printf 'd:\n  notes: |\n    line # con hash\n' > "${_sfp}/spec.yaml"
+check "spec_field: a block body keeps its own hash" "line # con hash" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field d notes)"
+
+# THE OTHER TWO awks. Sharing the walker reached four of the six that read the
+# spec; `ratified_n` and `pending_n` were the other two, and they counted dashed
+# lines with no block awareness at all. A block scalar inside an entry then
+# inflated the count with its own prose, and the row's evidence claimed more
+# ratified invariants than the spec declares -- an over-count in the direction
+# that flatters. Lifted into `spec_seq_count` so this file can assert it.
+# Reported by agatticelli.
+printf 'invariants:\n  - id: real-1\n    notes: |\n      esto es prosa, no invariantes:\n      - uno\n      - dos\ntier: T1\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_seq_count does not count bullets inside a block body" "1" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_seq_count invariants)"
+
+# CONTROL: real entries ARE counted, or the fix would be a checker that always
+# answers zero.
+printf 'invariants:\n  - id: a\n  - id: b\n  - id: c\ntier: T1\n' > "${_sfp}/spec.yaml"
+check "spec_seq_count counts the real entries" "3" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_seq_count invariants)"
+
+# THE THREE SIBLINGS THAT WALKED BLOCK BODIES AS KEYS. `spec_field` learned to
+# skip a block scalar; `driven_symbol`, `driven_keys` and `implemented_test`
+# did not, and they read the same file. Measured before the shared library:
+#
+#   driven_symbol durable_outbox  ->  ESTO-ES-PROSA   (the real value,
+#                                     store.OpenDurable, sits two lines below)
+#   driven_keys                   ->  notes durable_outbox durable_outbox
+#                                     (the real key listed TWICE, once from the
+#                                     prose inside the block)
+#
+# This file records the same mistake five times for marker rows: one repaired
+# while a sibling a few lines away keeps the bug. Reported by fd1az, who also
+# named the shape of the fix -- share the walker instead of transcribing it.
+printf 'driven:\n  notes: >\n    prose that imitates keys\n    durable_outbox: ESTO-ES-PROSA\n  durable_outbox: store.OpenDurable\nimplemented:\n  notes: >\n    effect_journal: PROSE\n  effect_journal: TestOutboxSurvivesRestart\n' \
+  > "${_sfp}/spec.yaml"
+check "driven_symbol does not read a key out of a block body" "store.OpenDurable" \
+  "$(SPEC="${_sfp}/spec.yaml" driven_symbol durable_outbox)"
+check "driven_keys does not list a key that only exists as prose" "notes durable_outbox" \
+  "$(SPEC="${_sfp}/spec.yaml" driven_keys | tr '\n' ' ' | sed 's/ *$//')"
+check "implemented_test does not read a test name out of a block body" "TestOutboxSurvivesRestart" \
+  "$(SPEC="${_sfp}/spec.yaml" implemented_test effect_journal)"
+
+# THE CONTROL THE WIDENING NEEDS: a plain `key: value` whose value merely
+# CONTAINS an indicator must NOT be read as a header, or the widening would
+# swallow the real key below it.
+printf 'data_lifecycle:\n  retention_policy: see foo | bar\n  deletion_mechanism: no_subject_data\n' \
+  > "${_sfp}/spec.yaml"
+check "spec_field: a value containing a pipe does not open a block" "no_subject_data" \
+  "$(SPEC="${_sfp}/spec.yaml" spec_field data_lifecycle deletion_mechanism)"
+rm -rf "$_sfp"
+
+# NOT-RE-VERIFIED HAD NO CASE, AND IT WAS CHECKED FIRST.
+# `go test ./...` prints one line per package, so a sibling with no test files
+# puts "[no test files]" in the same output as the `--- FAIL` that proves the
+# mutation was caught. With the skip test first, a genuine detection was
+# reported as NOT-RE-VERIFIED -- fail-closed, so nothing got through, but a
+# correct red under the wrong reason is how a correct red gets argued away.
+# Reported by agatticelli on kraken-marketdata#11. The second case is the
+# control: an output with NO verdict at all must still be NOT-RE-VERIFIED.
+check "a real FAIL outranks a sibling's [no test files]" "DETECTED" \
+  "$(classify_mutation_result 'ok   example/other  [no test files]
+--- FAIL: TestInvariant_X (0.01s)
+FAIL example/pkg 0.02s')"
+check "no verdict at all is still NOT-RE-VERIFIED" "NOT-RE-VERIFIED" \
+  "$(classify_mutation_result 'ok   example/other  [no test files]')"
 
 # grep_x: the same distinction, as a helper. A file whose ONLY match is inside
 # a comment must not be returned.
@@ -180,6 +322,27 @@ if [[ "$_gxhits" == *only-comment.yaml* ]]; then
 else
   echo "  ok   grep_x does not return a comment-only match"
 fi
+
+# THE `--` BRANCH HAD NO CASE. `grep_x` eats leading `-` arguments as grep flags
+# until it sees `--`, and no caller in the probe passes one -- so the branch was
+# dead as far as this suite could tell, and a pattern that legitimately starts
+# with a dash would have been swallowed as a flag. Reported by agatticelli.
+#
+# Both directions, because only the pair pins it: WITH `--` the dash-leading
+# pattern is a pattern, and the `-i` before it is still honoured as a flag.
+printf -- "-Xfrontend is set here\n" > "${_gxdir}/dashy.yaml"
+printf -- "nothing to see\n"         > "${_gxdir}/plain.yaml"
+_gxdash="$(grep_x -- "-Xfrontend" "$_gxdir")"
+check "grep_x after -- treats a dash-leading pattern as a pattern" "dashy.yaml" "$_gxdash"
+printf -- "-XFRONTEND in caps\n" > "${_gxdir}/caps.yaml"
+_gxflag="$(grep_x -i -- "-Xfrontend" "$_gxdir" | tr '\n' ' ')"
+case "$_gxflag" in
+  *dashy.yaml*caps.yaml*|*caps.yaml*dashy.yaml*)
+    echo "  ok   grep_x still honours a flag placed before --" ;;
+  *)
+    echo "  FAIL grep_x dropped a flag before --: $_gxflag" >&2
+    fails=$((fails+1)) ;;
+esac
 
 # fold_makefile: a backslash continuation is ONE logical line. The fuzz
 # reachability walk parses rules, and an unfolded continuation hides the
@@ -210,18 +373,45 @@ _tcdir="$(mktemp -d)"
 printf "module x\n\ngo 0.0.1\n" > "${_tcdir}/go.mod"
 check "toolchain_note warns when go.mod pins another toolchain" "go.mod pins go0.0.1" \
   "$(cd "$_tcdir" && toolchain_note)"
+# THE DENOMINATOR: THIS CASE COULD REPORT ok WITHOUT BUILDING ITS SCENARIO.
+# The fixture's `go` line came from `$(go env GOVERSION)`. With no Go the
+# substitution is empty, the line is a version-less `go `, toolchain_note's awk
+# does not match it, and the case printed `ok` -- unable to tell
+# quiet-because-the-pin-matches from quiet-because-there-is-no-pin. Reported by
+# agatticelli. A case that cannot build its scenario has to say so, not pass.
 _tcdir2="$(mktemp -d)"
-printf "module x\n\ngo %s\n" "$(go env GOVERSION 2>/dev/null | sed "s/^go//")" > "${_tcdir2}/go.mod"
-_note="$(cd "$_tcdir2" && toolchain_note)"
-if [[ "$_note" == *"pins"* ]]; then
-  echo "  FAIL toolchain_note cried wolf when the pin matches the running toolchain: $_note" >&2
+_hostgo="$(go env GOVERSION 2>/dev/null | sed "s/^go//")"
+if [[ -z "${_hostgo//[[:space:]]/}" ]]; then
+  echo "  FAIL toolchain_note is quiet when the pin matches -- the fixture was never built:" >&2
+  echo "       'go env GOVERSION' produced nothing. Install Go, or run this on CI." >&2
   fails=$((fails+1))
 else
-  echo "  ok   toolchain_note is quiet when the pin matches"
+  printf "module x\n\ngo %s\n" "$_hostgo" > "${_tcdir2}/go.mod"
+  _note="$(cd "$_tcdir2" && toolchain_note)"
+  if [[ "$_note" == *"pins"* ]]; then
+    echo "  FAIL toolchain_note cried wolf when the pin matches the running toolchain: $_note" >&2
+    fails=$((fails+1))
+  else
+    echo "  ok   toolchain_note is quiet when the pin matches (go$_hostgo)"
+  fi
 fi
 
 
 echo "non-vacuity selftest: start"
+
+# THE VERDICT MUST BE THE MUTATED TEST'S, NOT A NEIGHBOUR'S. The classifier read
+# `^(--- )?FAIL` anywhere, so a run where OUR test skipped and a SIBLING failed
+# classified as DETECTED -- certifying an invariant never measured. Reported by
+# fd1az on binance-marketdata#24. The call site knows which test it mutated, so
+# it passes it and the FAIL has to name it. The control is our own test's FAIL:
+# scoping must not stop it detecting.
+check "a sibling's FAIL is not our verdict" "NOT-RE-VERIFIED" \
+  "$(classify_mutation_result '--- SKIP: TestInvariant_Ours (0.00s)
+--- FAIL: TestOther_Theirs (0.01s)
+FAIL other/pkg 0.02s' TestInvariant_Ours)"
+check "control: our own FAIL is still detected" "DETECTED" \
+  "$(classify_mutation_result '--- FAIL: TestInvariant_Ours (0.01s)
+FAIL our/pkg 0.02s' TestInvariant_Ours)"
 
 check "a red test counts as detected" "DETECTED" \
   "$(classify '--- FAIL: TestInvariant_Foo (0.01s)

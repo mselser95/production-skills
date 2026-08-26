@@ -130,6 +130,36 @@ mirrors=(
   # them diverging. Two correct copies with no gate between them is not a
   # mirrored file, it is two files that happen to agree today.
   "prod-new/template/scripts/tests/probe-self-gate-selftest.sh:_shared/probes/tests/probe-self-gate-selftest.sh"
+  # MOVED HERE FROM .githooks/pre-commit AT THE RECONCILIATION MERGE
+  # (2026-08-26). fix/registry-gate-block-scalars-and-template-rot added these
+  # three by APPENDING them to a hardcoded array in the hook, which is where the
+  # list lived when that branch started. In parallel,
+  # fix/probe-defects-and-shared-selftest replaced that array with a derivation
+  # FROM THIS FILE. Both changes are right and they are incompatible as written:
+  # keeping the hook's copy would have re-created the two-lists-that-must-agree
+  # defect the derivation exists to kill, and keeping the derivation alone would
+  # have silently dropped all three of these mirrors while the hook went on
+  # printing "N mirror(s) already in step". So the derivation stays and the
+  # entries move to the one list it reads.
+  #
+  # ADDED AFTER THE ROT WAS MEASURED. check-registries.sh had no canonical copy
+  # at all, so the template drifted in the direction nothing watches: the
+  # adopting repos improved it while the template stayed at 88 lines, missing
+  # REGISTRIES_DIR, the fail-closed on zero entries, the mandatory owner, the
+  # sequence-boundary derivation and the block-scalar guard. Every repo
+  # bootstrapped by prod-new got the 88-line version -- a registry gate that
+  # passes an expired waiver whose renewal note happens to contain an
+  # `expires:` line, and passes an EMPTY registries/ directory outright. The
+  # install-time refusal could not see it: it compares a copy to a source, and
+  # there was no source.
+  "prod-new/template/scripts/check-registries.sh:_shared/probes/check-registries.sh"
+  "prod-new/template/scripts/tests/check-registries-selftest.sh:_shared/probes/check-registries-selftest.sh"
+  # ADDED WITH THE ROW IT COVERS. The sbom ordering selftest lifts the probe's
+  # program out by its PYSBOM marker, so a template copy that drifts from
+  # _shared would extract a marker that no longer exists -- and the selftest
+  # would refuse to run in every repo prod-new scaffolds. That is the loud
+  # failure, but only because it was built to refuse. Mirror it anyway.
+  "prod-new/template/scripts/tests/sbom-ordering-selftest.sh:_shared/probes/sbom-ordering-selftest.sh"
 )
 drift=0
 for m in "${mirrors[@]}"; do
