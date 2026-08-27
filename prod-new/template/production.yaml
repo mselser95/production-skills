@@ -21,6 +21,28 @@ service:
     T0 by itself). A real service replaces this with its own ratified
     answer to prod-new's Phase 1 question 2.
   policy: production-skills (single source, main)
+  # OPTIONAL, and only meaningful when the org has adopted a domain topology
+  # (_shared/domain-topology.yaml -- see _shared/domain-boundaries.md). A
+  # single-service org deletes these two lines and domain_dependencies below;
+  # their absence is a silent, legitimate N/A everywhere in this framework,
+  # never a gap. Uncomment and fill from prod-new/prod-bootstrap's Phase 1
+  # domain proposal when it applies:
+  # owning_domain: <domain name, must be a key in domain-topology.yaml>
+  # domain_role: foundational # foundational | derived | aggregate -- must
+  #                            # agree with the topology's own entry for this
+  #                            # domain, or it is a DIVERGENCE prod-review
+  #                            # computes on the first review, not a decoration
+
+# OPTIONAL, same condition as owning_domain/domain_role above. Each entry
+# names another domain this service depends on and the SPECIFIC capability
+# (classed domain_gateway in THAT domain's own spec) it depends on through --
+# never the domain's datastore directly. An entry whose `via:` capability
+# cannot be confirmed classed domain_gateway (the target checkout is not
+# available to this run) is UNVERIFIED-CROSS-REPO until prod-review resolves
+# it, never assumed clean.
+# domain_dependencies:
+#   - domain: payments
+#     via: payments_gateway
 
 invariants:                         # ratified -- resolve to verification/ratified/
   - units_conserved

@@ -1,0 +1,29 @@
+# domain-boundaries registry — liability entries with owner + expiry.
+# Every entry: {id, capability, target_domain, reason, owner, created,
+# expires, evidence}. The ops sweep (prod-ops OP-5) escalates expired
+# entries; it never silently extends one.
+#
+# OPT-IN: this registry only means something once the org has adopted a
+# domain topology (_shared/domain-topology.yaml — see
+# _shared/domain-boundaries.md). A single-service scaffold ships this file
+# empty and it stays that way; deleting it entirely is also fine.
+#
+# Records TEMPORARY exceptions to the domain-boundary invariant — a caller
+# reading another domain's datastore or a non-gateway capability directly,
+# tracked with the migration that retires it. Never a place to make the
+# exception permanent by pushing the date out; check-registries.sh reds a
+# lapsed entry the same way it does for every other registry.
+#
+# entries:
+#   - id: legacy-payments-read
+#     capability: legacy_payments_read     # the direct-access capability, named
+#     target_domain: payments
+#     reason: >
+#       checkout-svc reads payments' ledger table directly pending
+#       payments_gateway's read-path (T2 of the migration plan); tracked so
+#       the exception cannot go quiet.
+#     owner: checkout-team
+#     created: 2026-08-27
+#     expires: 2026-11-27
+
+entries: []

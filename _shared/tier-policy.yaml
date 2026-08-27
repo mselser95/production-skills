@@ -457,6 +457,28 @@ defaults: &defaults
                                           # reads by week three
     exhaustion_policy: declared_and_enforced
 
+  # Domain ownership and cross-domain boundaries (dimension 24,
+  # domain-boundaries.md) -- OPT-IN, unlike every key above it. Applies only
+  # when `_shared/domain-topology.yaml` exists; a single-service org never
+  # sets this and the dimension is a legitimate NA, not a gap.
+  #
+  # `role_matches_topology: required_if_declared` is the anti-vacuity key,
+  # same shape as `published_contract.shape_pinned` above: a repo's own
+  # `domain_role` claim is worthless if nobody checks it against the org's
+  # single source of truth for who owns what -- see dimensions.md's "vacuous
+  # form" `domain_role` asserted, topology not consulted`.
+  #
+  # `dependency_resolution: domain_gateway_only` is the invariant itself: a
+  # `domain_dependencies` entry whose `via:` capability is not classed
+  # `domain_gateway` in the TARGET's own spec is a violation, not a style
+  # note. Where the target checkout is unavailable to confirm it, the
+  # obligation is `unverified_cross_repo`, never a silent pass.
+  domain_boundaries:
+    role_matches_topology: required_if_declared
+    dependency_resolution: domain_gateway_only
+    cross_repo_confirmation: unverified_cross_repo_if_unresolvable
+    waived_exceptions: registries/domain-boundaries.yaml # owner + expiry, swept by prod-ops OP-5
+
 tiers:
   "0":
     <<: *defaults
@@ -529,3 +551,19 @@ capability_classes:
     obligations: [key_custody, policy_enforcement, audit_trail, quorum]
     scenarios: [unauthorized_request, policy_violation, key_unavailable,
                 partial_quorum]
+  # Domain gateway (dimension 24, domain-boundaries.md). The ONLY capability
+  # class an outside domain may depend on. Its obligations are what the
+  # GATEWAY itself owes its consumers -- not what a caller owes the gateway,
+  # which is the domain_dependencies / domain-boundaries.yaml side of the
+  # same invariant (see domain-boundaries.md; this class alone does not
+  # enforce "nobody bypasses it", it only says what the sanctioned door must
+  # provide once declared). Deliberately reuses external_read/external_effect
+  # framing rather than inventing new scenario shapes: a domain_gateway is a
+  # normal capability with one extra fact attached (it is this domain's
+  # published boundary), so its checklist composes with whichever of those
+  # two classes actually describes the traffic instead of replacing it.
+  domain_gateway:
+    obligations: [contract_version, backward_compat_window, consumer_registry,
+                  deprecation_policy]
+    scenarios: [breaking_change_undetected, deprecated_field_removed_early,
+                unregistered_consumer, schema_drift_undetected]
