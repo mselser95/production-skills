@@ -1,4 +1,5 @@
 config.sh
+domain-topology.yaml
 .skill-optimizer/runs/
 benchmark-results/
 node_modules/

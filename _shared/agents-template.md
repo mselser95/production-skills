@@ -47,6 +47,10 @@ steps are optional.
   — never a silent skip.
 - If the task is ambiguous enough to change its capability mapping or tier:
   ask, don't guess.
+- <IF DOMAIN-AWARE> A new dependency reaching another domain's capability
+  that is not classed `domain_gateway` is a boundary violation, not a style
+  finding — flag it, do not route around it by finding a lower-level path to
+  the same data.
 - Every completion ends with the evidence summary (gates green, tests by
   provenance class, deviations declared). No evidence summary = not done.
 
@@ -59,6 +63,9 @@ steps are optional.
 - Regressions corpus: `<PROD_REGRESSIONS_DIR>/` · Ratification queue:
   `<PROD_RATIFY_QUEUE_DIR>/`
 - Blocker bar for reviews: <one line — what class of damage blocks merge>
+- <IF DOMAIN-AWARE> Domain: `<owning_domain>` (`<domain_role>`) · depends on:
+  `<domain_dependencies, each with its via: gateway>` · this repo's own
+  gateway capability, if any: `<domain_gateway capability id, or none>`
 ```
 
 ---
@@ -70,5 +77,9 @@ Instantiation rules for prod-bootstrap:
 - If the repo already has an AGENTS.md/CLAUDE.md, MERGE by appending the
   pipeline section and hard rules; never delete existing guidance — flag
   conflicts to the human instead.
+- `<IF DOMAIN-AWARE>` lines are instantiated only when `_shared/domain-
+  topology.yaml` exists AND this repo declares `owning_domain` — otherwise
+  drop both lines entirely rather than filling them with "N/A" (see
+  `domain-boundaries.md`: absence is a silent, legitimate N/A, never a row).
 - The file is part of the repo's TCB surface once installed: agents may not
   weaken it, and changes to it get human review like any ratified artifact.

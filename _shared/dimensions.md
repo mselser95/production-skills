@@ -1307,6 +1307,74 @@ present with a stated cadence, or manual; age of the oldest open update PR;
 gate tooling and third-party actions pinned to immutable identifiers, or to
 mutable tags.
 
+## 24. Domain ownership and cross-domain boundaries
+
+Adam Gluck, "Introducing Domain-Oriented Microservice Architecture" (Uber
+Engineering blog, 2020) — the source for `foundational` / `derived` /
+`aggregate` domain classification and the gateway pattern this entry names.
+Industry practice with a written source, cited as such, same footing as §21's
+Fowler citation: a pattern definition, not an empirical result.
+
+**This dimension is the only one in the file scoped ABOVE a single repo.**
+Every other dimension asks what one service does and proves it inside one
+checkout. This one asks a question no single checkout can answer alone: which
+OTHER service is this one allowed to depend on, and through what door. §14
+(published contract) and §21 (consumer-driven contracts) both assume the
+dependency is already legitimate and ask whether the CONTRACT across it is
+honored — versioned, pinned, verified against a real consumer expectation.
+Neither asks the prior question: whether the dependency should exist as a
+direct one at all, or whether it is reading data that belongs to a domain
+which has its own declared entry point. A service can pass §14 and §21 in
+full — a perfectly versioned, perfectly consumer-verified contract — while
+reading straight out of another team's database, because both of those
+dimensions are silent about WHICH capability a caller reached, only about
+whether the one it reached is honored.
+
+**Opt-in, and cheap to leave off.** This dimension applies only when the org
+has adopted a domain topology (`_shared/domain-topology.yaml`; see
+`domain-boundaries.md`). Absent, every row below is legitimately NA — not a
+gap, not a question owed to a human, and never grounds to invent a domain
+classification a repo cannot resolve against anything.
+
+Vacuous forms:
+
+- **A domain declared with no gateway.** `owning_domain: payments` on a
+  service whose every capability is `source_of_truth`/`external_read` gives
+  callers nothing sanctioned to depend on — they either cannot integrate or
+  they reach around the declaration, which makes the declaration decorative.
+- **A gateway that is not the only door.** The capability classed
+  `domain_gateway` exists and is versioned, while the same repo's datastore
+  is still reachable by another team's connection string. Declaring the
+  gateway does not retract the older access path; retracting it is its own
+  task, and until it lands the declaration is aspirational.
+- **`domain_role` asserted, topology not consulted.** A repo's own
+  `production.yaml` claiming `foundational` while the shared topology never
+  heard of the domain (or disagrees on its role) is exactly §1 of the
+  preamble's forbidden move — resolving precedent by guessing between two
+  sources of truth instead of reading the one that governs.
+- **A waived exception with no expiry.** `registries/domain-boundaries.yaml`
+  entries are migrations in progress, not permanent policy; one with no
+  `expires` is the boundary quietly deciding not to exist.
+
+Inventory: this repo's declared `owning_domain` and `domain_role`, and
+whether they agree with the org topology's entry for that domain; every
+`domain_dependencies` entry and whether its `via:` capability resolves, in
+the TARGET repo, to a capability classed `domain_gateway` (mark
+UNVERIFIED-CROSS-REPO where the target checkout is unavailable to this run,
+never PASS by assertion); every capability NOT classed `domain_gateway` that
+an external dependency reaches instead; open entries in
+`registries/domain-boundaries.yaml` and their expiry.
+
+Ask: nothing, when the topology exists — domain and role are proposed from it
+and confirmed, the same human moment as any other semantic declaration
+(preamble §7(b)). When it does not exist, ask nothing either; there is no
+question to ask.
+
+Row: `owning_domain`/`domain_role` declared and topology-consistent, or NA
+(no topology adopted); every cross-domain dependency resolving to a declared
+`domain_gateway`, or a named violation; direct-access exceptions tracked in
+`registries/domain-boundaries.yaml` with owner and expiry, or untracked.
+
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big
   gap localizes weak assertions better than either number alone; both inputs

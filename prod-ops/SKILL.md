@@ -26,7 +26,10 @@ operation below.
 Read `references/preamble.md` first. Test provenance rules:
 `references/test-provenance.md`. Registry paths come from `config.sh`
 (`PROD_FLAGS_REGISTRY`, `PROD_WAIVERS_REGISTRY`, `PROD_QUARANTINE_REGISTRY`,
-`PROD_CONTRACT_DEBT_REGISTRY`); every entry has `owner`, `created`, `expires`.
+`PROD_CONTRACT_DEBT_REGISTRY`, and — only where the repo declares
+`owning_domain` — `PROD_DOMAIN_BOUNDARIES_REGISTRY`, see
+`references/domain-boundaries.md`); every entry has `owner`, `created`,
+`expires`.
 
 Reverting an agent's PR has zero social cost — that asymmetry is the design.
 Act fast on solid signal, leave the veto window to humans, and never confuse
@@ -108,6 +111,10 @@ with its evidence attached.
     notify owner.
   - contract-migration debt (`PROD_CONTRACT_DEBT_REGISTRY`) → open the
     ticket for the pending destructive step; NEVER author destructive DDL.
+  - domain-boundary exception (`PROD_DOMAIN_BOUNDARIES_REGISTRY`, if declared)
+    → the waived direct-access path returns to force; notify the owner. This
+    is RULE NO-JUDGMENT territory the moment "still migrating" is asserted —
+    that is a human call, never yours to extend.
   - agent PR stale >48h or ejected twice (fixed by design) → close with a
     state-dump comment.
 - Output: sweep report — entries actioned, entries escalated, owners pinged.

@@ -30,7 +30,9 @@ Read `references/preamble.md` first, then `references/tier-policy.yaml` (every
 threshold and class checklist), `references/dimensions.md` (the completeness
 list), `references/mechanism-derivation.md` (which machinery this service
 actually needs) and `references/verification-probes.md` (verify the effect,
-never the report).
+never the report). If `_shared/domain-topology.yaml` exists, also read
+`references/domain-boundaries.md` before Phase 1 — it decides whether Q3
+carries a domain sub-question at all.
 
 The thesis this skill exists to serve: **retrofitting the standard costs
 weeks; being born with it costs an afternoon.** Everything the brownfield path
@@ -115,8 +117,25 @@ Everything else is derived. Ask:
    line: which external systems it calls, is called by, reads, consumes, or
    holds state in. Each gets a class (`external_effect`, `source_of_truth`,
    `event_consumer`, `event_producer`, `external_read`, `connection`,
-   `signer`) — and the class carries its obligations and scenario checklist
-   automatically.
+   `signer`, `domain_gateway`) — and the class carries its obligations and
+   scenario checklist automatically.
+
+   **When `_shared/domain-topology.yaml` exists, this question also carries
+   the domain classification — never a fifth question, the same batched
+   line.** Propose `owning_domain` and `domain_role` from the purpose line
+   against the topology's own entries (the human confirms or corrects, same
+   as every other proposal here), and for each declared dependency that
+   targets another domain, propose which capability it depends on FROM THE
+   TOPOLOGY'S OWN METADATA, not from inspecting the target repo — this
+   skill's input is one new service and a present human, never another
+   repo's checkout. Record the proposed `via:` capability and mark it
+   `UNVERIFIED-CROSS-REPO` in the spec rather than a plain pass; confirming it
+   is actually classed `domain_gateway` in the target's own spec is
+   `prod-review`'s job the first time this dependency's traffic is reviewed,
+   never something scaffolded as already checked
+   (`references/domain-boundaries.md`, "What this cannot prove locally").
+   Where the topology file is absent, skip this paragraph entirely — it is a
+   silent N/A, not a gap.
 4. **What must never happen?** — seeded with candidates you infer from the
    purpose (conservation, at-most-once effect, no stale-as-fresh, authz
    boundaries). These become the seed invariants; they are the reason the repo
@@ -323,9 +342,13 @@ lane for mutation, extended fuzz and soak. Coverage carries a per-package
 ratchet plus changed-line coverage as a signal.
 
 **Governance** — `production.yaml` (semantics only, `verified:`/`assumed:`
-split per capability, ratified declines, no invented escape keys), `AGENTS.md`
-from `references/agents-template.md`, `CODEOWNERS` with a real owner,
-`registries/{flags,waivers,quarantine,contract-debt}.yaml`, `docs/RUNBOOK.md`,
+split per capability, ratified declines, no invented escape keys — plus
+`service.owning_domain`/`service.domain_role`/`domain_dependencies` ONLY when
+Phase 1's Q3 carried the domain sub-question), `AGENTS.md` from
+`references/agents-template.md` (its `<IF DOMAIN-AWARE>` lines instantiated
+under the same condition), `CODEOWNERS` with a real owner,
+`registries/{flags,waivers,quarantine,contract-debt}.yaml` plus
+`registries/domain-boundaries.yaml` when domain-aware, `docs/RUNBOOK.md`,
 `docs/SLO.md` (objectives marked proposed), `observability/alerts.md`, and the
 `.prod/evidence/` record the probe writes per commit.
 
@@ -353,8 +376,10 @@ from `references/agents-template.md`, `CODEOWNERS` with a real owner,
    verdict with the property that produced it, including the NOT-WARRANTED
    ones** — what was declined and why, what was ratified vs left CANDIDATE, the
    probe table, and the ONE command the next engineer runs to add their first
-   feature (`prod-spec`). Nothing else should be left for the human to
-   remember.
+   feature (`prod-spec`). Where domain-aware: `owning_domain`/`domain_role`
+   as ratified, and every `domain_dependencies` entry with the gateway it
+   resolves through (or the UNVERIFIED-CROSS-REPO flag if it couldn't be
+   confirmed). Nothing else should be left for the human to remember.
 
    Report the not-warranted verdicts as prominently as the warranted ones. A
    reader who finds no outbox six months from now will otherwise assume it was

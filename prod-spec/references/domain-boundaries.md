@@ -1,0 +1,1 @@
+../../_shared/domain-boundaries.md

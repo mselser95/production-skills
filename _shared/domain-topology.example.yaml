@@ -1,0 +1,40 @@
+# Org domain topology — copy to `domain-topology.yaml` (gitignored) and edit.
+#
+# Presence of `_shared/domain-topology.yaml` is the opt-in switch for the
+# whole DOMA layer (see `domain-boundaries.md`). Absent = every domain-aware
+# step in every skill is a silent N/A; a single-service org never sees this.
+#
+# This file is ORG-SPECIFIC DATA, unlike tier-policy.yaml (a generic policy
+# this repo ships as one shared source) — your domain names, ownership and
+# repo list belong to your company, never to this framework, and must never
+# be committed here.
+
+domains:
+  # Example: a foundational domain. Owns primitive data; nothing outside it
+  # may read that data except through a capability classed `domain_gateway`
+  # in one of its own repos' production.yaml.
+  payments:
+    role: foundational
+    owner: payments-team
+    repos: [payments-ledger, payments-gateway-svc]
+
+  identity:
+    role: foundational
+    owner: identity-team
+    repos: [identity-core]
+
+  # Example: a derived domain. Composes across foundational domains; owns no
+  # primitive data of its own that another domain would depend on.
+  checkout:
+    role: derived
+    owner: checkout-team
+    repos: [checkout-svc]
+
+  # Example: an aggregate domain — same idea as derived, DOMA's own separate
+  # label for a domain whose entire purpose is composing several others
+  # behind one facade (a BFF, a reporting rollup) rather than adding new
+  # business logic of its own.
+  customer-dashboard:
+    role: aggregate
+    owner: growth-team
+    repos: [customer-dashboard-bff]
