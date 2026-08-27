@@ -20,7 +20,9 @@ description: >
 # prod-spec — from intent to contract
 
 Read `references/preamble.md` first. Output formats:
-`references/resolved-context.md` and `references/change-plan.md`.
+`references/resolved-context.md` and `references/change-plan.md`. If the repo
+declares `owning_domain`, also read `references/domain-boundaries.md` before
+step 5.
 
 This skill runs on the SESSION model and dispatches per
 `references/dispatch.md`: recon sweeps go to `prod-scout` (cheap); the plan's
@@ -61,13 +63,22 @@ plan's task list for `prod-implement`.
    source_of_truth ⇒ recovery, reconciliation, backup semantics;
    event_consumer ⇒ duplicate/reorder/poison handling; external_read ⇒
    declared staleness bound, staleness observable, unavailability fallback,
-   timeout; connection ⇒ reconnect/sequence-gap/resubscribe). You derive; you never invent or skip.
+   timeout; connection ⇒ reconnect/sequence-gap/resubscribe; domain_gateway ⇒
+   contract version, backward-compat window, consumer registry, deprecation
+   policy — see `references/domain-boundaries.md`, and only where
+   `_shared/domain-topology.yaml` exists). You derive; you never invent or skip.
 5. **Detect semantic events** in what the task will require:
    `introduces_dependency`, `introduces_state`, `introduces_external_effect`,
    `introduces_retry`, `introduces_queue`, `introduces_background_worker`,
    `changes_schema`, `changes_public_api`, `changes_hot_path`,
-   `changes_critical_calculation`. Each event pulls its requirement set into
-   `required_evidence`.
+   `changes_critical_calculation`, and — only when this repo declares
+   `owning_domain` — `crosses_domain_boundary`: the new dependency's target
+   is a capability outside this repo's own domain. Resolve whether that
+   target capability is classed `domain_gateway` in ITS OWN spec if you can
+   see it; if you cannot (the target checkout is not in this run), the
+   required evidence becomes exactly that resolution, never an assumed pass
+   (`domain-boundaries.md`, "What this cannot prove locally"). Each event
+   pulls its requirement set into `required_evidence`.
 6. **Write the change plan.** Decompose into bounded tasks, each tagged with
    `ambiguity: none|low|open`. Anything `open` stays with the orchestrator
    tier — never hand an open design question to a cheap implementer. New

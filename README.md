@@ -20,6 +20,16 @@ test provenance, and the incident fixture — plus the review audit engine
 request in a governed repo passes through the pipeline. The formats are the
 contracts of the whole system — skills are replaceable, the formats are not.
 
+Everything above is scoped to ONE repo. `_shared/domain-boundaries.md` is the
+one layer above that: DOMA-style domain ownership (`foundational`/`derived`/
+`aggregate`), a `domain_gateway` capability class, and the invariant that a
+service outside a domain may depend only on that domain's declared gateway,
+never its datastore. It is entirely OPT-IN — gated on an org-level
+`_shared/domain-topology.yaml` (copy from `domain-topology.example.yaml`,
+gitignored like every skill's `config.sh`) that a single-service org never
+needs to create. Absent, every domain-aware step in every skill below is a
+silent no-op.
+
 | Skill | Tier | What it does |
 |---|---|---|
 | [`prod-spec/`](prod-spec/) | orchestrator | Intent → resolved context (~30 lines) + change plan. Writes no code. Hosts the T0 human moment. |
@@ -115,3 +125,9 @@ plus, as the framework hardens: `verification/ratified/**` under server-side
 protection, the liability registries, and a cheap-gate command. Skills degrade
 gracefully — each one's Bail section says exactly what it needs and cannot
 fake.
+
+Optionally, when the org has adopted a domain topology
+(`_shared/domain-topology.yaml`), `production.yaml` also carries
+`service.owning_domain`, `service.domain_role`
+(`foundational|derived|aggregate`) and `domain_dependencies: []` — see
+`_shared/domain-boundaries.md`.

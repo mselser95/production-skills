@@ -26,7 +26,9 @@ Read `references/preamble.md` first, then `references/review-depth.md` — the
 audit engine: its Hard Rules, idiom layer, severity buckets, and review areas
 govern every finding this skill produces. Contract artifacts follow
 `references/resolved-context.md` and `references/change-plan.md` (read from
-`PROD_CONTEXT_DIR`); test provenance per `references/test-provenance.md`.
+`PROD_CONTEXT_DIR`); test provenance per `references/test-provenance.md`. If
+the diff's repo declares `owning_domain`, also read
+`references/domain-boundaries.md` before Phase 1.
 
 The framing matters: `prod-spec`'s interpretation is a **hint**. This skill is
 the deterministic-side check that the hint matched reality, followed by an
@@ -62,6 +64,8 @@ claimed context:
 - touched a capability not in `capabilities.touched` → **DIVERGENCE**
 - semantic event occurred that the plan didn't declare → **DIVERGENCE**
 - tier of touched paths higher than context `tier` → **DIVERGENCE**
+- `owning_domain` declared and the diff adds a dependency crossing it that
+  `crosses_domain_boundary` didn't flag → **DIVERGENCE**
 Any divergence is a BLOCKER by definition — the loop optimized the wrong
 contract, and everything downstream of it is unaudited.
 
@@ -77,6 +81,10 @@ The framework checklist, applied to what the diff introduces:
 - semantic change with the spec (`PROD_SPEC_FILE`) and capability
   declarations untouched → either the spec changes or the PR asserts it
   remains complete.
+- new dependency reaching another domain (`owning_domain` declared) → does it
+  resolve to a `domain_gateway`-classed capability in the target's own spec?
+  Unresolvable (target repo unavailable) → gap, not a pass
+  (`references/domain-boundaries.md`).
 
 ### Phase 3 — Provenance audit
 For every test file in the diff:

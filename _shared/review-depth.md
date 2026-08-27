@@ -92,6 +92,14 @@ boundary; state left held on an error path).
    (nullable-producer/non-nullable-consumer = BLOCKER), enums line up by
    value. Counterpart missing or unlocatable ⇒ BLOCKER or NOT VALIDATED —
    never assume the contract holds because the code compiles.
+   **Where `owning_domain` is declared** (`domain-boundaries.md`): a NEW
+   dependency that reaches a capability of a service in another domain is a
+   BLOCKER unless that capability is classed `domain_gateway` in the
+   target's own spec — a direct read of another domain's datastore instead
+   of its gateway is the violation this check exists for, and "it compiles
+   and the data is right" is not a defense; the finding is about WHO may
+   depend on it, not whether the value returned is correct. Target repo
+   unavailable to confirm the class ⇒ NOT VALIDATED, never assumed clean.
 8. **Tests** — beyond existence: does the test actually test anything? A
    test asserting a mock was called, or re-asserting the implementation's own
    arithmetic, is coverage theater — call it out even when the number is

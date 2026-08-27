@@ -23,10 +23,12 @@ description: >
 
 Read `references/preamble.md` first, and `references/mechanism-derivation.md`
 before Phase 1b (which mechanisms this service warrants — the inventory shows
-what it HAS, the derivation says what it should have). Outputs use
-`references/resolved-context.md` conventions for the spec fields and
-`references/change-plan.md` for the refactor plan. Registry and path names
-come from `config.sh`.
+what it HAS, the derivation says what it should have). If
+`_shared/domain-topology.yaml` exists, also read `references/domain-
+boundaries.md` before Phase 1b — same phase, one more thing to check for.
+Outputs use `references/resolved-context.md` conventions for the spec fields
+and `references/change-plan.md` for the refactor plan. Registry and path
+names come from `config.sh`.
 
 Three rules frame everything:
 
@@ -99,6 +101,13 @@ Before formulating a single question, resolve from the policy files:
   denominator; the author never supplies scenario lists);
 - which dimensions need a gap row and which need a human answer →
   `references/dimensions.md`;
+- **whether `_shared/domain-topology.yaml` exists** — if not, dimension 24 is
+  NA for this repo and every domain-aware step below is skipped, silently,
+  for the rest of this run. If it exists, propose `owning_domain`/
+  `domain_role` from the inventory's external-boundary list against the
+  topology's own entries, and for each candidate capability that reaches
+  another domain, propose whether it should resolve through that domain's
+  `domain_gateway` (`references/domain-boundaries.md`);
 - **which architectural mechanisms this service warrants** →
   `references/mechanism-derivation.md`, run against the Phase-1 INVENTORY
   rather than a purpose line, since the code already shows what exists.
@@ -155,6 +164,10 @@ already holds.
 2. **Capabilities** — the inventory's candidate list with class assignments
    AND the class-implied semantics pre-filled; the human confirms or corrects.
    Detected-but-declined candidates are recorded as explicitly out of scope.
+   **Where the topology file exists**, this item also carries Phase 1b's
+   `owning_domain`/`domain_role` proposal and the `domain_dependencies`
+   candidates, in the SAME batched message — never a separate question.
+   Absent, this paragraph does not apply and nothing is asked.
 3. **Invariants** — the one genuinely open question: "what must never happen
    in this system?" Seed it with candidates you inferred from declared
    metrics, doc invariants, and the code's own fail-closed checks, so the
