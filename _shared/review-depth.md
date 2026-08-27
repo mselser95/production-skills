@@ -35,6 +35,21 @@ A third input is discovered per repo, never configured: the repo's own idioms
 8. **Prioritise findings; skip the praise.** No preamble, no "overall looks
    good".
 
+Adjacent to those rules, and deliberately not one of them: the effectiveness
+of this whole engine is a function of how much it is asked to read at once.
+Bacchelli & Bird, studying review as it is actually practiced rather than as
+it is prescribed, found that what a review delivers is bounded by the
+reviewer's UNDERSTANDING of the change — not by diligence and not by
+seniority — and that understanding is precisely what a large change destroys
+("Expectations, Outcomes, and Challenges of Modern Code Review", ICSE 2013);
+the operating threshold that line of work settled on is roughly **400 changed
+lines**, past which review effectiveness measurably degrades. So when a diff
+exceeds it, say so in the report as a review-effectiveness risk, and name the
+seam you would split it on. This is a statement about the confidence of your
+own findings and nothing else: a large diff still gets the full pass over
+every area, and "too big to review" is not a verdict this engine may return.
+Rule 2 still binds — the risk note never stands in for an area you skipped.
+
 ## Repo idiom layer — apply before any style/pattern finding survives
 
 The costliest failure mode of an automated reviewer is flagging deliberate
@@ -79,13 +94,46 @@ boundary; state left held on an error path).
 4. **Error handling** — no swallowed errors, no log-and-return-nil; wrapped
    with context; retryable-vs-terminal classified; does the error path clean
    up state (locks, reservations, partial writes)? Held-on-error meets the
-   bar.
+   bar. This area has more empirical weight behind it than any other on the
+   list, and a finding here is argued from that rather than from taste.
+   Yuan et al. reproduced 198 randomly sampled user-reported failures of
+   Cassandra, HBase, HDFS, MapReduce and Redis and found that **92% of the
+   catastrophic ones followed from incorrect handling of errors the system
+   had already caught and signalled** — detection was almost never the
+   defect; the handler was — and that **35% of the catastrophic failures
+   came from three patterns trivial enough for a machine to find**: a
+   handler that is empty or whose entire body is a log statement (the
+   log-and-continue shape, past a condition the surrounding code itself
+   treats as fatal), a handler that aborts the whole system on an
+   over-general caught exception, and a handler whose body is a TODO or
+   FIXME ("Simple Testing Can Prevent Most Critical Failures", OSDI 2014).
+   All three are mechanically greppable, and that is what makes them useful
+   here: a reviewer who flags one is not offering a judgment that can be
+   negotiated down, they are standing on the strongest empirical result the
+   field has about where catastrophes begin. Cite it when the author pushes
+   back. (The template's `scripts/error-handling-fitness.sh` mechanizes the
+   first and third patterns — the over-general-catch abort has no Go analogue,
+   which that gate's own header declares — so in a scaffolded repo the cheap
+   gate catches those before this review does; finding one HERE means the
+   gate is missing or was not run.)
 5. **Observability** — correlation ids the system actually debugs by;
    bounded-cardinality labels; the 3am question: if this fails silently in
    production, what fires? Nothing ⇒ finding. (In this framework: every new
    failure branch needs a distinguishable signal.)
 6. **Performance** — hot-path allocations, calls inside held locks,
    batch-vs-row, missing timeouts, complexity changes (O(1)→O(n) fanouts).
+   Overload belongs here too, and it is the one performance finding that
+   survives every call site looking correct: **a NEW unbounded queue, or a
+   NEW retry loop with no global budget, is an overload finding (dimension
+   26) even when each call's own policy reads right.** The damage is not
+   slowness at the site you are reading — it is that the queue converts
+   overload into latency instead of rejection, and the retries multiply the
+   arrival rate exactly when the system is least able to serve it, so the
+   system sustains its own collapse after the trigger is gone. Locally
+   reasonable, aggregately metastable: the defect is not present in the hunk
+   at all, which is why it survives a clean read. Name the missing bound
+   — the queue depth and what happens at it, or the budget shared by every
+   retry in the request — not merely that a bound is absent.
 7. **Cross-boundary contracts** — any change crossing a service boundary
    (API fields, message shapes, mirrored/generated types, queue payloads):
    verify the counterpart actually exists AT ITS SOURCE, types match

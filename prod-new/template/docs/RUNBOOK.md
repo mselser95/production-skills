@@ -285,3 +285,61 @@ separately and want opposite endpoint shapes — see "The four levers" above.
 design — a counter that drops is one every `rate()` misreads as a restart —
 and restarting discards the queued spans that a recovering collector would
 otherwise have received.
+
+## The service says it is ready and clients say it is not (`SvcGrayFailure`)
+
+**Severity: page.** This is the gray-failure condition (Huang et al., "Gray
+Failure: The Achilles' Heel of Cloud-Scale Systems", HotOS 2017): the pod's
+own health signals are green and an external vantage says it is unusable.
+Traffic is still being routed to it, because every mechanism that would take
+it out of rotation — the readiness gate, the restart policy — reads the view
+that says everything is fine.
+
+**Do not start by looking for the bug. Start by deciding which view is
+wrong,** because the two answers send you to opposite places and the alert
+deliberately does not tell you which it is. That is not an omission: the
+whole content of the signal is that the two disagree.
+
+1. **Take the pod out of rotation first.** Whatever the cause, it is serving
+   the bad path to real traffic while this is being diagnosed, and nothing
+   in the service will do that on its own — that is the definition of the
+   condition. Cordon it, scale the replica, or drop it from the backend pool
+   by hand.
+2. **Reproduce the client view from the client's network position**, not
+   from your laptop and not with `kubectl exec` into the pod. A request that
+   succeeds from inside the pod and fails from outside it localises the
+   fault to the path between them (ingress, service mesh sidecar, network
+   policy, an LB health check reading a different port), and that path is
+   invisible to every signal this service emits.
+3. **Read the pod's own view, in full:**
+
+       curl -s :8081/readyz | jq .
+       curl -s :8081/healthz | jq '{state, config}'
+
+   `/readyz` gives the gate breakdown (`log_writable`,
+   `no_recent_invariant_violation`); `/healthz`'s `state` object gives the
+   ledger this process reconstructed. A pod that is READY, has a plausible
+   `state.balance`, and still fails from outside is a path problem. A pod
+   that is READY with `state.known: false` is a pod that never got a ledger,
+   which readiness does not currently gate on — record that as a finding
+   rather than as the incident's cause.
+4. **Check whether it is fail-SLOW rather than fail-stop.** Gunawi et al.,
+   "Fail-Slow at Scale" (FAST 2018), collected 101 incidents of hardware
+   that kept working at a fraction of its speed for weeks — the binary
+   readiness probe passes throughout, which is exactly how the traffic keeps
+   arriving. Compare `svc_outbox_oldest_pending_age_seconds` and the
+   command latency on this pod against its peers before concluding the pod
+   is healthy; "responding" and "responding usefully" are different
+   readings and only one of them is gated.
+5. **If the self view turns out to be the wrong one, that is the finding.**
+   The repair is not to silence this alert; it is to give the readiness gate
+   a component that can see whatever the prober saw, and to file the gap.
+   A readiness formula that cannot go false in a condition clients can see
+   is the vacuous form of a readiness probe — and per this repo's own rules,
+   the finding belongs in `registries/contract-debt.yaml` with an owner and
+   an expiry, so it comes back on its own.
+
+**Do not** resolve this by widening the client-side threshold in
+`observability/alerts.md` until the divergence stops firing. An alert edited
+until it is quiet has been deleted with extra steps, and this is the one
+alert in this repo that fires on a condition no other signal here can see.

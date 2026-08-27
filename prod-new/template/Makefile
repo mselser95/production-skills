@@ -1,4 +1,4 @@
-.PHONY: check-registries verify-standard bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability
+.PHONY: check-registries verify-standard bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness probe-selftests crash-only-selftest sim load soak
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
 # checks + a plain (no -race) `go test ./...` + architecture. It must stay
@@ -21,6 +21,50 @@ check-fast:
 	go test -count=1 ./...
 	@echo "Running architecture checks..."
 	go test -count=1 ./internal/architecture
+	$(MAKE) error-handling-fitness
+	$(MAKE) crash-only-selftest
+
+# error-handling-fitness is a FITNESS FUNCTION, sitting beside the import bans
+# in internal/architecture rather than beside the tests: it constrains the
+# SHAPE of code the repo will accept, and like those bans it is cheap enough
+# to belong in the staged presubmit rather than in the full lane.
+#
+# It is in check-fast for the same reason check-registries is: the three
+# handler shapes it refuses (empty branch, TODO branch, log-and-continue past
+# an available error return) are the ones Yuan et al. (OSDI 2014) measured
+# behind 35% of catastrophic distributed-systems failures, and every one of
+# them is cheapest to remove before a reviewer has spent attention on the
+# diff. Measured on this scaffold: 0.13s over 82 Go files.
+#
+# THE SELFTEST RUNS FIRST, and that ordering is the point rather than
+# tidiness. The gate is a text pass, so its failure mode is going silently
+# green -- a regex that stopped matching prints exactly the same "clean" line
+# as a regex that matched everything and found nothing. The selftest drives
+# the real script against crafted fixtures and asserts both directions (three
+# shapes RED, three correct forms GREEN, zero-inputs RED), so `make
+# check-fast` cannot report the gate as satisfied unless the gate has just
+# been shown to be capable of failing. Measured: 0.33s.
+error-handling-fitness:
+	@echo "Proving the error-handling gate can fail..."
+	bash scripts/tests/error-handling-fitness-selftest.sh
+	@echo "Running error-handling fitness (Yuan et al., OSDI 2014)..."
+	bash scripts/error-handling-fitness.sh
+
+# crash-only-selftest exercises the LOGIC of the crash-only state assertion in
+# scripts/kill-durability.sh without a docker daemon, by sourcing the script
+# through its library seam and driving the real comparison against fixtures.
+#
+# It is in check-fast, and `kill-durability` deliberately is not, because the
+# two answer different questions. The scenario answers "does THIS BUILD
+# recover correctly", needs docker, and belongs in its own CI job. This answers
+# "can that assertion still fail at all", needs nothing, and is the question
+# nobody would otherwise ask -- the scenario runs in exactly one place, so a
+# renamed /healthz field or an inverted comparison inside it would show up as
+# a green scenario in the environment least able to debug it, and nowhere
+# else. Measured: 0.1s, no daemon, no image.
+crash-only-selftest:
+	@echo "Proving the crash-only state assertion can fail (Candea & Fox, HotOS IX 2003)..."
+	bash scripts/tests/kill-durability-state-selftest.sh
 
 # test-advisory runs the candidate-provenance test lane: tests behind the
 # `candidate` build tag that are not yet ratified/derived invariants. This
@@ -101,6 +145,95 @@ bench:
 	@echo "Running benchmarks (recording, never a gate)..."
 	go test -run=^$$ -bench=. -benchmem -count=1 ./...
 
+# load and soak are the two LANES `bench` cannot cover, and the distinction is
+# not a matter of duration. `bench` measures ONE operation in isolation, in
+# process, with no arrivals and no queue -- it answers "how long does this take"
+# and is structurally incapable of answering "what happens when they arrive
+# faster than that". Every property worth knowing about a system under traffic
+# (where throughput stops tracking offered load, whether the tail collapses
+# before it, whether anything grows without bound) lives in the gap between
+# those two questions.
+#
+# Both are deliberately OUT of `verify`, for the same reason kill-durability is:
+# they start a real process and run for minutes, and a developer's inner loop
+# must not pay for that. CI runs them in the nightly trends lane.
+
+# load sweeps rising arrival rates against a locally started service and writes
+# benchmarks/load/baseline.md -- the artifact benchmarks/load/baseline-TEMPLATE.md
+# describes. Non-zero exit means the sweep did NOT produce a usable capacity
+# number: it never saturated (a lower bound, not a measurement -- raise RATES),
+# every row was spoiled by the generator falling behind its own schedule, or a
+# declared TARGET_RPS was missed by more than tier-policy.yaml's 2x margin.
+#
+# TARGET_RPS and LATENCY_BUDGET_MS have no defaults on purpose. They are facts
+# about what this service must do, which no scaffold can supply, and defaulting
+# them would produce a capacity gate that passes every service forever.
+load:
+	@echo "Sweeping offered load (open-loop; writes benchmarks/load/baseline.md)..."
+	bash benchmarks/load/sweep.sh
+
+# soak holds a sustained rate for SOAK_MINUTES and fails on resource growth that
+# does not level off -- goroutines, file descriptors and RSS, sampled from the
+# OPERATING SYSTEM rather than from anything the service says about itself.
+#
+# This is the one lane that can see a leak. A leak is invisible to every other
+# gate here by construction: the service stays correct, stays fast, passes
+# -race, and grows a few descriptors a minute until the fourth day of a deploy.
+#
+# The verdict logic lives in benchmarks/load/growth-check.sh, which reads a
+# sample table on stdin -- so "does this detector actually go red on a leak" is
+# answerable in a second against a synthetic series, instead of only by leaking
+# for half an hour.
+SOAK_MINUTES ?= 30
+soak:
+	@echo "Soaking for $(SOAK_MINUTES) minute(s) under sustained load..."
+	SOAK_MINUTES=$(SOAK_MINUTES) bash benchmarks/load/soak.sh
+
+# sim runs the stage-1 deterministic simulation harness
+# (verification/simulation) -- a seeded schedule of ~500 operations and
+# injected faults driven through internal/app.Ledger, asserting the ratified
+# invariants at every step.
+#
+# SIM_SEED is why this target exists separately from `test`. Unset, the
+# harness runs its fixed default seed, which is as deterministic as any other
+# test in this module and already runs in the ordinary `go test ./...` lane.
+# Overriding it sweeps other schedules (SIM_SEED=$$RANDOM make sim), and THAT
+# lane is advisory: a red on a seed nobody has seen before is a finding to
+# minimize into regressions/, not a reason to stop a merge. Dimension 27 is
+# advisory for the same reason -- a required probe row would buy every repo a
+# verification/simulation/ directory, which is the vacuous form of having a
+# simulator. SIM_SEED is passed through the environment by go test, so no
+# -exec plumbing is needed here; it is named in this comment because a knob
+# no target mentions is a knob nobody finds.
+#
+# -v is deliberate: the harness logs its seed and its schedule-adequacy
+# counters, and a run whose seed is not in the output cannot be reproduced
+# from it -- which is the one property this harness exists to provide.
+# -count=1 because a cached PASS says nothing about this tree.
+#
+# BOTH tests run, and the second one is not optional: TestSimulation_
+# SeedReproduces runs one seed twice and compares the decision traces byte
+# for byte. A seed that does not reproduce turns every red run back into a
+# story, which is the failure this whole harness exists to avoid -- so the
+# check ships with it rather than after it.
+#
+# The name guard mirrors the fuzz and e2e targets: renaming either test must
+# fail loudly here rather than silently simulating nothing.
+#
+# It differs from them in one place, and the difference was measured rather
+# than reasoned: `go test -list ... | grep -qx` pipes away the exit status, so
+# a package that does not COMPILE reports as "missing simulation test", which
+# sends the reader hunting for a rename that never happened. (Observed while
+# mutation-testing this target: a deliberate compile error in
+# internal/domain printed exactly that.) Checking the list command's status
+# first costs one line and makes the two failures say what they are.
+sim:
+	@list=$$(go test -list '^TestSimulation_' ./verification/simulation) || { echo "$$list" >&2; echo "simulation package failed to build -- see the compiler output above" >&2; exit 1; }; \
+	for name in TestSimulation_SeededFaultSchedule TestSimulation_SeedReproduces; do \
+	  printf '%s\n' "$$list" | grep -qx "$$name" || { echo "missing simulation test: $$name" >&2; exit 1; }; \
+	done; \
+	go test -count=1 -v -run='^TestSimulation_' ./verification/simulation
+
 # verify-standard probes every dimension of the production standard and
 # PRINTS THE COMPLETION REPORT. It probes EFFECTS (runs the tools, greps
 # the entrypoints for wiring, reads the spec's ratified declines), not
@@ -108,3 +241,17 @@ bench:
 # to soften.
 verify-standard:
 	bash scripts/verify-standard.sh
+
+# Prove the verifier before trusting its verdict. Each selftest drives
+# verify-standard.sh's own row logic against crafted fixtures and asserts BOTH
+# directions. Listed individually rather than globbed: `for f in
+# scripts/tests/*-selftest.sh` reports success over an empty glob if the
+# directory is ever renamed, which is the fail-open shape every one of these
+# files exists to refuse. Cheap (no Go toolchain, no network), so it belongs
+# here beside the probe it certifies.
+probe-selftests:
+	bash scripts/tests/load-rows-selftest.sh
+	bash scripts/tests/probe-self-gate-selftest.sh
+	bash scripts/tests/sbom-ordering-selftest.sh
+	bash scripts/tests/check-registries-selftest.sh
+	bash scripts/tests/non-vacuity-selftest.sh

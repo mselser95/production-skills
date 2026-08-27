@@ -13,6 +13,32 @@
 # with a reason in the commit message (a genuine, reviewed regression),
 # never to silence a failing gate.
 
+# benchmarks/load is the open-loop load generator (benchmarks/load/loadgen.go),
+# and it carries a floor for the same reason everything else here does: this
+# file's ratchet FAILS CLOSED on a package it has no line for, so a new package
+# added without one aborts the coverage gate for every repo generated from this
+# template before a single floor is checked.
+#
+# It is gated at all -- rather than excluded as "just a tool" -- because a load
+# generator's defects are invisible in its own output. A closed loop, a clock
+# started at the send instead of the arrival, or a tail sampled over successes
+# only each produce a summary indistinguishable from a correct one, only more
+# flattering. The tests behind this floor are the only thing that tells them
+# apart, and their absence would not show up anywhere else.
+#
+# 85.00 = the measured 87.72 minus the 2.0 points this file's header
+# prescribes, rounded down. The uncovered remainder is main()'s flag wiring.
+#
+# That 87.72 is a STABLE measurement, and getting it stable was a finding
+# rather than a formality: the number first swung between 82.39 and 84.28 on
+# identical source, because the generator's own send-lag branch only ran when
+# the operating system happened to be late. A floor over a figure that moves by
+# two points between runs is not a ratchet, it is a coin toss with a threshold.
+# TestRun_ReportsItsOwnLatenessAtARateItCannotSustain now forces that branch
+# deterministically (100ns between arrivals, which no process can schedule),
+# and repeated runs of scripts/coverage.sh report 87.72 every time.
+benchmarks/load 85.00
+
 # cmd/<SERVICE> was 24.00, on the argument that run()'s body is
 # process-wiring glue "0%-coverable without an actual running process". That
 # argument was true and the conclusion drawn from it was wrong: a composition

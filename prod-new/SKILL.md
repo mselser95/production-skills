@@ -356,7 +356,14 @@ under the same condition), `CODEOWNERS` with a real owner,
 
 1. Run `make verify` and `make verify-standard`. **The standard's own probe
    must report zero FAIL on the empty service.** A scaffold that ships red
-   teaches that red is normal.
+   teaches that red is normal. This includes MINTING the load baseline: the
+   template ships `benchmarks/load/` (the generator) plus only
+   `baseline-TEMPLATE.md`, and the probe's `load-baseline` row engages the
+   moment that directory exists — so run `make load` once against the
+   scaffolded service to produce `benchmarks/load/baseline.md` measured on
+   the machine that will run it. A capacity number invented at scaffold time
+   is the one artifact people quote in a design review; a measured one from
+   an empty service is a real lower bound the first feature updates.
 2. Verify non-vacuity of what you shipped: each seed invariant observed RED
    under its recorded mutation, each fuzz target executed, the replay fixture
    red on a deliberately broken variant. Record the evidence where the

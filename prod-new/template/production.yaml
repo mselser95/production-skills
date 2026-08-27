@@ -66,6 +66,7 @@ capabilities:
       log_bounded_by_the_live_set: internal/platform/outboxlog TestCompact_DropsATerminalEntryNothingCanRederive + ./cmd/<SERVICE> TestCompactOutboxLog_ReclaimsWhatTheEventLogCanNoLongerRederive (boot compaction folds terminal, no-longer-re-derivable entries away, so the log tracks the live set instead of lifetime effect volume)
       compaction_never_republishes: ./cmd/<SERVICE> TestCompactOutboxLog_DoesNotRepublishDeliveredEffectsOnTheNextBoot, with its constructive complement TestCompactOutboxLog_WithoutTheRetainGuardTheNextBootRedelivers (the log doubles as the delivery watermark; dropping a re-derivable delivered entry would republish it on every boot)
       compaction_observed: internal/adapter/in/healthhttp TestCompactionStats_ReachTheScrape (svc_outbox_compactions_total / _compacted_entries_total / _compaction_reclaimed_bytes_total; a mechanism whose effect nothing can observe is one nobody notices has stopped working)
+      crash_only_state_identity_across_a_real_sigkill: scripts/kill-durability.sh (make kill-durability; CI job kill-durability) -- captures the ledger state the process RECONSTRUCTED, read off /healthz's `state` object (balance, applied-set size, and a digest over the applied set), immediately before the SIGKILL and again after the restart, and requires the two to be identical against a denominator that refuses an unknown or empty capture. A DIFFERENT claim from durable_intent_survives_a_real_sigkill above, and the two are not redundant -- that one asserts the records survived, this one asserts that REPLAYING them reconstructs the same state, and a boot that read every byte back and rebuilt the balance wrong satisfies the first completely. Proven non-vacuous 2026-08-27 by appending one event to the container's log while it was dead -- the intent-identity assertion reported "0 lost" and PASSED, while this one went RED naming balance 12 -> 13, applied_count 12 -> 13 and a changed digest. The comparison logic is additionally driven by fixtures with no docker daemon (make crash-only-selftest), because the scenario itself runs in exactly one place.
     assumed:
       fsync_bytes_reach_the_platter:
         detector: >
@@ -94,6 +95,30 @@ capabilities:
           implementation (this template ships LogSink, a working
           demonstration) must honor the same idempotency-key contract for
           the assumption to hold in production.
+      crash_only_recovery_beyond_what_healthz_exposes:
+        detector: >
+          NARROWED 2026-08-27, and stated so the claim is not read as larger
+          than it is. Crash-only discipline (Candea & Fox, "Crash-Only
+          Software", HotOS IX 2003) says a component should have exactly one
+          stop path -- crashing -- and one start path -- recovering. This
+          scaffold takes that side by construction: the event log is the
+          source of truth, boot replays it, and there is no shutdown state
+          flush a SIGKILL could skip. scripts/kill-durability.sh now FALSIFIES
+          the claim rather than restating it, by comparing the reconstructed
+          ledger across a real SIGKILL.
+          What is proven is bounded by what /healthz exposes: the balance, the
+          size of the applied-event set, and a digest over that set. State the
+          process holds and does not surface -- outbox delivery attempt
+          counts, relay checkpoint position, in-flight timers -- is compared
+          by nothing and is assumed to recover correctly. Closing that gap
+          means surfacing more state, not widening this assertion, and a
+          digest that covered fields nobody can read back would be an
+          assertion nobody can debug when it fires.
+          The SAME gap covers the single-process shape of the test: one
+          container is killed and restarted, so nothing here says anything
+          about a replica set recovering together, about a partial write torn
+          across a page boundary, or about two processes recovering from the
+          same log at once. None of those is claimed anywhere in this repo.
 
   - id: units_ledger
     class: source_of_truth
@@ -272,6 +297,28 @@ scalability:
   # then needs throughput must change this line deliberately, not discover
   # the ceiling in production.
   durability_trade: fsync_per_event
+
+# Load, stress and soak (dimension 25) -- REQUIRED once the repo carries a load
+# lane. Dimension 10's `benchmarks` row measures the cost of ONE operation at
+# N=1; this one asks where the system stops keeping up and how far that point
+# is from the peak it must serve. They are different questions and a green
+# benchmarks row has never been evidence about either.
+#
+# The probe reads benchmarks/load/baseline.md and compares its declared margin
+# against margin_target below. It also refuses a baseline older than 30 days,
+# read from a `measured:` field INSIDE the document -- never the file's mtime,
+# which a clone stamps with the checkout time.
+load_baseline:
+  # <number>x (a FACTOR over expected peak) or <number>% (a PERCENTAGE of it).
+  # The two are not interchangeable and the probe refuses to compare one
+  # against the other rather than coercing: a measured 1.5x satisfying a
+  # declared 120% target is arithmetic on two different quantities.
+  #
+  # 3x is the scaffold's example answer, not a recommendation: it is the
+  # headroom a single-writer fsync-per-event ledger can defend on the hardware
+  # this template assumes. A real service replaces it with a number derived
+  # from its own peak and its own tolerance for a traffic surprise.
+  margin_target: 3x
 
 # Bounded auto-recovery (dimension 13) -- REQUIRED BY DEFAULT at every tier.
 # Dimension 8 asks whether a failure is VISIBLE; this asks whether the system

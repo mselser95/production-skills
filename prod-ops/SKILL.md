@@ -9,6 +9,8 @@ description: >
   ejected from the merge queue. Every operation is bounded, evidenced, and
   safe to run unattended within its rules. Absolute exception: a flaky T0
   invariant test is an INCIDENT, never a quarantine.
+  The scheduled sweep additionally computes the four delivery keys from git
+  and CI history as a TREND, never a gate.
   TRIGGER when: trunk is red ("bisect and revert"), a test flaked ("classify
   this flake"), registries need their sweep ("clean up expired flags"), an
   ejected PR needs rebasing, or on schedule as the standing maintenance loop.
@@ -91,6 +93,10 @@ with its evidence attached.
   hypothesis — race detector, repeated runs, randomized order (Go example:
   `-race -count=N -shuffle=on`; adapt to the repo's language).
 - Check RULE T0-FLAKE before anything else.
+- The distinction step (1) draws — a *bohrbug* that reproduces on the isolated
+  rerun and belongs to OP-1, versus a *heisenbug* that moves when observed and
+  is what OP-4 holds — is Gray, "Why Do Computers Stop and What Can Be Done
+  About It?" (Tandem TR-85.7, 1985).
 - Output: classification + evidence + suspected class (async-wait, ordering,
   isolation, timing) → OP-4 entry + owner notification.
 
@@ -124,6 +130,42 @@ with its evidence attached.
 - Do: mechanical rebase onto trunk. Textual conflict → re-task the authoring
   agent with the conflict context, cap 2 retries, then OP-5 closure.
   Semantic conflict (both sides changed behavior) → RULE NO-JUDGMENT.
+
+### OP-7 Delivery metrics (trend)
+- When: on the OP-5 sweep's cadence, as part of that scheduled run. Not on
+  demand, and never as an input to a release decision — see the stance below.
+- Do: compute the four delivery keys from history this repo already keeps —
+  git log plus the CI/deploy record. This operation adds no instrumentation
+  and no new registry; if a key's input does not exist, that is what you
+  report for it.
+  - **deployment frequency** — deploys reaching production per window.
+  - **lead time for changes** — first commit of a merged change to the deploy
+    that carried it; report the median and the p85, because the tail is where
+    the batching lives.
+  - **time to restore service** — the postsubmit red that opened OP-1 to the
+    merge of the OP-2 revert or the fix-forward that turned the same job
+    green. Both ends are already timestamped by those operations, which is
+    the only reason this key is cheap here.
+  - **change failure rate** — deploys followed inside the window by a revert,
+    a rollback, or a declared incident, over all deploys.
+
+  Two windows, both reported (30 and 90 days — fixed by design): one window
+  states a level, and only the pair states a direction.
+- Output: four numbers with their windows, appended to the OP-5 sweep report.
+  Name every key you could NOT compute and the input that was missing — a
+  repo with no deploy record leaves three of these uncomputable, and printing
+  that is the finding; printing a plausible number instead is the vacuous
+  form of this operation.
+- **TREND ONLY, never a gate.** The same stance this framework already takes
+  on mutation scores: reported in the trend lane, no threshold, no registry
+  entry, no escalation path out of this operation. A delivery key that gates
+  anything stops being measured and starts being produced — deferring a
+  revert so restore time reads better is the failure mode, and it inverts
+  exactly the asymmetry the top of this file relies on.
+- Source: Forsgren, Humble & Kim, *Accelerate* (IT Revolution, 2018) — the
+  four keys, and their correlation with organizational performance measured
+  across a survey population. A correlation over organizations licenses a
+  direction to watch in one repo; it does not license a pass/fail line here.
 
 ## Bail
 

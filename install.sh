@@ -169,6 +169,17 @@ mirrors=(
   # would refuse to run in every repo prod-new scaffolds. That is the loud
   # failure, but only because it was built to refuse. Mirror it anyway.
   "prod-new/template/scripts/tests/sbom-ordering-selftest.sh:_shared/probes/sbom-ordering-selftest.sh"
+  # ADDED WITH THE THREE ROWS IT COVERS: dimension 25's `load-baseline`, the
+  # `error-handling-fitness` row, and dimension 27's advisory
+  # `simulation-advisory`. It lifts `row`, `spec_field`, the three row
+  # functions and the LOAD_MAX_AGE_DAYS window out of verify-standard.sh BY
+  # NAME, so a template copy that drifted from _shared would either lift a
+  # function that no longer exists -- and this selftest refuses loudly, by
+  # construction -- or certify the OLD freshness window while the vendored
+  # probe enforces a new one. The second shape is silent, which is exactly why
+  # it belongs in the mirrored set rather than in the "someone will notice"
+  # category.
+  "prod-new/template/scripts/tests/load-rows-selftest.sh:_shared/probes/load-rows-selftest.sh"
 )
 drift=0
 for m in "${mirrors[@]}"; do

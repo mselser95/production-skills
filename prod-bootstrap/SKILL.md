@@ -244,7 +244,13 @@ ordered by leverage:
    wired into the repo's fuzz lane);
 9. mutation advisory baseline over the core packages (TREND, never a gate);
 10. benchmark baseline of the hot path with a versioned workload (relative
-    regression only — SIGNAL).
+    regression only — SIGNAL);
+11. open-loop load baseline + soak lane (dimension 25) — `benchmarks/load/baseline.md`
+    with the MEASURED saturation point, wired as `make load` / `make soak`.
+    Item 10 measures the delta, this measures the ceiling: a relative check on
+    a hot path nobody has driven to saturation reports a healthy percentage
+    right up to the knee, and the soak lane is the only one of the two that
+    can see a degradation whose unit is hours.
 This list is the MINIMUM: a plan that omits any dimension without an
 explicit declined-with-rationale entry is an incomplete bootstrap — the
 human should never have to ask "where is the fuzzing?". Tasks a cheap model

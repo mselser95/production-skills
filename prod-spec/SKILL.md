@@ -67,6 +67,15 @@ plan's task list for `prod-implement`.
    contract version, backward-compat window, consumer registry, deprecation
    policy — see `references/domain-boundaries.md`, and only where
    `_shared/domain-topology.yaml` exists). You derive; you never invent or skip.
+
+   **Load and overload obligations derive the same way.** Where the repo's spec
+   declares a load or capacity obligation, or the task touches a hot path,
+   dimensions 25 and 26 add their set: open-loop load evidence, a retry budget,
+   a shedding policy, a declared degraded mode. The numbers are not yours to
+   pick — they come from `references/tier-policy.yaml`'s `defaults.load_testing`
+   and `defaults.overload`, exactly as the class checklists in that same file
+   supply the obligations above. A repo with no hot path and no declared load
+   obligation pulls nothing here: this is derivation, not a new questionnaire.
 5. **Detect semantic events** in what the task will require:
    `introduces_dependency`, `introduces_state`, `introduces_external_effect`,
    `introduces_retry`, `introduces_queue`, `introduces_background_worker`,
@@ -79,6 +88,31 @@ plan's task list for `prod-implement`.
    required evidence becomes exactly that resolution, never an assumed pass
    (`domain-boundaries.md`, "What this cannot prove locally"). Each event
    pulls its requirement set into `required_evidence`.
+
+   Three of those events pull more than they did, for one reason: a per-call
+   view of a system does not predict its behavior under load.
+   - `changes_hot_path` pulls a LOAD evidence requirement, not only a relative
+     benchmark — an open-loop measurement against the saturation point recorded
+     in `benchmarks/load/baseline.md`. A closed-loop driver backs off when the
+     system slows, so it measures the system's own pace and calls it throughput
+     (coordinated omission — Gil Tene); a change that moves saturation down
+     still passes a relative benchmark that never reached it.
+   - `introduces_retry` pulls the `retry_budget` obligation. The budget is
+     SYSTEMIC, and that is the whole point: a per-call policy can be
+     individually correct — bounded attempts, jittered backoff, a timeout —
+     while every caller retrying at once multiplies the offered load, which is
+     what sustains a metastable failure after its trigger is gone (Bronson et
+     al., "Metastable Failures in Distributed Systems", HotOS 2021). The
+     evidence is a budget against the request rate, not a per-call policy
+     restated in other words.
+   - `introduces_queue` pulls a boundedness declaration: the bound, the
+     behavior AT the bound (shed, block, drop-oldest), and what the caller
+     observes when it is hit. An unbounded queue does not absorb an overload,
+     it converts it into work whose requester has already timed out.
+
+   Vacuous forms, named: a load baseline produced by a closed-loop driver; a
+   retry budget declared in the spec and enforced by nothing; a queue whose
+   only bound is its channel buffer, with no policy for what happens at it.
 6. **Write the change plan.** Decompose into bounded tasks, each tagged with
    `ambiguity: none|low|open`. Anything `open` stays with the orchestrator
    tier — never hand an open design question to a cheap implementer. New

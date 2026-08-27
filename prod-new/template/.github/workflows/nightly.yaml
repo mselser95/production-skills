@@ -77,3 +77,136 @@ jobs:
           name: mutation-baseline
           path: .prod/mutation/
           retention-days: 30
+
+  # Load baseline (dimension 25) -- the open-loop sweep that produces
+  # benchmarks/load/baseline.md. Nightly rather than per-PR for the same reason
+  # every other job in this file is: it starts a real process and holds it under
+  # load for minutes, which no pull request should wait on.
+  #
+  # `continue-on-error: true`, deliberately, and the reason is the whole design
+  # of `make load` rather than a shrug. The sweep exits NON-ZERO in three
+  # cases -- it never saturated (the top rate was survived, so the number is a
+  # lower bound), every row was spoiled by the generator falling behind its own
+  # schedule, or a declared TARGET_RPS missed tier-policy.yaml's 2x margin --
+  # and only the third is a statement about the SERVICE. The first two are
+  # statements about the sweep's parameters and the runner it ran on. A red
+  # required check that usually means "raise RATES" is a check people learn to
+  # ignore, and the artifact below carries the finding either way.
+  #
+  # This flips to a blocking job the moment TARGET_RPS is declared: at that
+  # point the margin is computable, the third case becomes reachable, and a
+  # capacity regression is a real gate. Until then a required check here would
+  # be the vacuous form -- a gate whose only failing condition is a
+  # denominator nobody has supplied.
+  #
+  # TARGET_RPS and LATENCY_BUDGET_MS are intentionally absent below. They are
+  # facts about what this service must sustain, and defaulting them in CI would
+  # produce a capacity gate that passes every service forever.
+  #
+  # timeout-minutes bounds the whole job: RATES x DURATION plus boot and warm-up
+  # is a few minutes, so 20 leaves room for a slow runner while still failing
+  # loudly on a service that hangs instead of running past its window -- the
+  # same discipline the soak job's `-timeout` applies.
+  load-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Sweep offered load and write the baseline
+        run: make load
+        env:
+          RATES: "250 500 1000 2000 4000 8000"
+          DURATION: 15s
+      # if: always() -- the artifact is MOST wanted on the runs that failed.
+      # A sweep that never saturated or was spoiled by the generator still
+      # wrote a baseline.md saying exactly that, and uploading it only on
+      # success would discard the one copy that explains the red.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-baseline
+          path: benchmarks/load/baseline.md
+          retention-days: 30
+
+  # Soak (dimension 25) -- sustained load with resource sampling, the only lane
+  # that can see a leak.
+  #
+  # This is NOT the `soak` job above it. That one repeats the race-detected unit
+  # suite to shake out a timing-dependent flake; the process it soaks is `go
+  # test`, which starts and exits many times over. This one holds ONE process
+  # under continuous traffic and watches goroutines, file descriptors and RSS
+  # for growth that does not level off -- a failure invisible to a suite that
+  # keeps restarting the thing under test.
+  #
+  # Blocking, unlike load-baseline: a leak is unambiguously a defect in the
+  # service, the verdict needs no human-supplied denominator, and
+  # benchmarks/load/growth-check.sh refuses to give a verdict at all rather
+  # than pass when the samples cannot support one.
+  #
+  # timeout-minutes is SOAK_MINUTES plus headroom for build, boot and the
+  # verdict. Keep the two in step: a timeout below SOAK_MINUTES kills the job
+  # mid-soak and reports it as a failure of the service.
+  soak-under-load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Hold sustained load and check for resource growth
+        run: make soak SOAK_MINUTES=30
+        env:
+          SOAK_RATE: "200"
+          SOAK_SAMPLE_SECONDS: "30"
+
+  # Simulation sweep (dimension 27) -- ADVISORY, never a gate, which is why
+  # it lives here beside the mutation baseline and not in pr.yaml. `make sim`
+  # already runs its FIXED default seed in the ordinary test lane on every PR;
+  # what this job adds is the part that must not block a merge: schedules
+  # nobody has seen before. A red here is a finding to minimize into
+  # regressions/, not a reason to stop someone's change.
+  #
+  # The seeds are derived from github.run_id rather than $RANDOM on purpose.
+  # A sweep whose seed is not recoverable from the run that failed is exactly
+  # the "story instead of a reproducer" this dimension exists to eliminate --
+  # and $RANDOM is gone the moment the log rotates. run_id is in the URL of
+  # the failing run, so `SIM_SEED=<run_id + n> make sim` reproduces it from
+  # the browser tab that reported it.
+  #
+  # The loop keeps going after a failure and reports every red seed at the
+  # end, because the interesting output of a sweep is WHICH seeds failed, not
+  # the first one alphabetically.
+  simulation-sweep:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Sweep seeds derived from the run id
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          failed=""
+          for n in 0 1 2 3 4 5 6 7 8 9; do
+            seed=$((RUN_ID + n))
+            echo "::group::SIM_SEED=$seed"
+            if ! SIM_SEED="$seed" make sim; then
+              failed="$failed $seed"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "simulation sweep red for seeds:$failed" >&2
+            echo "reproduce locally with: SIM_SEED=<seed> make sim" >&2
+            exit 1
+          fi

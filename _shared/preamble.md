@@ -61,7 +61,15 @@ catalog and its anti-patterns live in `verification-probes.md`). Probe the
 wiring in the entrypoints, not the definition; run the tool, don't check for
 its config. "The port exists" is not "the tracer is wired"; "the job exists"
 is not "the scan passes". A probe you did not execute is a dimension you did
-not deliver.
+not deliver. This rule is not house preference: it descends from Saltzer, Reed
+& Clark's end-to-end argument — a function implemented at an intermediate
+layer of a system is, from the endpoints' point of view, at best a performance
+optimization and never a substitute for the check performed end to end, since
+only the ends can see whether the thing was actually accomplished ("End-to-End
+Arguments in System Design", ACM TOCS 2(4), 1984, DOI 10.1145/357401.357402)
+— which is exactly why probing the effect beats reading the report a layer
+below it, that report being the intermediate check that cannot speak for the
+ends.
 
 **A gate script you only parsed is an UNRUN gate.** `bash -n` checks syntax
 and executes not one line; `shellcheck` reads code and runs none of it. Every

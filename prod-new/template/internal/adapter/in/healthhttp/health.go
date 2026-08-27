@@ -107,6 +107,39 @@ type Options struct {
 	// "your logs may not be reaching you", which is one of the two cases
 	// this counts.
 	OTLPExportFailures func() int64
+
+	// LedgerState reports the state this pod RECONSTRUCTED at boot, in a
+	// form an observer outside the process can compare across a restart: the
+	// balance, the size of the applied-event set, and a digest over that set.
+	//
+	// WHY A PROCESS'S RECOVERED STATE HAS TO BE OBSERVABLE FROM OUTSIDE IT.
+	// Candea and Fox, "Crash-Only Software" (HotOS IX, 2003), argue that a
+	// component should have exactly one way to stop (crash) and one way to
+	// start (recover), because a graceful-shutdown path that is not the
+	// recovery path is a second code path that only runs when things are
+	// going well -- so the one that runs during an outage is the one nobody
+	// exercised. This scaffold already takes that side: the event log is the
+	// source of truth and boot replays it, there is no "clean shutdown"
+	// state-flush to be lost. But "recovery is the only start path" is a
+	// claim, and the ONLY way to falsify it is to compare the state before a
+	// crash with the state after one. State that lives solely inside the
+	// process cannot be compared with anything, so a service can hold the
+	// discipline perfectly and still be unable to demonstrate it.
+	// scripts/kill-durability.sh reads this across a real SIGKILL, and could
+	// assert nothing at all without it.
+	//
+	// A FUNCTION rather than a widening of LedgerHealth, for the reason
+	// OTLPExportFailures above is one: nil is legal (a health-only pod with
+	// no ledger), every existing test double keeps compiling, and this
+	// package keeps knowing nothing about internal/domain.State.
+	//
+	// The DIGEST rather than the ID list: the applied set grows without
+	// bound, and a /healthz body that grows with lifetime event volume is a
+	// liveness probe that gets slower the longer the service has been alive.
+	// The cost is that a mismatch here says "the sets differ" and not which
+	// ID moved -- the replay corpus is where that question is answered, not
+	// a probe endpoint.
+	LedgerState func() (balance string, appliedCount int, appliedDigest string)
 }
 
 // DefaultViolationCooldown is used when Options.ViolationCooldown is zero.
@@ -209,8 +242,31 @@ func (s *Server) mux() *http.ServeMux {
 // is surfaced automatically instead of being forgotten here --
 // TestHealthz_SurfacesEveryConfigIdentityField compares the response against
 // the struct's own field set, so the drift cannot happen twice.
+// LedgerStateView is the reconstructed-state fingerprint rendered under
+// /healthz's `state` key. See Options.LedgerState for why it is here at all;
+// the short version is that a crash-only claim is unfalsifiable while the
+// state it makes claims about is invisible from outside the process.
+//
+// Every field is present even when Options.LedgerState is nil, and `known`
+// is the field that says which case this is. "The balance is 0" and "I
+// cannot tell you the balance" support opposite conclusions, and a body that
+// rendered both as `"balance":"0"` would let a probe read a pod with no
+// ledger as a pod with an empty one -- the same distinction
+// svc_outbox_unknown_age_entries exists to keep on the metrics side.
+type LedgerStateView struct {
+	Known         bool   `json:"known"`
+	Balance       string `json:"balance"`
+	AppliedCount  int    `json:"applied_count"`
+	AppliedDigest string `json:"applied_digest"`
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	state := LedgerStateView{}
+	if s.opts.LedgerState != nil {
+		state.Known = true
+		state.Balance, state.AppliedCount, state.AppliedDigest = s.opts.LedgerState()
+	}
 	body, err := json.Marshal(struct {
 		Status string `json:"status"`
 		PodID  string `json:"pod_id"`
@@ -225,12 +281,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// field added to config.Identity can never collide with one of the
 		// three above.
 		Config config.Identity `json:"config"`
+		// State is NESTED for the same reason Config is: it is a separate
+		// identity (which state did this pod reconstruct, as opposed to
+		// which config produced it), and a field added to either can never
+		// collide with a field of the other or with the three literals.
+		State LedgerStateView `json:"state"`
 	}{
 		Status:       "ok",
 		PodID:        s.opts.PodID,
 		Revision:     s.build.Revision,
 		ConfigDigest: s.opts.ConfigIdentity.Digest,
 		Config:       s.opts.ConfigIdentity,
+		State:        state,
 	})
 	if err != nil {
 		// Unreachable for this struct (every field is a string or an int),

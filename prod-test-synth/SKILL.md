@@ -46,6 +46,22 @@ Read `references/preamble.md` first. Every test follows
 2. **Table-driven by default.** For enumerable spaces (the class checklists:
    timeout-after-accept, duplicate delivery, journal-says-X world-says-Y),
    enumerate — do not sample what can be enumerated.
+2b. **Error branches are a first-class target, not a leftover.** Yuan et al.,
+   "Simple Testing Can Prevent Most Critical Failures" (OSDI 2014), found
+   that 92% of catastrophic failures in the distributed systems they studied
+   followed the incorrect handling of an error the software had already
+   signalled. That measurement makes error paths the highest-empirical-value
+   surface this skill can emit tests for, and they are enumerable in exactly
+   the sense step 2 means: list every error return of the unit under test,
+   emit a candidate that DRIVES each one (the injected failure reaches that
+   specific return, not merely some error), and assert the obligation the
+   framework already states for a failure branch — a distinguishable signal,
+   not just a non-nil error. Two branches returning the same opaque value are
+   one branch as far as production is concerned, so a test asserting only
+   "an error came back" is the vacuous form here; it passes on the day the
+   two paths are silently merged. Error returns you could not reach go in
+   `uncovered` with the reason — an unenumerated error path is
+   indistinguishable in this report from one that does not exist.
 3. **Property tests get adequacy self-checks, generated with them:**
    - state diversity: the generator's observed-state count over N runs is
      asserted above a floor (a generator producing only well-formed balanced

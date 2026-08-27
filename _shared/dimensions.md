@@ -192,7 +192,10 @@ or declined (with the deriving signal named) — and if declined, whether
 inbound carriers are still continued and outbound calls still injected; every
 declared observability backend paired with at least one named producer, and
 where the backend is queryable, ingest confirmed per producer over a named
-window rather than inferred from the producer's configuration.
+window rather than inferred from the producer's configuration; client-vantage
+SLI and self-reported health compared, with the DIVERGENCE itself a monitored
+quantity, or health self-reported only; degradation (slow, partial, one
+partition) a detected condition with a declared threshold, or only up/down.
 
 **Profiling is the fourth signal, it is CONTINUOUS, and every service owes it
 — headless ones included.**
@@ -427,6 +430,66 @@ its own severity table is non-normative; OTel's SeverityNumber inverts syslog's
 direction and adds TRACE. What IS worth checking: a service whose ERROR call
 sites outnumber everything else combined is usually logging handled errors, and
 each of those is a line nobody can act on.
+
+**Differential observability: the signal is the DISAGREEMENT between two
+vantage points, and neither one alone carries it.** Huang, Guo, Zhou, Lorch,
+Dang, Chintalapati and Yao, "Gray Failure: The Achilles' Heel of Cloud-Scale
+Systems" (HotOS 2017), define the failure this entry exists for: a
+component whose own health check passes while an app on top of it observes
+errors, timeouts or unusable latency. The system is not up and it is not down;
+it is up according to itself. Their construction is the useful part — a gray
+failure is precisely a *differential observability* condition, so the
+detectable quantity is not either view but the gap between them, and a
+monitoring design that samples only one vantage cannot express the defect at
+all, however many signals it collects from that vantage.
+
+The second half is that "degraded" is a real state and mostly goes unnamed.
+Gunawi, Suminto, Sears, Golliher, Sundararaman, Lin and others, "Fail-Slow at
+Scale: Evidence of Hardware Performance Faults in Large Production Systems"
+(FAST 2018), studied 101 reported fail-slow hardware incidents from
+large-scale deployments at twelve institutions — disks, NICs, CPUs and memory
+that kept working at a fraction of their speed, sometimes for months,
+converting a hardware fault into a latency mystery for whoever owned the
+service on top. **Fail-slow means latency degradation is a CONDITION to be
+detected — a declared threshold and a state the system enters — not a curve on
+a panel somebody may notice.** A binary readiness probe cannot see a disk at a
+tenth of its speed, so that node stays in the pool serving the slow path to
+everyone, which is the worst arrangement available: the fault is present, the
+traffic is still routed to it, and every health signal says it is fine.
+
+This framework already owns both halves and never compares them. §22 requires
+each SLI to state its measurement vantage point and prefers one OUTSIDE the
+process being measured — that is the client view. Everything else in §8 asks
+whether the service EMITS — that is the self view. The row that does not exist
+yet is the one that reads both and alerts on the delta.
+
+Vacuous forms:
+
+- **A health endpoint answered by the failing process.** It executes in the
+  same process, on the same host, over the same devices, and it is the one
+  request guaranteed to take the cheap path. Its 200 is a statement about the
+  handler.
+- **Both curves on one dashboard, and no comparison.** Client latency and
+  self-reported latency plotted side by side is not differential observability
+  until something computes the difference and has a threshold for it. Two
+  correct panels and a human eye is the same absence-of-mechanism this
+  framework refuses in §17's canary and §22's burn rate.
+- **Degradation expressed only as a log line.** "slow response from X" at WARN
+  is not a state: nothing routes differently, nothing sheds, nothing is paged,
+  and the line is indistinguishable from the twenty thousand before it.
+- **A client vantage that is a synthetic prober only.** A prober measures the
+  path the prober takes, at the rate the prober runs. It is worth having and
+  it is not the user's view — a real request population and a synthetic one
+  disagree exactly when the fault is partial (one shard, one tenant, one
+  version), which is the fail-slow shape.
+
+Inventory specifically: which signals exist from a vantage OUTSIDE the process
+(client-side SLI, load-balancer or mesh telemetry, synthetic probes — named
+individually with their sampling rate); whether any check compares an outside
+signal to the corresponding self-reported one and what threshold that
+comparison carries; whether "degraded" is a state the service can be in —
+declared threshold, entry and exit — or only "up"/"down"; whether any
+readiness gate can fail on SLOWNESS rather than only on error.
 
 ## 9. Security
 Inventory: authz/authn surface, policy-as-invariant candidates, secret
@@ -742,6 +805,27 @@ framework:
 is the test that induced the failure and timed it" is.** A failure you can
 provoke is a recovery you can time — which is what makes a scenario driver
 (§4) the natural instrument for this dimension rather than a separate effort.
+
+**The sharpest case of detected-but-never-recovers is METASTABLE failure, and
+it is the one this dimension's usual instrument misses by construction.**
+Bronson, Aghayev, Charapko and Zhu, "Metastable Failures in Distributed
+Systems" (HotOS 2021), name the state: a trigger (a load spike, a dependency
+brownout, a cold cache) pushes the system into a regime that then SUSTAINS
+ITSELF through a feedback loop — usually retries, usually with every retry
+policy inside its own declared limits — so removing the trigger changes
+nothing. Capacity exceeds the load users are offering, every component is
+behaving to spec, no invariant is violated, and there is no progress, because
+the load being served is the system's own amplification. The wedge outlives
+its cause, which is the exact shape §4's `poison_message` note and this
+dimension's opening rule are about: silent-vs-loud is not the axis,
+recoverable-vs-wedged is, and this is a wedge in which nothing anywhere is
+individually wrong. The instrument has to change too — a driver that induces a
+fault and times the return will faithfully time a return that arrives, whereas
+the metastable question is what happens AFTER the fault is removed, and it is
+only a real answer if a restart is forbidden while it is asked. §26 owns the
+mechanisms (shedding, retry budgets, breakers) and the trigger-and-release
+experiment; what belongs here is the recognition that "it recovered once the
+trigger stopped" is an assumption this dimension must stop granting for free.
 
 ## 14. The published contract
 
@@ -1374,6 +1458,341 @@ Row: `owning_domain`/`domain_role` declared and topology-consistent, or NA
 (no topology adopted); every cross-domain dependency resolving to a declared
 `domain_gateway`, or a named violation; direct-access exceptions tracked in
 `registries/domain-boundaries.yaml` with owner and expiry, or untracked.
+
+## 25. Load, stress and soak
+
+Gil Tene, "How NOT to Measure Latency" (2015) — a talk, not a paper, cited
+the way §23 cites Dependabot: the source for *coordinated omission*, which is
+the defect this dimension is mostly about, and which has no academic result
+behind it this file can point at. Three results carry the rest. Little, "A
+Proof for the Queuing Formula: L = λW", Operations Research 9(3), 1961 — the
+identity that turns three separately-measured numbers into a consistency
+check. Gunther, *Guerrilla Capacity Planning* (Springer, 2007) — the
+Universal Scalability Law, whose contention and coherency terms predict
+RETROGRADE scaling, throughput that falls as you add load or hardware, which
+is the shape a linear extrapolation cannot produce. Dean and Barroso, "The
+Tail at Scale", CACM 56(2), 2013 — why the tail, not the mean, is the number
+a load run exists to produce.
+
+**§6 declares this and nothing executes it.** Dimension 6 inventories "known
+saturation point" and asks for the capacity safety margin; `tier-policy.yaml`
+states the answer as policy — `capacity: { margin_target: 2x, measured:
+required }`. Then follow the word `measured` into the standard set and it
+arrives nowhere: there is no probe row for it, no make target, no artifact
+whose absence is a FAIL. **Today, in this framework, nothing measures the
+saturation point** — every repo's capacity row is satisfied by an assertion,
+and `measured: required` is a requirement whose only enforcement is that
+somebody types a number. This is the framework's own defect of the class it
+names everywhere else — declared and checked by nothing, exactly as §22 says
+of an SLO with no SLI behind it and §20 of a consistency model nothing
+exercises. It is stated here rather than left to a finding because a dimension
+that opens by absolving itself is the thing this file exists to refuse. §6 owns the delta (this
+build against last build, on a benchmark); this dimension owns the CEILING,
+and a relative regression check on a hot path nobody has driven to saturation
+reports a healthy percentage right up to the knee and then reports it again
+past the knee, where the system is going backwards.
+
+Vacuous forms:
+
+- **A CLOSED-loop bench reporting p99.** N workers, each issuing its next
+  request after the previous response returns. When the system slows, the
+  harness slows with it — the offered rate falls exactly when the system is
+  struggling, the requests that would have shown the stall are never sent, and
+  the percentile is computed over a sample the system itself selected. That is
+  coordinated omission, and the number it produces is a measurement of the
+  harness's politeness. **Open loop is the requirement**: a fixed arrival rate,
+  requests issued on schedule whether or not earlier ones have returned, and
+  latency measured from the INTENDED send time rather than from the moment the
+  harness got around to sending. The two differ by orders of magnitude in the
+  tail on the same system, and only one of them is what a user experiences.
+- **A saturation point declared rather than measured.** "It handles 5k rps"
+  with no sweep behind it is the capacity row's assertion in a sentence. The
+  measurement is a curve: rate against throughput and latency, up past the
+  knee, with the knee identified — and Gunther's law is the reason the sweep
+  must continue PAST the peak, since a system with a coherency term gets
+  slower as load rises, so the peak is not the last point you can reach but a
+  point you can pass without noticing.
+- **The mean of a load run.** Dean and Barroso's argument is that a service
+  fanning out to N components pays the MAX of N latencies, so a component's
+  p99 becomes the common case of a request. A load run reporting an average
+  reports the number nobody experienced, and a load run reporting a
+  percentile with no total request count attached does not say whether the
+  percentile has any samples in it.
+- **A soak that is the suite run longer.** This framework's own nightly `soak`
+  job is `go test -race -count=25 -timeout=20m ./...` — the template's nightly
+  workflow, beside extended fuzz and the mutation baseline. That is a flake
+  hunter and a good one, and its oracle is the same set of assertions the PR
+  suite already makes, run more times. A soak's oracle is different in kind:
+  **resource growth under sustained load** — goroutines or threads, file
+  descriptors, heap and RSS, connection-pool occupancy, on-disk footprint —
+  sampled over hours and checked for monotone increase against a flat
+  expectation. A leak that takes six hours to become visible is invisible to
+  an assertion that passes at minute one and at minute three hundred.
+- **A load run with no Little's-law check.** L = λW is an identity, not a
+  model: mean queue occupancy equals arrival rate times mean time in system,
+  for any stable system, with no distributional assumptions. So three numbers
+  the harness already has — observed in-flight/queue depth, achieved
+  throughput, measured latency — must agree to within measurement error, and
+  when they do not, one of them is wrong. It is usually the latency, wrong in
+  the direction coordinated omission produces, which makes this the cheapest
+  available audit of the harness itself.
+- **Load against stubbed dependencies, reported as system capacity.** A sweep
+  with the database faked measures the application's own ceiling, which is a
+  legitimate and different number. Say which one the artifact holds.
+
+Inventory: whether any load generator exists, and whether it is open-loop
+(fixed arrival schedule, latency from intended send time) or closed-loop; the
+workload it drives and whether that workload is versioned alongside the
+benchmark workloads; the MEASURED saturation point — the knee, the rate at it,
+and whether the sweep continued past it far enough to see retrograde
+behaviour; the date of that measurement and the build and hardware it ran on
+(a capacity number with no build attached is not comparable to anything); the
+margin computed as measured peak over required peak, against the tier policy's
+`margin_target`; the Little's-law residual for each recorded run; whether a
+soak lane exists, its duration, which resource series it samples, at what
+interval, and what threshold makes it fail; which dependencies were real and
+which were stubbed.
+
+Ask: the expected peak and the horizon it is expected over (a product fact,
+the same kind of number §22 says only a human can supply — an engineer can
+measure the ceiling but not decide what has to fit under it); which resources
+are EXPECTED to grow under steady load and which must be flat, because that
+distinction is the whole difference between a leak and a warm cache; how long
+a soak must run for this system's slowest cycle to complete at least twice —
+retention window, compaction, credential refresh, cursor rollover — since a
+soak shorter than one cycle cannot see the class of defect that lives there.
+
+Row: load generation present and OPEN-loop, closed-loop (and therefore
+reporting a number about the harness), or absent; saturation point measured
+with its date, build and hardware, or declared/unknown; capacity margin
+computed from measured peak against required peak, or asserted to satisfy the
+tier policy; Little's-law consistency checked or unchecked; soak lane present
+with a named resource-growth oracle and its duration, or absent (and, if the
+only soak is the nightly repeat-the-suite lane, say so — it is a flake hunter,
+not this); the baseline recorded in `benchmarks/load/baseline.md`, or no
+artifact.
+
+## 26. Overload and metastability
+
+Bronson, Aghayev, Charapko and Zhu, "Metastable Failures in Distributed
+Systems" (HotOS 2021) — the naming result, and the reason this is a dimension
+rather than a paragraph in §7. Nygard, *Release It!* (Pragmatic Bookshelf,
+2007) — circuit breaker, bulkhead and fail-fast as named patterns. Beyer,
+Jones, Petoff and Murphy (eds.), *Site Reliability Engineering* (O'Reilly,
+2016), "Handling Overload" and "Addressing Cascading Failures" — the
+operational form: shedding, criticality, and why a restart is often the only
+thing that clears a cascade, which is precisely what this dimension refuses to
+accept as recovery. Fox and Brewer, "Harvest, Yield, and Scalable Tolerant
+Systems" (HotOS-VII, 1999) — harvest and yield as the two independent things a
+system can give up under duress. Dean and Barroso (CACM 2013) again, for
+hedged requests — **a READ-side tactic and never an obligation in this
+framework: on a path carrying an external effect, a hedge duplicates the
+effect, so citing it as a general latency tool is how a tail-latency fix
+becomes a double-spend.**
+
+What the existing dimensions cover and where the hole is. §7 requires
+backpressure to be an explicit, tested decision at ingress. §12 adds the
+egress side. §13 requires a bounded return from a detected failure. All three
+assume the fault is present while the system is unwell. Bronson et al.'s
+contribution is the regime where it is not: a **trigger** (load spike,
+dependency brownout, cold cache, partial outage) pushes the system into a
+state that is then sustained by its own feedback loop, so that removing the
+trigger does not remove the failure. Capacity exceeds the load users are
+offering; every retry sits inside its own declared policy; every component
+passes its own health check; and the system serves nothing, because what it is
+serving is its own amplified work. §13 states the axis — recoverable-vs-wedged,
+not silent-vs-loud — and this is the wedge in which no individual thing is
+wrong, which is why it survives a review that checks each component against
+its contract.
+
+Vacuous forms:
+
+- **Shedding with no declared criterion.** "We shed under overload" leaves
+  unstated the three things that are the mechanism: which SIGNAL is read
+  (queue depth, in-flight concurrency, latency against the declared budget,
+  CPU), at what THRESHOLD, and what the shed caller RECEIVES (a typed
+  rejection it can back off on, or a timeout indistinguishable from the
+  overload itself). Absent all three, the system still sheds — by falling
+  over — and the only difference is that nobody chose which requests.
+- **Per-call retry policies mistaken for a retry budget.** `external_effect`
+  already obliges a `retry_policy` per capability, and every one of them can
+  be individually defensible while the composition is not: three attempts at
+  each of three layers is 27 requests to the bottom for one user action, and
+  each layer is inside its stated limit. A retry BUDGET is a different object
+  — a global cap on retries as a fraction of the request rate over a window,
+  enforced client-side, where the retry that would exceed the budget fails
+  immediately rather than waiting its turn. Without it, retry policy is a
+  per-hop property and amplification is a system property nobody owns.
+- **A circuit breaker that has never opened.** A breaker whose threshold has
+  not been reached in an induced run is a configuration value, in exactly the
+  sense §13's `Reconcile` was a function with passing tests and no caller. The
+  test must drive it open, show calls failing fast rather than queueing, and
+  then show it CLOSING again — a breaker that opens and never closes has
+  converted a brownout into an outage.
+- **Recovery demonstrated by a restart.** If the operator (or the
+  orchestrator's liveness probe) restarted the process, the experiment
+  measured the restart. This is the vacuous form with the strongest pull,
+  because restarting is what actually happens at 3am and it usually works; a
+  system that only returns via restart has a metastable failure and a habit
+  that conceals it. Forbid the restart for the duration of the experiment and
+  the question becomes answerable.
+- **A degraded mode nothing can enter.** A documented fallback with no trigger
+  condition, or one whose trigger is a human decision under time pressure, is
+  a paragraph. Harvest and yield are only real if something enters them
+  automatically and something records that it did.
+- **An unbounded queue anywhere on the path.** The feedback loop needs
+  somewhere to keep the work it cannot do. A bounded queue converts overload
+  into a rejection at a known point, which is a decision; an unbounded one
+  converts it into latency, then into memory, then into the state this
+  dimension is named for.
+
+The scenario that has to exist, stated exactly, because it is what separates
+this dimension from §7: **in the chaos lane, induce a retry storm — stall or
+error a dependency long enough for queues to fill and retries to compound —
+then REMOVE the trigger and keep measuring.** The assertion is that the system
+returns to steady state, unaided, without a restart, within a stated bound.
+Two halves are load-bearing and both are easy to drop: the trigger must be
+fully removed (otherwise the test measures degradation, which §7 already
+covers), and the restart must be forbidden (otherwise it measures the restart).
+A run that never reached the amplified regime in the first place proves
+nothing either, so the experiment must show the loop actually formed — retry
+rate above baseline, queue depth at its bound — before the release.
+
+Inventory: ingress admission control — where it sits, the signal it reads, its
+threshold, and the response a shed caller gets; every retry site, and whether
+a global budget bounds them, with the amplification factor COMPUTED across the
+deepest call chain rather than asserted per hop; outbound circuit breakers,
+their thresholds and half-open policy, and whether any test has driven one
+open and closed again; every queue on the request path and whether it is
+bounded; whether the chaos lane contains a trigger-and-release experiment,
+what bound it asserts on the return, and whether it forbids a restart; per
+user-facing capability, its declared degraded mode as HARVEST (an answer over
+less data) or YIELD (fewer requests answered) and what enters it; whether any
+hedged request rides a path that carries an external effect.
+
+Ask: for each user-facing capability, which the consumer prefers — a partial
+answer or a refused one (harvest versus yield is a product decision and cannot
+be derived from the code); the priority order in which traffic classes are
+shed, which is the same kind of question and the one that gets discovered
+during the incident if it is not answered before; what fraction of the request
+rate may be retries (the budget number); and who or what is allowed to restart
+during an overload event, since an automatic restart policy will silently
+answer this dimension's central question in the negative every time.
+
+Row: ingress shedding present with a declared signal, a threshold and a
+response the caller can see, or absent; retry budget enforced globally with the
+amplification factor computed, or per-call policies only; breakers on outbound
+dependencies driven open AND closed in a test, or configured only; a
+trigger-and-release metastability experiment present, showing return to steady
+state without restart within a stated bound, or untested (and if the chaos
+lane is still `-race -count=N`, that is untested, per §20); degraded mode
+declared per user-facing capability as harvest or yield with an automatic
+entry condition, or undeclared; every request-path queue bounded, or the
+unbounded ones named.
+
+## 27. Deterministic simulation (advisory)
+
+Zhou, Xu, Shraer and others, "FoundationDB: A Distributed Unbundled
+Transactional Key Value Store" (SIGMOD 2021) — the industrial result for
+deterministic simulation testing: the whole system run in a single process
+against a simulated network, disk and clock, with every source of
+nondeterminism driven from one seed, so that a failing run is a SEED and
+replays exactly. The property worth copying is not the ambition but that
+last clause. §20's chaos experiments answer a question no test suite can, and
+they hand you a story: the fault fired, something broke, and the interleaving
+that produced it is gone. A simulation failure hands you a reproducer, which
+is the artifact every other dimension in this file is organized around.
+
+**The prerequisites are the expensive part, and this scaffold already has
+them.** `prod-new` injects the clock, the randomness and the id generator as
+ports rather than letting the core reach for them, keeps the decision core
+pure, and enforces exactly that with fitness functions (§1) — named, because a
+claim of injectability with no enforcing test behind it is the thing this
+dimension breaks on: `TestCoreWallClock_TimeNowBannedExceptAllowlist` and
+`TestCoreRandomness_MathRandBannedExceptAllowlist`, each with an EMPTY
+allowlist, beside the hexagonal import bans in the same file. Those rules were
+adopted for testability and architecture reasons,
+and they happen to be exactly the preconditions for determinism: a system that
+already routes every nondeterministic input through an injected port is one
+harness away from being replayable, whereas a system that is not can only get
+there by a refactor of everything. Saying so is the point of this entry —
+most repos discover DST is out of reach; this one is unusually close and does
+not know it.
+
+Two stages, and only the first is proposed:
+
+- **Stage 1 — a single-process seeded fault-schedule harness over the app
+  layer, `make sim`.** One seed generates a schedule of faults expressed
+  against the existing ports — dependency errors and timeouts, message
+  duplication and reorder, crash-restart at chosen points in the fold — driven
+  through the same interfaces the adapters implement, with the ratified
+  invariants asserted after every step and the seed printed on failure. The
+  fault classes are not invented here: they are §4's capability-class
+  checklists, which is what keeps the schedule's coverage measurable against a
+  denominator rather than against the author's imagination.
+- **Stage 2 — a simulated network and disk under the whole process**, with a
+  deterministic scheduler and no real syscalls, which is what FoundationDB
+  actually built and what makes the technique cover the code that stage 1
+  drives through instead of into. Future, and out of scope until stage 1
+  exists somewhere.
+
+**This dimension is `mode: advisory`, and it stays advisory until stage 1
+exists in a repo.** Declaring it a gate first is the vacuous form, and it is a
+familiar one: a required lane most repos cannot yet satisfy is either waived
+everywhere or satisfied by an empty harness, which is §20's `make chaos`
+shipping as `-race -count=N` with a more impressive name on the target. The
+honest sequence is harness first, evidence that it finds something, then a
+conversation about whether it blocks — the same sequence the mutation
+dimension (§2) has been in for the entire life of this framework, and for the
+same reason.
+
+Vacuous forms:
+
+- **A seed that does not reproduce.** If replaying the seed does not produce
+  the same schedule and the same outcome, the failure is a story again and the
+  dimension has bought nothing. The check is mechanical and must exist from the
+  first commit of the harness: run one seed twice, compare the decision trace
+  byte for byte, and fail the run when they differ.
+- **Randomized testing relabelled as simulation.** A property or fuzz run with
+  a random seed is §3, and it is already required. What makes this different
+  is FAULTS on the ports and a schedule that controls the interleaving; a
+  harness that only varies inputs has renamed an existing lane.
+- **One bypassed source of nondeterminism.** A single `time.Now()` in the
+  core, one package-level `math/rand`, one map iteration whose order reaches
+  an output, and the seed no longer determines the run — silently, and usually
+  discovered as a "flaky" simulation. This is where §1's fitness functions
+  stop being a style rule and become a load-bearing precondition; a repo
+  wiring this harness should say which fitness function is standing behind
+  each claim of injectability.
+- **A harness that asserts only "no panic".** Then the oracle is the runtime's,
+  the schedule is exercising code rather than checking it, and any state that
+  is wrong but alive passes every seed.
+
+Inventory: whether clock, randomness and identifiers are injected at every
+point the core reads them, with the fitness function that proves it NAMED
+(§16's rule applies — an injected port that the entrypoint constructs and
+discards is not injection); whether a seeded fault-schedule harness exists,
+what it drives, and whether it is wired as `make sim`; whether the seed is
+printed on failure and whether replaying it reproduces; which fault classes
+the schedule can express, counted against §4's capability-class checklists as
+the denominator; what the harness asserts after each step — ratified
+invariants, or absence of panic.
+
+Ask: nothing that is not already answered elsewhere for stage 1 — the fault
+classes come from §4's checklists and the assertions from the ratified
+invariant set, which is most of why this stage is cheap. The one human
+question, and it is a judgment about value rather than a semantic fact: does
+this system's core carry interleavings worth the harness at all, or is it
+sequential enough that §3's properties and §4's scenarios already cover the
+space (§17's model-checking entry is scoped by the same question, one level
+further up).
+
+Row: `mode: advisory`, always, and this row is never a FAIL; injected
+clock/random/ids present with the enforcing fitness function named, or absent
+(which is also the answer to "could this repo do stage 1 at all"); `make sim`
+present with seeded schedules and a demonstrated seed replay, or absent; fault
+classes expressed against the §4 denominator; per-step assertions naming the
+ratified invariants, or panic-only.
 
 ## Cross-dimension metrics worth computing because they are nearly free
 - **Oracle gap** per package: structural coverage MINUS mutation score. A big

@@ -29,6 +29,26 @@ Two corpora are this skill's working capital (paths in `config.sh`):
   history (screening oracle for change-detectors).
 - `PROD_KATA_DIR`: deliberately broken implementations per capability class
   (wrong rounding, dropped idempotency key, off-by-one, swallowed error).
+  Two further classes belong here, both of them breakages a suite assembled
+  from happy-path clauses will sail straight through — which is precisely
+  what makes them worth staging:
+  - **overload kata** — a retry loop with no bound, no budget and no
+    shedding: correct against a fast downstream, and under a slow one each
+    client retry adds load to the thing already saturated, so the system
+    stays collapsed after the trigger is gone. A candidate suite must FAIL
+    this kata; a suite that exercises only the nominal latency passes it, and
+    that pass is the finding, because dimension 26 (overload and
+    metastability) is the failure this kata stages in miniature.
+  - **error-handling kata** — a handler that catches a fatal error and
+    carries on: logged and swallowed, or the error variable overwritten
+    before it is returned, so the caller sees success. Yuan et al., "Simple
+    Testing Can Prevent Most Critical Failures" (OSDI 2014), found that 92%
+    of catastrophic failures in the distributed systems they studied followed
+    the incorrect handling of an error the software had ALREADY signalled,
+    and that a large share of those handlers were trivially wrong. The kata
+    is cheap to write for that reason, and a suite that passes it is asserting
+    outputs while the error path decides the outcome.
+
 Maintain both: every sweep, add newly-identified refactor commits and any kata
 gap you found. A stale corpus screens nothing.
 

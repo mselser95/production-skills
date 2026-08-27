@@ -62,6 +62,7 @@ and the hard rules every agent in this repo follows.
 | `make test-advisory` | the candidate-provenance lane (`-tags=candidate`) — never blocks |
 | `make check-registries` | liability-registry expiry gate |
 | `make bench` | benchmarks — recording only, never a gate |
+| `make sim` | stage-1 deterministic simulation (`verification/simulation`) — fixed seed by default, `SIM_SEED=<n>` to sweep; the sweep is advisory |
 
 ## What this template does NOT ship
 

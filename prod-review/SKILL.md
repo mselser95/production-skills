@@ -78,6 +78,13 @@ The framework checklist, applied to what the diff introduces:
 - new failure branch → distinguishable in production from existing failures?
   (a bare error return with no new signal is a gap)
 - loop/fanout over a collection that used to be O(1) → benchmark scenario?
+- new queue or retry loop with no declared bound or global budget → overload
+  gap (dimension 26), and it stays a gap when each call's own timeout and
+  retry policy is present and correct. Amplification is a property of the
+  fleet, not of the call: every caller retrying its individually-bounded
+  attempts at the same moment is what sustains a metastable failure after the
+  trigger is gone (Bronson et al., HotOS 2021). A per-call policy answers a
+  different question, so citing it here is the vacuous form of this check.
 - semantic change with the spec (`PROD_SPEC_FILE`) and capability
   declarations untouched → either the spec changes or the PR asserts it
   remains complete.

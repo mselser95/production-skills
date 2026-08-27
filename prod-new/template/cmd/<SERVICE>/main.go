@@ -298,6 +298,24 @@ func run(ctx context.Context) error {
 		// the Outbox line above exists to prevent. It is passed as a plain
 		// function so healthhttp keeps knowing nothing about OpenTelemetry.
 		OTLPExportFailures: observability.OTLPExportFailures,
+		// Without this /healthz's `state` object reads
+		// `"known":false` forever, and scripts/kill-durability.sh's
+		// crash-only assertion has nothing to compare across the SIGKILL --
+		// the third instance in this call of the same defect the two
+		// comments above name: instrumented, never injected.
+		//
+		// The digest is computed HERE, in the composition root, rather than
+		// on domain.State: it is an observability rendering of the state,
+		// not a property of it, and internal/domain stays free of anything
+		// that exists only to be looked at. config.Digest is reused for it
+		// so "which config produced this" and "which state did it
+		// reconstruct" are fingerprinted by the same function -- one
+		// algorithm to know, and a digest that changes meaning between two
+		// fields of the same response is its own small trap.
+		LedgerState: func() (string, int, string) {
+			st := ledger.State()
+			return st.Balance, len(st.Applied), config.Digest(st.AppliedIDs())
+		},
 	})
 
 	var wg sync.WaitGroup

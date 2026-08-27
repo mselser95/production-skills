@@ -227,3 +227,68 @@ func TestHealthz_SurfacesEveryConfigIdentityField(t *testing.T) {
 			"'is this pod exporting, and to where' must be a lookup", body.Config["tracing_endpoint"])
 	}
 }
+
+// provenance: derived
+// verifies: /healthz surfaces the reconstructed ledger state, so a crash-only
+// recovery claim (Candea & Fox, HotOS IX 2003) is falsifiable from OUTSIDE
+// the process -- the assertion scripts/kill-durability.sh makes across a real
+// SIGKILL
+func TestHealthz_SurfacesTheReconstructedLedgerState(t *testing.T) {
+	srv := New(fakeLedger{}, Options{
+		LedgerState: func() (string, int, string) { return "42", 3, "d1d2d3d4d5d6" },
+	})
+	base := serveTest(t, srv)
+
+	resp, err := http.Get(base + "/healthz")
+	if err != nil {
+		t.Fatalf("get /healthz: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var body struct {
+		State LedgerStateView `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.State.Known {
+		t.Fatalf("state.known = false with a LedgerState supplied -- a probe cannot tell "+
+			"'no ledger' from 'empty ledger', which is the ambiguity the field exists to remove: %+v", body.State)
+	}
+	if body.State.Balance != "42" || body.State.AppliedCount != 3 || body.State.AppliedDigest != "d1d2d3d4d5d6" {
+		t.Fatalf("state = %+v, want balance=42 applied_count=3 applied_digest=d1d2d3d4d5d6", body.State)
+	}
+}
+
+// provenance: derived
+// verifies: /healthz distinguishes "no ledger" from "empty ledger"
+//
+// The negative half, and it carries the same weight as the positive one: a
+// handler that always rendered known=true would pass the test above, and
+// scripts/kill-durability.sh would then compare two IDENTICAL EMPTY captures
+// across the kill and report crash-only recovery proven having observed
+// nothing. That is exactly the vacuous pass this standard keeps finding, so
+// it gets its own case rather than a comment.
+func TestHealthz_LedgerStateIsMarkedUnknownWhenThereIsNoLedger(t *testing.T) {
+	srv := New(fakeLedger{}, Options{})
+	base := serveTest(t, srv)
+
+	resp, err := http.Get(base + "/healthz")
+	if err != nil {
+		t.Fatalf("get /healthz: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var body struct {
+		State LedgerStateView `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.State.Known {
+		t.Fatalf("state.known = true with no LedgerState supplied: %+v", body.State)
+	}
+	if body.State.Balance != "" || body.State.AppliedCount != 0 || body.State.AppliedDigest != "" {
+		t.Fatalf("state = %+v, want the zero view when nothing supplies it", body.State)
+	}
+}

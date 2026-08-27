@@ -13,4 +13,36 @@
 # (production.yaml's out_of_scope) -- including artifact provenance, which
 # is implemented for real via actions/attest-build-provenance in
 # .github/workflows/pr.yaml, not waived.
+#   THE ONE WAIVER THIS TEMPLATE EXPECTS A REAL DEPLOYMENT TO NEED.
+#   observability/alerts.md's `SvcGrayFailure` reads one series this service
+#   emits and one it structurally cannot: an out-of-process vantage on whether
+#   clients can actually use it. A deployment with no such vantage -- no
+#   blackbox prober, no ingress success rate, no synthetic canary, no consumer
+#   error rate -- cannot run that alert.
+#
+#   The failure mode this entry exists to prevent is NOT the missing prober.
+#   It is the repair that looks like a fix: substituting another `svc_*`
+#   series for the client half, which produces an expression that parses,
+#   evaluates, never fires, and reads in review as a working gray-failure
+#   detector. A gray failure is a disagreement between vantages (Huang et al.,
+#   HotOS 2017); a self-emitted client view is a third self-report wearing a
+#   client's name, and it goes quiet in exactly the failure the alert exists
+#   for.
+#
+#   So the obligation is waived with a date, never met with a lookalike:
+#
+#     - id: gray-failure-no-external-vantage
+#       owner: <team>
+#       created: <YYYY-MM-DD>
+#       expires: <YYYY-MM-DD>          # never `never`: this is debt, not a
+#                                      # permanent operational lever
+#       obligation: differential_observability (tier-policy.yaml)
+#       reason: >
+#         No out-of-process vantage on this service's usability exists yet, so
+#         SvcGrayFailure cannot be evaluated. Deliberately NOT satisfied by
+#         pointing the client half at a series this process emits, which would
+#         make the alert green and blind at the same time.
+#       plan: >
+#         <the prober / ingress SLI / canary being stood up, and by whom>
+
 entries: []

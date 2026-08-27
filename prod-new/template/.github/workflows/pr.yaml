@@ -24,6 +24,19 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: make check-fast
+      # PROVE THE VERIFIER BEFORE TRUSTING ITS VERDICT. Each of these drives
+      # verify-standard.sh's own logic against crafted fixtures and asserts
+      # BOTH directions. They are listed individually rather than globbed:
+      # `for f in scripts/tests/*-selftest.sh` reports success over an empty
+      # glob if the directory is ever renamed, which is the fail-open shape
+      # every one of these files exists to refuse.
+      - name: probe selftests (the verifier of the verifier)
+        run: |
+          bash scripts/tests/load-rows-selftest.sh
+          bash scripts/tests/probe-self-gate-selftest.sh
+          bash scripts/tests/sbom-ordering-selftest.sh
+          bash scripts/tests/check-registries-selftest.sh
+          bash scripts/tests/non-vacuity-selftest.sh
 
   production-gates:
     needs: check-fast

@@ -75,6 +75,18 @@ candidate invariant, and the gate attribution stay on the session model.
    sequence exhibiting the failure against the pre-fix code. Target 10–50
    events — minimization is the deliverable; a raw capture is fixture rot on
    a timer. Apply RULE SHELL-INTERLEAVING / RULE NOT-REPRODUCIBLE as needed.
+   The systematic form of this reduction is **ddmin** (Zeller & Hildebrandt,
+   "Simplifying and Isolating Failure-Inducing Input", IEEE TSE 28(2), 2002):
+   split the sequence into n chunks, test each complement, keep whatever
+   still fails, raise the granularity when nothing does. You MAY run it
+   mechanically when the raw capture is large — the replay harness is already
+   the pass/fail predicate ddmin requires, so the search is a script and not
+   a judgment call, and it converges on a sequence that is 1-minimal
+   (removing any single event makes the failure disappear) rather than one
+   that merely stopped shrinking when you got bored. Record the predicate you
+   minimized against: a ddmin run against "the process exits non-zero"
+   minimizes toward the wrong failure and produces a fixture that passes for
+   a reason nobody stated.
 2. **Assert invariants, not snapshots.** `invariants.txt` names which
    ratified invariants must hold at every transition of the replay. If the
    incident violated something no ratified invariant captures — that IS the

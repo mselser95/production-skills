@@ -79,6 +79,17 @@ Read `references/preamble.md` first. Inputs are artifacts in
    - anything else → `provenance: candidate` with mandatory `ttl:`; exact
      values not derivable from a ratified property additionally get
      `pinning: true`.
+   - every NEW error branch you introduce ships with a test that EXECUTES it
+     and asserts its distinguishable signal — reachable, and separable in
+     production from the branches beside it. Yuan et al. (OSDI 2014) measured
+     that 92% of catastrophic failures followed the mishandling of an error
+     the software had already signalled, and that the commonest handlers were
+     trivially wrong (empty, catch-all-and-abort, a `TODO`); all three are
+     mechanically avoidable at write time, which is the only moment they cost
+     one table row. `prod-review` recomputes obligations from your diff and
+     raises a new failure branch with no signal as a gap finding — an
+     untested error branch in your own diff is that finding, already visible
+     to you, so close it here rather than in a round trip.
 4. **Iterate against the cheap gate** (`PROD_CHEAP_GATE_CMD`): compile
    affected + lint + changed-package units. Repair from structured feedback —
    the remediation line of a violation is your next step. Count iterations

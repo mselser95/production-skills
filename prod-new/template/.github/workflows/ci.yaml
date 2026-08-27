@@ -19,6 +19,17 @@ jobs:
           cache: true
       - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
       - run: make verify
+      # PROVE THE VERIFIER BEFORE TRUSTING ITS VERDICT — same step as pr.yaml's
+      # check-fast job, and here because `make verify` does not run the probe
+      # selftests. Listed individually rather than globbed: a `for f in
+      # scripts/tests/*-selftest.sh` loop reports success over an empty glob.
+      - name: probe selftests (the verifier of the verifier)
+        run: |
+          bash scripts/tests/load-rows-selftest.sh
+          bash scripts/tests/probe-self-gate-selftest.sh
+          bash scripts/tests/sbom-ordering-selftest.sh
+          bash scripts/tests/check-registries-selftest.sh
+          bash scripts/tests/non-vacuity-selftest.sh
 
   # Secret scanning on EVERY trigger, not just PR --
   # tier-policy.yaml: supply_chain.secret_scan = all_triggers. This is the

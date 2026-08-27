@@ -2956,6 +2956,381 @@ if grep -rqE "commit|git_sha|config_version|schema_version|build_info" observabi
   esac
 else row "operational-determinism" FAIL "Output=F(code,config,state,inputs): the four versions are not surfaced — replay cannot reproduce prod"; fi
 
+# --- 23. load / stress / soak (dimension 25) --------------------------------
+#
+# THE QUESTION THIS ASKS THAT NO ROW ABOVE ASKS: at what arrival rate does this
+# system stop keeping up, and how far is that point from the peak it is
+# expected to serve?
+#
+# The `benchmarks` row (dimension 10, above) does NOT answer it, and the
+# difference is mechanical rather than a matter of emphasis. That row runs
+# `go test -run='^$' -bench=. -benchtime=10x`: one operation, ten iterations, no
+# concurrency, no queue. A system can hold a perfectly flat ns/op while its
+# saturation point sits BELOW its expected peak, because saturation is a
+# property of contention and of coherency traffic, not of per-operation cost.
+# Gunther's Universal Scalability Law (Guerrilla Capacity Planning, 2007) is
+# that argument in closed form -- C(N) = N / (1 + a(N-1) + bN(N-1)) -- where the
+# serialization coefficient `a` and the crosstalk coefficient `b` are the only
+# terms that decide where the throughput curve turns over, and BOTH vanish at
+# N=1. A benchmark at N=1 measures neither. That is why a green `benchmarks`
+# row has never been evidence about capacity, and why this dimension is
+# separate rather than an extra assertion inside that one.
+#
+# WHY THE ARTIFACT IS A DOCUMENT. The saturation point is only meaningful
+# against a hardware shape and an expected peak, and both of those are
+# declarations a human owns -- no test can derive them. So dimension 25's
+# evidence is benchmarks/load/baseline.md, written by whoever ran the load, and
+# the spec's `load_baseline.margin_target` is what that document is scored
+# against.
+#
+# WHICH MEANS THIS ROW IS CHECKED HARDER THAN A TEST-BACKED ONE, not more
+# softly. A prose artifact is the easiest thing in this framework to satisfy
+# dishonestly: a sentence saying "we never found the saturation point" contains
+# the word `saturation`, and a keyword grep is this file's oldest and most
+# repeated defect -- `grep -qi "reconcil"` satisfied by a comment saying
+# reconciliation is absent, the `mutation` keyword search satisfied by typing
+# the word, `grep -rqi "sbom\|syft"` green for weeks in a repo whose sbom job
+# had never once succeeded. All three shipped. Three guards separate this row
+# from that habit:
+#
+#   1. FIELD SHAPE, NOT WORD PRESENCE. Every value must sit on a `key: value`
+#      line and must START with its number. `saturation point: not measured
+#      yet` fails, and so does a paragraph about the saturation point, because
+#      neither puts a number where the number belongs.
+#   2. THE MARGIN IS COMPARED, NOT READ. The document's headroom is checked
+#      against `load_baseline.margin_target` in the spec, so a document
+#      recording 1.1x against a declared 3x target is a FAIL naming both
+#      numbers -- not a PASS for having a margin line.
+#   3. THE MEASUREMENT CARRIES AN AGE, READ FROM INSIDE THE DOCUMENT. Never
+#      from the file's mtime: a clone stamps every file with the checkout time,
+#      so an mtime freshness check reports a three-year-old baseline as zero
+#      days old on every CI runner -- fail-open, silently, on exactly the
+#      machine that gates the merge.
+#
+# WHAT A PASS HERE DOES NOT PROVE, stated plainly rather than left to be
+# inferred: that the load test was ever run. This row reads a document a human
+# writes, and it cannot distinguish a measured number from a typed one. The
+# date, the field shape and the comparison raise the cost of a lie; they do not
+# remove it. The honest ceiling is that a CI load lane should WRITE this file,
+# at which point the row is reading a machine's output -- that is stage 2 work
+# and it is not done here, so nobody should read this row as more than
+# "somebody committed a measurement that meets the target, recently".
+LOAD_BASELINE="benchmarks/load/baseline.md"
+# 30 days, and the number is a policy choice rather than a discovery: a load
+# baseline decays because the SYSTEM changes, not because the file ages, and
+# nothing here can measure that. A month is short enough that a quarter's worth
+# of drift cannot hide behind it and long enough that a repo is not re-running
+# load on every release. A repo that genuinely needs a different window changes
+# it by declining the dimension with the reason, not by editing this constant
+# in its vendored copy -- a threshold edited per repo is a threshold nobody can
+# reason about across repos.
+LOAD_MAX_AGE_DAYS=30
+
+# load_field reads ONE declared field out of the load baseline document.
+#
+# The grammar is narrow, and it is written down here rather than left implied:
+#
+#     [ -*> ] [**] <key> [**] : <value>
+#
+# A leading bullet, blockquote marker or bold decoration is allowed because
+# real markdown carries them; the key matches case-insensitively; everything
+# after the FIRST colon is the value; the first matching line in the file wins.
+#
+# A markdown TABLE CELL is deliberately not a field: `| saturation point |
+# 12000 rps |` yields nothing, because a two-cell row has no colon and
+# accepting it would mean accepting "the key appears somewhere on a line",
+# which is the keyword grep this row exists to refuse.
+#
+# The key regex is PARENTHESISED before it is embedded. Callers pass
+# alternations (`(measured|date)`), and unparenthesised alternation would
+# escape the surrounding context entirely -- `\**a|b\**[[:space:]]*:` matches a
+# bare `a` anywhere on the line, with no colon required. That is a
+# fail-OPEN precedence bug, so the group is applied here where every caller
+# gets it rather than in each caller where one will eventually forget.
+load_field() { # load_field <key-extended-regex> -> the field's value, or empty
+  grep -aiE "^[[:space:]]*[-*>]?[[:space:]]*\**(${1})\**[[:space:]]*:" "$LOAD_BASELINE" 2>/dev/null \
+    | head -1 | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]+$//'
+}
+
+# load_margin_norm normalises a headroom expression to "<kind> <number>", so
+# the document and the spec's target are COMPARED rather than string-matched.
+#
+# Two kinds are accepted and they are not interchangeable: `3.2x` is a FACTOR
+# over expected peak, `220%` is a PERCENTAGE of it. Coercing one into the other
+# would let a measured 1.5x satisfy a declared 120% target, which is arithmetic
+# on two different quantities dressed up as a comparison -- so a mismatch is a
+# FAIL that says so, never a silent conversion.
+#
+# ANCHORED AT THE START of the value, which is the whole guard: "aiming for 3x
+# eventually" does not normalise, because the number that describes a
+# measurement has to BE the measurement rather than a number in a sentence
+# about one.
+load_margin_norm() { # load_margin_norm <text> -> "factor N" | "percent N" | empty
+  local t; t="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  if   [[ "$t" =~ ^([0-9]+(\.[0-9]+)?)x ]]; then printf 'factor %s' "${BASH_REMATCH[1]}"
+  elif [[ "$t" =~ ^([0-9]+(\.[0-9]+)?)% ]]; then printf 'percent %s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# load_age_days turns the document's declared measurement date into a whole
+# number of days.
+#
+# python3, not `date -d`: BSD date (every macOS developer machine running this
+# probe) rejects `-d`, and GNU date (every Linux CI runner) rejects `-j -f`, so
+# a shell-date implementation is right on exactly one of the two machines that
+# matter and silently yields an empty age on the other. An empty age is the
+# fail-open shape -- it reads as "no verdict" to a careless caller -- so the
+# caller below treats a non-integer as a FAIL rather than as fresh.
+#
+# UTC, matching the evidence record at the bottom of this file, so a run at
+# 23:00 in one timezone and 01:00 in the next do not disagree about the age of
+# the same file by a day. Future dates come back NEGATIVE on purpose: they are
+# a stamp no run could have produced, and the caller refuses them instead of
+# rounding them to fresh.
+load_age_days() { # load_age_days <YYYY-MM-DD> -> whole days since that date, or empty
+  python3 - "$1" <<'PYAGE' 2>/dev/null
+import datetime, sys
+try:
+    d = datetime.date.fromisoformat(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+print((datetime.datetime.now(datetime.timezone.utc).date() - d).days)
+PYAGE
+}
+
+# The three rows of this section are FUNCTIONS, called immediately below, for
+# the reason classify_mutation_result, extract_real_tag and spec_field are:
+# _shared/probes/load-rows-selftest.sh drives THESE against scratch fixture
+# directories, in every verdict each can produce. A selftest that restates the
+# branch logic tests the restatement, and a selftest that greps this file for
+# the branch cannot tell a branch that works from a branch that is dead.
+load_baseline_row() {
+  # NA IS "UNASKED", NEVER "ANSWERED". Both NA paths below are about the
+  # QUESTION not having been put to this repo -- a ratified decline, or a spec
+  # written before dimension 25 existed. Neither is evidence about capacity,
+  # and the evidence strings say so, because an N/A that reads like a pass is
+  # how a dimension quietly leaves the standard.
+  if declined "load_baseline"; then
+    row "load-baseline" NA "ratified decline in $SPEC -- capacity is UNMEASURED here by a recorded decision, not by evidence"
+    return
+  fi
+  local has_block=0 has_dir=0 engaged_by
+  grep -qE '^load_baseline:' "$SPEC" 2>/dev/null && has_block=1
+  [[ -d benchmarks/load ]] && has_dir=1
+  if (( has_block == 0 && has_dir == 0 )); then
+    row "load-baseline" NA "spec predates dimension 25: no load_baseline block in $SPEC and no benchmarks/load/ -- this repo has never been ASKED for a saturation point, which is not the same as having answered"
+    return
+  fi
+  # Two independent ways in, and the evidence names which one fired, because
+  # "you owe a load baseline" is an unhelpful finding if the reader cannot see
+  # what created the obligation.
+  if (( has_block )); then engaged_by="load_baseline: declared in $SPEC"
+  else engaged_by="benchmarks/load/ exists in this repo"; fi
+
+  if [[ ! -f "$LOAD_BASELINE" ]]; then
+    row "load-baseline" FAIL "$engaged_by, but $LOAD_BASELINE does not exist -- the artifact this dimension is scored on is missing (prod-bootstrap ships benchmarks/load/baseline-TEMPLATE.md; copy it to $LOAD_BASELINE and fill it from a real run)"
+    return
+  fi
+
+  # THE TARGET IS CHECKED BEFORE THE DOCUMENT IS PARSED, on purpose. A measured
+  # margin with nothing to meet is a number, not a gate, and reporting the
+  # document's shortcomings first would send the reader to edit the file that
+  # is fine -- the same misattribution implemented_row was fixed for when it
+  # blamed a decayed spec for a build failure elsewhere in the repo.
+  local target target_norm
+  target="$(spec_field load_baseline margin_target)"
+  if placeholder_value "$target"; then
+    row "load-baseline" FAIL "$LOAD_BASELINE exists but $SPEC declares no load_baseline.margin_target (got '${target:-<absent>}') -- a measured headroom with no committed target is a number nobody can fail"
+    return
+  fi
+  target_norm="$(load_margin_norm "$target")"
+  if [[ -z "$target_norm" ]]; then
+    row "load-baseline" FAIL "load_baseline.margin_target in $SPEC is '$target' -- it must START with the number, as 3x (factor over expected peak) or 300% (percentage of it), so the probe compares quantities instead of strings"
+    return
+  fi
+
+  local measured age
+  measured="$(load_field 'measured([_ ](at|on))?|measurement[_ ]date|date')"
+  if [[ ! "$measured" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+    row "load-baseline" FAIL "$LOAD_BASELINE carries no parseable measurement date: wanted a 'measured: YYYY-MM-DD' field, got '${measured:-<no such field>}' -- and the file's mtime is NOT a fallback, because a clone stamps it with the checkout time and would report any baseline as fresh"
+    return
+  fi
+  measured="${BASH_REMATCH[1]}"
+  age="$(load_age_days "$measured")"
+  if [[ ! "$age" =~ ^-?[0-9]+$ ]]; then
+    row "load-baseline" FAIL "could not compute the age of $LOAD_BASELINE from its declared date '$measured' -- a freshness check that produced no age must not report freshness (is python3 on PATH? is the date real, e.g. 2026-02-31?)"
+    return
+  fi
+  if (( age < 0 )); then
+    row "load-baseline" FAIL "$LOAD_BASELINE says it was measured on $measured, $(( -age )) day(s) in the FUTURE -- no run produced that stamp, so the date is typed rather than measured and the freshness of everything under it is unknown"
+    return
+  fi
+  if (( age > LOAD_MAX_AGE_DAYS )); then
+    row "load-baseline" FAIL "$LOAD_BASELINE was measured on $measured, $age day(s) ago (limit ${LOAD_MAX_AGE_DAYS}) -- a stale capacity measurement describes a system that no longer exists; re-run the load lane or decline the dimension with the reason"
+    return
+  fi
+
+  local sat
+  sat="$(load_field 'saturation[_ -]?point')"
+  if placeholder_value "$sat" || [[ ! "$sat" =~ ^[0-9] ]]; then
+    row "load-baseline" FAIL "$LOAD_BASELINE declares no saturation point: wanted 'saturation point: <number> <unit>' with the value STARTING at the number, got '${sat:-<no such field>}' -- prose about the saturation point is the keyword-grep form this row exists to refuse"
+    return
+  fi
+
+  local margin margin_norm mkind mval tkind tval
+  margin="$(load_field 'margin|headroom')"
+  margin_norm="$(load_margin_norm "$margin")"
+  if [[ -z "$margin_norm" ]]; then
+    row "load-baseline" FAIL "$LOAD_BASELINE declares no parseable margin: wanted 'margin: <number>x' or 'margin: <number>%', got '${margin:-<no such field>}' -- without it the saturation point is a number with nothing to compare it to"
+    return
+  fi
+  read -r mkind mval <<<"$margin_norm"
+  read -r tkind tval <<<"$target_norm"
+  if [[ "$mkind" != "$tkind" ]]; then
+    row "load-baseline" FAIL "$LOAD_BASELINE reports the margin as a $mkind ('$margin') while $SPEC declares the target as a $tkind ('$target') -- these are different quantities and comparing them would be arithmetic dressed as a verdict; state both the same way"
+    return
+  fi
+  if awk -v a="$mval" -v b="$tval" 'BEGIN{ exit !(a+0 >= b+0) }'; then
+    row "load-baseline" PASS "saturation $sat; margin $margin meets the declared target $target; measured $measured ($age day(s) old, limit $LOAD_MAX_AGE_DAYS)"
+  else
+    row "load-baseline" FAIL "$LOAD_BASELINE reports a margin of $margin against the declared target $target -- the measured headroom does not meet what $SPEC commits to; that is a capacity finding, not a reason to lower the target"
+  fi
+}
+load_baseline_row
+
+# --- 24. error handling as a fitness function (Yuan et al., OSDI 2014) ------
+#
+# THE FINDING THIS ROW IS BUILT ON, with its numbers, because the numbers are
+# the argument. "Simple Testing Can Prevent Most Critical Failures: An Analysis
+# of Production Failures in Distributed Data-Intensive Systems" (Yuan, Luo,
+# Zhuang, Rodrigues, Zhao, Zhang, Jain, Stumm; OSDI 2014) studied 198 randomly
+# sampled user-reported failures across Cassandra, HBase, HDFS, MapReduce and
+# Redis:
+#
+#   * 92% of the CATASTROPHIC failures resulted from incorrect handling of
+#     non-fatal errors that the software had ALREADY EXPLICITLY SIGNALLED. The
+#     error was detected. The handler is what took the cluster down.
+#   * 58% of those catastrophic failures would have been caught by testing the
+#     error-handling code alone -- no distributed reasoning, no exotic
+#     interleaving, no fault injection into the network.
+#   * 35% of them fall into three patterns a reader can spot without running
+#     anything: the handler is empty or only logs, the handler body is a
+#     TODO/FIXME, or the handler over-catches and aborts the process.
+#
+# That last group is what makes this a FITNESS FUNCTION rather than a test.
+# Those three shapes are properties of the SOURCE, so they belong with the
+# import bans and the wall-clock ban of dimension 3: checked by a script the
+# probe RUNS, not by a reviewer remembering to look.
+#
+# WHY THE PROBE DOES NOT IMPLEMENT THE CHECK ITSELF. What counts as an
+# over-catch, and which packages are allowed to abort, are repo-specific facts
+# -- a composition root SHOULD exit on a failed dependency, and a decision core
+# never should. A single expression baked into this vendored file would either
+# fire on the correct case (and get widened until it is gone -- the fate this
+# framework names explicitly) or be loose enough to certify nothing. So the
+# rule lives in the repo, at scripts/error-handling-fitness.sh, and the probe
+# does what it does everywhere else: runs the gate, and refuses to describe an
+# unrun gate as a clean one.
+#
+# THE VACUOUS FORMS, named so they are recognisable when someone proposes one:
+#
+#   - a fitness script that exits 0 having scanned ZERO files. That is the
+#     shape this file has shipped three separate times, and it is the script's
+#     own obligation to fail loudly on an empty match set -- prod-bootstrap's
+#     plan task for this script carries that requirement, and this row cannot
+#     see it from outside.
+#   - a script present but NOT EXECUTABLE. In CI that is a step that exists in
+#     the workflow and never runs.
+#   - this row reading the script's PRESENCE instead of its exit status, which
+#     would make it a filename check with a paper's name attached.
+#
+# The first is the script's to refuse; the second and third are what the
+# branches below refuse.
+EHF="scripts/error-handling-fitness.sh"
+error_handling_fitness_row() {
+  if [[ ! -e "$EHF" ]]; then
+    row "error-handling-fitness" NA "no $EHF -- this repo's scaffold predates the error-handling fitness function (Yuan et al., OSDI 2014: 92% of catastrophic failures come from the handler, not from the error). prod-bootstrap's gap report owes it as a plan task; this NA means UNASKED, never answered"
+    return
+  fi
+  if [[ ! -x "$EHF" ]]; then
+    # Deliberately NOT rescued by running it through `bash`. This probe could;
+    # CI cannot, because CI invokes it as a program, and a lane that cannot
+    # start is indistinguishable from a lane that passed. Certifying it clean
+    # from a path CI does not take is the same false green as a required check
+    # skipped by a failed `needs:` counting as PASSED.
+    row "error-handling-fitness" FAIL "$EHF exists but is not executable ($(ls -l "$EHF" 2>/dev/null | awk '{print $1}')) -- the mode bit is the difference between a gate and a workflow step that reports success without running; chmod +x it"
+    return
+  fi
+  local out rc first
+  out="$("$EHF" 2>&1)"; rc=$?
+  if (( rc == 0 )); then
+    first="$(printf '%s\n' "$out" | grep -m1 -aE '[^[:space:]]' | cut -c1-90)"
+    row "error-handling-fitness" PASS "$EHF EXECUTED clean this run (exit 0): ${first:-no output}"
+  else
+    # An evidence-free FAIL is the worst output this probe can produce -- it
+    # names no defect, so the only available "fix" is to soften the probe. A
+    # script that reds silently still gets a finding with its exit status in it.
+    first="$(printf '%s\n' "$out" | grep -m1 -aE '[^[:space:]]' | cut -c1-120)"
+    row "error-handling-fitness" FAIL "$EHF is RED (exit $rc): ${first:-no output at all, which is itself a defect in the fitness script -- a gate must name what it rejected}"
+  fi
+}
+error_handling_fitness_row
+
+# --- 25. deterministic simulation (dimension 27) -- ADVISORY, CANNOT FAIL ---
+#
+# WHAT THE LANE IS. A deterministic simulation runs the whole system inside a
+# single simulated world: one seeded PRNG drives every scheduling and fault
+# decision, time is a variable the harness advances rather than a clock, and
+# the network, the disks and the peers are models the test can partition, stall
+# and crash at will. The payoff is that a failing SEED is a reproducible
+# distributed bug -- replay it and get the identical interleaving, which is the
+# one thing ordinary concurrency testing cannot offer. FoundationDB is the
+# reference implementation (Zhou et al., "FoundationDB: A Distributed Unbundled
+# Transactional Key Value Store", SIGMOD 2021, §4 -- the simulator was built
+# BEFORE the database it tests); TigerBeetle's VOPR runs the same idea
+# continuously over seed space.
+#
+# WHY THIS ROW CANNOT FAIL, AND EXACTLY WHAT WOULD CHANGE THAT.
+#
+# Nothing in this framework has yet had a defect found by a simulation lane. A
+# gate that can turn a build red before it has ever caught anything buys one
+# thing: the appearance of coverage. This file's own history is the whole
+# argument -- every vacuous row it has had to remove (`grep -qi "reconcil"`,
+# the `mutation` keyword search, `grep -rqi "sbom\|syft"`) began as a real
+# requirement nobody could satisfy honestly yet, and was therefore satisfied
+# dishonestly. A red row that cannot be earned is a red row that gets argued
+# down into a keyword.
+#
+# So this row REPORTS and does not gate, and it is promoted on a checkable
+# condition rather than on a date: when stage 1's sim lane has produced its
+# first real finding -- a seed that reproduced a defect no other lane caught --
+# whoever has that seed converts this into a FAIL-capable row and cites it
+# here. Until then PASS means "a lane is present", NA means "there is no lane",
+# and NEITHER is a claim that this system was ever simulated.
+#
+# ONE MECHANICAL NOTE, because it would otherwise break the promise above by
+# accident: `row` converts a PASS carrying EMPTY evidence into a FAIL. Both
+# evidence strings below therefore begin with a literal, so no combination of
+# detections can produce an empty one and hand this row a failing branch it is
+# not supposed to have.
+simulation_advisory_row() {
+  local has_target=0 has_dir=0 missing=""
+  # `^sim:` is the TARGET, not the word. A `.PHONY: sim` line names it without
+  # defining it, and a Makefile that only declares the phony has no recipe to
+  # run -- the same distinction the secret-scan row had to learn between a job
+  # DEFINITION and a mention of one.
+  grep -qE '^sim:' Makefile 2>/dev/null && has_target=1
+  [[ -d verification/simulation ]] && has_dir=1
+  if (( has_target && has_dir )); then
+    row "simulation-advisory" PASS "sim lane present (advisory): a 'sim:' target in the Makefile and verification/simulation/ ($(find verification/simulation -type f 2>/dev/null | wc -l | tr -d ' ') file(s)) -- PRESENCE ONLY; this row executes no seed and gates nothing"
+  else
+    (( has_target )) || missing="no 'sim:' target in the Makefile"
+    (( has_dir ))    || missing="${missing:+$missing; }no verification/simulation/"
+    row "simulation-advisory" NA "no deterministic simulation lane ($missing) -- dimension 27 is ADVISORY: this row cannot FAIL until a sim lane has caught a defect no other lane did, and until then an absent lane is a gap in the roadmap, not in this repo"
+  fi
+}
+simulation_advisory_row
+
 # --- report --------------------------------------------------------------
 # --- SILENCE IS NOT A VERDICT -----------------------------------------------
 #

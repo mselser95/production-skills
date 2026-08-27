@@ -27,6 +27,46 @@ defaults: &defaults
   # the implementation, which is worse than no model.
   formal_methods: { mode: advisory, scope: novel_concurrent_or_distributed_protocol_core }
 
+
+  # Deterministic simulation testing (dimension 27) — ADVISORY, and the
+  # advisory is the honest part of this entry rather than a hedge in it.
+  # FoundationDB runs the whole system on a simulated network, disk and clock
+  # under a seeded fault schedule, so a failure IS a seed and reproducing it
+  # is rerunning that seed ("FoundationDB: A Distributed Unbundled
+  # Transactional Key Value Store", SIGMOD 2021). It sits one step past
+  # `formal_methods` above on the same spectrum: that key checks a model of
+  # the design, this one runs the real code against a controlled world.
+  #
+  # The prerequisites already exist here, and were not built for this: the
+  # scaffold injects clock, randomness and IDs, and keeps a pure decision
+  # core (`operational_determinism` below, and the three architectural
+  # zones). A repo on this standard is closer to stage 1 than it knows, which
+  # is why the entry is worth recording before the harness exists.
+  #
+  # What does NOT exist is the harness, and `mode: advisory` says exactly
+  # that — it is not a tier relaxation, it is this framework declining to
+  # levy a requirement it cannot yet check. Declaring it required today would
+  # be satisfied by a `-race -count=N` lane renamed "simulation", which is
+  # this file's own textbook vacuous form committed on purpose. The entry
+  # moves to required_or_ratified_decline when a stage-1 harness ships AND
+  # its non-vacuity is demonstrated the way every other gate here pays for
+  # itself — break the thing it guards, watch it go red — and not one commit
+  # before.
+  simulation:
+    mode: advisory                        # no harness exists yet; see above
+    stage1: seeded_fault_schedule_over_app_layer
+                                          # single process, the REAL app
+                                          # layer, fakes beneath it, faults
+                                          # chosen by a recorded seed — the
+                                          # reproducible half. Simulated
+                                          # network and disk are stage 2 and
+                                          # explicitly not this
+
+    # What ends "advisory": the first seed that reproduces a defect no
+    # other lane caught. Every vacuous row this framework removed began as
+    # a real requirement nobody could satisfy honestly yet; recording the
+    # promotion condition is what stops advisory becoming permanent.
+    promotion_condition: first_seed_found_defect
   # Behavioral
   property_tests: required_on_core
   fuzz: required_on_decode_boundaries    # every parse/decode boundary, seed corpus checked in
@@ -85,6 +125,78 @@ defaults: &defaults
                 absolute_slo: dedicated_hardware_only, profiling: periodic }
   capacity: { margin_target: 2x, measured: required }
 
+
+  # Load, stress and soak (dimension 25) — the key that finally CASHES
+  # `capacity: { margin_target: 2x, measured: required }` above. That entry
+  # has been in this file since v1 and nothing anywhere measures it: no
+  # harness, no probe row, no lane, and dimension 6 inventories a "known
+  # saturation point" that no artifact records. A margin is a RATIO, and a
+  # ratio needs a numerator somebody observed. This is this framework's own
+  # vacuous form, sitting in its own policy file, and it is named here rather
+  # than quietly fixed.
+  #
+  # `generation: open_loop` is the anti-vacuity key, and it is the whole
+  # dimension in one word. A closed-loop harness — N workers, each sending
+  # its next request only after the previous one returns — cannot offer load
+  # faster than the system accepts it. When the system stalls the harness
+  # politely stalls with it, the requests that WOULD have arrived are never
+  # issued, and so never counted: the omission is COORDINATED with the very
+  # failure the run exists to expose (Gil Tene, "How NOT to Measure Latency",
+  # a talk, not a paper — cited as one). What such a run reports is the
+  # latency of the requests the system was willing to take, which is how a
+  # saturated service produces a beautiful tail. A closed-loop p99 is THE
+  # vacuous form of this dimension, and it is the form almost every Go
+  # benchmark in existence already has.
+  #
+  # `measurement: coordinated_omission_safe` is the same requirement pointed
+  # at the histogram rather than at the generator: latency is measured from
+  # the INTENDED send time, so a request delayed behind a stall carries the
+  # queueing it actually suffered instead of only its service time.
+  #
+  # `saturation_point: measured` is the second anti-vacuity key. A declared
+  # saturation point is a guess with a unit attached. The measured one is the
+  # offered rate past which throughput stops rising while queueing delay
+  # starts climbing — the two curves crossing, which is Little's law read off
+  # a graph (J. D. C. Little, "A Proof for the Queuing Formula: L = λW",
+  # Operations Research 9(3), 1961). That number, divided into the declared
+  # peak, IS the margin `capacity` above has been asking for.
+  #
+  # `soak.oracle: resource_growth` is why soak is not merely a longer load
+  # test. A leak — goroutines, file descriptors, RSS, a map nothing evicts —
+  # is invisible at benchmark durations by construction, and "it ran four
+  # hours and did not crash" is a story, not an oracle. The growth curve is
+  # the oracle; the crash is what happens to somebody else, later.
+  load_testing:
+    generation: open_loop                 # fixed offered rate, independent of
+                                          # how fast the system replies
+    measurement: coordinated_omission_safe
+                                          # latency from intended send time,
+                                          # not from the send that happened
+    saturation_point: measured            # observed on a run and recorded;
+                                          # never declared
+    baseline_artifact: benchmarks/load/baseline.md
+                                          # versioned like every other
+                                          # baseline here, and a stale one is
+                                          # a finding, not a formality
+    soak:
+      cadence: nightly                    # hours; deliberately not a PR
+                                          # budget, which is what kept this
+                                          # dimension out of the file
+      oracle: resource_growth             # goroutine / FD / RSS trend across
+                                          # the run, not survival
+
+    # FLOOR on what a service may commit to in its own production.yaml —
+    # never the commitment itself, since only the service knows its peak.
+    # `<n>x` is a factor over expected peak; `<n>%` a percentage of it;
+    # the probe refuses to compare one kind against the other. Enforced by
+    # prod-spec/prod-review deriving obligations from this file — the probe
+    # is vendored and deliberately never reads tier-policy.yaml.
+    min_margin: 2x
+    # Mirrors the probe's LOAD_MAX_AGE_DAYS. Two numbers that must agree
+    # are one number and one latent defect: the probe's constant is the
+    # vendored copy of THIS policy choice, and a repo that needs another
+    # window declines the dimension with its reason instead of editing it.
+    max_baseline_age_days: 30
   # Resilience / recovery
   fault_injection: required_per_capability_class
   # Chaos engineering (dimension 20) is NOT `fault_injection` above with a
@@ -138,8 +250,231 @@ defaults: &defaults
               effect_journal_atomic: required_if_durable_effects,
               tabular_recovery_tests: required,
               real_crash_tests: sampled_by_risk }
+
+
+  # Crash-only software (Candea & Fox, "Crash-Only Software", HotOS 2003).
+  # The argument is not about robustness under abuse: it is that a component
+  # with only ONE stop path — the abrupt one — has its recovery path
+  # exercised on every single stop, so the code that must work at 3am is the
+  # code that ran at every deploy. A graceful shutdown is a second, quieter
+  # path, and what it hides is always the same thing: state that was durable
+  # only because something got to flush it on the way out.
+  #
+  # `recovery.real_crash_tests: sampled_by_risk` directly above is the
+  # sampling of this discipline; this key is the discipline itself, and the
+  # repo already owns one worked instance of it. prod-new's
+  # scripts/kill-durability.sh SIGKILLs the real container and proves the
+  # outbox intents fsynced before the kill are still readable after it — and
+  # it REJECTS its own run on any exit code other than 137, because
+  # `docker stop` sends SIGTERM, the process flushes on the way out, and the
+  # scenario would pass having tested nothing. That script is this key's
+  # evidence and its shape; the key generalizes it from the outbox to
+  # everything else that holds state.
+  #
+  # `scope: every_stateful_mechanism` is the anti-vacuity key. One kill test
+  # over the one store somebody remembered is the shape without the property:
+  # the event log, the snapshot writer, the inbox and any local cache read
+  # back after a restart each have their OWN flush, so each owes its own
+  # kill. Note the honest ceiling kill-durability.sh already states and this
+  # key inherits: a container SIGKILL kills the process, not the machine, so
+  # what is proven is that the write reached the kernel — power-loss
+  # durability needs a fault-injecting filesystem and is claimed by nothing
+  # here.
+  #
+  # `graceful_shutdown: optimization_never_correctness` keeps the other two
+  # honest. A graceful path may exist and may drain connections faster; what
+  # it may never be is the reason something is correct.
+  crash_only:
+    stop_signal: sigkill_only             # the stop path that gets verified.
+                                          # A durability run that exits 0
+                                          # proved the graceful path, not the
+                                          # durability
+    scope: every_stateful_mechanism       # event log, snapshots, inbox,
+                                          # outbox, local caches read after
+                                          # restart — one kill each, not one
+                                          # kill total
+    graceful_shutdown: optimization_never_correctness
   reconciliation: required_if_durable_state
   backup_restore_test: required_if_durable_state
+
+
+  # Overload and metastability (dimension 26). Bronson, Aghayev, Charapko &
+  # Benson, "Metastable Failures in Distributed Systems" (HotOS 2021): a
+  # system pushed past a threshold enters a stable-but-degraded state and
+  # STAYS there after the trigger is gone, because the work its own
+  # degradation generates — retries, reconnects, re-queued timeouts — is now
+  # the load sustaining it. The defining property is that removing the cause
+  # does not remove the effect, which is why every key below is about a
+  # FEEDBACK LOOP and not about a threshold.
+  #
+  # `retry_budget` is NOT `external_effect`'s `retry_policy` obligation under
+  # a new name, and collapsing the two is exactly how this arrives in a repo
+  # that believes it is already covered. A retry POLICY is per call: how many
+  # attempts this caller makes, with what backoff and jitter. A retry BUDGET
+  # is global: a cap on the ratio of retries to original requests across the
+  # process, enforced by refusing to retry once the ratio is exceeded. Three
+  # individually polite three-attempt policies in a chain amplify a brownout
+  # by 27x, and every one of them passes its own review. The budget is the
+  # only key in this file that bounds amplification.
+  #
+  # `metastable_recovery: chaos_scenario_required` is the anti-vacuity key,
+  # and it is the link to dimension 13 that is missing today. Shedding,
+  # budgets and breakers are MECHANISMS, and a mechanism nothing drives is
+  # dimension 16's failure wearing resilience vocabulary. The scenario
+  # induces a retry storm, REMOVES the trigger, and requires the system to
+  # return to steady state with no restart and no intervention — because "we
+  # restarted it and it came back" is precisely the observation under which a
+  # metastable failure hides, and it is the observation an operator makes
+  # every time.
+  #
+  # `degraded_mode` is Fox & Brewer's harvest/yield stated as an obligation
+  # ("Harvest, Yield, and Scalable Tolerant Systems", HotOS 1999). Under
+  # overload something IS given up; the only question is whether which thing
+  # was decided at design time or by whichever code path happened to time out
+  # first. Its vacuous form is a capability that answers "we degrade
+  # gracefully" without naming what it drops and what it keeps.
+  #
+  # Hedged requests (Dean & Barroso, "The Tail at Scale", CACM 56(2), 2013)
+  # belong to this dimension and are deliberately NOT a key here: on a
+  # capability with external effects a hedge duplicates the effect. They are
+  # a tactic this dimension cites, not an obligation it imposes.
+  overload:
+    ingress_shedding: declared_and_tested # with the CRITERION that decides
+                                          # what is shed and what survives —
+                                          # "it sheds under load" names no
+                                          # victim and tests nothing
+    retry_budget: required_where_retries  # global amplification cap; see
+                                          # above — never the per-call policy
+    circuit_breaking: required_on_outbound
+                                          # every dependency call, including
+                                          # the one nobody expects to be slow
+    degraded_mode: declared_per_user_facing_capability
+                                          # what is sacrificed first, and
+                                          # what that costs the consumer
+    metastable_recovery: chaos_scenario_required
+                                          # trigger induced, trigger removed,
+                                          # recovery WITHOUT a restart
+
+  # Error-handling fitness (Yuan et al., "Simple Testing Can Prevent Most
+  # Critical Failures", OSDI 2014). The paper reproduced 198 randomly sampled
+  # user-reported failures of Cassandra, HBase, HDFS, MapReduce and Redis and
+  # found that 92% of the CATASTROPHIC ones followed from incorrect handling
+  # of errors the system had ALREADY CAUGHT AND SIGNALLED -- detection was
+  # almost never the defect, the handler was -- and that 35% of them came from
+  # three handler shapes trivial enough for a machine to find.
+  #
+  # This key exists because "review catches those" is measurably false: they
+  # were found in shipped, reviewed code, in five of the most-scrutinised open
+  # source systems in the field. A greppable defect class with that much
+  # empirical weight behind it belongs in the cheap gate, not in a reviewer's
+  # attention budget, which is why the mode below is `blocking` at every tier
+  # rather than advisory. It is the one fitness function in this file whose
+  # justification is a measurement rather than a design argument.
+  #
+  # `shapes:` is the anti-vacuity key. A gate declared as "error handling is
+  # checked" is satisfied by a grep for the word `err`, and this file's whole
+  # method is to name the thing that must fail. Each shape below is one of the
+  # paper's three, and the scaffold's implementation
+  # (scripts/error-handling-fitness.sh, wired into `make check-fast`) is
+  # mutation-proven against all three plus a zero-inputs case.
+  #
+  # `scope_declared: required` is the second anti-vacuity key, and it is the
+  # one that keeps this honest rather than loud. The check is a text pass, so
+  # it has a false-negative surface -- a handler whose variable is not named
+  # `err`, a two-statement swallow, a multi-line signature. An implementation
+  # that does not state its own blind spots in its header reads as complete
+  # and is not, and a check that overclaims is worse than one that scopes
+  # itself: the first stops people looking.
+  error_handling_fitness:
+    mode: blocking                        # every tier; the empirical weight
+                                          # does not thin out at T2
+    lane: cheap_gate                      # presubmit, seconds -- these are
+                                          # cheapest to remove before a
+                                          # reviewer has read the diff
+    shapes: [empty_handler, todo_or_fixme_handler, log_and_continue_past_an_available_error_return]
+    zero_inputs_fail: required            # a scan of nothing is not a clean
+                                          # scan (same rule the liability
+                                          # registries already hold)
+    scope_declared: required              # the implementation states its own
+                                          # false negatives, in its header
+    selftest: required_in_the_same_lane   # the gate is a text pass, so its
+                                          # failure mode is going silently
+                                          # green; the lane must prove it can
+                                          # still fail before trusting it
+
+  # Crash-only recovery, asserted rather than declared (Candea & Fox,
+  # "Crash-Only Software", HotOS IX, 2003). The argument: a component should
+  # have exactly one way to stop -- crashing -- and one way to start --
+  # recovering -- because a graceful-shutdown path that differs from the
+  # recovery path is code that only runs when things are going well, while the
+  # path that runs during an outage is the one nobody exercised.
+  #
+  # `recovery.real_crash_tests` above already samples real crashes by risk.
+  # This key is the assertion those crashes must MAKE, and it is a different
+  # claim from the one a durability check makes: "the records survived" and
+  # "replaying those records reconstructs the same state" are separate, and a
+  # boot that read every byte back and rebuilt the state wrong satisfies the
+  # first completely. Nothing in this file previously asked for the second.
+  #
+  # `state_observable_externally: required` is the key that makes the rest
+  # possible and the one most likely to be skipped, because it is a code
+  # change rather than a test: state that lives only inside the process cannot
+  # be compared with anything, so a service can hold crash-only discipline
+  # perfectly and still be unable to demonstrate it. The scaffold satisfies it
+  # with a `state` object on /healthz carrying the balance, the applied-set
+  # size and a digest over that set.
+  #
+  # `denominator: required` is the anti-vacuity key. Two captures that both
+  # read "unknown" are identical, and an equality assertion over them reports
+  # crash-only recovery proven from two readings of nothing -- so a capture
+  # must be marked known AND carry a non-empty working set before its equality
+  # means anything.
+  crash_only_recovery:
+    state_identity_across_a_real_crash: required_if_durable_state
+    state_observable_externally: required # a claim about state nothing outside
+                                          # the process can read is unfalsifiable
+    denominator: required                 # an empty or unknown capture must
+                                          # FAIL, never compare equal
+    assertion_selftest: required          # the scenario needs docker and runs
+                                          # in exactly one place, so its logic
+                                          # must be exercisable without it --
+                                          # otherwise decay shows up only in
+                                          # the environment least able to
+                                          # debug it
+
+  # Differential observability (Huang, Guo, Lin, Bolosky, Bansal,
+  # Ravindranath, Chen, Zhang, Kang and others, "Gray Failure: The Achilles'
+  # Heel of Cloud-Scale Systems", HotOS 2017, DOI 10.1145/3102980.3103005).
+  #
+  # `observability_contract` above asks whether the service EMITS; §22's SLIs
+  # ask for a measurement vantage and prefer one OUTSIDE the process. This key
+  # is the row neither of them is: the one that READS BOTH AND ALERTS ON THE
+  # DELTA. A gray failure is precisely a differential-observability condition
+  # -- the component's own health check passes while an application on top of
+  # it sees errors, timeouts or unusable latency -- so the detectable quantity
+  # is not either view but the gap between them, and a monitoring design that
+  # samples one vantage cannot express the defect at all, however many signals
+  # it collects from that vantage.
+  #
+  # `client_vantage_not_self_emitted: required` is the anti-vacuity key, and
+  # it is the one that will be violated first, because violating it is easy
+  # and looks correct: a series the service emits about its own usability
+  # executes in the same process, on the same host, over the same devices, so
+  # it goes quiet in exactly the failure the alert exists for. A deployment
+  # with no external vantage does not get a rewritten expression; it gets a
+  # waiver with an owner and an expiry.
+  differential_observability:
+    mode: required                        # T2 may relax to recommended
+    client_vantage_not_self_emitted: required
+    divergence_window: declared           # the two vantages are sampled by
+                                          # different systems on different
+                                          # schedules; a pointwise comparison
+                                          # alerts on scrape skew, not on a
+                                          # divergence
+    threshold_at_slo_boundary: required   # a client threshold pinned at total
+                                          # failure detects the outage the
+                                          # self view already saw, not the
+                                          # gray state between them
 
   # Observability
   observability_contract: required        # checked in CI, not documentation
@@ -497,6 +832,20 @@ tiers:
     # elsewhere, not here.
     formal_methods: { mode: required_or_ratified_decline,
                        scope: novel_concurrent_or_distributed_protocol_core }
+    # Only the floor moves, and only upward: T0 is where a saturation
+    # surprise is least recoverable — an irreversible external effect issued
+    # past the knee of the curve cannot be un-issued. YAML's `<<:` merge is
+    # SHALLOW, so this repeats the whole map rather than one key; the values
+    # other than min_margin must match defaults.load_testing or T0 silently
+    # loses them (same shape as scenario_coverage above).
+    load_testing:
+      generation: open_loop
+      measurement: coordinated_omission_safe
+      saturation_point: measured
+      baseline_artifact: benchmarks/load/baseline.md
+      soak: { cadence: nightly, oracle: resource_growth }
+      min_margin: 3x
+      max_baseline_age_days: 30
   "1":
     <<: *defaults
     invariant_flake_rule: incident        # data-correctness tiers keep the T0 rule
@@ -524,7 +873,16 @@ capability_classes:
     scenarios: [rejected, timeout_before_acceptance, timeout_after_acceptance,
                 duplicate_response, malformed_response, unavailable,
                 extreme_latency, crash_between_decision_and_effect,
-                retry_on_unknown_state]
+                retry_on_unknown_state,
+                # Dimension 26. This class's `retry_policy` obligation is
+                # per call and these two are what the call cannot see:
+                # retry_storm is every caller retrying at once (the
+                # amplification `overload.retry_budget` bounds), and
+                # slow_downstream_congestion is the dependency that answers
+                # SLOWLY instead of failing — no error to trip a breaker,
+                # every caller's connections held, which is the entry into
+                # the metastable state Bronson describes.
+                retry_storm, slow_downstream_congestion]
   source_of_truth:
     obligations: [consistency_semantics, recovery, backup, reconciliation]
     scenarios: [deadlock, serialization_conflict, timeout,
@@ -534,7 +892,14 @@ capability_classes:
     obligations: [delivery_semantics, ordering_semantics, duplicate_handling,
                   poison_handling, backpressure]
     scenarios: [duplicate, delay, reorder, drop, poison_message, partition,
-                upstream_backpressure]
+                upstream_backpressure,
+                # Dimension 26. `upstream_backpressure` above is the
+                # producer slowing down, which is the polite case. This is
+                # the producer's own retries multiplying the stream: the
+                # arrival rate rises while the useful rate does not, so
+                # duplicate handling and the consumer's lag budget are both
+                # exercised by load that carries no new information.
+                upstream_retry_storm]
   event_producer:
     obligations: [delivery_semantics, ordering_guarantee, observability]
     scenarios: [slow_consumer, consumer_disconnect, publish_failure, replay]
@@ -546,7 +911,15 @@ capability_classes:
     obligations: [reconnect_policy, liveness_detection, resubscribe_semantics,
                   readiness_gating]
     scenarios: [disconnect, sequence_gap, missed_heartbeat, reconnect_storm,
-                half_open_socket, resubscribe_failure, scheduled_recycle]
+                half_open_socket, resubscribe_failure, scheduled_recycle,
+                # Dimension 26. `reconnect_storm` above is one client
+                # reconnecting repeatedly; this is every client reconnecting
+                # at the same instant after a shared disconnect, and the
+                # difference is the synchronization, not the volume — an
+                # upstream restart aligns all of them, their backoff was
+                # never jittered, and the reconnect load itself keeps the
+                # upstream down.
+                thundering_herd_reconnect]
   signer:
     obligations: [key_custody, policy_enforcement, audit_trail, quorum]
     scenarios: [unauthorized_request, policy_violation, key_unavailable,
