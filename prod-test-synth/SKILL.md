@@ -74,6 +74,13 @@ Read `references/preamble.md` first. Every test follows
    oracles: ratified properties, contract clauses, metamorphic relations
    (repeat-op no double effect; identity is neutral; adding protection never
    worsens the protected metric), and enumerated failure-mode outcomes.
+4b. **Metamorphic comparison over STRUCTURED output goes through a declared
+   canonicalization.** Naive deep equality across a metamorphic pair compares
+   fields sourced from the injected clock, the random port and the ID
+   generator, so it fails for reasons that have nothing to do with the
+   relation under test — and the fix people reach for is loosening the
+   assertion until it passes. Name the canonicalization function in the test,
+   and exclude port-sourced fields explicitly rather than by omission.
 5. **TTL on everything.** `ttl:` at most `PROD_CANDIDATE_TTL_DAYS` (default
    30). Expiry deletes without ceremony; promotion is `prod-curate`'s batch.
 6. **Synthesis report:**
@@ -99,12 +106,29 @@ fail under mutation, which is more than most contract clauses can say.
 - Preamble §6 is absolute: no header, no test. No candidate ever placed in a
   blocking path, a `verification/ratified/` dir, or cited as `ratified`.
 - You never edit existing tests, generators, or fixtures — additive only.
+- **Pinning is the per-test fallback, not a mode.** If more than ~30% of a
+  batch comes out `pinning: true`, stop and report it: the target's contract
+  surface is too thin to synthesize against, and a batch of pinning tests is a
+  change-detector farm that curation will discard wholesale after paying to
+  screen it.
+- **"Would survive a refactor" needs an operational test, or it is a wish.**
+  An assertion is admissible only if it references the unit's EXPORTED surface
+  or a declared observable effect — a returned value, a typed error, an
+  invariant counter or metric, persisted state, an emitted event. An assertion
+  over call order, private helpers, or the number of times a collaborator was
+  invoked is a change detector by construction, whatever it is named.
 - Do not chase kill-counts: a candidate that exists to kill one mutant via a
   call-sequence assertion will be discarded by curation's screening anyway.
   Write assertions that would survive a refactor.
 
 ## Bail
 
-Preamble format. Mandatory bail: the target has no contract clauses and no
-ratified invariants to cite → nothing here can be verified, only pinned;
+Preamble format. Mandatory bail: the TARGET AS A WHOLE has no contract clauses
+and no ratified invariants to cite → nothing here can be verified, only pinned;
 report that as the finding (the gap is upstream, in the spec).
+
+A bail still emits BOTH artifacts: the preamble BAIL block AND a SYNTHESIZED
+report with `counts: 0 / 0 / 0`, `adequacy: n/a`, and every requested clause or
+checklist entry listed under `uncovered` with its reason. A bail that omits the
+report leaves no record of WHAT was not synthesized, which is the half the next
+run needs.

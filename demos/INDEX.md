@@ -32,6 +32,14 @@ each exists to stop a specific way of lying:
 - **`teardown.sh` removes everything**, and the removal is verified, not
   assumed.
 
+**One consequence of idempotency, stated because it cost a wrong diagnosis:**
+every demo recreates its own fixed-name containers, so TWO CONCURRENT RUNS OF
+THE SAME DEMO destroy each other. The per-demo prefix rule prevents collisions
+between different demos and does nothing about this. Validate a demo only after
+its authoring run has finished; when a failure shows a different symptom on each
+attempt, that is a concurrency signature rather than a defect signature, and the
+container ages in `docker ps -a` are what tell you.
+
 ## How a demo becomes a practice in a new org
 
 The demo itself never travels. What travels is the property, by one of two
@@ -70,14 +78,23 @@ quiet one.
 | 2 | [power-loss-durability-demo](https://github.com/mselser95/power-loss-durability-demo) | SIGKILL cannot tell fsync'd code from code that never calls it — only cutting the device can; a torn tail is refused, not read back as data | Pillai et al., ALICE (OSDI 2014) | narrows `assumed: fsync_bytes_reach_the_platter`; §12 durability trade | [A] | `validated` |
 | 3 | [retry-storm-demo](https://github.com/mselser95/retry-storm-demo) | the naive variant stays collapsed 20s AFTER the trigger is removed; a global retry budget returns it in 1s | Bronson et al., Metastable Failures (HotOS 2021) | §26; `overload.retry_budget`, `overload.metastable_recovery` | [A] | `validated` |
 | 4 | [gray-failure-demo](https://github.com/mselser95/gray-failure-demo) | the self-report stays `ready` through a fault costing clients a third of their requests; the self-emitted imitation of the client vantage stays silent through all of it | Huang et al., Gray Failure (HotOS 2017); Gunawi et al., Fail-Slow at Scale (FAST 2018) | §8, §22; `differential_observability.client_vantage_not_self_emitted` | [A]+[B] | `validated` |
+| 5 | [crypto-shredding-demo](https://github.com/mselser95/crypto-shredding-demo) | a subject is erased from an append-only log AND from a snapshot that already folded them in, by destroying their key — log byte-identical, replay still green, everyone else untouched | Boneh & Lipton (USENIX Sec 1996) | §15 `deletion_mechanism: crypto_shredding` | [A] | `validated` |
+| 6 | [fencing-token-demo](https://github.com/mselser95/fencing-token-demo) | a leader SIGSTOPped past its lease still writes; only a monotonic token checked at the store refuses it — and B writes again after, which is what makes it a fence rather than an outage | Kleppmann (2016); DDIA ch.8 | §7; `source_of_truth.consistency_semantics` | [A] | `validated` |
+| 7 | [coordinated-omission-demo](https://github.com/mselser95/coordinated-omission-demo) | same service, same stall, same offered rate: closed loop reports p99 14.6ms, open loop 3859ms — 264x — and the service itself counts the 1594 arrivals the closed loop never issued | Tene (talk, 2015); Little (1961) | §25 `load_testing.generation: open_loop` | [A] | `validated` |
+| 8 | [backup-restore-demo](https://github.com/mselser95/backup-restore-demo) | a restore checked by row count passes over a corrupted ledger that the invariant check refuses | SRE (O'Reilly 2016), data-integrity ch. | `backup_restore_test` | [A] | `pushed` |
+| 9 | [-demo](https://github.com/mselser95/vuln-reachability-demo) | "govulncheck is green" and "no known-vulnerable dependencies" are different claims, and the count is a property of the toolchain | govulncheck / SBOM tooling semantics | §9 `vuln_scan` | [A] | `pushed` |
+
+`validated` above means I re-ran it myself from a clean clone of the pushed
+commit, watched the success path exit 0 AND every negative control exit
+non-zero. `pushed` means its author reported that and I have not yet repeated
+it — the distinction is kept because the whole programme rests on not believing
+a report.
 
 ### In flight
 
 | demo | property | source | cashes |
 |---|---|---|---|
-| crypto-shredding-demo | a subject's data made unreadable in an append-only log AND in snapshots that already folded it, without rewriting history | Boneh & Lipton (USENIX Sec 1996) | §15 `deletion_mechanism: crypto_shredding` |
-| coordinated-omission-demo | a closed-loop harness stalls with the system, so the requests that would have been slow are never issued | Tene (talk, 2015); Little (1961) | §25 `load_testing.generation: open_loop` |
-| fencing-token-demo | a paused leader past its lease still writes, and only a monotonic token checked at the storage layer rejects it | Kleppmann (2016; DDIA ch.8) | §7; `source_of_truth.consistency_semantics` |
+| expand-contract-live-demo | a schema change under live traffic with two app versions running simultaneously, zero failed requests — and the inverted ORDER as the control | Rae et al., F1 (VLDB 2013) | §19 `schema_evolution` |
 
 ### Queued
 
@@ -85,9 +102,9 @@ Grouped by what they cash. Every one of these is an obligation this framework
 already declares and that nothing currently executes — which is the selection
 criterion, not novelty.
 
-**Already-declared obligations with no executor:** backup-restore (`backup_restore_test`) · error-budget-freeze (`slo.exhaustion_policy: declared_and_enforced`) · runbook-rehearsal (`runbooks.exercise_cadence`) · trace-conformance (`formal_methods` at T0) · expand-contract-live (§19 `schema_evolution`) · partition-consistency (§20, the declared consistency model checked by nothing)
+**Already-declared obligations with no executor:** error-budget-freeze (`slo.exhaustion_policy: declared_and_enforced`) · runbook-rehearsal (`runbooks.exercise_cadence`) · trace-conformance (`formal_methods` at T0) partition-consistency (§20, the declared consistency model checked by nothing)
 
-**Supply chain, extending demo #1:** slsa-provenance · reproducible-builds · transparency-log · dependency-confusion · sbom-runtime-drift · vuln-reachability
+**Supply chain, extending demo #1:** slsa-provenance · reproducible-builds · transparency-log · dependency-confusion · sbom-runtime-driftvuln-reachability
 
 **Distributed resilience:** asymmetric-partition · clock-skew · fail-slow-disk · bulkhead · dedup-end-to-end · chaos-steady-state
 

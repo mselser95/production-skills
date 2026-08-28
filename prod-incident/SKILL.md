@@ -45,13 +45,27 @@ candidate invariant, and the gate attribution stay on the session model.
 - **RULE TWO-COLORS:** a fixture is valid only when demonstrated BOTH ways —
   red on the pre-fix commit, green on fixed code. A fixture that never turned
   red proves nothing; a close-out missing either color is incomplete, and you
-  say so rather than accept it.
+  say so rather than accept it. **A fixture not yet shown RED is not written
+  into `<PROD_REGRESSIONS_DIR>/`** — a permanently-green fixture is corpus
+  noise indistinguishable from a working guard, and the corpus is the one
+  place this framework cannot afford decoration. Park it in
+  `PROD_RATIFY_QUEUE_DIR` with the color it is missing named, and it enters the
+  corpus when somebody produces the red.
 - **RULE NOT-REPRODUCIBLE:** if the failure cannot be reproduced after real
   minimization effort, the close-out does NOT stall and does NOT get waved
-  through: the MANDATORY outputs become (a) the missing-signal report and
-  (b) a `gate_attribution` that records the simulability gap — what the
-  harness lacked to reproduce this. "Irreproducible" is never a way to skip
-  the work; it changes which artifacts are the deliverable.
+  through. **The four-artifact contract still holds, re-expressed** — "become"
+  in the old wording read as "the other two are dropped", which is the reading
+  that turns an irreproducible incident into a two-artifact close-out nobody
+  audits:
+  1. no fixture directory is committed; a `simulability-gap.yaml` in
+     `PROD_RATIFY_QUEUE_DIR` takes its place, naming what the harness lacked;
+  2. the candidate invariant is still proposed where the incident implies one —
+     an unreproducible failure can still have taught you what must never
+     happen, and it is filed with its evidence gap stated rather than withheld;
+  3. the missing-signal report and (4) the gate attribution are unchanged and
+     are now the load-bearing ones.
+  "Irreproducible" is never a way to skip the work; it changes which artifacts
+  are the deliverable, not how many.
 - **RULE SHELL-INTERLEAVING:** if the failure lived in shell-level
   interleavings (retries, timeouts, crash windows), model the shell's part as
   explicit events (effect-result events, timeout events) so the core replay
@@ -120,4 +134,17 @@ the close-out and add it to `demos/INDEX.md`'s queue rather than leaving
 
 Preamble format. Expected `blocked_on` values: `sparse-input` (RULE
 SPARSE-INPUT, with the missing-material list), `no-prefix-commit` (cannot
-identify a pre-fix state to demonstrate red on — name what you tried).
+identify a pre-fix state to demonstrate red on — name what you tried), and
+`analysis-not-final` — the request arrived while the incident was still being
+debugged, which the frontmatter's DO NOT TRIGGER anticipates and the Bail
+section had no value for. List the contract inputs still missing (timeline,
+log/trace window, culprit commit, the fix) so the close-out can be resumed
+rather than restarted; this skill consumes a finished analysis and cannot page
+through a live system.
+
+**Before any bail, establish that material is genuinely ABSENT rather than
+merely un-fetched.** Dispatch `prod-scout` (per `references/dispatch.md`) to
+enumerate what exists for the incident window — retention range, traces
+matching the failing operation, the config versions in effect — and name that
+enumeration in the bail. "I could not find it" and "it does not exist" are
+different findings, and only the second is a bail.

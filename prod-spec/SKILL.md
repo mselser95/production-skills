@@ -54,6 +54,12 @@ plan's task list for `prod-implement`.
    declared capability does this touch?", not "what new thing do I build?".
    Only when no declared capability fits, mark `declared: NEW` — that is a
    semantic declaration and a human moment; say so explicitly in the output.
+2b. **A capability entry with no declared `class` is not a defaulting case.**
+   The resolved-context format requires a class for every touched capability,
+   because the class IS the obligation set. Inferring one from the capability's
+   id, its package name or what its code appears to do is inventing policy
+   (preamble §2) with an extra step. Ask for the class and stop — it is human
+   moment (b), the same one a NEW capability triggers.
 3. **Pull invariants with over-inclusion.** List ALL ratified invariants of
    every touched service. You do not narrow. If you believe an invariant is
    irrelevant, note it as a comment; narrowing is a human's call.
@@ -138,7 +144,15 @@ plan's task list for `prod-implement`.
    ratification via `prod-curate` — write the package into
    `PROD_RATIFY_QUEUE_DIR` (default `.prod/ratify-queue/`), never into the
    blocking lane from here.
-8. **Stop at the human moment.** If `tier == 0`, present the resolved context
+8. **Stop at the human moment.** Stop when `tier == 0` **OR when any touched
+   capability is `declared: NEW`** — step 2 already calls that "a semantic
+   declaration and a human moment", and preamble §7(b) makes semantic
+   declarations a fixed point you may not route around. Only the tier
+   condition was written here, so a NEW capability on a tier-1 repo passed
+   straight through the one gate that exists to catch it. A NEW capability
+   additionally needs its CLASS ratified before any obligation can be derived
+   from it: a class you inferred is a threshold you invented.
+   If `tier == 0`, present the resolved context
    (it fits on one screen — that is the point) and wait for approval before
    any downstream skill runs. Record the approval in the artifact.
 
@@ -162,6 +176,27 @@ inside a change plan).
   capability mapping or the tier, ask the human ONE precise question rather
   than producing a confident wrong contract. A wrong resolved context is worse
   than no framework — it stamps wrong work with institutional evidence.
+
+## Question
+
+When the intent is ambiguous in a way that changes the capability mapping or
+the tier, the deliverable is a QUESTION, not a hedged contract — and preamble
+§4 wants it structured like everything else:
+
+```
+QUESTION
+question: <one sentence, answerable in a word>
+candidate_mappings:
+  - <capability + class>: <obligations and semantic events this branch pulls>
+  - <capability + class>: <same, for the other branch>
+blocked: <what does not start until this is answered — normally: everything>
+state: <what exists so far — normally: nothing written>
+```
+
+Naming what each branch PULLS is the point: it lets the human answer in one
+word by seeing the consequence, instead of adjudicating a definition. Emit no
+resolved context and no change plan alongside it — a half-filled contract next
+to an open question is the confident wrong artifact this step exists to avoid.
 
 ## Bail
 

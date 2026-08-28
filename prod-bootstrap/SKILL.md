@@ -182,6 +182,16 @@ already holds.
    source_of_truth or external_read, so nothing leaves this process that a
    crash could lose" is a decline a future reader can check against the
    capability list. "No outbox — N/A" is one they can only trust.
+**Silence ratifies items 1, 2 and 4 — never item 3.** Tier, capability classes
+and declines are proposed from evidence, defaulted soundly and reversible, so
+"dale" or no answer accepts them and the spec records `ratified_by: silence`.
+Invariants are the one item with no sound default: "what must never happen"
+cannot be inferred from an inventory, and a seed list accepted by silence puts
+the framework's most load-bearing artifact into the spec on the strength of
+nobody objecting. If item 3 goes unanswered, the bootstrap completes with an
+EMPTY invariant set and that gap named in the report — honest, and better than
+invariants nobody ratified.
+
 Everything else — coverage numbers, mutation policy, fuzz requirements,
 scenario lists, benchmark policy, security gates, delivery/runbook
 requirements — is DERIVED and merely REPORTED in the gap report. Do not ask.
