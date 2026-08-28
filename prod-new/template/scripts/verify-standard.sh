@@ -2340,11 +2340,29 @@ for raw in sys.stdin:
         problems.append("%s is unparseable" % fname)
         continue
 
+    # AN INLINE SBOM JOB IS AN SBOM JOB. The map below names the reusable
+    # workflows of ONE organisation's CI repo, and this row is vendored into
+    # every repo the framework scaffolds -- so a repo that generates its SBOM
+    # with an inline `syft` step, which is what this framework's OWN template
+    # does, was invisible to it and the row reported "no job uses sbom.yaml" on
+    # a tree that produces both CycloneDX and SPDX. Measured 2026-08-28 on a
+    # freshly instantiated template. The ordering logic below is unchanged; it
+    # simply stops being blind to the shape it does not recognise.
+    #
+    # The match is on the OUTPUT FORMAT flags rather than the word "sbom",
+    # because `bash scripts/tests/sbom-ordering-selftest.sh` in the cheap-gate
+    # job contains that word and produces nothing.
+    def inline_sbom(name):
+        st = (jobs[name].get("steps") or "").lower()
+        return ("-o cyclonedx" in st) or ("-o spdx" in st) or ("cyclonedx-json=" in st) or ("spdx-json=" in st)
+
     def wf_of(name):
         u = jobs[name].get("uses") or ""
         for w in CONSUMES:
             if w in u:
                 return w
+        if inline_sbom(name):
+            return "sbom.yaml"   # same ROLE in the ordering graph: it produces the SBOM
         return None
 
     def needs(name):
@@ -2394,7 +2412,7 @@ for raw in sys.stdin:
                     % (fname, c, gone[0], d))
 
 if not any_consumer:
-    print("FAIL|no job uses sbom.yaml -- the word may be in comments, the job is not there")
+    print("FAIL|no job PRODUCES an SBOM -- neither a reusable sbom workflow nor an inline step emitting -o cyclonedx / -o spdx. The word may appear in comments or in a selftest filename; neither generates anything")
 elif problems:
     print("FAIL|" + "; ".join(problems[:2]))
 elif not any_deleter:
@@ -2410,7 +2428,7 @@ PYSBOM
       for _f in "$wf"/*.yml "$wf"/*.yaml; do
         [ -e "$_f" ] || continue
         printf '%s\t' "$(basename "$_f")"
-        yq -o=json -I=0 '[.jobs // {} | to_entries[] | {"job": .key, "uses": (.value.uses // ""), "needs": (.value.needs // []), "art": (.value.with."artifact-name" // "")}]' "$_f" 2>/dev/null || printf 'PARSE_ERROR'
+        yq -o=json -I=0 '[.jobs // {} | to_entries[] | {"job": .key, "uses": (.value.uses // ""), "needs": (.value.needs // []), "art": (.value.with."artifact-name" // ""), "steps": ((.value.steps // []) | tostring)}]' "$_f" 2>/dev/null || printf 'PARSE_ERROR'
         printf '\n'
       done | python3 -c "$_sbom_py"
     )"
