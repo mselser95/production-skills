@@ -84,8 +84,8 @@ returns the ROOT, so the `/..` landed one level ABOVE the repo and every file
 read failed. The fallback branch was the only one that behaved, and it is the
 branch nobody exercises.
 
-**Four shapes a SHELL gate uses to report success while doing nothing.**
-Every one was measured on 2026-08-27, inside a harness written by this
+**Five shapes a SHELL gate uses to report success while doing nothing.**
+Four were measured on 2026-08-27, inside a harness written by this
 framework to prove a durability property — found by mutation, none by reading,
 and each produced a confident green:
 
@@ -106,6 +106,14 @@ and each produced a confident green:
   nobody was testing, and PASSED a writer that never called fsync. Use
   `export VAR=…; cmd`, and add a guard that refuses to continue when the run
   left no artifact where the test expects one.
+- **`cmd | grep -q pattern` under `pipefail` reports FALSE exactly when it
+  succeeds.** `grep -q` exits the instant it matches, so the writer upstream
+  gets SIGPIPE and dies 141; with `set -o pipefail` the pipeline's status is
+  141, and the `if` reads that as "not found". The check therefore fails
+  precisely on the runs where the thing it was looking for WAS there — the
+  inversion is invisible because the common case (no match, clean exit 1) looks
+  correct. Measured 2026-08-28 inside a canary-analysis harness. Capture the
+  output first and match the variable, or drop `-q` and compare a count.
 - **`grep` exits 1 when it selects no lines — which is the PASSING case.**
   Under `set -e` the gate then exits non-zero exactly on the runs where nothing
   was wrong, and the fix people reach for is to delete the `set -e`. Terminate

@@ -27,6 +27,11 @@
 #   BARE-GREP-UNDER-SET-E   a bare `grep` whose no-match exit 1 is the PASSING
 #                           case, in a script running `set -e`: the gate then
 #                           fails exactly on the runs where nothing was wrong.
+#   GREPQ-UNDER-PIPEFAIL    `cmd | grep -q p` with `set -o pipefail`: grep -q
+#                           exits on first match, the writer takes SIGPIPE and
+#                           dies 141, pipefail propagates 141, and the caller
+#                           reads "not found" -- so the check inverts EXACTLY
+#                           when it succeeds. Capture first, match the variable.
 #   BASH-N-AS-VALIDATION    `bash -n` presented as having validated a script.
 #                           It parses and executes nothing; a script that dies
 #                           on its first line passes it.
@@ -79,7 +84,20 @@ guarded='(\|\||&&|if |while |until |\$\(|`)'
 # argument for the rule it enforces two lines down.
 prefix_assign='^[[:space:]]*([A-Za-z_][A-Za-z_0-9]*)=[^[:space:];&|]+[[:space:]]+([^;&|]*)$'
 pkill_x='pkill[[:space:]]+(-[a-zA-Z0-9]+[[:space:]]+)*-[a-zA-Z]*x'
+grepq_pipe='\|[[:space:]]*grep[[:space:]]+(-[a-zA-Z]*[[:space:]]+)*-[a-zA-Z]*q'
 findings=0
+# ADVISORIES are reported and do NOT affect the exit code. Exactly one rule is
+# advisory, and the reason is a measurement rather than a preference:
+# GREPQ-UNDER-PIPEFAIL is LATENT, not broken. Whether the writer takes SIGPIPE
+# depends on whether it is still writing when grep exits, so a small `printf`
+# never trips it and a `docker ps` can. Measured on this template: 11 call
+# sites in its own selftests, every one of them working today. Failing the
+# cheap gate over those would be the fire-on-correct-code trap this file's
+# header refuses -- a gate that fires on correct code is widened until it is
+# gone. So they are counted, named, and printed on every run, including the
+# clean one, so the number cannot go quietly to zero attention.
+advisories=0
+advise() { printf '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4" >&2; advisories=$((advisories+1)); }
 report() { printf '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4"; findings=$((findings+1)); }
 
 for f in "${files[@]}"; do
@@ -91,6 +109,15 @@ for f in "${files[@]}"; do
 
   uses_set_e=0
   grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*e' "$f" && uses_set_e=1
+  # pipefail, however it was spelled. The first version of this line required
+  # `-o` as a separate token and therefore missed `set -euo pipefail`, which is
+  # how almost every script in this repo spells it -- a rule that could not
+  # fire, found by mutation and not by reading, for the third time in this
+  # file. The lesson is in the pattern, not in the regex: a detector whose
+  # trigger condition is itself a match must be mutated too, not only the
+  # thing it detects.
+  uses_pipefail=0
+  grep -qE '^[[:space:]]*set[[:space:]].*pipefail' "$f" && uses_pipefail=1
 
   n=0
   while IFS= read -r line; do
@@ -137,15 +164,22 @@ for f in "${files[@]}"; do
       report "$f" "$n" "BARE-GREP-UNDER-SET-E" "no-match exit 1 is the PASSING case; terminate it explicitly (|| true) and check the count"
     fi
 
+    if (( uses_pipefail )) && [[ "$line" =~ $grepq_pipe ]]; then
+      advise "$f" "$n" "GREPQ-UNDER-PIPEFAIL" "grep -q kills the writer with SIGPIPE (141); pipefail turns the MATCH into a false. Capture the output and match the variable"
+    fi
+
     if [[ "$line" =~ bash[[:space:]]+-n ]]; then
       report "$f" "$n" "BASH-N-AS-VALIDATION" "parses and executes nothing; run the gate, then break what it guards and watch it go red"
     fi
   done < "$f"
 done
 
+if (( advisories )); then
+  printf 'gate-hygiene-fitness: %d advisory (GREPQ-UNDER-PIPEFAIL) -- latent, not failing. See this file'"'"'s header for why.\n' "$advisories" >&2
+fi
 if (( findings )); then
   printf 'gate-hygiene-fitness: %d finding(s) across %d shell file(s).\n' "$findings" "${#files[@]}" >&2
   printf 'Each is a shape measured reporting SUCCESS while doing nothing (see _shared/preamble.md §4b).\n' >&2
   exit 1
 fi
-printf 'gate-hygiene-fitness: clean -- %d shell file(s), 0 gates that can report success while doing nothing.\n' "${#files[@]}"
+printf 'gate-hygiene-fitness: clean -- %d shell file(s), 0 failing findings, %d advisory.\n' "${#files[@]}" "$advisories"
