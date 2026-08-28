@@ -62,23 +62,28 @@ retargeting a tier is a one-line change there, never a skill edit.
 
 ## Install
 
-Skills load from `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/`. Symlink the ones
-you want, then create each config from its example:
+**New here? Read [`QUICKSTART.md`](QUICKSTART.md)** — install, the one decision
+per repo, the three commands you will actually type, and what to do when a gate
+goes red. The rest of this file is reference.
 
 ```bash
 git clone git@github.com:mselser95/production-skills.git
 cd production-skills
-
-CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-mkdir -p "$CFG/skills"
-for s in prod-spec prod-review prod-incident prod-implement prod-test-synth prod-ops prod-curate prod-bootstrap prod-new; do
-  ln -s "$(pwd)/$s" "$CFG/skills/$s"
-  cp "$s/config.example.yml" "$s/config.sh"
+for s in prod-*/; do
+  [ -f "$s/config.sh" ] || cp "$s/config.example.yml" "$s/config.sh"
 done
-mkdir -p "$CFG/agents"
-for a in agents/*.md; do ln -s "$(pwd)/$a" "$CFG/agents/$(basename "$a")"; done
 $EDITOR */config.sh
+bash install.sh && bash install.sh --verify
 ```
+
+`install.sh` installs the skills as **hash-verified COPIES, not symlinks**, and
+records a manifest. This is deliberate and this README used to say the
+opposite: the skill definitions are part of the trusted computing base, and a
+symlinked install means any agent with write access edits the live TCB in
+place, with nothing to notice it. `--verify` compares the installed tree
+against the manifest and additionally reports STALENESS — integrity and
+currency are different questions, and a clean integrity check says nothing
+about whether the gate you are running is the current one.
 
 The `do_not_touch` write-mask that `prod-implement`/`prod-ops` honor should
 also be enforced mechanically: add permission deny rules for

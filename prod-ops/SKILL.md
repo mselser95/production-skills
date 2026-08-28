@@ -68,6 +68,12 @@ with its evidence attached.
   this is OP-3, not a bisect. Then bisect last-green..HEAD (short span on a
   queue-fed trunk). Confidence is `high` only with a clean non-flaky
   reproduction at the culprit AND green at its parent; anything less is `low`.
+- **An infra-aborted or infra-noisy run is a NON-OBSERVATION, not a data
+  point.** A job killed by a runner failure, a checkout 429, or a timeout that
+  bounded nothing tells you about the infrastructure and nothing about the
+  commit. Re-run it once on clean infrastructure before assigning any
+  confidence; if it aborts again, confidence is `low` and the handoff says the
+  bisect was never actually observed rather than that it was observed weakly.
 - Output: `CULPRIT <sha> <pr> confidence: high|low` + evidence.
 - Handoff: `high` → OP-2. `low` → a human, with both runs attached; never
   open a revert on a low-confidence bisect.
@@ -81,6 +87,13 @@ with its evidence attached.
   auto-merge after the veto window `PROD_REVERT_VETO_MINUTES` (default 15).
   Human-authored culprit OR any T0 path touched → request human approval,
   no auto-merge.
+  **Where those two facts come from, and what happens when they cannot be
+  determined:** authorship is read from the culprit PR's author against the
+  repo's agent-identity list; T0 paths from the resolved context, or from the
+  spec's T0 path globs where no context exists. If EITHER input is unavailable,
+  take the conservative branch — human approval, no auto-merge. An unknown
+  input must never resolve to the permissive side of a policy that arms an
+  automatic merge.
 - Handoff: re-task the original author with the revert context. Re-land cap:
   2 attempts (fixed by design), then require a human.
 
@@ -89,7 +102,12 @@ with its evidence attached.
   commit.
 - Do, in order: (1) isolated rerun — fresh process, same commit; (2) the
   changed-code intersection check: did the failing test execute ANY line the
-  blamed commit changed? No ⇒ flake by construction; (3) stress the
+  blamed commit changed? **No ⇒ flake by construction. YES ⇒ INCONCLUSIVE,
+  never "confirmed flake"** — the commit remains implicated, and that is the
+  common case as well as the dangerous one. Quarantine is still permitted, but
+  the OP-4 entry and the owner notification must both carry the intersection
+  result, because a quarantine recorded as "flaky" over a test that touches the
+  suspect code is how a real regression gets parked for fourteen days; (3) stress the
   hypothesis — race detector, repeated runs, randomized order (Go example:
   `-race -count=N -shuffle=on`; adapt to the repo's language).
 - Check RULE T0-FLAKE before anything else.

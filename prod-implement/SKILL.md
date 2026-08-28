@@ -57,6 +57,12 @@ Read `references/preamble.md` first. Inputs are artifacts in
   This skill honors the mask itself; enforce it mechanically with permission
   deny rules in your harness (see repo README) — the mask is policy, not
   merely prompt.
+- **RULE SCOPE-MASK:** if the task's own `files:` list contains a path outside
+  the resolved context's mask, or a `do_not_touch:` path, edit NOTHING and bail
+  with `blocked_on: scope-mask`, listing the offending paths. The mask is
+  checked against the task before the task is executed — a plan that asks for a
+  masked path is a planning defect, and honouring it "because the plan said so"
+  is how the mask is routed around with a paper trail that looks compliant.
 - **RULE WAIVER:** an obligation you cannot satisfy becomes a waiver proposal
   (preamble §2), and the task bails pending adjudication. You never decide an
   obligation "doesn't apply here".
@@ -110,6 +116,13 @@ signals: <coverage on changed lines, surviving mutants if surfaced>
 deviations: none | <anything done differently from the plan, and why>
 ```
 
+Every value in `gates:` and `signals:` is COPIED from the output of the
+commands in `required_evidence.gates` / `PROD_PRESUBMIT_CMD`, with the run
+reference that produced it. A signal those commands do not produce is written
+`not produced by the configured gates`, never estimated and never omitted —
+an estimated coverage number is indistinguishable from a measured one in the
+block that downstream review trusts.
+
 `deviations` is load-bearing: `prod-review` recomputes obligations from the
 diff, and an undeclared deviation becomes a DIVERGENCE blocker there. Declare
 it here first.
@@ -123,7 +136,12 @@ acquires machinery nobody has ever watched work.
 
 ## Bail
 
-Preamble format, always with the branch pushed and named in `state:` — a bail
-that discards work is worse than one that parks it. The four expected
-`blocked_on` values: `iteration-cap`, `tcb:<artifact>`, `existing-test`,
-`ambiguity`.
+Preamble format. **Whenever any work exists**, push the branch and name it in
+`state:` — a bail that discards work is worse than one that parks it. For a
+bail taken BEFORE any edit (the step-1 ambiguity check, a mask breach, a
+missing context) there is nothing to push, and `state: nothing written` is the
+honest value; the previous wording made that case read as a violated rule and
+invited a pointless empty branch.
+
+Expected `blocked_on` values: `iteration-cap`, `tcb:<artifact>`,
+`existing-test`, `ambiguity`, `scope-mask`, `unproven-mechanism`.

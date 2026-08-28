@@ -61,7 +61,12 @@ session model.
 
 1. **Collect eligibles:** candidate-lane tests inside their TTL that have run
    ≥ `PROD_MIN_ADVISORY_RUNS` times with a stable record and without
-   `pinning: true`.
+   `pinning: true`. **Stable record is mechanical, not a judgement:** zero
+   unexplained failures across those runs, where a failure counts as explained
+   only if it is attributed to a landed defect the test was right to catch. A
+   test whose failures were investigated and dismissed is NOT stable — that is
+   the flake pattern arriving under a friendlier name, and promoting it puts a
+   nondeterministic test in the blocking lane.
 2. **Change-detector screening:** run each against every commit in the
    refactor corpus. A test that fails on ANY behavior-preserving commit is a
    change detector → reject, note the commit that caught it.
@@ -87,7 +92,13 @@ session model.
      trace; missing either ⇒ back to author with the gap named.
    - contradiction-check vs declared capability contracts ⇒ CONFLICT rejects
      (or flags the contract itself for human attention — never both silently).
-   - duplicates/implications vs the ratified set ⇒ merged or dropped.
+   - duplicates/implications vs the ratified set: **DROP** when the candidate
+     is a restatement of, or is strictly implied by, a ratified invariant —
+     record the invariant id it duplicates, so the drop is auditable rather
+     than a disappearance. **MERGE** when the candidate is strictly STRONGER
+     (it holds everywhere the ratified one does, and somewhere it does not);
+     the merge is a proposal to REPLACE the ratified statement and therefore
+     goes through ratification like any other, never as an edit.
 3. **Respect the budget:** at most `PROD_RATIFY_BUDGET_PER_WEEK` per service
    reach the human, ranked by (incident-derived first, then coverage of
    uncovered capabilities). Overflow expires back to the queue — scarcity is
@@ -112,6 +123,16 @@ cheaper than authoring katas from scratch, and they come pre-proven to fail.
 
 ## Bail
 
-Preamble format. Common: corpora too thin to screen (`PROD_REFACTOR_CORPUS`
-< 5 commits — floor fixed by design — or a capability with no katas) → the bail names the corpus gap;
-building corpus is the prerequisite task, not a reason to skip screening.
+Preamble format, and the two corpus gaps have DIFFERENT blast radii — joining
+them with "or" hid that:
+
+- `PROD_REFACTOR_CORPUS` < 5 commits (floor fixed by design) blocks the WHOLE
+  batch: screening cannot discriminate for any capability, so nothing in the
+  batch has been screened.
+- A capability with no katas blocks only THAT capability's candidates. They are
+  HELD for the next batch, not rejected — a missing kata is a gap in the
+  oracle, and rejecting a candidate for it would record a verdict the screening
+  never reached. The rest of the batch proceeds.
+
+Either way the bail names the corpus gap; building corpus is the prerequisite
+task, not a reason to skip screening.
