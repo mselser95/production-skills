@@ -2695,7 +2695,21 @@ done
 if [[ -x scripts/check-registries.sh ]]; then
   if out=$(bash scripts/check-registries.sh 2>&1); then
     row "registries-expiry-gated" PASS "$(grep -oE '[0-9]+ entries checked[^,]*' <<<"$out" | head -1); expiry gates the build"
-  else row "registries-expiry-gated" FAIL "$(grep -m1 EXPIRED <<<"$out")"; fi
+  else
+    # THE EVIDENCE FALLS BACK, because the failure is not always an expiry.
+    # This line used to be `FAIL "$(grep -m1 EXPIRED <<<"$out")"`, and when
+    # check-registries.sh failed for any OTHER reason the grep matched nothing
+    # and the row printed a FAIL with a BLANK evidence column. Measured
+    # 2026-08-28 on a freshly instantiated template: the script exits 1 saying
+    # `MALFORMED no entries found in registries/`, zero lines contain EXPIRED,
+    # and the probe reported a failure it could not describe. A row that
+    # detects a problem and then says nothing about it sends its reader to
+    # guess, which is the same disservice as not firing at all.
+    _why="$(grep -m1 -E 'EXPIRED|MALFORMED|ERROR' <<<"$out")"
+    [[ -z "$_why" ]] && _why="$(grep -vE '^[[:space:]]*$' <<<"$out" | tail -1)"
+    [[ -z "$_why" ]] && _why="check-registries.sh exited non-zero and produced NO output -- the gate failed silently, which is itself the finding"
+    row "registries-expiry-gated" FAIL "$_why"
+  fi
 else row "registries-expiry-gated" FAIL "registries are recorded but nothing enforces expiry — a stale waiver is a permanent silent exemption"; fi
 
 # --- 17. contract artifacts exist for the work (audit finding: never written) --
