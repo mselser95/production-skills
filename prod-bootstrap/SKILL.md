@@ -201,6 +201,13 @@ additive — bootstrap never edits existing code, tests, or CI config
 (preamble §3 applies; CI wiring for new lanes is a plan task for a human or
 prod-implement under review, not a bootstrap side effect).
 
+**Vendored-file currency is a gap row, and for a brownfield repo it is often
+the oldest one.** A repo that took copies of the standard's scripts at some
+point in the past has no way to know how far behind they are; run
+`scripts/check-template-drift.sh` if `.prod/template-provenance.yaml` exists,
+and if it does NOT, stamping it is itself a plan task — until it exists, every
+later question about drift is unanswerable rather than answered `none`.
+
 ### Phase 4 — Gap report (completeness-enforced)
 Walk `references/dimensions.md` and emit a row for EVERY dimension — all of
 them, whatever the file currently lists (it has grown, and a count hardcoded

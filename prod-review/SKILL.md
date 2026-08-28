@@ -56,11 +56,23 @@ dominant patterns in the untouched code around the diff. This feeds the idiom
 layer — the single largest source of false positives is skipping this. Then
 read EVERY changed file in full, not hunks.
 
+A changed file you CANNOT read in full — generated, vendored, binary, or
+larger than your context — is listed under `NOT VALIDATED` with that exact
+reason and its path. It is never reviewed from its hunk instead: Hard Rule
+4 exists because diff-only reading misses the contradictions that live in
+the untouched part of the file, and a hunk-only pass on a file you could
+not open reproduces precisely that failure while reporting coverage.
+
 ### Phase 1 — Recompute obligations from the diff
 From the actual changed paths and symbols, derive independently: which zones
 (core/orchestration/shell), which capabilities (which ports/adapters were
 touched), which semantic events actually occurred. THEN compare with the
 claimed context:
+- a zone touched that the context/plan did not claim (the plan says
+  shell-only and the diff edits orchestration or core; ANYTHING added to
+  the pure core) → **DIVERGENCE**. This bullet exists because the phase's
+  own first sentence tells you to recompute zones and the list used to
+  compare everything except them.
 - touched a capability not in `capabilities.touched` → **DIVERGENCE**
 - semantic event occurred that the plan didn't declare → **DIVERGENCE**
 - tier of touched paths higher than context `tier` → **DIVERGENCE**
@@ -92,6 +104,14 @@ The framework checklist, applied to what the diff introduces:
   resolve to a `domain_gateway`-classed capability in the target's own spec?
   Unresolvable (target repo unavailable) → gap, not a pass
   (`references/domain-boundaries.md`).
+
+**Severity of a GAP or an EVIDENCE finding.** WARNING by default; BLOCKER
+only when the missing control is itself the blocker bar — an unbounded
+queue or a retry loop with no global budget on a path that can lose money,
+a new external effect with no idempotency strategy, a new state with no
+recovery on a durable path. Phase 1 fixes DIVERGENCE at BLOCKER and Phase 3
+fixes a deleted test at BLOCKER; without this line the other two classes
+had no mapping at all, and `severity` is mandatory on every finding.
 
 ### Phase 3 — Provenance audit
 For every test file in the diff:
@@ -136,7 +156,9 @@ FINDINGS
   required: <the specific remediation — actionable, one step>
 NOT VALIDATED
 - <area>: <why it could not be verified>
-VERDICT: contract-satisfied | blocked (<n> blockers)
+VERDICT: contract-satisfied (every area verified, no findings)
+       | contract-satisfied-with-findings (<w> warnings, <m> missing-tests, <u> not-validated)
+       | blocked (<n> blockers)
 ```
 
 ## Guardrails
@@ -148,6 +170,9 @@ VERDICT: contract-satisfied | blocked (<n> blockers)
 - The idiom layer binds: a consistent house pattern is the standard; an
   enabled linter rule is CI's finding, not yours.
 - You fix nothing. Findings go back to `prod-implement` (or a human).
+- The middle verdict is not a courtesy. A run with zero blockers, eight
+  warnings and four missing-tests is not `contract-satisfied`, and forcing
+  it into that word is how a review with real findings gets read as a pass.
 - You do not soften DIVERGENCE findings because the code "looks right" — the
   point is that nobody audited it against the right contract.
 

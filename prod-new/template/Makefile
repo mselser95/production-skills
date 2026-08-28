@@ -1,4 +1,4 @@
-.PHONY: check-registries verify-standard bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness probe-selftests crash-only-selftest sim load soak
+.PHONY: check-registries verify-standard bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness template-drift probe-selftests crash-only-selftest sim load soak
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
 # checks + a plain (no -race) `go test ./...` + architecture. It must stay
@@ -50,6 +50,7 @@ error-handling-fitness:
 	@echo "Running error-handling fitness (Yuan et al., OSDI 2014)..."
 	bash scripts/error-handling-fitness.sh
 	bash scripts/gate-hygiene-fitness.sh
+	@bash scripts/check-template-drift.sh --local
 
 # crash-only-selftest exercises the LOGIC of the crash-only state assertion in
 # scripts/kill-durability.sh without a docker daemon, by sourcing the script
@@ -255,6 +256,12 @@ verify-standard:
 # shell scripts that decide whether every other check ran.
 gate-hygiene-fitness:
 	bash scripts/gate-hygiene-fitness.sh
+
+# Currency, not integrity. --local needs no template and so runs anywhere,
+# including CI; the full check (are we behind upstream?) needs the installed
+# template and is a developer/agent-side question.
+template-drift:
+	bash scripts/check-template-drift.sh
 
 probe-selftests:
 	bash scripts/tests/load-rows-selftest.sh

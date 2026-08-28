@@ -382,11 +382,20 @@ under the same condition), `CODEOWNERS` with a real owner,
    validation" and then prints a confident wrong verdict. Execute it, read
    its output, and confirm it FAILS when it should — including when its input
    set is empty (see preamble §4b). An unrun gate is an ungated dimension.
-4. Emit the first `.prod/evidence/<sha>.json`. Delete any evidence record the
+4. **Stamp the scaffold provenance**: run `scripts/stamp-template-provenance.sh`
+   so `.prod/template-provenance.yaml` records every vendored file with BOTH
+   hashes — this repo's instantiated copy and the template file it came from.
+   Without it `scripts/check-template-drift.sh` cannot tell a repo that was
+   never scaffolded from one whose stamp was lost, and a vendored gate edited
+   later is indistinguishable from one that was always that way. The two-hash
+   form is load-bearing: `<OWNER>`/`<SERVICE>` substitution makes the repo's
+   copy legitimately differ from the template's, so a single-hash stamp reports
+   permanent false drift on every slot-bearing file.
+5. Emit the first `.prod/evidence/<sha>.json`. Delete any evidence record the
    template shipped: a record naming another commit, produced by an older
    probe with different row names, is a green attestation for a state this
    repo was never in.
-5. Report: the four answers as ratified, **the mechanism derivation — every
+6. Report: the four answers as ratified, **the mechanism derivation — every
    verdict with the property that produced it, including the NOT-WARRANTED
    ones** — what was declined and why, what was ratified vs left CANDIDATE, the
    probe table, and the ONE command the next engineer runs to add their first
