@@ -3261,11 +3261,55 @@ error_handling_fitness_row() {
     row "error-handling-fitness" FAIL "$EHF exists but is not executable ($(ls -l "$EHF" 2>/dev/null | awk '{print $1}')) -- the mode bit is the difference between a gate and a workflow step that reports success without running; chmod +x it"
     return
   fi
+  # THE WIRING, merged in 2026-08-27 from the deferred wiring-rows fragment
+  # (proposals/2026-08-27-probe-wiring-rows/, now landed and deleted). It was
+  # filed as a separate same-named row and could not be landed as one: two rows
+  # sharing a dimension name break this file's report and its not-probed
+  # derivation, so the check belongs HERE, in the one row that name has.
+  #
+  # WHY IT IS NEEDED AT ALL, since `cheap-gate` already exists and this row
+  # already EXECUTES the script. `cheap-gate` greps for `^check-fast:` in the
+  # Makefile: it answers "is there a cheap gate", never "does the cheap gate
+  # still run the checks people believe it runs". And this row running the
+  # script itself proves the script works -- from a path CI does not take. So
+  # deleting the `$(MAKE) error-handling-fitness` line from check-fast's recipe
+  # left BOTH of them green while the gate no longer ran in the only place that
+  # gates anything. That is the exact shape this probe exists to refuse
+  # everywhere else, and it is why the check is the recipe's, not the script's.
+  #
+  # CHECK-FAST'S OWN RECIPE, extracted first, and NOT a grep over the whole
+  # Makefile. Measured while writing this row: the whole-file grep passed after
+  # `$(MAKE) error-handling-fitness` was deleted from check-fast, because the
+  # standalone `error-handling-fitness:` target's own recipe line still matched.
+  # The row certified "wired into the cheap gate" over a gate the cheap gate no
+  # longer ran -- which is this file's defining defect, committed by a row added
+  # to prevent it.
+  #
+  # awk from `^check-fast:` to the first line that is neither blank nor
+  # tab-indented, which is exactly where a make recipe ends.
+  #
+  # A THIRD REPAIR, FOUND WHILE LANDING and not in the fragment: the recipe's
+  # own COMMENTS are stripped before matching. Without that, commenting the
+  # invocation out -- `#\t$(MAKE) error-handling-fitness`, the single most
+  # likely way a gate actually gets disabled in a hurry -- left the row PASSing
+  # over a recipe make would not run. It is the same defect the fragment
+  # already recorded inside the alert fence ("a mention is not a citation"),
+  # one file over. Stripping fails CLOSED: a real invocation carrying a
+  # trailing comment keeps matching, and anything hidden behind a `#` stops.
+  local _cf
+  _cf="$(awk '/^check-fast:/{f=1;next} f && /^[^\t]/ && NF{f=0} f' Makefile 2>/dev/null | sed 's/#.*$//')"
+  if ! grep -qE '(\$\(MAKE\) error-handling-fitness|scripts/error-handling-fitness\.sh)' <<<"$_cf"; then
+    row "error-handling-fitness" FAIL "$EHF exists but check-fast's OWN RECIPE does not invoke it -- a fitness function nothing invokes is a file, not a gate; and note this is read from the recipe, never from the whole Makefile, where the standalone error-handling-fitness: target's own line keeps matching after the cheap gate stops calling it"
+    return
+  fi
+  # Only now the landed behaviour: RUN it, and refuse to describe an unrun gate
+  # as a clean one. Wiring first, because a gate that is green in this probe and
+  # absent from the cheap gate is the more flattering of the two failures.
   local out rc first
   out="$("$EHF" 2>&1)"; rc=$?
   if (( rc == 0 )); then
     first="$(printf '%s\n' "$out" | grep -m1 -aE '[^[:space:]]' | cut -c1-90)"
-    row "error-handling-fitness" PASS "$EHF EXECUTED clean this run (exit 0): ${first:-no output}"
+    row "error-handling-fitness" PASS "check-fast's recipe invokes it AND $EHF EXECUTED clean this run (exit 0): ${first:-no output}"
   else
     # An evidence-free FAIL is the worst output this probe can produce -- it
     # names no defect, so the only available "fix" is to soften the probe. A
@@ -3331,6 +3375,108 @@ simulation_advisory_row() {
 }
 simulation_advisory_row
 
+# --- 26. crash-only state identity (Candea & Fox, HotOS IX 2003) ------------
+#
+# Landed 2026-08-27 from the deferred wiring-rows fragment. Like the wiring
+# check merged into section 24, this row probes the EFFECT and not the file:
+# scripts/kill-durability.sh existing says nothing about what it asserts.
+#
+# The scenario itself needs docker and cannot run from this probe, so what is
+# probed is the two things that CAN be checked here: that the assertion is
+# present in the scenario at all, and -- via the wiring above and the scenario's
+# own selftest -- that its logic can still fail. The first is the one that
+# decays silently: the scenario runs in exactly one CI job, so a renamed
+# /healthz field shows up there and nowhere else.
+#
+# THE `else` BRANCH IS A REPAIR MADE WHILE LANDING, not part of the fragment.
+# The fragment guarded the whole block with `if [[ -f scripts/kill-durability.sh ]]`
+# and emitted nothing when the file was absent. Under this file's own
+# SILENCE-IS-NOT-A-VERDICT derivation (see below) an unemitted name becomes
+# `FAIL not probed`, so a repo that has never been asked for a kill scenario
+# would have gone red on a row that never ran. NA means UNASKED here, exactly as
+# it does on error-handling-fitness -- never "fine".
+KILL_DURABILITY="scripts/kill-durability.sh"
+crash_only_state_row() {
+  if [[ ! -f "$KILL_DURABILITY" ]]; then
+    row "crash-only-state-identity" NA "no $KILL_DURABILITY -- this repo's scaffold predates the crash-only kill scenario (Candea & Fox, HotOS IX 2003). prod-bootstrap's gap report owes it as a plan task; this NA means UNASKED, never answered"
+    return
+  fi
+  if grep -q 'assert_state_identical' "$KILL_DURABILITY" 2>/dev/null; then
+    row "crash-only-state-identity" PASS "the kill scenario compares reconstructed state across the crash (assert_state_identical in $KILL_DURABILITY), not only durable records"
+  else
+    row "crash-only-state-identity" FAIL "$KILL_DURABILITY asserts records survived but never that replaying them reconstructs the same state (no assert_state_identical) -- a boot that read every byte back and rebuilt the state wrong passes it"
+  fi
+}
+crash_only_state_row
+
+# --- 27. differential observability (Huang et al., HotOS 2017) --------------
+#
+# Landed 2026-08-27 from the deferred wiring-rows fragment.
+#
+# The alert is the artifact; what makes it REAL is that its client half is a
+# series this service does not emit. That is the property to check, and it is
+# the one that will be got wrong -- substituting a self-emitted series for the
+# client vantage produces an expression that parses, evaluates, and never fires.
+#
+# NO `WARN` VERDICT, deliberately: row() tallies PASS, FAIL and NA and nothing
+# else, so a WARN would render in the table and be counted in none of them --
+# invisible under this probe's own `FAIL 0` bar. A verdict the summary cannot
+# see is the vacuous form of a row.
+#
+# The test below is mechanical and fails CLOSED: it requires the alert's
+# expression to cite at least one metric identifier that is NOT in
+# emitted-metrics.yaml. An extractor that stopped matching finds no external
+# series and the row FAILs, rather than passing over an expression it never
+# read.
+#
+# THE `else` BRANCH IS THE SAME REPAIR AS SECTION 26's: the fragment emitted no
+# row at all when either file was missing, which this file's derivation turns
+# into `FAIL not probed` for every repo without an alert manifest.
+differential_observability_row() {
+  if [[ ! -f observability/alerts.md || ! -f observability/emitted-metrics.yaml ]]; then
+    local _miss=""
+    [[ -f observability/alerts.md ]]             || _miss="no observability/alerts.md"
+    [[ -f observability/emitted-metrics.yaml ]]  || _miss="${_miss:+$_miss; }no observability/emitted-metrics.yaml"
+    row "differential-observability" NA "$_miss -- there is no alert manifest to read a client vantage out of, so this repo has never been ASKED for one (Huang et al., HotOS 2017). UNASKED, never answered"
+    return
+  fi
+  # the alert's own section, from its heading to the next one
+  local _gray _declared _external=0 _m
+  _gray="$(awk '/^## .*([Gg]ray.?[Ff]ail|DifferentialObservability)/{f=1;print;next} /^## /{f=0} f' observability/alerts.md)"
+  _declared="$(grep -oE '^[[:space:]]*-[[:space:]]*name:[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*' observability/emitted-metrics.yaml | awk '{print $NF}' | sort -u)"
+  if [[ -n "$_gray" ]]; then
+    # Identifiers inside the fenced expression only -- prose names series too,
+    # and counting those would let a paragraph satisfy the row.
+    #
+    # AND NOT FUNCTION NAMES. Measured while writing this: without the
+    # trailing-paren filter, `min_over_time` and `avg_over_time` counted as
+    # "series this service does not emit", so the row PASSED on an expression
+    # whose every actual series was self-emitted -- the exact substitution it
+    # exists to catch, certified green by two PromQL builtins.
+    #
+    # AND NOT COMMENTS INSIDE THE FENCE, for the same reason and found the same
+    # way: with the `#` lines left in, swapping the live client series for a
+    # self-emitted one still PASSED, because the comment ABOVE it still named
+    # the external series it no longer used. A mention is not a citation.
+    while read -r _m; do
+      [[ -n "$_m" ]] || continue
+      [[ "$_m" == *"(" ]] && continue          # a call, not a series
+      grep -qxF "$_m" <<<"$_declared" || _external=$((_external+1))
+    done < <(awk '/^```/{f=!f;next} f' <<<"$_gray" | sed 's/#.*$//' \
+             | grep -oE '\b[a-z][a-z0-9]*_[a-z0-9_]+\b\(?' | sort -u)
+  fi
+  if [[ -n "$_gray" && $_external -gt 0 ]]; then
+    row "differential-observability" PASS "gray-failure alert present and citing $_external series this service does not emit (the client vantage)"
+  elif [[ -n "$_gray" ]]; then
+    row "differential-observability" FAIL "the gray-failure alert cites ONLY series this service emits -- a self-reported client view executes in the same process and goes quiet in exactly the failure the alert exists for"
+  elif waived gray-failure-no-external-vantage; then
+    row "differential-observability" NA "live waiver with owner+expiry in registries/waivers.yaml"
+  else
+    row "differential-observability" FAIL "no alert on the DISAGREEMENT between a client vantage and self-reported readiness, and no live waiver (Huang et al., HotOS 2017: the detectable quantity is the gap, not either view)"
+  fi
+}
+differential_observability_row
+
 # --- report --------------------------------------------------------------
 # --- SILENCE IS NOT A VERDICT -----------------------------------------------
 #
@@ -3369,6 +3515,19 @@ simulation_advisory_row
 #   seen by the anchored form         50
 #   blind set                          6   was 9
 #
+# RE-MEASURED AGAIN AT THE WIRING-ROWS LANDING (2026-08-27), and they had gone
+# stale in exactly the way this comment predicts -- the reader who trusted "56"
+# would have been three rows out before this change added two more:
+#
+#   total declared rows (unanchored)  61   was 56 as written above
+#   seen by the anchored form         55
+#   blind set                          6   the same six, listed below
+#
+# The blind set is unchanged in MEMBERSHIP, which is the point worth recording:
+# both rows landed here (crash-only-state-identity, differential-observability)
+# start their line, so they are seen by either form and the argument below is
+# untouched by them.
+#
 #   advisory-lane, auto-recovery:self_recovery, cheap-gate, nightly-trends,
 #   registries, secret-scan-all-triggers
 #
@@ -3387,13 +3546,20 @@ simulation_advisory_row
 # relearning -- an anchor that fits the shape you happened to look at.
 declared_rows=$(grep -oE 'row "[a-zA-Z][^"$]*"' "$PROBE_SELF" \
   | sed -E 's/row "([^"]*)"/\1/' | sort -u)
-# 50, not 20: the real count is 56 (re-measured 2026-08-26 at the reconciliation
-# merge; it was 55 when this line was written), and a floor low enough to be met
-# by a half-broken matcher is a floor that would have accepted the 46 above.
+# 50, not 20: the real count is 61 (re-measured 2026-08-27 at the wiring-rows
+# landing; 56 at the 2026-08-26 reconciliation merge, 55 when this line was
+# written), and a floor low enough to be met by a half-broken matcher is a floor
+# that would have accepted the 46 above.
+#
+# THE FLOOR ITSELF IS DELIBERATELY NOT RAISED TO 61. It is not a row census --
+# a floor that tracks the count has to be edited on every added row, which is
+# the shape of a number that gets edited without being thought about. It fences
+# the derivation COLLAPSING, and 50 still does that.
 #
 # WHAT THIS FLOOR DOES NOT CATCH, said plainly so nobody reads more into it than
 # is there: it does NOT catch a regression to the anchored matcher. That form
-# derives exactly 50 on this tree, and 50 is not < 50, so it would pass clean.
+# derives 55 on this tree (50 before the wiring-rows landing), and neither is
+# < 50, so it would pass clean.
 # The floor catches a derivation that COLLAPSES -- an empty or near-empty list,
 # which is the fail-open shape it was written for -- and nothing finer. Raising
 # it to bracket the anchored form would turn it into a number that has to be

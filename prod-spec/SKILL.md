@@ -58,15 +58,30 @@ plan's task list for `prod-implement`.
    every touched service. You do not narrow. If you believe an invariant is
    irrelevant, note it as a comment; narrowing is a human's call.
 4. **Derive obligations from class checklists.** For each touched capability,
-   copy the obligations its class implies (external_effect ⇒ timeout, retry
-   policy, failure model, ambiguous-outcome scenarios, observability;
-   source_of_truth ⇒ recovery, reconciliation, backup semantics;
-   event_consumer ⇒ duplicate/reorder/poison handling; external_read ⇒
-   declared staleness bound, staleness observable, unavailability fallback,
-   timeout; connection ⇒ reconnect/sequence-gap/resubscribe; domain_gateway ⇒
-   contract version, backward-compat window, consumer registry, deprecation
-   policy — see `references/domain-boundaries.md`, and only where
-   `_shared/domain-topology.yaml` exists). You derive; you never invent or skip.
+   read its obligations VERBATIM from `references/tier-policy.yaml` →
+   `capability_classes.<class>.obligations`, and its scenario denominator from
+   `.scenarios`. Copy the list; do not restate it, summarise it, or work from
+   memory of it. You derive; you never invent or skip.
+
+   **This file deliberately no longer paraphrases those lists, and the reason
+   is a measured defect rather than tidiness.** Until 2026-08-27 this step
+   carried an inline gloss of each class, and the gloss was LOSSY in the two
+   places it could least afford to be: `external_effect` was written as
+   "timeout, retry policy, failure model, ambiguous-outcome scenarios,
+   observability", silently dropping `idempotency_strategy` and
+   `reconciliation` — on a refund or payment path, exactly the two obligations
+   that stop a retry-on-unknown-state from paying twice — and `source_of_truth`
+   was written as "recovery, reconciliation, backup semantics", dropping
+   `consistency_semantics`. An agent following this file produced a resolved
+   context missing both, which is worse than no contract: it stamps the
+   omission with institutional evidence. A restatement of a source of truth is
+   a second source of truth, and it decays silently; the policy file is the
+   only copy.
+
+   `domain_gateway` derives the same way and only where
+   `_shared/domain-topology.yaml` exists (`references/domain-boundaries.md`);
+   absent the topology, the class does not apply and its obligations are not
+   pulled.
 
    **Load and overload obligations derive the same way.** Where the repo's spec
    declares a load or capacity obligation, or the task touches a hot path,

@@ -1,7 +1,24 @@
 #!/usr/bin/env bash
-# load-rows-selftest.sh -- the verdict matrix for the three rows verify-standard.sh
-# gained with dimensions 25 and 27: `load-baseline`, `error-handling-fitness`
-# and `simulation-advisory`.
+# load-rows-selftest.sh -- the verdict matrix for the five rows verify-standard.sh
+# gained with dimensions 25 and 27 and with the 2026-08-27 wiring landing:
+# `load-baseline`, `error-handling-fitness`, `simulation-advisory`,
+# `crash-only-state-identity` and `differential-observability`.
+#
+# THE WIRING CASES (added 2026-08-27 when the deferred wiring-rows fragment was
+# landed) are the ones worth reading first, because each of them pins a verdict
+# that a plausible simplification of the probe would silently invert:
+#
+#   * error-handling-fitness now FAILs when the script exists and check-fast's
+#     OWN RECIPE no longer invokes it. The case that discriminates the awk from
+#     the obvious whole-Makefile grep is `standalone target still matches a
+#     whole-file grep`: it is the fragment's measured miss, reproduced here as
+#     a fixture rather than quoted as a claim.
+#   * differential-observability FAILs when the alert's client half is replaced
+#     by a series this service emits. Two of its cases exist only because the
+#     fragment's author measured the row PASSING over exactly that substitution
+#     -- once because PromQL builtins counted as external series, once because a
+#     COMMENT inside the fence still named the series the expression had
+#     stopped using. Both are pinned below and both go RED without their filter.
 #
 # WHY THIS FILE EXISTS. Two of those three rows are the shape this framework is
 # most often wrong about. `load-baseline` scores a PROSE ARTIFACT, which is the
@@ -72,14 +89,20 @@ eval "$(grep -m1 -E '^SPEC=' "$PROBE")"
 eval "$(grep -m1 -E '^LOAD_BASELINE=' "$PROBE")"
 eval "$(grep -m1 -E '^LOAD_MAX_AGE_DAYS=' "$PROBE")"
 eval "$(grep -m1 -E '^EHF=' "$PROBE")"
-for _v in SPEC LOAD_BASELINE LOAD_MAX_AGE_DAYS EHF; do
+eval "$(grep -m1 -E '^KILL_DURABILITY=' "$PROBE")"
+for _v in SPEC LOAD_BASELINE LOAD_MAX_AGE_DAYS EHF KILL_DURABILITY; do
   [[ -n "${!_v:-}" ]] || { echo "load-rows selftest: could not lift $_v from $PROBE" >&2; exit 2; }
 done
 [[ "$LOAD_MAX_AGE_DAYS" =~ ^[0-9]+$ ]] || { echo "load-rows selftest: LOAD_MAX_AGE_DAYS lifted as '$LOAD_MAX_AGE_DAYS', not a number" >&2; exit 2; }
 
-for _fn in row declined placeholder_value spec_field \
+# `waived` is lifted too, and not restated: the differential-observability row
+# reaches its NA through it, and a restated copy would let the real one drift
+# (its id matcher has already been fixed once, for a waiver whose `id:` did not
+# sit on the dash line).
+for _fn in row declined waived placeholder_value spec_field \
            load_field load_margin_norm load_age_days \
-           load_baseline_row error_handling_fitness_row simulation_advisory_row; do
+           load_baseline_row error_handling_fitness_row simulation_advisory_row \
+           crash_only_state_row differential_observability_row; do
   _src="$(sed -n "/^${_fn}() {/,/^}/p" "$PROBE")"
   if [[ -z "$_src" ]] || ! eval "$_src" || ! declare -F "$_fn" >/dev/null; then
     echo "load-rows selftest: could not lift $_fn from $PROBE -- it was renamed or reshaped" >&2
@@ -336,10 +359,35 @@ expect "a markdown table cell is not a field (stated limit)" load_baseline_row F
 ROW_NAME="error-handling-fitness"
 echo "error-handling-fitness:"
 
+# ehf_script <exit-code> [message] -- the gate itself, executable by default.
+ehf_script() {
+  mkdir -p scripts
+  { printf '#!/usr/bin/env bash\n'
+    [[ -n "${2:-}" ]] && printf 'echo %q\n' "$2"
+    printf 'exit %s\n' "$1"; } > scripts/error-handling-fitness.sh
+  chmod +x scripts/error-handling-fitness.sh
+}
+# wired_makefile -- a check-fast whose OWN RECIPE calls the gate. Every case
+# below that is about the SCRIPT has to write one, because the row refuses an
+# unwired gate before it ever runs it; a fixture without this file would report
+# the wiring FAIL and silently stop testing what its name says it tests.
+wired_makefile() {
+  { printf 'check-fast:\n'
+    printf '\t@echo "cheap gate"\n'
+    printf '\tgo vet ./...\n'
+    printf '\t$(MAKE) error-handling-fitness\n'
+    printf '\n'
+    printf 'error-handling-fitness:\n'
+    printf '\tbash scripts/error-handling-fitness.sh\n'; } > Makefile
+}
+
 fixture
 cd "$BASE"
 expect "absent script is UNASKED, not clean" error_handling_fitness_row NA "prod-bootstrap"
 
+# The mode bit is scored BEFORE the wiring, and this fixture has no Makefile at
+# all -- so it also pins the precedence: the first thing wrong is the thing
+# reported, and CI cannot start a non-executable gate however well it is wired.
 fixture
 mkdir -p scripts
 printf '#!/usr/bin/env bash\nexit 0\n' > scripts/error-handling-fitness.sh
@@ -347,26 +395,109 @@ chmod 644 scripts/error-handling-fitness.sh
 cd "$BASE"
 expect "present but not executable is a FAIL, not a PASS" error_handling_fitness_row FAIL "not executable"
 
+# --- THE WIRING (landed 2026-08-27). A gate the cheap gate no longer calls is
+# --- a file, and the row that only EXECUTED the script called it green.
 fixture
-mkdir -p scripts
-printf '#!/usr/bin/env bash\necho "3 empty error handlers in internal/app"\nexit 1\n' > scripts/error-handling-fitness.sh
-chmod +x scripts/error-handling-fitness.sh
+ehf_script 0 "scanned 214 handlers, 0 violations"
+printf 'check-fast:\n\t@echo "cheap gate"\n\tgo vet ./...\n' > Makefile
+cd "$BASE"
+expect "check-fast recipe stripped of the invocation" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
+
+# THE MEASURED MISS, reproduced as a fixture. This Makefile still contains the
+# text `scripts/error-handling-fitness.sh` -- in the standalone target's recipe
+# -- so a whole-file grep PASSES it while check-fast runs neither. The awk is
+# the difference, and this case is what would go red if someone replaced it.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+{ printf 'check-fast:\n\t@echo "cheap gate"\n\tgo vet ./...\n'
+  printf '\n'
+  printf 'error-handling-fitness:\n'
+  printf '\tbash scripts/error-handling-fitness.sh\n'; } > Makefile
+cd "$BASE"
+expect "standalone target still matches a whole-file grep" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
+
+# A repo with the gate and NO Makefile has no cheap gate to be wired into. It
+# fails closed, which is the same answer `cheap-gate` gives it.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+cd "$BASE"
+expect "no Makefile at all is not 'wired'" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
+
+# THE THIRD REPAIR, found while landing rather than in the fragment: a recipe
+# line that is COMMENTED OUT is a line make does not run. It is the likeliest
+# way a gate is actually disabled, and it is the alert fence's "a mention is not
+# a citation" one file over.
+#
+# THE TAB-THEN-HASH FORM IS THE ONE THAT DISCRIMINATES, and getting this wrong
+# is recorded here because it happened while writing the case. The first
+# fixture used `#<TAB>$(MAKE) ...` -- a line starting with `#` -- and it went
+# FAIL with and without the repair, because the awk ends the recipe at the
+# first line that is not tab-indented, so that text was never in `_cf` at all.
+# A case that cannot fail under the weakening it was written for is decoration.
+# `<TAB>#$(MAKE) ...` IS still inside the recipe (make hands it to the shell,
+# which ignores it), so only the sed removes it: drop the sed and this case
+# goes PASS.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+{ printf 'check-fast:\n\t@echo "cheap gate"\n'
+  printf '\t# $(MAKE) error-handling-fitness   # disabled while the lint lands\n'; } > Makefile
+cd "$BASE"
+expect "a COMMENTED-OUT invocation is not wiring" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
+
+# The OTHER comment shape, kept as its own case because it is caught by a
+# DIFFERENT mechanism: a line starting with `#` is not tab-indented, so the awk
+# has already ended the recipe there. Pinned so the two are not confused again.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+{ printf 'check-fast:\n\t@echo "cheap gate"\n'
+  printf '#\t$(MAKE) error-handling-fitness\n'; } > Makefile
+cd "$BASE"
+expect "a hash-first line has already ended the recipe" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
+
+# ...and the converse, so the strip cannot be widened into refusing real lines:
+# a live invocation with a trailing comment is still an invocation.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+{ printf 'check-fast:\n\t@echo "cheap gate"\n'
+  printf '\t$(MAKE) error-handling-fitness   # the OSDI-2014 handler shapes\n'; } > Makefile
+cd "$BASE"
+expect "a trailing comment does not un-wire a real call" error_handling_fitness_row PASS "scanned 214 handlers"
+
+# The recipe may call the script DIRECTLY rather than through $(MAKE); both are
+# the cheap gate running it, and only the wiring is being asserted.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+printf 'check-fast:\n\t@echo "cheap gate"\n\tbash scripts/error-handling-fitness.sh\n' > Makefile
+cd "$BASE"
+expect "a direct script call in the recipe is wiring too" error_handling_fitness_row PASS "scanned 214 handlers"
+
+# The recipe ends where the tab-indentation does. A later target that DOES call
+# the gate is not check-fast calling it.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+{ printf 'check-fast:\n\t@echo "cheap gate"\n'
+  printf 'verify:\n\t$(MAKE) error-handling-fitness\n'; } > Makefile
+cd "$BASE"
+expect "a LATER target's recipe is not check-fast's" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
+
+# --- and, wired, the landed execute-and-report behaviour is unchanged.
+fixture
+ehf_script 1 "3 empty error handlers in internal/app"
+wired_makefile
 cd "$BASE"
 expect "a red fitness script reds the row, with its message" error_handling_fitness_row FAIL "3 empty error handlers"
 
 # A script that reds SILENTLY still has to produce a finding. An evidence-free
 # FAIL is the worst output this probe can produce.
 fixture
-mkdir -p scripts
-printf '#!/usr/bin/env bash\nexit 7\n' > scripts/error-handling-fitness.sh
-chmod +x scripts/error-handling-fitness.sh
+ehf_script 7
+wired_makefile
 cd "$BASE"
 expect "a SILENT red still names its exit status" error_handling_fitness_row FAIL "exit 7"
 
 fixture
-mkdir -p scripts
-printf '#!/usr/bin/env bash\necho "scanned 214 handlers, 0 violations"\nexit 0\n' > scripts/error-handling-fitness.sh
-chmod +x scripts/error-handling-fitness.sh
+ehf_script 0 "scanned 214 handlers, 0 violations"
+wired_makefile
 cd "$BASE"
 expect "green fitness script passes, quoting what it measured" error_handling_fitness_row PASS "scanned 214 handlers"
 
@@ -374,11 +505,18 @@ expect "green fitness script passes, quoting what it measured" error_handling_fi
 # evidence -- `row` would convert that into a FAIL, which is the right guard
 # and the wrong verdict here, so the row supplies its own text.
 fixture
-mkdir -p scripts
-printf '#!/usr/bin/env bash\nexit 0\n' > scripts/error-handling-fitness.sh
-chmod +x scripts/error-handling-fitness.sh
+ehf_script 0
+wired_makefile
 cd "$BASE"
 expect "green and silent still yields non-empty evidence" error_handling_fitness_row PASS "EXECUTED clean"
+
+# The PASS carries BOTH measurements, so a reader can tell "it ran" from "the
+# cheap gate runs it" without going back to the source.
+fixture
+ehf_script 0 "scanned 214 handlers, 0 violations"
+wired_makefile
+cd "$BASE"
+expect "the PASS names the wiring as well as the run" error_handling_fitness_row PASS "check-fast's recipe invokes it"
 
 # --- simulation-advisory (dimension 27) -------------------------------------
 ROW_NAME="simulation-advisory"
@@ -480,6 +618,194 @@ else
   bad=$((bad+1))
 fi
 
+# --- crash-only-state-identity (Candea & Fox, HotOS IX 2003) -----------------
+#
+# The scenario needs docker, so the row cannot run it and does not pretend to.
+# What it asserts is that the crash scenario COMPARES RECONSTRUCTED STATE, and
+# the failure mode is the quiet one: a scenario that checks the records came
+# back is a scenario a wrong replay passes.
+ROW_NAME="crash-only-state-identity"
+echo "crash-only-state-identity:"
+
+kill_script() { # kill_script <assertion-name>
+  mkdir -p scripts
+  { printf '#!/usr/bin/env bash\n'
+    printf 'set -euo pipefail\n'
+    printf '# start the service, write records, SIGKILL it, boot it again\n'
+    printf '%s() { :; }\n' "$1"
+    printf '%s\n' "$1"; } > scripts/kill-durability.sh
+  chmod +x scripts/kill-durability.sh
+}
+
+fixture
+cd "$BASE"
+expect "absent kill scenario is UNASKED, not clean" crash_only_state_row NA "UNASKED"
+
+fixture
+kill_script assert_state_identical
+cd "$BASE"
+expect "the state assertion present is the PASS" crash_only_state_row PASS "compares reconstructed state"
+
+# THE MUTATION THIS ROW EXISTS FOR: the assertion renamed out of the scenario.
+# The scenario still exists, still runs, still passes -- and the property it was
+# added for is gone. Named `assert_records_survived` on purpose: that is the
+# weaker check the row's own evidence string names as insufficient.
+fixture
+kill_script assert_records_survived
+cd "$BASE"
+expect "the state assertion renamed out is a FAIL" crash_only_state_row FAIL "never that replaying them reconstructs"
+
+# A scenario that MENTIONS the assertion in a comment and does not call it is
+# still a scenario that does not assert it -- but this row reads text and
+# cannot tell the two apart, so the limit is pinned here as a decision on
+# record rather than left to be discovered as a surprise. The non-vacuity of
+# the assertion itself is the scenario selftest's job, not this row's.
+fixture
+mkdir -p scripts
+{ printf '#!/usr/bin/env bash\n'
+  printf '# TODO: call assert_state_identical once the digest endpoint lands\n'
+  printf 'echo records survived\n'; } > scripts/kill-durability.sh
+chmod +x scripts/kill-durability.sh
+cd "$BASE"
+expect "a COMMENT naming the assertion satisfies it (stated limit)" crash_only_state_row PASS "compares reconstructed state"
+
+# --- differential-observability (Huang et al., HotOS 2017) -------------------
+#
+# The alert is REAL only if its client half is a series this service does not
+# emit. Every FAIL case below is an alert that parses, evaluates, and never
+# fires in the failure it was written for.
+ROW_NAME="differential-observability"
+echo "differential-observability:"
+
+emitted() { # emitted <series>...
+  mkdir -p observability
+  { printf '# manifest\n'
+    for _s in "$@"; do printf -- '- name: %s\n  type: gauge\n  labels: []\n' "$_s"; done
+  } > observability/emitted-metrics.yaml
+}
+gray_alert() { # gray_alert <expression-line>...
+  mkdir -p observability
+  { printf '## `SvcEventLogNotWritable` (page)\n\n```\nsvc_eventlog_writable == 0\n```\n\n'
+    printf '## `SvcGrayFailure` (page)\n\n```\n'
+    for _l in "$@"; do printf '%s\n' "$_l"; done
+    printf '```\n\n**Meaning:** the service is up according to itself.\n'; } > observability/alerts.md
+}
+
+fixture
+cd "$BASE"
+expect "neither observability file is UNASKED" differential_observability_row NA "no observability/alerts.md"
+
+fixture
+gray_alert 'probe_success < 0.99'
+cd "$BASE"
+expect "an alert file with no manifest cannot be scored" differential_observability_row NA "no observability/emitted-metrics.yaml"
+
+fixture
+emitted svc_eventlog_writable
+gray_alert \
+  '  min_over_time(svc_eventlog_writable[10m]) == 1' \
+  'and on(instance)' \
+  '  avg_over_time(probe_success{job="blackbox"}[10m]) < 0.99'
+cd "$BASE"
+expect "an alert citing an out-of-process series is the PASS" differential_observability_row PASS "1 series this service does not emit"
+
+# THE MUTATION THIS ROW EXISTS FOR: the client half replaced by a series this
+# service emits about itself. It parses, it evaluates, and in the gray failure
+# it is measuring the vantage that is wrong.
+fixture
+emitted svc_eventlog_writable svc_readyz_stale_never_ready_audits_total
+gray_alert \
+  '  min_over_time(svc_eventlog_writable[10m]) == 1' \
+  'and on(instance)' \
+  '  avg_over_time(svc_readyz_stale_never_ready_audits_total[10m]) > 0'
+cd "$BASE"
+expect "the client half replaced by a self-emitted series" differential_observability_row FAIL "cites ONLY series this service emits"
+
+# FIRST RECORDED FIRST-PASS REPAIR, pinned as its own case. Without the
+# trailing-paren filter `min_over_time` and `avg_over_time` counted as "series
+# this service does not emit", and the fixture above PASSED -- the exact
+# substitution the row exists to catch, certified green by two PromQL builtins.
+# The expression here is deliberately ALL builtins over ONE self-emitted series,
+# so removing the filter flips this case from FAIL to PASS.
+fixture
+emitted svc_eventlog_writable
+gray_alert \
+  '  min_over_time(svc_eventlog_writable[10m]) == 1' \
+  'and on(instance)' \
+  '  max_over_time(svc_eventlog_writable[10m]) == 1'
+cd "$BASE"
+expect "PromQL builtins are calls, not external series" differential_observability_row FAIL "cites ONLY series this service emits"
+
+# SECOND RECORDED FIRST-PASS REPAIR. With `#` lines left inside the fence, the
+# substitution above still PASSED because the COMMENT above the line still
+# named the external series the expression had stopped using. A mention is not
+# a citation, and this case is what goes green again if the sed is dropped.
+fixture
+emitted svc_eventlog_writable
+gray_alert \
+  '# was: avg_over_time(probe_success{job="blackbox"}[10m]) < 0.99' \
+  '  min_over_time(svc_eventlog_writable[10m]) == 1' \
+  'and on(instance)' \
+  '  max_over_time(svc_eventlog_writable[10m]) == 1'
+cd "$BASE"
+expect "a comment inside the fence is a mention, not a citation" differential_observability_row FAIL "cites ONLY series this service emits"
+
+# PROSE outside the fence names series too. Counting it would let a paragraph
+# about the blackbox exporter satisfy the row.
+fixture
+emitted svc_eventlog_writable
+{ printf '## `SvcGrayFailure` (page)\n\n```\n'
+  printf 'min_over_time(svc_eventlog_writable[10m]) == 1\n'
+  printf '```\n\n'
+  printf 'We should compare this against probe_success from the blackbox exporter.\n'
+} > observability/alerts.md
+cd "$BASE"
+expect "prose outside the fence is not the expression" differential_observability_row FAIL "cites ONLY series this service emits"
+
+# The next `## ` heading ENDS the section. A different alert's external series
+# must not be borrowed by this one.
+fixture
+emitted svc_eventlog_writable
+{ printf '## `SvcGrayFailure` (page)\n\n```\n'
+  printf 'min_over_time(svc_eventlog_writable[10m]) == 1\n'
+  printf '```\n\n'
+  printf '## `SvcProbeDown` (page)\n\n```\n'
+  printf 'probe_success{job="blackbox"} < 1\n'
+  printf '```\n'
+} > observability/alerts.md
+cd "$BASE"
+expect "a NEIGHBOURING alert's series is not this one's" differential_observability_row FAIL "cites ONLY series this service emits"
+
+fixture
+emitted svc_eventlog_writable
+mkdir -p observability
+printf '## `SvcEventLogNotWritable` (page)\n\n```\nsvc_eventlog_writable == 0\n```\n' > observability/alerts.md
+cd "$BASE"
+expect "no gray-failure alert at all, and no waiver" differential_observability_row FAIL "no alert on the DISAGREEMENT"
+
+# THE WAIVER NA. `waived` is the probe's own function, so this case also drives
+# its id matcher and its check-registries handoff -- an expired or unregistered
+# waiver leaves the row RED, which is what the FAIL case above already shows.
+fixture
+emitted svc_eventlog_writable
+printf '## `SvcEventLogNotWritable` (page)\n\n```\nsvc_eventlog_writable == 0\n```\n' > observability/alerts.md
+mkdir -p registries scripts
+printf -- '- obligation: gray-failure alert needs an out-of-process vantage\n  id: gray-failure-no-external-vantage\n  owner: platform\n  expires: 2099-01-01\n' > registries/waivers.yaml
+printf '#!/usr/bin/env bash\nexit 0\n' > scripts/check-registries.sh
+cd "$BASE"
+expect "a live waiver is the NA, and names itself" differential_observability_row NA "live waiver"
+
+# A waiver for a DIFFERENT id does not cover this obligation. Without this the
+# NA above would be satisfied by any waivers.yaml that exists at all.
+fixture
+emitted svc_eventlog_writable
+printf '## `SvcEventLogNotWritable` (page)\n\n```\nsvc_eventlog_writable == 0\n```\n' > observability/alerts.md
+mkdir -p registries scripts
+printf -- '- obligation: something else entirely\n  id: some-other-waiver\n  owner: platform\n  expires: 2099-01-01\n' > registries/waivers.yaml
+printf '#!/usr/bin/env bash\nexit 0\n' > scripts/check-registries.sh
+cd "$BASE"
+expect "another waiver's id does not cover this row" differential_observability_row FAIL "no alert on the DISAGREEMENT"
+
 echo
 if (( cases == 0 )); then
   echo "load-rows selftest: ZERO cases ran -- that is a broken selftest, not a green one" >&2
@@ -489,5 +815,5 @@ if (( bad != 0 )); then
   echo "load-rows selftest: ${bad} of ${cases} case(s) FAILED" >&2
   exit 1
 fi
-echo "load-rows selftest: ok -- ${cases} case(s), every verdict of all three rows demonstrated"
+echo "load-rows selftest: ok -- ${cases} case(s), every verdict of all five rows demonstrated"
 exit 0

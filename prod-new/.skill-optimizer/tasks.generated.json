@@ -1,0 +1,52 @@
+{
+  "tasks": [
+    {
+      "id": "3b7c1e94a02d",
+      "prompt": "A human asks for a new Go service repo called 'ledger-notifier' whose one-line purpose is 'sends settlement notifications to partner webhooks and owns the delivery ledger'. You send the batched Phase-1 message with your proposals pre-filled, and the human replies answering only two of the four: they confirm the purpose/ownership line and they pick tier 1, saying nothing about boundaries or about what must never happen. Continue the run as this skill should: do not re-interrogate question by question, do not invent the two missing semantic answers, and state exactly what remains outstanding and how you are getting it before any scaffolding happens.",
+      "expected_actions": [],
+      "capabilityId": "rule_four_questions"
+    },
+    {
+      "id": "a91f04d6c7b8",
+      "prompt": "New service 'catalog-admin': a plain CRUD API over a Postgres table of product records, one capability classed source_of_truth, no external effects, nothing consumes an event stream from it. The template ships an event log, snapshots and compaction. Run the mechanism derivation for this service and show what Phase 2 records: give the verdict for the event log, snapshots/compaction, inbox/dedup and outbox, each naming the property that decided it, and write the not-warranted verdicts into the spec's out_of_scope with those deriving properties rather than leaving them out silently or shipping the journal anyway.",
+      "expected_actions": [],
+      "capabilityId": "rule_derived_mechanisms"
+    },
+    {
+      "id": "6d2e8fa35b10",
+      "prompt": "During Phase 1 of scaffolding 'payout-router' you seeded four candidate invariants: total payout conservation, at-most-once external transfer, no stale exchange rate served as fresh, and payouts never cross tenant boundaries. The human ratifies only the first two and says the tenant-boundary one 'sounds right but we have not thought it through'. Show precisely where each of the four lands in the scaffolded tree and in production.yaml, including which files and keys the unratified ones use, and explain what the standard's probe would do if the tenant-boundary invariant were filed alongside the ratified ones.",
+      "expected_actions": [],
+      "capabilityId": "phase_2_two_homes_for_an_invariant"
+    },
+    {
+      "id": "cf50a1b3e792",
+      "prompt": "The user says: 'Scaffold a new Go service at the standard for our reconciliation worker.' The working directory they point you at already contains a git repo with go.mod, internal/, a partial test suite and a CI workflow that runs one lane. Respond as this skill should for this situation, in the bail format, and tell them exactly where this work belongs instead and what that path does differently.",
+      "expected_actions": [],
+      "capabilityId": "bail_repo_exists"
+    },
+    {
+      "id": "07e9b4c2d861",
+      "prompt": "A nightly cron job invokes this skill non-interactively with the argument 'start a repo for quote-cache' and a one-line purpose, with no human attached to the session and no way to receive a reply. Respond as this skill should: name the blocked_on condition in the bail format, say which specific inputs cannot be derived and why guessing them is not an option here, and state what the operator must supply for a rerun to proceed.",
+      "expected_actions": [],
+      "capabilityId": "bail_headless"
+    },
+    {
+      "id": "b48d3f0e6ca5",
+      "prompt": "Phase 1b for the new service 'inventory-api' returns event log role: none — it is a CRUD service over its own Postgres tables. You are now at Phase 2 step 2, about to remove the event log from the copied template, and you notice the template's example domain is a fold Apply(state, event) and its app layer journals before applying. Write the message you send the human at this point and say what you do next about the scaffold.",
+      "expected_actions": [],
+      "capabilityId": "phase_2_template_derivation_disagreement"
+    },
+    {
+      "id": "5a1cb7e83f04",
+      "prompt": "The scaffold for 'trade-gateway' is written and you are at Phase 3. `make verify` is green and `make verify-standard` reports FAIL 1, with the failing row named load-baseline, and benchmarks/load/ contains the generator plus baseline-TEMPLATE.md. Take Phase 3 to completion: get the probe to zero FAIL, say exactly what you run and what artifact it produces and on which machine it must be measured, and cover the rest of Phase 3's proof obligations including the gate scripts you authored and the evidence record.",
+      "expected_actions": [],
+      "capabilityId": "phase_3_prove_it_then_hand_it_over"
+    },
+    {
+      "id": "e2603da9184f",
+      "prompt": "You are scaffolding 'risk-limiter'. You copy template/ out of the installed skill directory into the new repo, and the first edit that fills a <slot> in the copied production.yaml fails with 'permission denied'. Explain what happened, fix it, and state the exact ordering the rest of this scaffold follows for every file copied out of the installed skill directory so no later slot-filling edit hits the same failure.",
+      "expected_actions": [],
+      "capabilityId": "bail_chmod_u_w_read_only_template"
+    }
+  ]
+}
