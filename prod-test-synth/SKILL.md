@@ -89,6 +89,11 @@ uncovered: <clauses or checklist entries you could NOT synthesize for, and why>
 
 `uncovered` is the honest line — silence there reads as full coverage.
 
+**Demos are oracle sources, not just illustrations.** Where `demos/INDEX.md`
+has made a property executable, its assertions are a legitimate oracle to
+generate against — they are derived from a cited source and were proven to
+fail under mutation, which is more than most contract clauses can say.
+
 ## Guardrails
 
 - Preamble §6 is absolute: no header, no test. No candidate ever placed in a

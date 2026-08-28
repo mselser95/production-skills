@@ -293,6 +293,13 @@ the build identity attached so profiles are comparable across a deploy). The
 inbound half of tracing, by contrast, is derived — see RULE
 DERIVED-MECHANISMS.
 
+**Where a new mechanism comes from.** Everything this template vendors was
+de-risked as a runnable demo first — see `demos/INDEX.md`, whose worked example
+is `scripts/kill-durability.sh`. When you find yourself scaffolding a mechanism
+this repo has never proven end to end, that is a demo to write before it is a
+file to ship: a scaffold that installs an unproven mechanism teaches that the
+mechanism is standard when nobody has watched it work.
+
 **Verification** — `verification/ratified/` (seed invariants as executable
 tests, each with its non-vacuity mutation recorded), `verification/conformance/`
 (a kit per declared capability class, wired to every adapter),

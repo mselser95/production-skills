@@ -167,6 +167,13 @@ with its evidence attached.
   across a survey population. A correlation over organizations licenses a
   direction to watch in one repo; it does not license a pass/fail line here.
 
+**Chaos and liability operations have runnable references.** `demos/INDEX.md`
+carries the executable form of several conditions this skill acts on — a
+metastable collapse that outlives its trigger (retry-storm), a component whose
+self-report stays green while clients fail (gray-failure). When classifying an
+incident-shaped failure, comparing it against a demo that reproduces the shape
+is cheaper than arguing from the logs.
+
 ## Bail
 
 Preamble format. The expected `blocked_on` values: `judgment`,

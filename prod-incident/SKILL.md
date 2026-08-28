@@ -109,6 +109,13 @@ candidate invariant, and the gate attribution stay on the session model.
    `events.json`, `invariants.txt`); proposals in the ratify queue; RULE
    NO-CI-EDITS respected.
 
+**A missing-signal report is a demo brief.** When the gate attribution says no
+declared gate would have caught the incident, the honest next artifact is
+often a runnable demo of the property that was missing — that is how
+`gray-failure-demo` and `retry-storm-demo` came to exist. Record it as such in
+the close-out and add it to `demos/INDEX.md`'s queue rather than leaving
+"nothing would have caught this" as the last word.
+
 ## Bail
 
 Preamble format. Expected `blocked_on` values: `sparse-input` (RULE

@@ -84,6 +84,34 @@ returns the ROOT, so the `/..` landed one level ABOVE the repo and every file
 read failed. The fallback branch was the only one that behaved, and it is the
 branch nobody exercises.
 
+**Four shapes a SHELL gate uses to report success while doing nothing.**
+Every one was measured on 2026-08-27, inside a harness written by this
+framework to prove a durability property — found by mutation, none by reading,
+and each produced a confident green:
+
+- **A kill that killed nothing, and said 0.** busybox's `pkill -9 -x <name>`
+  matches the command LINE, not the name, so it exits 0 having signalled
+  nothing. The harness reported a power cut that never happened and attributed
+  the resulting (unrelated) data loss to it. Kill by PID and then PROVE the
+  process is gone (`[ -d /proc/$pid ]`), because "the kill command succeeded"
+  and "the process is dead" are different facts.
+- **A scan that strode past everything it was looking for.** A raw-device
+  reader advanced 4096 bytes over an image formatted with 1 KiB blocks, so it
+  walked over every record and returned a count of zero — and the assertion of
+  the day only checked that the *forbidden* records were ABSENT, which "found
+  nothing at all" satisfies perfectly. Assert BOTH directions: the thing that
+  must be there is there, AND the thing that must not be is not.
+- **`VAR=x cmd --file $VAR/f` — the assignment applies to the command, the
+  expansion happened before it.** The gate therefore read and wrote a path
+  nobody was testing, and PASSED a writer that never called fsync. Use
+  `export VAR=…; cmd`, and add a guard that refuses to continue when the run
+  left no artifact where the test expects one.
+- **`grep` exits 1 when it selects no lines — which is the PASSING case.**
+  Under `set -e` the gate then exits non-zero exactly on the runs where nothing
+  was wrong, and the fix people reach for is to delete the `set -e`. Terminate
+  the pipeline explicitly (`|| true` with the count checked afterwards), never
+  by weakening the shell's own error handling.
+
 **A check that checked NOTHING must FAIL, not pass.** Zero-findings and
 zero-inputs are different outcomes and must be different exit codes: a
 citation checker that finds no citations, a scan whose file list came back

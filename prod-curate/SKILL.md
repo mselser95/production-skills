@@ -96,6 +96,11 @@ session model.
    both-direction evidence, contradiction result, soak counters if available,
    and a one-line "what breaks if this is wrong".
 
+**A demo's negative path is a kata.** Every demo in `demos/INDEX.md` ships a
+control that breaks the property on purpose and must exit non-zero — which is
+exactly the known-bad implementation `PROD_KATA_DIR` wants. Harvesting them is
+cheaper than authoring katas from scratch, and they come pre-proven to fail.
+
 ## Guardrails
 
 - Preamble §3: you touch the blocking lane and `verification/ratified/` ONLY

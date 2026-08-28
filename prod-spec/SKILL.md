@@ -142,6 +142,13 @@ plan's task list for `prod-implement`.
    (it fits on one screen — that is the point) and wait for approval before
    any downstream skill runs. Record the approval in the artifact.
 
+**An obligation whose mechanism does not exist yet is not a waiver.** When a
+derived obligation has no implementation anywhere in the org — no script, no
+kit, no platform control — say so in the plan and point at `demos/INDEX.md`:
+either the property is already executable there (and the task is to vendor it)
+or it is queued (and the task is bounded by that, not by inventing a mechanism
+inside a change plan).
+
 ## Guardrails
 
 - Preamble rules apply in full; the ones that bite here:

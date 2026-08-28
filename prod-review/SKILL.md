@@ -113,6 +113,12 @@ the full files read in Phase 0. Every area is checked or explicitly listed
 `NOT VALIDATED` with the reason — silence is not OK. Cross-boundary changes
 get their counterpart verified at its source, never assumed from compilation.
 
+A gap you are about to raise against a mechanism nobody in the org has ever
+run end to end is still a gap, but its remediation is a demo, not a code
+review comment — `demos/INDEX.md` says which properties are executable today.
+Name the vehicle; "add reconciliation" against a mechanism with no working
+example is a finding the author cannot act on.
+
 ### Phase 5 — Evidence check
 Every entry in `required_evidence.gates` has a corresponding green result for
 THIS diff; missing evidence is a gap, not a promise.

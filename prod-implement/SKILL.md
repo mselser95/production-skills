@@ -114,6 +114,13 @@ deviations: none | <anything done differently from the plan, and why>
 diff, and an undeclared deviation becomes a DIVERGENCE blocker there. Declare
 it here first.
 
+**RULE NO-INVENTED-MECHANISM.** If the task requires a mechanism this org has
+never run end to end — and `demos/INDEX.md` neither lists it as vendored nor
+as validated — you are not the right place for its first implementation. Emit
+`BAIL` with `blocked_on: unproven-mechanism`, naming it. A mechanism first
+written inside a feature task, under an iteration cap, is how the framework
+acquires machinery nobody has ever watched work.
+
 ## Bail
 
 Preamble format, always with the branch pushed and named in `state:` — a bail

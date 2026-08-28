@@ -228,6 +228,13 @@ that ships to it, or the fact that it has none (§8).
 Severity is impact-based for the tier. Nothing is omitted for being
 embarrassing, and "not applicable" is a legal state ONLY with its reason.
 
+**A gap whose mechanism this org has never run is a demo before it is a plan
+task.** `demos/INDEX.md` lists the properties already made executable and the
+vehicle each travels by ([A] per repo, [B] once per org). A [B] row is not a
+repo task at all — the repo only owes participation in a control installed
+elsewhere, and writing it as a per-repo task produces a plan the team cannot
+execute.
+
 ### Phase 5 — Refactor plan (the ratchet, auto-populated)
 Every dimension whose Phase-4 row shows a gap MUST produce a task — the plan
 is generated from the gap report, not from recollection. Baseline task set,
