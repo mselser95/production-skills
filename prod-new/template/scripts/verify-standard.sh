@@ -2468,17 +2468,61 @@ PYSBOM
   # rule is now enforced mechanically by the `probe-self:no-pipe-into-grep-q` row
   # below, not just asserted here.
   wf_exec="$(grep -rhE "^[^#]*" $wf/*.yaml 2>/dev/null | sed 's/#.*//' || true)"
-  if grep -qE "cosign|--provenance=|actions/attest|attestations:" <<<"$wf_exec"; then
-    row "artifact-provenance" PASS "signing/attestation step present"
+  # SIGNING IS NOT PROVENANCE, and this row used to accept either. Its pattern
+  # was `cosign|--provenance=|actions/attest|attestations:`, so the bare word
+  # `cosign` anywhere in any workflow passed a row named artifact-PROVENANCE --
+  # and a pipeline that only signs passed it. Measured 2026-08-28 two ways: by
+  # slsa-provenance-demo, which ran it over two workflows differing in exactly
+  # that property and got the identical verdict, and again here on a fixture
+  # whose only step is `cosign sign`. A signature says a key vouched for these
+  # bytes; provenance says which source, which builder, which parameters
+  # produced them, and that is the claim this row's name makes.
+  #
+  # `cosign sign` alone no longer matches. `cosign attest` does, as do the
+  # attestation-producing forms of the other three.
+  if grep -qE "cosign[[:space:]]+attest|--provenance=true|actions/attest-build-provenance|^[[:space:]]*attestations:[[:space:]]*(write|true)" <<<"$wf_exec"; then
+    row "artifact-provenance" PASS "an attestation-PRODUCING step is present (signing alone does not satisfy this row)"
+  elif grep -qE "cosign[[:space:]]+sign" <<<"$wf_exec"; then
+    row "artifact-provenance" FAIL "the workflows SIGN but produce no provenance -- a signature attests custody of a key, not where the bytes came from (cosign attest / --provenance=true / actions/attest-build-provenance)"
   elif waived artifact-provenance-signing; then
     row "artifact-provenance" NA "live waiver with owner+expiry in registries/waivers.yaml"
   else row "artifact-provenance" FAIL "no provenance and no live waiver (an expired or missing waiver is not an exemption)"; fi
 fi
 
 # --- 15. CI lanes ---------------------------------------------------------
-grep -q "^check-fast:" Makefile 2>/dev/null && row "cheap-gate" PASS "make check-fast exists" || row "cheap-gate" FAIL "no cheap gate"
-grep -q "^test-advisory:" Makefile 2>/dev/null && row "advisory-lane" PASS "make test-advisory exists" || row "advisory-lane" FAIL "no advisory lane"
-ls $wf/nightly* >/dev/null 2>&1 && row "nightly-trends" PASS "nightly workflow present" || row "nightly-trends" FAIL "no scheduled trend lane"
+# A TARGET THAT EXISTS IS NOT A GATE THAT RUNS. These three rows used to check
+# that a name appeared in the Makefile and that a file existed, and measured
+# 2026-08-28 on a fixture all three PASSED over: a `check-fast:` with an EMPTY
+# recipe, a `test-advisory:` with an empty recipe, and a ZERO-BYTE nightly.yaml.
+# cheap-gate is the worst of the three, because every other row's meaning
+# assumes the cheap gate ran something. The recipe is now read the way make
+# reads it -- from the target line to the first line that is neither blank nor
+# tab-indented -- which is the same extraction the wiring rows use, and for the
+# same reason: a whole-file grep still matches after the recipe is emptied.
+recipe_of() { awk -v t="^$1:" '$0 ~ t {f=1;next} f && /^[^	]/ && NF {f=0} f' Makefile 2>/dev/null; }
+for pair in "check-fast:cheap-gate" "test-advisory:advisory-lane"; do
+  _t="${pair%%:*}"; _row="${pair##*:}"
+  if ! grep -q "^${_t}:" Makefile 2>/dev/null; then
+    row "$_row" FAIL "no ${_t} target"
+  elif [[ -z "$(recipe_of "$_t" | grep -vE '^[[:space:]]*(@?echo|#)' | tr -d '[:space:]')" ]]; then
+    row "$_row" FAIL "make ${_t} exists and its recipe runs NOTHING (only echoes or blank) -- a target is not a gate"
+  else
+    row "$_row" PASS "make ${_t} exists and its own recipe invokes $(recipe_of "$_t" | grep -cvE '^[[:space:]]*(@?echo|#)|^[[:space:]]*$') command(s)"
+  fi
+done
+# A nightly workflow file that exists proves a filename. tier-policy's own note
+# says an invalid workflow yields ZERO checks rather than a red one, so an empty
+# or job-less file is the fail-open shape this row exists to refuse.
+_nightly="$(ls $wf/nightly* 2>/dev/null | head -1)"
+if [[ -z "$_nightly" ]]; then
+  row "nightly-trends" FAIL "no scheduled trend lane"
+elif [[ ! -s "$_nightly" ]]; then
+  row "nightly-trends" FAIL "$_nightly exists and is EMPTY -- a zero-byte workflow schedules nothing"
+elif ! grep -qE "^[[:space:]]*(schedule|cron):" "$_nightly" || ! grep -qE "^[[:space:]]*jobs:" "$_nightly"; then
+  row "nightly-trends" FAIL "$_nightly has no schedule trigger or no jobs: -- it is a file, not a lane"
+else
+  row "nightly-trends" PASS "scheduled trend lane with jobs in $(basename "$_nightly")"
+fi
 
 # --- 16. ops artifacts (present AND their citations resolve) --------------
 for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
