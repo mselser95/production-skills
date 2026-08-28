@@ -87,6 +87,9 @@ quiet one.
 | 11 | [dependency-confusion-demo](https://github.com/mselser95/dependency-confusion-demo) | a committed, integrity-checked lockfile generated against the wrong default is a durable pin TO THE ATTACKER that `npm ci` reproduces on every clean build | Birsan (2021, disclosure) | §23; **corrects** `dependency_currency.lockfile` | [A]+[B] | `pushed` |
 | 12 | [clock-skew-demo](https://github.com/mselser95/clock-skew-demo) | 8 of 15 causal edges invert under wall-clock ordering, 0 under HLC — and 8 are ordered by the logical counter alone, the component an incomplete implementation drops | Kulkarni et al., HLC (OPODIS 2014); Lamport (1978) | the injected clock/random/ID rule — this demo is WHY | [A] | `pushed` |
 | 13 | [bulkhead-demo](https://github.com/mselser95/bulkhead-demo) | a healthy endpoint collapses because a sick one shares its pool; enlarging the shared pool postpones exhaustion instead of confining it | Nygard, *Release It!* (2018); SRE ch.22 | §7 `isolation_and_backpressure`, §26 | [A] | `pushed` |
+| 14 | [sbom-runtime-drift-demo](https://github.com/mselser95/sbom-runtime-drift-demo) | the application's OWN binary appears in zero SBOM components (syft derives its file inventory from the package DB), and a package-DB check passes while an LD_PRELOADed object executes | CycloneDX / SPDX specs; EO 14028 | §9 `supply_chain.sbom` | [A]+[B] | `pushed` |
+| 15 | [reproducible-builds-demo](https://github.com/mselser95/reproducible-builds-demo) | two builders differing in image, path, HOME, hostname, uid, timezone and VCS state produce byte-identical digests — with per-flag attribution showing which bytes each flag removes | Lamb & Zacchiroli (IEEE Software 2022) | §11 reproducibility; complements `artifact_provenance` | [A]+[B] | `pushed` |
+| 16 | [dedup-end-to-end-demo](https://github.com/mselser95/dedup-end-to-end-demo) | duplicates injected at every hop of a three-service chain still yield exactly one effect — and the key minted per PUBLISH instead of per outbox ENTRY defeats it | Richardson, *Microservices Patterns* (2018); Gray & Reuter (1992) | `external_effect.idempotency_strategy` | [A] | `pushed` |
 
 `validated` above means I re-ran it myself from a clean clone of the pushed
 commit, watched the success path exit 0 AND every negative control exit
@@ -96,7 +99,7 @@ a report.
 
 ### In flight
 
-sbom-runtime-drift · reproducible-builds · dedup-end-to-end
+canary-abort · egress-default-deny · noisy-neighbor — the first kubernetes batch
 
 ### Queued
 
