@@ -22,7 +22,10 @@ check-fast:
 	@echo "Running architecture checks..."
 	go test -count=1 ./internal/architecture
 	$(MAKE) error-handling-fitness
+	$(MAKE) gate-hygiene-fitness
 	$(MAKE) crash-only-selftest
+	@echo "Checking this repo is still in step with the standard..."
+	@bash scripts/check-template-drift.sh --local
 
 # error-handling-fitness is a FITNESS FUNCTION, sitting beside the import bans
 # in internal/architecture rather than beside the tests: it constrains the
@@ -49,8 +52,6 @@ error-handling-fitness:
 	bash scripts/tests/error-handling-fitness-selftest.sh
 	@echo "Running error-handling fitness (Yuan et al., OSDI 2014)..."
 	bash scripts/error-handling-fitness.sh
-	bash scripts/gate-hygiene-fitness.sh
-	@bash scripts/check-template-drift.sh --local
 
 # crash-only-selftest exercises the LOGIC of the crash-only state assertion in
 # scripts/kill-durability.sh without a docker daemon, by sourcing the script
@@ -141,7 +142,14 @@ fuzz:
 	go test -list "^$${name}$$" ./internal/platform/outboxlog | grep -qx "$$name" || { echo "missing fuzz target: $$name" >&2; exit 1; }; \
 	go test -run='^$$' -fuzz="$${name}" -fuzztime=$(FUZZTIME) ./internal/platform/outboxlog
 
-verify: lint architecture race coverage chaos e2e fuzz
+# check-fast FIRST, and it is not a convenience. Until 2026-08-28 `verify` did
+# not include it, and ci.yaml runs `make verify` and nothing else -- so on that
+# path the registry expiries, the error-handling fitness, the gate-hygiene
+# fitness, the crash-only selftest and the template-drift check never ran at
+# all. pr.yaml happened to invoke check-fast separately, which is why nobody
+# noticed: the gates were reachable on one route and absent on the other, and
+# the lane documented as "the full presubmit" was the one missing them.
+verify: check-fast lint architecture race coverage chaos e2e fuzz
 
 bench:
 	@echo "Running benchmarks (recording, never a gate)..."
