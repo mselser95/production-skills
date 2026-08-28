@@ -120,6 +120,30 @@ and each produced a confident green:
   the pipeline explicitly (`|| true` with the count checked afterwards), never
   by weakening the shell's own error handling.
 
+**A QUEUED operation reports acceptance, never execution — and the five shapes
+above do not cover it.** Those are about a command's exit code; this is about
+an effect submitted asynchronously, where "success" means the request was taken
+and nothing in the caller's world ever reports what the request DID. Measured
+2026-08-28: an explanatory comment inside a Vault `revocation_statements` block
+contained a semicolon, Vault splits that field on `;`, and PostgreSQL was handed
+a statement beginning with prose. Revocation being asynchronous, the CLI printed
+"All revocation operations queued successfully" and exited 0 while the
+credential stayed live for the 71 seconds anybody bothered to measure. The fix
+then reintroduced the defect while explaining it — the corrected comment quoted
+`";"` — and was caught only by the preflight that same change had just added.
+
+Three rules follow, and they apply to every async effect this framework touches
+(publish, revoke, invalidate, dispatch):
+
+- **Assert the EFFECT, never the submission.** "Queued successfully" is a
+  statement about the queue.
+- **Read back what the SERVER stored, and parse it the way the server will.**
+  A preflight over the local file validates a document nobody executes.
+- **When two mechanisms produce the same client-visible symptom, ask the system
+  which one acted.** A lease expiry and a `VALID UNTIL` both yield "password
+  authentication failed"; only a direct query distinguishes the mechanism you
+  built from the one that happened to be there.
+
 **A check that checked NOTHING must FAIL, not pass.** Zero-findings and
 zero-inputs are different outcomes and must be different exit codes: a
 citation checker that finds no citations, a scan whose file list came back
