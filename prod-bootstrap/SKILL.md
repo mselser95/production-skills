@@ -282,6 +282,13 @@ can do are tagged `ambiguity: none` and handed to `prod-implement`; design
 decisions stay `open` with the human. State explicitly which gaps the plan
 does NOT cover and why.
 
+**A load or chaos gap is closed by the procedure, never by a script somebody
+improvises.** `references/chaos-load-framework.md` is what a §25 or §26 plan
+task executes: the steady state declared first, the detector calibrated before
+the subject, and the controls that make the result falsifiable. Its step 5 is
+the one that saves the most time here — the faults are DERIVED from the
+capability class's scenario checklist, so nobody has to invent a fault list.
+
 ### Phase 6 — EXECUTE (the default; planning alone is not a deliverable)
 A gap identified and left as a plan item is a bootstrap that did half its job.
 Every task from Phase 5 whose `ambiguity` is `none` or `low` is DISPATCHED and

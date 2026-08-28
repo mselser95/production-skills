@@ -130,6 +130,13 @@ often a runnable demo of the property that was missing — that is how
 the close-out and add it to `demos/INDEX.md`'s queue rather than leaving
 "nothing would have caught this" as the last word.
 
+**A metastable incident is reproduced by a procedure, not by a fixture.** When
+the timeline shows a system that stayed down after its trigger was removed,
+`references/chaos-load-framework.md` step 7 is the shape of the reproduction —
+and the recovery bound it measures becomes the candidate invariant. A fixture
+that replays only the collapse misses the property that made the incident
+expensive.
+
 ## Bail
 
 Preamble format. Expected `blocked_on` values: `sparse-input` (RULE

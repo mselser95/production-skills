@@ -408,6 +408,13 @@ under the same condition), `CODEOWNERS` with a real owner,
    reader who finds no outbox six months from now will otherwise assume it was
    forgotten, and either add one nothing needs or distrust the whole scaffold.
 
+**The load harness the template ships is step 3 of a nine-step procedure.**
+`benchmarks/load/loadgen.go` is open-loop because
+`references/chaos-load-framework.md` says a closed-loop harness cannot measure
+past saturation; the sweep, the baseline artifact and the controls that make the
+number falsifiable are the rest of that procedure, and a scaffold that ships the
+generator without them ships a measurement nobody can refute.
+
 ## Guardrails
 
 - Preamble in full. Greenfield-specific:

@@ -139,6 +139,14 @@ review comment — `demos/INDEX.md` says which properties are executable today.
 Name the vehicle; "add reconciliation" against a mechanism with no working
 example is a finding the author cannot act on.
 
+A load or chaos artifact in the diff is reviewed against
+`references/chaos-load-framework.md`, and the first question is not whether the
+numbers look right — it is whether the experiment could have FAILED. An
+experiment with no executed control, a percentile from a closed-loop harness, a
+steady state measured from inside the process, or a partition asserted from
+`iptables`' exit code rather than from inside the pod: each is a finding, and
+each has produced a green false result in this collection's own demos.
+
 ### Phase 5 — Evidence check
 Every entry in `required_evidence.gates` has a corresponding green result for
 THIS diff; missing evidence is a gap, not a promise.

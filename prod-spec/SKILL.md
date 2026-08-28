@@ -163,6 +163,13 @@ either the property is already executable there (and the task is to vendor it)
 or it is queued (and the task is bounded by that, not by inventing a mechanism
 inside a change plan).
 
+**A load or chaos obligation is a PROCEDURE, not a task line.** When the
+derived obligations include load evidence (§25) or a chaos scenario (§26, §20),
+the plan task points at `references/chaos-load-framework.md` and inherits its
+nine steps and its mandatory controls. A plan entry reading "add a load test"
+resolves to a closed-loop harness roughly every time, which measures the
+harness's politeness and not the service.
+
 ## Guardrails
 
 - Preamble rules apply in full; the ones that bite here:

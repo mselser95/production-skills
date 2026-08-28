@@ -192,6 +192,12 @@ self-report stays green while clients fail (gray-failure). When classifying an
 incident-shaped failure, comparing it against a demo that reproduces the shape
 is cheaper than arguing from the logs.
 
+**A chaos experiment is a bounded operation with a rehearsed abort, and both
+are defined in `references/chaos-load-framework.md`.** Running one whose abort
+path has never been invoked is outside this skill's rules however routine the
+experiment looks: an abort nobody exercised fails when called, and the
+experiment continues past it.
+
 ## Bail
 
 Preamble format. The expected `blocked_on` values: `judgment`,

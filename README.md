@@ -20,6 +20,13 @@ test provenance, and the incident fixture — plus the review audit engine
 request in a governed repo passes through the pipeline. The formats are the
 contracts of the whole system — skills are replaceable, the formats are not.
 
+`_shared/chaos-load-framework.md` is the operational procedure for the two
+dimensions nobody executes by reading: load (§25) and chaos (§13/§20/§26). Nine
+steps, each with a "not ready if" condition, and a set of mandatory controls
+that exist because each one's absence produced a green false result in one of
+the 34 demos. It is what a "build the load/chaos experiments for X" request
+resolves to, and it is referenced from every skill that can be asked for one.
+
 Everything above is scoped to ONE repo. `_shared/domain-boundaries.md` is the
 one layer above that: DOMA-style domain ownership (`foundational`/`derived`/
 `aggregate`), a `domain_gateway` capability class, and the invariant that a
