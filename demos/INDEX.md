@@ -70,9 +70,10 @@ quiet one.
 | `gated` | a row in `verify-standard.sh` scores it, with selftest coverage |
 | `queued` | on the list, not built |
 | `blocked` | attempted, could not be made honest on this stack — with the reason |
+| `superseded` | the gap it demonstrated has been CLOSED by the framework; the demo's own premise check now fails on purpose |
 
 **Where this table actually stands, counted from the rows below rather than
-remembered: 8 `pushed`, 26 `validated`.** `pushed` was missing from this
+remembered: 6 `pushed`, 27 `validated`, 1 `superseded`.** `pushed` was missing from this
 vocabulary until 2026-08-29 — 27 of 34 rows carried a status the legend did not
 define, so a reader looking it up found nothing and would reasonably read it as
 a synonym for the one above it. It is not. The gap between the two is the whole
@@ -84,6 +85,19 @@ point of having a status column:
   the property it demonstrates is removed. A demo whose failing case was never
   exercised is the same shape as a test that passes against a broken
   implementation: it proves the harness runs, not that the mechanism matters.
+
+**One row reads `superseded`, and it is the pipeline working.**
+error-budget-freeze-demo existed to show two gaps: the probe had NO slo row, and
+`ops:SLO.md` was satisfied by an EMPTY docs/SLO.md. Both were closed on
+2026-08-29 -- `slo-objectives-ratified` was written, and the ops rows now reject
+a zero-byte file. The demo has a premise check (`run-demo.sh:350`,
+`[ "${PSLO:-1}" -eq 0 ] || fail "the probe already has an slo row"`) and it
+FAILED, on purpose, rather than demonstrating a gap that no longer exists.
+
+Its eight controls all still pass. Nothing about it is broken: the thing it was
+built to expose is fixed, and it said so instead of going quietly green. A demo
+that notices when its subject gets repaired is worth more than one that keeps
+passing after the point is moot.
 
 **The procedure is a script: `demos/validate-demo.sh <repo>`.** It clones fresh
 from the public URL every time, runs the happy path, reads the controls out of
@@ -157,8 +171,8 @@ sentence is "34 published, 7 validated".
 | 30 | [syscall-anomaly-demo](https://github.com/mselser95/syscall-anomaly-demo) | Falco with an EMPTY rules file starts cleanly, reports healthy, and detects nothing; rules find what somebody thought of | Forrest et al. (IEEE S&P 1996); Falco as tooling | §9 — proposes a NEW runtime-security key | [B] | `validated` |
 | 31 | [least-privilege-rbac-demo](https://github.com/mselser95/least-privilege-rbac-demo) | the gap between the role somebody guessed and the role the workload uses, measured — and a derived role nobody re-tested is an outage waiting for a code path | Saltzer & Schroeder (1975); k8s RBAC docs | `authz_invariants` | [A]+[B] | `pushed` |
 | 32 | [slsa-provenance-demo](https://github.com/mselser95/slsa-provenance-demo) | a correctly SIGNED artifact built by hand is admitted by signature and refused by provenance — and the shipped probe row gives the SAME verdict to a sign-only and a with-provenance workflow | Torres-Arias et al., in-toto (USENIX Sec 2019); SLSA spec | `artifact_provenance` — **and finds the row vacuous** | [B] | `validated` |
-| 33 | [error-budget-freeze-demo](https://github.com/mselser95/error-budget-freeze-demo) | an SLI computed from the server's own success counter stays healthy through an outage the client sees, so the budget never burns and the freeze never fires | Beyer et al., SRE (2016) | `slo.exhaustion_policy: declared_and_enforced` | [A]+[B] | `pushed` |
-| 34 | [runbook-rehearsal-demo](https://github.com/mselser95/runbook-rehearsal-demo) | a runbook whose steps assert no postcondition: every command exits 0, the service is still broken, the rehearsal reports success | SRE (2016); §10's own citations-resolve line | `runbooks.exercise_cadence` | [A] | `pushed` |
+| 33 | [error-budget-freeze-demo](https://github.com/mselser95/error-budget-freeze-demo) | an SLI computed from the server's own success counter stays healthy through an outage the client sees, so the budget never burns and the freeze never fires | Beyer et al., SRE (2016) | `slo.exhaustion_policy: declared_and_enforced` | [A]+[B] | `superseded` |
+| 34 | [runbook-rehearsal-demo](https://github.com/mselser95/runbook-rehearsal-demo) | a runbook whose steps assert no postcondition: every command exits 0, the service is still broken, the rehearsal reports success | SRE (2016); §10's own citations-resolve line | `runbooks.exercise_cadence` | [A] | `validated` |
 
 `validated` above means I re-ran it myself from a clean clone of the pushed
 commit, watched the success path exit 0 AND every negative control exit
