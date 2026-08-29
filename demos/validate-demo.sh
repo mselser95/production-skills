@@ -63,9 +63,24 @@ runner="$clone/run-demo.sh"
 [[ -x "$runner" || -r "$runner" ]] || {
   echo "  CANNOT VALIDATE: no run-demo.sh in the clone" >&2; exit 2; }
 
-# Controls declared in the runner's header. Comment lines only: a control named
-# in executable code is the demo running it, not documenting it.
-mapfile -t controls < <(grep -E '^#[[:space:]]+[A-Z][A-Z0-9_]*=[A-Za-z0-9._-]+[[:space:]]+\./' "$runner" \
+# Controls declared in the runner's header. TWO filters, and the second was
+# learned the hard way.
+#
+# Comment lines only: a control named in executable code is the demo running it,
+# not documenting it.
+#
+# AND the line must say `exits 1`. A header lists more than controls -- it also
+# lists alternative supported MODES, which exit 0 because they work. Measured
+# 2026-08-29 on crypto-shredding-demo: its header declares three controls
+# (CS_CONTROL=plaintext-omit / plaintext-snapshot / shred-noop, each "exits 1")
+# and one mode (CS_KEYMODE=envelope, "the fallback construction"). Without this
+# filter the mode was swept in as a control, ran, exited 0 because it is
+# supposed to, and the tool reported a HEALTHY demo as NOT validated.
+#
+# That is the assertion that fires when nothing is wrong, in the validator built
+# to catch exactly that. Shipped as-is, the next person "fixes" a correct demo.
+# The demos' own vocabulary is the discriminator: a control declares its exit.
+mapfile -t controls < <(grep -E '^#[[:space:]]+[A-Z][A-Z0-9_]*=[A-Za-z0-9._-]+[[:space:]]+\./.*exits?[[:space:]]+1' "$runner" \
   | sed -E 's/^#[[:space:]]+//; s/[[:space:]]+\..*$//' | sort -u)
 
 if (( ${#controls[@]} == 0 )); then
