@@ -2424,6 +2424,12 @@ DELETES,  _d_injected = _load_map("PROD_SBOM_DELETES",  {})
 
 any_consumer = False
 any_deleter  = False
+# _saw_reusable: did ANY job delegate to a reusable workflow (`uses:` pointing at
+# a .yaml/.yml in another repo or path)? It is what separates "this pipeline is
+# built from workflows we were not taught to classify" -- unknowable, NA -- from
+# "this pipeline is plain inline jobs and simply has no SBOM" -- knowable, FAIL.
+# Without it the NA branch would excuse every repo that has no SBOM at all.
+_saw_reusable = False
 problems, proven = [], []
 
 for raw in sys.stdin:
@@ -2458,7 +2464,17 @@ for raw in sys.stdin:
 
     def wf_of(name):
         u = jobs[name].get("uses") or ""
+        # BOTH maps, not just CONSUMES. The deleter loop below asks
+        # `wf_of(d) in DELETES`, so a wf_of that only ever returned CONSUMES
+        # keys could never name a deleter: any_deleter stayed False and every
+        # ordering fixture came back "no artifact-deleting job in the graph to
+        # order against" -- a PASS, over the exact invariant the row exists to
+        # check. Same defect as the unread _c_injected flag: a map loaded and
+        # then unreachable.
         for w in CONSUMES:
+            if w in u:
+                return w
+        for w in DELETES:
             if w in u:
                 return w
         if inline_sbom(name):
@@ -2470,10 +2486,25 @@ for raw in sys.stdin:
         return [n] if isinstance(n, str) else list(n)
 
     def kind(name):
+        # CONSUMES.get, never CONSUMES[w]: wf_of now also resolves DELETES keys,
+        # and a job that only DELETES has no consumer-kind. Subscripting would
+        # raise KeyError and kill the probe; .get returns None, which no `gone`
+        # tuple can equal, so a deleter is correctly never counted as a reader
+        # of the artifact it destroys.
         w = wf_of(name)
-        return None if w is None else (CONSUMES[w], jobs[name].get("art") or "")
+        if w is None or w not in CONSUMES:
+            return None
+        return (CONSUMES[w], jobs[name].get("art") or "")
 
     any_consumer |= any((wf_of(n) or "") == "sbom.yaml" for n in jobs)
+    # A `uses:` that names a .yaml/.yml is a call into a reusable workflow. The
+    # basename check keeps `uses: actions/checkout@v4` (a plain action, no file
+    # extension) from counting -- every repo has those, and they say nothing
+    # about whether the pipeline delegates its build to workflows we cannot see.
+    for _n in jobs:
+        _u = jobs[_n].get("uses") or ""
+        if ".yaml@" in _u or ".yml@" in _u or _u.endswith(".yaml") or _u.endswith(".yml"):
+            _saw_reusable = True
 
     for d in jobs:
         w = wf_of(d)
@@ -2511,7 +2542,26 @@ for raw in sys.stdin:
                     "%s: %r downloads the %s artifact that %r DELETES, and is not in its needs"
                     % (fname, c, gone[0], d))
 
-if not any_consumer:
+if not any_consumer and not _c_injected and _saw_reusable:
+    # THE PROMISED NA, WHICH DID NOT EXIST. _c_injected and _d_injected were
+    # assigned and then never read: the comment above says "UNSET IS NOT EMPTY:
+    # with no map injected the ordering invariant is UNKNOWABLE, and the row
+    # says so and returns NA", and the code fell straight through to the FAIL
+    # below instead. A comment describing behaviour that is not there is worse
+    # than no comment, because the next reader stops looking.
+    #
+    # Three conditions, and all three are needed:
+    #   not any_consumer -- no producer was recognised;
+    #   not _c_injected  -- and nobody told us what a producer looks like HERE;
+    #   _saw_reusable    -- and the pipeline is built from reusable workflows
+    #                       we therefore cannot classify.
+    #
+    # Without the third, a repo with plain inline jobs and genuinely no SBOM at
+    # all would get NA instead of the FAIL it has earned. With it, NA means
+    # exactly "you are on a CI whose conventions this probe was not told", which
+    # is the case 346b659 set out to stop answering with somebody else's facts.
+    print("NA|the SBOM ordering invariant is UNKNOWABLE here: this pipeline is built from reusable workflows, and PROD_SBOM_CONSUMES was not injected, so the probe cannot tell which of them produces an SBOM. Set it in config.sh (format: sbom.yaml:sbom,sbom-scan.yaml:sbom) to get a real verdict -- an uninjected map is not evidence of a missing SBOM")
+elif not any_consumer:
     print("FAIL|no job PRODUCES an SBOM -- neither a reusable sbom workflow nor an inline step emitting -o cyclonedx / -o spdx. The word may appear in comments or in a selftest filename; neither generates anything")
 elif problems:
     print("FAIL|" + "; ".join(problems[:2]))

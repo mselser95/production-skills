@@ -816,12 +816,24 @@ run_case "an anchor AND a tag still open a block" \
 # the phantom counts as a CLEAN registry -- defeating the `total == 0`
 # fail-closed guard that lives in this same file. So the flag is load-bearing
 # after all, and the case below is the shape my reasoning did not reach.
+# EXPECTED TEXT REALIGNED 2026-08-29. These two cases assert the fail-closed
+# zero-entries path, and they still do: exit 1 was correct throughout. What
+# changed is the sentence. The checked-and-none work reworded the verdict from
+# "no entries found" to a message that names the DISCRIMINATOR --
+# "N/4 registries declare an `entries:` key -- the rest are missing or
+# unreadable, so zero entries means the gate looked at nothing rather than found
+# nothing" -- and did not update these assertions. They then failed for a reason
+# unrelated to what they guard, in a selftest nothing in this repo invokes.
+#
+# The substring chosen is the clause carrying the MEANING, not the whole
+# sentence, so a future rewording that keeps the distinction does not break it
+# again while one that loses the distinction does.
 run_case "a walked top-level block cannot manufacture an entry" \
 "policy: |
   id: phantom
   owner: ghost
   expires: 2099-01-01" \
-  1 "no entries found"
+  1 "looked at nothing rather than found nothing"
 
 run_case "a top-level block does not derail the entry before it" \
 "entries:
@@ -959,7 +971,7 @@ run_case "control: a plain key: value is not a block opener" \
 run_case "a registry file with NO entries fails closed" \
 '# a comment and nothing else
 ' \
-  1 "no entries found"
+  1 "looked at nothing rather than found nothing"
 
 run_empty_case "an EMPTY registry directory fails closed" 1 "NO registry files"
 

@@ -48,9 +48,19 @@ jobs:
       # Listed individually, never globbed. `for f in _shared/probes/*-selftest.sh`
       # reports success over an empty glob if the directory is ever renamed,
       # which is the fail-open shape these files exist to refuse.
+      #
+      # probe-self-gate-selftest was ADDED here 2026-08-29. It had been the only
+      # canonical selftest that can run from this repo's root -- the other three
+      # hardcode template-relative `scripts/` paths and exit 2 here -- and
+      # nothing ran it. That matters more than it sounds: verify-standard.sh is
+      # EDITED in this repo and EXECUTED only in scaffolded ones, so a
+      # self-gating regression to the canonical probe landed here with no signal
+      # at all until somebody scaffolded a repo. Verified from the framework
+      # root: 29 ok, 0 failed.
       - name: probe selftests
         run: |
           bash _shared/probes/load-rows-selftest.sh
+          bash _shared/probes/tests/probe-self-gate-selftest.sh
           bash _shared/probes/policy-coverage.sh
 
       # Validate the workflow definitions. CI cannot meaningfully validate its
