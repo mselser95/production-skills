@@ -90,6 +90,25 @@ if (( ${#controls[@]} == 0 )); then
   exit 2
 fi
 
+# TEARDOWN BETWEEN RUNS, and this was learned by breaking a demo with it.
+#
+# Every demo ships teardown.sh because its containers bind fixed ports. The
+# first version of this script never ran it, so a validated demo left its
+# postgres/vault/app containers alive and the NEXT demo hit
+# "failed to set up container networking: driver failed programming external
+# connectivity" -- exit 125 on all five runs. Measured 2026-08-29: after
+# validating dynamic-credentials-demo, `docker ps` still showed dcd-postgres,
+# dcd-vault, dcd-app-static and dcd-app-dynamic holding their ports, and
+# expand-contract-live-demo was condemned for it.
+#
+# A validator whose runs contaminate each other measures the ORDER it ran them
+# in, not the demos. Teardown runs after every single invocation -- happy path
+# and each control -- because the leak is per-run, not per-demo.
+_teardown() {
+  [[ -x "$clone/teardown.sh" || -r "$clone/teardown.sh" ]] || return 0
+  ( cd "$clone" && ./teardown.sh >/dev/null 2>&1 ) || true
+}
+
 fails=0
 declare -a _rcs=()
 echo "== happy path"
@@ -102,11 +121,13 @@ else
   tail -5 "$work/happy.log" | sed 's/^/        /'
   fails=$((fails + 1))
 fi
+_teardown
 
 echo "== ${#controls[@]} declared control(s), each must exit 1"
 for c in "${controls[@]}"; do
   ( cd "$clone" && env "$c" ./run-demo.sh >"$work/ctl.log" 2>&1 )
   rc=$?
+  _teardown
   _rcs+=("$rc")
   if (( rc == 1 )); then
     echo "  ok    $c -> exit 1"
