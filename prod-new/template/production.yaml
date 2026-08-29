@@ -244,6 +244,26 @@ out_of_scope:
       unlimited container lets one runaway process take its host, which is a
       security property as much as an operational one.
 
+  - chaos_engineering: >
+      This scaffold is not deployed anywhere, so there is no production in which
+      to run an experiment and no steady state to hold a hypothesis about. The
+      policy asks for experiments DECLARED with a hypothesis, an abort path and
+      a cadence; declaring one against a service that does not run would be
+      inventing the very thing this framework refuses to accept from others.
+
+      This decline LAPSES on the first deployment. At that moment there IS a
+      steady state, and the first experiment to declare is the one whose
+      hypothesis is the invariant this service exists to hold
+      (see chaos-steady-state-demo, and _shared/chaos-load-framework.md).
+  - delivery: >
+      Nothing ships this scaffold yet: there is no environment, no progressive
+      rollout and no rollback to rehearse. `rollback: artifact_repin` presumes an
+      artifact that some deployment currently points at, and none does.
+
+      This decline LAPSES on the first deployment, and the rehearsal is the part
+      to do FIRST rather than last -- a rollback nobody has performed is a
+      paragraph, and the one time it is needed is the worst time to find that
+      out (see canary-abort-demo).
   - consistency_verification: >
       This scaffold is SINGLE-WRITER and immediately consistent: internal/app.Ledger
       holds one in-memory domain.State guarded by its own mutex, and no

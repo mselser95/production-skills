@@ -43,6 +43,8 @@ overload:overload:ingress_shedding,overload:retry_budget
 authz_invariants:authz-invariants
 sast_specialized:sast-blocking
 mutation:mutation-baseline (TREND)
+chaos_engineering:chaos-experiments-declared
+delivery:delivery-progressive
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -71,8 +73,6 @@ isolation_and_backpressure:scalability:partition_key
 # work list, and a key here with a demo beside it is a row somebody can write
 # this afternoon.
 KNOWN_UNSCORED="
-chaos_engineering               chaos-steady-state-demo
-delivery                        canary-abort-demo
 "
 
 # SPACES AND PARENS ARE PART OF SOME ROW NAMES. The pattern was

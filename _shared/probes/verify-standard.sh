@@ -2552,6 +2552,89 @@ else
   fi
 fi
 
+# --- chaos engineering: experiments DECLARED, with hypothesis and abort --------
+#
+# tier-policy: `chaos_engineering: { production_experiments: required,
+# steady_state_hypothesis: required_per_experiment, abort_path:
+# required_and_rehearsed, cadence: declared }`. Demo: chaos-steady-state-demo.
+#
+# I had this filed as "needs the template to ship a kind cluster in every PR",
+# and that was wrong about what the policy asks. It asks for experiments to be
+# DECLARED -- each with the hypothesis it would falsify, the abort path, and a
+# cadence. That is a document, checkable statically. Nothing here requires
+# infrastructure in a pull request.
+#
+# A steady-state hypothesis is what separates an experiment from an outage you
+# scheduled: without one, "we killed a pod and nothing looked wrong" is a story,
+# not a measurement. And the policy's own words on the abort: "an unenforced
+# blast radius is an intention, not a property".
+_chaos_file=$(ls chaos/experiments.y*ml verification/chaos/experiments.y*ml 2>/dev/null | head -1)
+if declined "chaos_engineering"; then
+  row "chaos-experiments-declared" NA "ratified decline in $SPEC"
+elif [[ -z "$_chaos_file" ]]; then
+  row "chaos-experiments-declared" FAIL "no chaos/experiments.yaml and no ratified decline -- the policy wants experiments DECLARED (hypothesis, abort path, cadence), which is a document, not infrastructure; a service with nothing to experiment on yet should say so in $SPEC"
+elif ! command -v python3 >/dev/null 2>&1; then
+  row "chaos-experiments-declared" FAIL "python3 unavailable, so $_chaos_file could not be parsed -- unparsed is not declared"
+else
+  _chaos_out=$(python3 -c '
+import sys, yaml
+p = sys.argv[1]
+try:
+    d = yaml.safe_load(open(p).read()) or {}
+except Exception as e:
+    print("FAIL|%s is unparseable: %s" % (p, str(e).replace("\n"," ")[:90])); raise SystemExit(0)
+exps = d.get("experiments") if isinstance(d, dict) else None
+if not isinstance(exps, list) or not exps:
+    print("FAIL|%s declares no `experiments:` list -- a file with no experiment declares no chaos" % p); raise SystemExit(0)
+bad = []
+for i, e in enumerate(exps):
+    if not isinstance(e, dict):
+        bad.append("entry %d is not a mapping" % i); continue
+    name = e.get("name") or "entry %d" % i
+    for k, why in (("steady_state_hypothesis", "no hypothesis -- an experiment with nothing to falsify is a scheduled outage"),
+                   ("abort_path", "no abort path -- an unenforced blast radius is an intention, not a property")):
+        if not e.get(k):
+            bad.append("%s: %s" % (name, why))
+if not d.get("cadence"):
+    bad.append("no top-level `cadence:` -- continuous, scheduled, or the once it was run and written up")
+if bad:
+    print("FAIL|%d experiment(s) declared, %d problem(s): %s" % (len(exps), len(bad), "; ".join(bad[:2])))
+else:
+    print("PASS|%d experiment(s) declared, each with a steady-state hypothesis and an abort path, cadence %r" % (len(exps), d.get("cadence")))
+' "$_chaos_file" 2>&1)
+  case "${_chaos_out%%|*}" in
+    PASS) row "chaos-experiments-declared" PASS "${_chaos_out#*|}" ;;
+    *)    row "chaos-experiments-declared" FAIL "${_chaos_out#*|}" ;;
+  esac
+fi
+
+# --- delivery: progressive, with a rehearsed rollback -------------------------
+#
+# tier-policy: `delivery: { progressive: required, analysis:
+# automated_plus_invariant_gates, rollback: artifact_repin, rehearsed: required,
+# human_ack_before_full }`. Demo: canary-abort-demo.
+#
+# Same correction as chaos above: this asks the repo to DECLARE how it ships and
+# how it goes back, not to run a canary in CI. `rehearsed: required` is the
+# clause that matters -- a rollback nobody has performed is a paragraph, and the
+# one time you need it is the worst time to discover that.
+if declined "delivery"; then
+  row "delivery-progressive" NA "ratified decline in $SPEC"
+else
+  _dlv=$(spec_field delivery strategy)
+  _dlv_rb=$(spec_field delivery rollback)
+  _dlv_reh=$(spec_field delivery rehearsed)
+  if placeholder_value "$_dlv"; then
+    row "delivery-progressive" FAIL "no delivery.strategy in $SPEC and no ratified decline -- how this service reaches production is a property of the service, not of the pipeline that happens to carry it"
+  elif placeholder_value "$_dlv_rb"; then
+    row "delivery-progressive" FAIL "delivery.strategy is '$_dlv' but no delivery.rollback declared -- a way forward with no way back is a one-way door"
+  elif placeholder_value "$_dlv_reh"; then
+    row "delivery-progressive" FAIL "delivery.rollback is '$_dlv_rb' but delivery.rehearsed is undeclared -- policy says rehearsed: required, and a rollback nobody has performed is a paragraph"
+  else
+    row "delivery-progressive" PASS "strategy '$_dlv', rollback '$_dlv_rb', rehearsed '$_dlv_reh'. NOT proven here: that the rehearsal happened recently or against this version -- the declaration is the gate, the freshness is a judgement"
+  fi
+fi
+
 # --- SAST, and it must BLOCK ---------------------------------------------------
 #
 # tier-policy: `sast_specialized: { mode: required, scope:
