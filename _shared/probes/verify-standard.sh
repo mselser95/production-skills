@@ -2796,8 +2796,47 @@ else
 fi
 
 # --- 16. ops artifacts (present AND their citations resolve) --------------
+# PRESENT IS NOT WRITTEN. These four were `[[ -f $f ]] && row ... PASS "present"`
+# -- pure existence -- so a repo satisfied the runbook, SLO, alerting and
+# ownership dimensions with FOUR EMPTY FILES. Measured 2026-08-29 on an
+# instantiated template: truncating RUNBOOK.md, SLO.md and CODEOWNERS to 0 bytes
+# left every one of them reading `PASS  present`.
+#
+# It matters more here than elsewhere, because these are the artifacts a human
+# reaches for during an incident. An empty runbook is not the same as a missing
+# one: it LOOKS answered, so nobody writes the real thing, and the gap surfaces
+# at 3am. A comment-only CODEOWNERS is the same shape -- it assigns no owners
+# while appearing to.
+#
+# The bar is "at least one line that is neither blank nor a comment". Content
+# QUALITY is deliberately not judged: runbook-citations-resolve and the alert
+# rows already do that, and a keyword list here would be a second, worse copy of
+# them -- the two-lists defect this file has been bitten by repeatedly.
+# `#` IS A COMMENT IN CODEOWNERS AND A HEADING IN MARKDOWN, so the content test
+# cannot be the same for both. The first version of this fix applied the shell
+# comment rule to `.md` too, which would have failed a runbook written mostly as
+# headings -- legitimate content judged as silence. Caught reviewing this very
+# change, before it left the branch.
+#
+#   CODEOWNERS : a line that is neither blank nor `#`. A comment-only file
+#                assigns no owners while looking like it does.
+#   *.md       : any non-blank line. Headings ARE content; the failure this row
+#                is for is the EMPTY file, not the terse one.
 for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
-  [[ -f $f ]] && row "ops:$(basename "$f")" PASS "present" || row "ops:$(basename "$f")" FAIL "missing"
+  _ops_name="ops:$(basename "$f")"
+  case "$f" in
+    *.md) _content_re='^[[:space:]]*[^[:space:]]' ;;
+    *)    _content_re='^[[:space:]]*[^[:space:]#]' ;;
+  esac
+  if [[ ! -f $f ]]; then
+    row "$_ops_name" FAIL "missing"
+  elif [[ ! -s $f ]]; then
+    row "$_ops_name" FAIL "present but EMPTY (0 bytes) -- an empty $f is not a missing one, it is a file that looks answered and is not"
+  elif ! grep -qE "$_content_re" "$f" 2>/dev/null; then
+    row "$_ops_name" FAIL "present but carries no content line -- nothing in it is stated (for CODEOWNERS: only comments, which assigns no owners)"
+  else
+    row "$_ops_name" PASS "present, $(grep -cE "$_content_re" "$f" 2>/dev/null) content line(s)"
+  fi
 done
 if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
   # Derive the series-name pattern from the MANIFEST, never from one org's
