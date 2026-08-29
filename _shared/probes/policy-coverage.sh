@@ -41,6 +41,7 @@ write_surface_authn:write-surface-authn
 consistency_verification:consistency-verification
 overload:overload:ingress_shedding,overload:retry_budget
 authz_invariants:authz-invariants
+sast_specialized:sast-blocking
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -74,7 +75,6 @@ delivery                        canary-abort-demo
 mutation                        DELIBERATE: the policy itself says mode:advisory -- a
                                 trend, never a gate, so a PASS/FAIL row would
                                 contradict the key it scores
-sast_specialized                (no demo yet)
 "
 
 rows="$(grep -oE 'row "[a-z0-9:_-]+"' "$PROBE" | sed 's/row "//;s/"//' | sort -u)"

@@ -2552,6 +2552,53 @@ else
   fi
 fi
 
+# --- SAST, and it must BLOCK ---------------------------------------------------
+#
+# tier-policy: `sast_specialized: { mode: required, scope:
+# declared_untrusted_input_surface, blocking: required }`. Eighth key off
+# policy-coverage's known-unscored work list.
+#
+# TWO QUESTIONS, and the second is the one that gets skipped. Is a SAST tool
+# wired at all, and does its failure STOP THE MERGE? A scanner in a
+# `continue-on-error` lane is a report, and this repo's whole argument is that a
+# report nobody is forced to read is not a gate. The vuln-scan row already
+# carries the same requirement for govulncheck, for the same reason and after
+# the same mistake.
+#
+# It is a different class from govulncheck beside it: govulncheck asks whether
+# this code CALLS a known-vulnerable dependency function, SAST asks whether this
+# code contains the flaw itself. A repo with only the first is scanning other
+# people's code.
+# COMMENTS STRIPPED FIRST, and I earned this line the hard way twice over. The
+# detection was a bare grep, so a COMMENT naming the tool satisfied it -- and
+# the comment that satisfied it was the one directly above, the paragraph
+# explaining that a report is not a gate. Measured 2026-08-29 by deleting the
+# gosec job from the workflow: two mentions remained, both in my own prose, and
+# the row stayed PASS with no scanner wired at all.
+#
+# Sixth occurrence of this shape in my own code in one session. Writing about a
+# confusion is not immunity to it; it is the condition under which you stop
+# checking for it.
+_sast_tool=$(sed -E 's/[[:space:]]*#.*$//' .github/workflows/*.y*ml Makefile 2>/dev/null \
+             | grep -hoiE 'gosec|semgrep|codeql|bandit|brakeman|snyk[[:space:]]+code' \
+             | tr '[:upper:]' '[:lower:]' | sort -u | head -1)
+if [[ -z "$_sast_tool" ]]; then
+  row "sast-blocking" FAIL "no SAST tool wired anywhere in CI or the Makefile -- govulncheck asks whether this code CALLS a known-vulnerable dependency function; nothing here asks whether the code contains the flaw itself"
+else
+  # Is the job that runs it allowed to fail without stopping the merge?
+  _sast_soft=$(awk -v t="$_sast_tool" '
+    BEGIN{IGNORECASE=1; job=""; soft=0}
+    /^[[:space:]]{2}[A-Za-z0-9_-]+:[[:space:]]*$/ { job=$1; sub(/:$/,"",job); jsoft[job]=0 }
+    /continue-on-error:[[:space:]]*true/ { if (job!="") jsoft[job]=1 }
+    $0 ~ t { if (job!="" && jsoft[job]==1) found=1 }
+    END{ print (found ? "soft" : "") }' .github/workflows/*.y*ml 2>/dev/null | grep -c soft || true)
+  if (( _sast_soft > 0 )); then
+    row "sast-blocking" FAIL "$_sast_tool runs inside a continue-on-error job -- a scan whose failure does not stop the merge is a report, and the policy says blocking: required"
+  else
+    row "sast-blocking" PASS "$_sast_tool wired in CI and not inside a continue-on-error job. NOT proven here: that its ruleset is adequate for this repo's untrusted input surface -- the tool running is the gate, the rules are a judgement"
+  fi
+fi
+
 # --- write surface authn ------------------------------------------------------
 #
 # tier-policy: `write_surface_authn: required_or_declined`, with the policy's own

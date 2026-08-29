@@ -83,6 +83,39 @@ jobs:
       - uses: actions/checkout@v4
       - run: make kill-durability
 
+  # SAST, BLOCKING. tier-policy: `sast_specialized: { mode: required, scope:
+  # declared_untrusted_input_surface, blocking: required }`. It is its own job,
+  # not a step inside another, so it produces its own required check that cannot
+  # be skipped into passing by an earlier job's `needs:` failing.
+  #
+  # gosec finds a different class from govulncheck beside it: govulncheck
+  # answers "does this code CALL a known-vulnerable function in a dependency",
+  # gosec answers "does this code contain the vulnerability itself" -- unhandled
+  # errors on security-relevant calls, weak randomness, command injection,
+  # hardcoded credentials, path traversal. A repo with only the first is scanning
+  # other people's code.
+  #
+  # NOT `continue-on-error`, and that is the policy's word (`blocking:
+  # required`), not a preference. A security scan whose failure does not stop the
+  # merge is a report, and this repo's whole argument is that a report nobody is
+  # forced to read is not a gate.
+  gosec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Pinned, like every other tool here: an unpinned scanner changes what
+      # "green" means without anyone editing the repo.
+      - run: go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+      # -exclude-generated: generated code is not this repo's to fix, and a
+      # finding nobody can act on trains people to pass -exclude everything.
+      # No -severity filter: the policy says blocking, and choosing which
+      # severities block is exactly the widening this standard refuses.
+      - run: gosec -exclude-generated ./...
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:
