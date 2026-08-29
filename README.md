@@ -114,8 +114,51 @@ incomparable.
 Two classes of check, used differently (the repo's own GATE/SIGNAL
 discipline):
 
-- **GATE:** `skill-optimizer doctor --static` — structural validity; must pass
-  for every skill before a change merges.
+Two GATEs, and they check different things. Run both.
+
+- **GATE:** `skill-optimizer doctor --static`, from inside each skill directory
+  (it reads `./.skill-optimizer/skill-optimizer.json`, so the working directory
+  is load-bearing). This validates the **optimizer config** — authModes, task
+  freezing, benchmark wiring. Run from the wrong directory it prints
+  `ERROR: Cannot read config` **and exits 0**, so read the output, not only the
+  status.
+
+- **GATE:** `bash _shared/probes/skills-static.sh` — validates the **SKILL.md
+  frontmatter**, which the tool above does not. Measured 2026-08-29 by mutating
+  a copy of `prod-ops` and running both against the same fixtures:
+
+  | mutation to SKILL.md | `doctor --static` | `skills-static.sh` |
+  |---|---|---|
+  | `description:` present but empty | rc=0, "0 error(s)" | FAILS |
+  | frontmatter invalid YAML | rc=0, "0 error(s)" | FAILS |
+  | `SKILL.md` deleted entirely | rc=1 (caught) | FAILS |
+
+  An empty description is the state that makes a skill unreachable in practice
+  — it is the only text the model sees when choosing a skill — while every
+  other structural check stays green. That is the gap the local probe closes.
+
+  Do not substitute `claude plugin validate <skills-dir>` for either. Probed the
+  same day, it PASSED all three mutations when applied to a **nested** skill: it
+  does not descend into nested skill directories.
+
+  `skills-static-selftest.sh` proves every rule fires on a fixture where that
+  rule's property is false — 13 cases, including a green baseline (without which
+  every case could "pass" because the probe fails on everything) and a
+  zero-subjects case that exits 2 rather than 0.
+- **SIGNAL:** `bash _shared/probes/benchmark-currency.sh` — before reading any
+  score, ask whether it is still ABOUT the skill it sits next to. Measured
+  2026-08-29: **all seven committed scores predate the skill they measure**, by
+  10 to 12 days, and two skills have never been benchmarked at all. `prod-ops`
+  reads `FAIL, 12.5% < floor 60.0%` — a number about a document that no longer
+  exists, sitting in the directory of the document that replaced it.
+
+  A stale score is not a finding about the skill; it is a finding about the
+  score. Do not work the gaps in a stale report — they were measured against
+  text that has since changed. This probe is advisory (exit 0) on purpose:
+  refreshing needs Codex credentials, and a gate that fails until a human
+  performs an action they may not be able to perform is a gate that gets
+  disabled, taking the honest ones with it.
+
 - **SIGNAL:** `skill-optimizer run` against the frozen tasks — the prompt
   surface scores *lexical recall* of section content, so a paraphrased-but-
   correct response can score low; treat deltas against the frozen baseline as

@@ -64,11 +64,30 @@ quiet one.
 
 | status | meaning |
 |---|---|
+| `pushed` | built and published, and its happy path was seen to run **once, on the machine that built it**. The negative path was not separately proven, and it was not re-run from a clean clone. |
 | `validated` | runs green here, negative path proven to fail, re-run from a clean clone |
 | `vendored` | its mechanism ships in `prod-new/template/` |
 | `gated` | a row in `verify-standard.sh` scores it, with selftest coverage |
 | `queued` | on the list, not built |
 | `blocked` | attempted, could not be made honest on this stack — with the reason |
+
+**Where this table actually stands, counted from the rows below rather than
+remembered: 27 `pushed`, 7 `validated`.** `pushed` was missing from this
+vocabulary until 2026-08-29 — 27 of 34 rows carried a status the legend did not
+define, so a reader looking it up found nothing and would reasonably read it as
+a synonym for the one above it. It is not. The gap between the two is the whole
+point of having a status column:
+
+- **`pushed` is a publication fact.** The repository exists, its README is real,
+  and the mechanism ran. That is worth something and it is not verification.
+- **`validated` is a claim about the negative path** — that the demo FAILS when
+  the property it demonstrates is removed. A demo whose failing case was never
+  exercised is the same shape as a test that passes against a broken
+  implementation: it proves the harness runs, not that the mechanism matters.
+
+Promoting a row from `pushed` to `validated` means doing that work, not editing
+this cell. Nothing here should be described as "34 validated demos"; the honest
+sentence is "34 published, 7 validated".
 
 ## The demos
 

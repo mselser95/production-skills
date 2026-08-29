@@ -395,6 +395,32 @@ row() { # row <dimension> <verdict> <evidence>
   ROWS+=("$1|$2|$3")
   case "$2" in PASS) passes=$((passes+1));; FAIL) fails=$((fails+1));; NA) nas=$((nas+1));; esac
 }
+# WHO STILL DOES NOT USE THIS, AND WHY — audited 2026-08-29, kept honest rather
+# than silently left. Three rows were found taking a COMMENT for code that day
+# (tracing-wired-in-prod, observability:log_handler_installed, and the pprof half
+# of profiling), each proven by mutation and each now filtered. These greps over
+# Go source still do not filter:
+#
+#   ~1411  grep -rqi "reconcil"          — already a loose keyword probe whose
+#                                          verdict is corroborated elsewhere;
+#                                          filtering would not change its
+#                                          weakness, which is the pattern itself.
+#   ~1780  grep -rql 'log/slog'          — gates whether the slog rows run at
+#                                          all. A comment naming log/slog would
+#                                          switch the block ON, which then FAILS
+#                                          honestly on its own checks; the
+#                                          failure mode is noisy, not silent.
+#   ~1808  slog_plain / slog_ctx         — a RATIO, not a presence test. Comments
+#   ~1809                                  would have to appear on both sides to
+#                                          shift it, and the row reports the
+#                                          numerator and denominator.
+#   ~2021  grep -rql "StartSpan" internal/ — evidence text only; named in the
+#                                          message, never decisive on its own.
+#
+# None of these is argued to be safe because it is inconvenient to fix. Each is
+# either non-decisive or fails loudly rather than passing quietly — which is the
+# distinction that mattered in the three that were fixed. If one is ever made
+# decisive, it needs this filter first.
 code_lines_only() { # filter `grep -rn` output down to lines that are CODE
   # `grep -rn` prints path:lineno:content. A content that starts with `//` is
   # PROSE, and every row in this file that greps for a call site is one doc
@@ -1162,8 +1188,56 @@ else row "benchmarks" FAIL "no benchmarks"; fi
 # the uploads land, and that the store retains them. That lives in deployment
 # config this repo cannot see -- which is precisely why signal (2) is required
 # rather than nice to have: the gauge is what makes it answerable there.
-prof_capture=$([[ -f benchmarks/profile.sh ]] && echo yes || echo no)
-prof_live=$(grep -rql "net/http/pprof" --include='*.go' . 2>/dev/null && echo yes || echo no)
+# prof_capture used to be `[[ -f benchmarks/profile.sh ]]` -- a pure existence
+# test, so a capture script that was syntactically broken, or that had been
+# emptied to a stub, satisfied it and one PASS branch below rests on this signal
+# plus prof_live alone. That is the shape the `benchmarks` row a few hundred
+# lines up explicitly refuses in its own evidence string: "a benchmark that
+# never runs is a file, not a measurement". The same sentence applies here and
+# the row was not honouring it.
+#
+# Three conditions now, and the third is the one that mattered: the script must
+# PARSE (`bash -n`), and must reference pprof in a command position rather than
+# only in a comment. Measured 2026-08-29 in an instantiated template: the
+# template's own profile.sh passes all three, and running it for real produced
+# __internal_domain-cpu.prof and -mem.prof, so this is not a bar the shipped
+# scaffold cannot clear.
+#
+# What is deliberately NOT done: executing it from here. It drives `go test
+# -cpuprofile` over the package's benchmarks (~9s), which the `benchmarks` row
+# already pays for separately, and a probe that silently doubles its own cost is
+# a probe people stop running. The evidence string says so rather than implying
+# the script was exercised.
+prof_capture=no
+if [[ -f benchmarks/profile.sh ]]; then
+  # NO `bash -n` HERE, and its absence is the point.
+  #
+  # The first version of this check used `bash -n` to separate a broken script
+  # from an inert one. gate-hygiene-fitness flagged it the same day under
+  # BASH-N-AS-VALIDATION -- "parses and executes nothing; a script that dies on
+  # its first line passes it" -- and the rule is right. Carving an exception for
+  # my own code is precisely what that rule exists to prevent, so the check went
+  # rather than the rule.
+  #
+  # Little is lost. `bash -n` only ever caught SYNTAX; a syntactically perfect
+  # script that captures nothing was always the likelier failure, and the grep
+  # below catches that as `inert`. What remains uncovered is a script whose
+  # syntax is broken, which the rule's own text says bash -n does not really
+  # cover either.
+  if grep -qE '^[^#]*(go tool pprof|-cpuprofile|-memprofile|/debug/pprof)' benchmarks/profile.sh 2>/dev/null; then
+    prof_capture=yes
+  else
+    prof_capture=inert
+  fi
+fi
+# -rn + code_lines_only, not -rql. Third row in this file found taking a COMMENT
+# for code on 2026-08-29 (after tracing-wired-in-prod and
+# observability:log_handler_installed), and the same sentence applies: a line
+# explaining that the pprof endpoint is env-gated names `net/http/pprof` without
+# importing it, and satisfied this. `-l` gives filenames with nothing to filter,
+# so the count has to come from `-n`.
+prof_live=$([[ $(grep -rn "net/http/pprof" --include='*.go' . 2>/dev/null \
+  | code_lines_only | wc -l | tr -d ' ') -gt 0 ]] && echo yes || echo no)
 
 # -i on the package qualifier only: `profiling.`, `Profiling.`, `pyroscope.`.
 prof_cont_sites=$(grep -rnEi ':?=[[:space:]]*(profil|pyroscope)[A-Za-z0-9_]*\.[A-Za-z0-9_]*Start[A-Za-z0-9_]*\(' \
@@ -1207,7 +1281,7 @@ else
 fi
 
 prof_ondemand="capture=$prof_capture live=$prof_live"
-prof_unproven="NOT proven here: that a deployment sets the profiler's server address, that uploads land, or that the store retains them — deployment config this repo cannot see; $prof_cont_gauge is what answers it in production"
+prof_unproven="NOT proven here: that a deployment sets the profiler's server address, that uploads land, or that the store retains them — deployment config this repo cannot see; $prof_cont_gauge is what answers it in production. Nor was benchmarks/profile.sh EXECUTED: it is checked for existence, a real pprof invocation outside a comment, which is strictly more than the file-existence test this used to be, and strictly less than running it. Syntax is deliberately NOT parse-checked: that would be gate-hygiene BASH-N-AS-VALIDATION, and the rule applies to this file too"
 if [[ "$prof_continuous" == yes && "$prof_capture" == yes && "$prof_live" == yes ]]; then
   row "profiling" PASS "CONTINUOUS ($prof_cont_sites composition-root start site(s) in non-test cmd/ keeping the profiler handle, observable as $prof_cont_gauge$prof_manifest_note) AND both on-demand halves ($prof_ondemand). $prof_unproven"
 elif [[ "$prof_continuous" == yes ]]; then
@@ -1779,8 +1853,24 @@ if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
   # A structured handler must actually be INSTALLED. slog.Default() is a text
   # handler writing to stderr; a repo can log diligently for months and emit
   # nothing a log store can parse into fields.
-  if grep -rqE 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
-    row "observability:log_handler_installed" PASS "a slog handler is constructed, not left at the default"
+  # code_lines_only, for the same reason tracing-wired-in-prod needed it. This
+  # was a bare `grep -rq`, so a COMMENT naming the constructor satisfied it.
+  # Measured 2026-08-29 on an instantiated template: renaming every real handler
+  # construction away and leaving only
+  #
+  #   // They are fanned out with the stdlib slog.NewMultiHandler rather than by
+  #
+  # still produced PASS "a slog handler is constructed, not left at the
+  # default". The row's own reason for existing -- that a repo can log
+  # diligently for months and emit nothing a log store can parse -- is exactly
+  # what a comment-satisfied check lets through.
+  #
+  # -n so the output is `file:line:text` and code_lines_only can strip the
+  # comment lines; -l would give filenames with nothing to filter.
+  log_handler_sites=$(grep -rnE 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' \
+    --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+  if (( log_handler_sites > 0 )); then
+    row "observability:log_handler_installed" PASS "a slog handler is constructed in $log_handler_sites non-comment line(s), not left at the default"
   else
     row "observability:log_handler_installed" FAIL "no slog handler is constructed anywhere -- slog.Default() emits unstructured text to stderr, so every structured field is lost before it reaches a log store"
   fi
@@ -1841,8 +1931,36 @@ inbound_route_sites() {
     --include='*.go' --exclude='*_test.go' cmd/ internal/ 2>/dev/null \
     | grep -vE 'healthhttp|pprofhttp|"/healthz|"/readyz|"/livez|"/startupz|"/metrics|"/debug/pprof'
 }
+# code_lines_only, and it is load-bearing. This was a raw grep, so a COMMENTED
+# OUT tracer injection counted as wiring. Measured 2026-08-29 on an instantiated
+# template: commenting out all ten tracer lines in cmd/unitsvc/main.go left this
+# row reporting the same "3 tracer call-site(s)" and PASSING.
+#
+# That is the precise failure this dimension exists to refuse. The standard's
+# own wording is "tracing wired in cmd/, not merely imported -- a tracer that is
+# never injected is a no-op in production", and a commented-out injection is
+# weaker still than an unused import. The helper was already used by the
+# profiling row a few hundred lines below; this row simply never got it.
+# ...and DEFINITIONS are not call sites. `[Tt]racer)` matched
+# `func adaptTracer(tr observability.Tracer) app.SpanFunc {` -- a function
+# declaration, which is the thing being wired, not the wiring.
+#
+# Measured 2026-08-29, with the one real injection removed and the build kept
+# valid (`ledger.SetTracer(adaptTracer(tracer))` -> `_ = tracer; _ = adaptTracer`):
+#
+#   tracing-wired-in-prod   PASS  "1 tracer call-site(s)"   <- the definition
+#   mechanisms-driven       PASS  "7/7 declared mechanism(s) survive linking"
+#
+# Both green with NO tracer wired at all. The second is not a backstop here:
+# tracing is not one of its seven declared mechanisms, so this row's claim that
+# "the mechanisms-driven row proves reachability properly" was false for the one
+# dimension it was written about. That is the exact wording the standard uses --
+# "tracing wired in cmd/, not merely imported; a tracer that is never injected
+# is a no-op in production" -- failing on its own example.
 tracer_sites=$(grep -rn --include='*.go' --exclude='*_test.go' \
-  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null | wc -l | tr -d ' ')
+  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null \
+  | code_lines_only | grep -vE '^[^:]+:[0-9]+:[[:space:]]*func[[:space:]]' \
+  | wc -l | tr -d ' ')
 
 # THE SECOND WIRING SHAPE: a process-wide TracerProvider instead of a threaded
 # tracer.
@@ -1927,7 +2045,7 @@ elif [[ "${tracer_sites:-0}" -gt 0 ]]; then
   # EXISTS; it cannot establish that it RUNS. Claiming "injected" was the defect
   # -- the row asserted more than it measured, which is the same failure it was
   # written to catch one level down.
-  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; the mechanisms-driven row proves reachability properly, and this one is kept as the earlier, weaker signal"
+  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — call sites only, function declarations excluded. NOT proven here: that a span is ever emitted at runtime. And mechanisms-driven does NOT cover this -- tracing is not among its declared mechanisms, so an earlier version of this sentence pointed at a backstop that does not exist for this dimension"
 elif (( ${global_tp_install:-0} > 0 && ${cmd_tracing_boot:-0} > 0 )); then
   row "tracing-wired-in-prod" PASS "GLOBAL TracerProvider shape: $cmd_tracing_boot non-test cmd/ line(s) keep the result of a tracing bootstrap call, and $global_tp_install non-test otel.SetTracerProvider( call site(s) install the provider they read$global_tp_instr_note — existence only, same as the threaded shape above: this proves the wiring EXISTS in the entrypoints, not that it is reached in production; only a contract test exercising the entrypoint can"
 elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
@@ -2305,10 +2423,24 @@ if [[ -d $wf ]]; then
     # Self-hosted runner labels are unknown to actionlint. Ignore ONLY that
     # rule: on the real defect its 8 label warnings buried the one line that
     # mattered, which is how the syntax error shipped in the first place.
-    if alout=$(PATH="$(gobin):$PATH" actionlint -ignore 'label ".+" is unknown' "$wf"/*.y*ml 2>&1); then
-      row "workflow-definitions-valid" PASS "actionlint clean on $(ls "$wf"/*.y*ml 2>/dev/null | wc -l | tr -d ' ') workflow file(s)"
+    # ZERO WORKFLOW FILES IS ITS OWN ANSWER. Named before running the linter,
+    # because actionlint on an unexpanded glob fails with a message carrying no
+    # `file.yaml:L:C:` diagnostic, the extraction below then matched nothing,
+    # and the row printed a bare "FAIL" with EMPTY evidence. Measured
+    # 2026-08-29 by moving the three workflows aside. A verdict with no reason
+    # is the shape row()'s own guard exists to refuse, reached by a route that
+    # guard could not see.
+    _wf_n=$(ls "$wf"/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
+    if (( _wf_n == 0 )); then
+      row "workflow-definitions-valid" FAIL "no workflow files in $wf -- there is nothing to validate, and a lane that defines no workflows runs no checks at all, which is the failure mode this row exists for (an invalid workflow yields ZERO checks, never a red one)"
+    elif alout=$(PATH="$(gobin):$PATH" actionlint -ignore 'label ".+" is unknown' "$wf"/*.y*ml 2>&1); then
+      row "workflow-definitions-valid" PASS "actionlint clean on ${_wf_n} workflow file(s)"
     else
-      row "workflow-definitions-valid" FAIL "$(grep -m1 -E '\.ya?ml:[0-9]+:[0-9]+:' <<<"$alout")"
+      # Prefer the first real diagnostic; fall back to the raw output rather
+      # than emitting an empty reason when actionlint fails some other way.
+      _al_why=$(grep -m1 -E '\.ya?ml:[0-9]+:[0-9]+:' <<<"$alout")
+      [[ -n "$_al_why" ]] || _al_why="actionlint exited non-zero with no file:line diagnostic: $(head -2 <<<"$alout" | tr '\n' ' ' | cut -c1-200)"
+      row "workflow-definitions-valid" FAIL "$_al_why"
     fi
   else row "workflow-definitions-valid" FAIL "actionlint not installed — CI definitions unvalidated, and an invalid one yields NO checks at all"; fi
 
@@ -2395,6 +2527,12 @@ DELETES,  _d_injected = _load_map("PROD_SBOM_DELETES",  {})
 
 any_consumer = False
 any_deleter  = False
+# _saw_reusable: did ANY job delegate to a reusable workflow (`uses:` pointing at
+# a .yaml/.yml in another repo or path)? It is what separates "this pipeline is
+# built from workflows we were not taught to classify" -- unknowable, NA -- from
+# "this pipeline is plain inline jobs and simply has no SBOM" -- knowable, FAIL.
+# Without it the NA branch would excuse every repo that has no SBOM at all.
+_saw_reusable = False
 problems, proven = [], []
 
 for raw in sys.stdin:
@@ -2429,7 +2567,17 @@ for raw in sys.stdin:
 
     def wf_of(name):
         u = jobs[name].get("uses") or ""
+        # BOTH maps, not just CONSUMES. The deleter loop below asks
+        # `wf_of(d) in DELETES`, so a wf_of that only ever returned CONSUMES
+        # keys could never name a deleter: any_deleter stayed False and every
+        # ordering fixture came back "no artifact-deleting job in the graph to
+        # order against" -- a PASS, over the exact invariant the row exists to
+        # check. Same defect as the unread _c_injected flag: a map loaded and
+        # then unreachable.
         for w in CONSUMES:
+            if w in u:
+                return w
+        for w in DELETES:
             if w in u:
                 return w
         if inline_sbom(name):
@@ -2441,10 +2589,25 @@ for raw in sys.stdin:
         return [n] if isinstance(n, str) else list(n)
 
     def kind(name):
+        # CONSUMES.get, never CONSUMES[w]: wf_of now also resolves DELETES keys,
+        # and a job that only DELETES has no consumer-kind. Subscripting would
+        # raise KeyError and kill the probe; .get returns None, which no `gone`
+        # tuple can equal, so a deleter is correctly never counted as a reader
+        # of the artifact it destroys.
         w = wf_of(name)
-        return None if w is None else (CONSUMES[w], jobs[name].get("art") or "")
+        if w is None or w not in CONSUMES:
+            return None
+        return (CONSUMES[w], jobs[name].get("art") or "")
 
     any_consumer |= any((wf_of(n) or "") == "sbom.yaml" for n in jobs)
+    # A `uses:` that names a .yaml/.yml is a call into a reusable workflow. The
+    # basename check keeps `uses: actions/checkout@v4` (a plain action, no file
+    # extension) from counting -- every repo has those, and they say nothing
+    # about whether the pipeline delegates its build to workflows we cannot see.
+    for _n in jobs:
+        _u = jobs[_n].get("uses") or ""
+        if ".yaml@" in _u or ".yml@" in _u or _u.endswith(".yaml") or _u.endswith(".yml"):
+            _saw_reusable = True
 
     for d in jobs:
         w = wf_of(d)
@@ -2482,7 +2645,26 @@ for raw in sys.stdin:
                     "%s: %r downloads the %s artifact that %r DELETES, and is not in its needs"
                     % (fname, c, gone[0], d))
 
-if not any_consumer:
+if not any_consumer and not _c_injected and _saw_reusable:
+    # THE PROMISED NA, WHICH DID NOT EXIST. _c_injected and _d_injected were
+    # assigned and then never read: the comment above says "UNSET IS NOT EMPTY:
+    # with no map injected the ordering invariant is UNKNOWABLE, and the row
+    # says so and returns NA", and the code fell straight through to the FAIL
+    # below instead. A comment describing behaviour that is not there is worse
+    # than no comment, because the next reader stops looking.
+    #
+    # Three conditions, and all three are needed:
+    #   not any_consumer -- no producer was recognised;
+    #   not _c_injected  -- and nobody told us what a producer looks like HERE;
+    #   _saw_reusable    -- and the pipeline is built from reusable workflows
+    #                       we therefore cannot classify.
+    #
+    # Without the third, a repo with plain inline jobs and genuinely no SBOM at
+    # all would get NA instead of the FAIL it has earned. With it, NA means
+    # exactly "you are on a CI whose conventions this probe was not told", which
+    # is the case 346b659 set out to stop answering with somebody else's facts.
+    print("NA|the SBOM ordering invariant is UNKNOWABLE here: this pipeline is built from reusable workflows, and PROD_SBOM_CONSUMES was not injected, so the probe cannot tell which of them produces an SBOM. Set it in config.sh (format: sbom.yaml:sbom,sbom-scan.yaml:sbom) to get a real verdict -- an uninjected map is not evidence of a missing SBOM")
+elif not any_consumer:
     print("FAIL|no job PRODUCES an SBOM -- neither a reusable sbom workflow nor an inline step emitting -o cyclonedx / -o spdx. The word may appear in comments or in a selftest filename; neither generates anything")
 elif problems:
     print("FAIL|" + "; ".join(problems[:2]))
@@ -2803,9 +2985,47 @@ else row "registries-expiry-gated" FAIL "registries are recorded but nothing enf
 
 # --- 17. contract artifacts exist for the work (audit finding: never written) --
 ctxdir="${PROD_CONTEXT_DIR:-.prod/context}"
-if ls "$ctxdir"/*resolved-context*.y*ml >/dev/null 2>&1 && ls "$ctxdir"/*change-plan*.y*ml >/dev/null 2>&1; then
-  row "contract-artifacts" PASS "resolved-context + change-plan present in $ctxdir"
-else row "contract-artifacts" FAIL "no resolved-context/change-plan in $ctxdir — nothing to audit the diff against"; fi
+# PRESENT IS NOT POPULATED. This was two `ls` globs, so a pair of ZERO-BYTE
+# files named resolved-context.yaml and change-plan.yaml passed it. Measured
+# 2026-08-29 by truncating both in an instantiated template: PASS,
+# "resolved-context + change-plan present". The row exists because of an audit
+# finding that these were NEVER WRITTEN, and its whole point is that there is
+# something to audit the diff against -- which an empty file is not.
+#
+# Checked now: the file exists, is non-empty, and parses as a YAML MAPPING. Not
+# checked, deliberately: which keys it carries. The formats live in
+# _shared/formats/ and evolve; a key list here would be a second copy that must
+# agree with them, and this file has already been bitten twice today by two
+# lists that had to agree. Emptiness is the failure this row was written for.
+_ca_why=""
+_ca_ok=1
+for _pat in '*resolved-context*.y*ml' '*change-plan*.y*ml'; do
+  # shellcheck disable=SC2086
+  _f=$(ls $ctxdir/$_pat 2>/dev/null | head -1)
+  if [[ -z "$_f" ]]; then
+    _ca_ok=0; _ca_why="${_ca_why} no file matching ${_pat} in $ctxdir;"
+    continue
+  fi
+  if [[ ! -s "$_f" ]]; then
+    _ca_ok=0; _ca_why="${_ca_why} ${_f} is EMPTY (0 bytes) -- present but nothing to audit against;"
+    continue
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    _parse=$(python3 -c '
+import sys, yaml
+try:
+    d = yaml.safe_load(open(sys.argv[1]).read())
+except Exception as e:
+    print("unparseable: %s" % str(e).replace("\n"," ")[:120]); raise SystemExit(0)
+if d is None: print("parses to nothing")
+elif not isinstance(d, dict): print("is a %s, not a mapping" % type(d).__name__)
+' "$_f" 2>&1)
+    [[ -n "$_parse" ]] && { _ca_ok=0; _ca_why="${_ca_why} ${_f} ${_parse};"; }
+  fi
+done
+if (( _ca_ok )); then
+  row "contract-artifacts" PASS "resolved-context + change-plan present in $ctxdir, non-empty, and parsing as YAML mappings"
+else row "contract-artifacts" FAIL "contract artifacts unusable:${_ca_why} — nothing to audit the diff against"; fi
 
 # --- 18. ratification packages back every ratified invariant -----------------
 if ls verification/ratified/*_test.go >/dev/null 2>&1; then
@@ -2931,7 +3151,23 @@ else
   # reports a defect about git history as though it were a defect in the code.
   # Same discriminator as the registries fix: answered-and-none, versus nothing
   # to answer with.
-  if ! git rev-parse HEAD >/dev/null 2>&1; then
+  # THREE STATES, NOT TWO. `git rev-parse HEAD` fails identically for a repo
+  # with zero commits and for a tree git is not tracking at all, so the second
+  # was handed the first one's message: "no commits yet", asserted about a
+  # directory where git can say nothing whatsoever. Measured 2026-08-29 on an
+  # instantiated template that was a plain copy rather than a clone -- the row
+  # read NA "no commits yet" over a tree with no .git anywhere in it.
+  #
+  # The distinction is the one this file keeps re-learning. An initialised repo
+  # with no commits is a POSITIVE fact: there are no changed lines, so there is
+  # nothing to carry provenance. A tree with no git is the INSTRUMENT missing:
+  # not "there are no changed lines" but "nobody can tell which lines changed".
+  # Both stay NA rather than FAIL -- prod-new leaves a scaffold in the first
+  # state at Phase 3 and must be able to reach FAIL 0 -- but they must not claim
+  # the same thing, because only one of them measured anything.
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    row "provenance-headers" NA "not a git work tree -- provenance is a property of CHANGED LINES, and without git there is no way to know which lines changed. The instrument is missing, which is not a clean result: run this in the repository rather than in a copy of it"
+  elif ! git rev-parse HEAD >/dev/null 2>&1; then
     row "provenance-headers" NA "no commits yet -- a tree with no history has no changed lines to carry provenance, so there is nothing to measure rather than something unmeasured"
   else
     row "provenance-headers" FAIL "no diff base resolves (tried origin/main, main, origin/HEAD) -- the repo HAS history, so this dimension went UNMEASURED, which is not the same as met"
@@ -3208,8 +3444,25 @@ LOAD_MAX_AGE_DAYS=30
 # fail-OPEN precedence bug, so the group is applied here where every caller
 # gets it rather than in each caller where one will eventually forget.
 load_field() { # load_field <key-extended-regex> -> the field's value, or empty
+  # The `s/^\*+//` is load-bearing. Both markdown styles reach this function:
+  #
+  #   - **measured**: 2026-08-29    colon OUTSIDE the bold -> value "2026-08-29"
+  #   - **measured:** 2026-08-29    colon INSIDE the bold  -> value "** 2026-08-29"
+  #
+  # and the second is the one a human writes, because every neighbouring line in
+  # the generated baseline uses it (`- **Toolchain:** ...`, `- **Host:** ...`).
+  # Without the strip the caller anchors on ^[0-9]{4}- , misses, and reports
+  # "carries no parseable measurement date" -- the SAME message as a file with
+  # no date at all, about a file whose date is sitting right there.
+  #
+  # Measured 2026-08-29: sweep.sh emitted the field in the inside-the-bold style
+  # and the row failed exactly that way, on a baseline `make load` had just
+  # written seconds earlier.
+  #
+  # Stripping leading asterisks cannot swallow a real value: no value this
+  # document accepts begins with '*'.
   grep -aiE "^[[:space:]]*[-*>]?[[:space:]]*\**(${1})\**[[:space:]]*:" "$LOAD_BASELINE" 2>/dev/null \
-    | head -1 | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]+$//'
+    | head -1 | sed -E 's/^[^:]*:[[:space:]]*//; s/^\*+[[:space:]]*//; s/[[:space:]]+$//'
 }
 
 # load_margin_norm normalises a headroom expression to "<kind> <number>", so

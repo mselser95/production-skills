@@ -1,0 +1,153 @@
+name: PR
+on:
+  pull_request:
+  push:
+    branches: [master]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# WHY THIS FILE EXISTS
+#
+# Until 2026-08-29 this repository had no .github/workflows at all. The repo
+# whose entire subject is production verifiability -- and which lists "CI
+# itself" as one of its 27 dimensions, demanding validated workflow files and
+# required checks that cannot be skipped into passing -- had no CI of its own.
+# `gh pr checks` answered "no checks reported", which by this repo's own rule
+# means the workflow never ran, not that nothing was wrong.
+#
+# The gates below are the ones that already existed and ran only when somebody
+# remembered to type their path. They now also run here, on every PR, where
+# forgetting is not available.
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: python + PyYAML (skills-static parses frontmatter as real YAML)
+        run: python3 -c "import yaml; print('PyYAML', yaml.__version__)"
+
+      # PROVE THE VERIFIER BEFORE TRUSTING ITS VERDICT.
+      #
+      # The selftest runs first and deliberately precedes the probe it tests: a
+      # green skills-static.sh means nothing if its rules cannot fire. 13 cases,
+      # each a fixture where one rule's property is FALSE, plus a green baseline
+      # (without which every case could "pass" because the probe fails on
+      # everything) and a zero-subjects case that must exit 2 rather than 0.
+      - name: skills-static selftest (the verifier of the verifier)
+        run: bash _shared/probes/skills-static-selftest.sh
+
+      - name: skills-static (SKILL.md frontmatter across the nine)
+        run: bash _shared/probes/skills-static.sh
+
+      # Listed individually, never globbed. `for f in _shared/probes/*-selftest.sh`
+      # reports success over an empty glob if the directory is ever renamed,
+      # which is the fail-open shape these files exist to refuse.
+      #
+      # probe-self-gate-selftest was ADDED here 2026-08-29. It had been the only
+      # canonical selftest that can run from this repo's root -- the other three
+      # hardcode template-relative `scripts/` paths and exit 2 here -- and
+      # nothing ran it. That matters more than it sounds: verify-standard.sh is
+      # EDITED in this repo and EXECUTED only in scaffolded ones, so a
+      # self-gating regression to the canonical probe landed here with no signal
+      # at all until somebody scaffolded a repo. Verified from the framework
+      # root: 29 ok, 0 failed.
+      # ALL FIVE, as of 2026-08-29. Three of them -- check-registries,
+      # non-vacuity, sbom-ordering -- could not run here at all until today:
+      # they resolved their target as `scripts/<f>`, which exists only in an
+      # INSTANTIATED repo, and exited 1 or 2 from this root. They failed closed,
+      # correctly, and the consequence was still bad: verify-standard.sh and
+      # check-registries.sh are EDITED here and EXECUTED there, so every edit to
+      # the canonical probe went unverified by its own selftest unless somebody
+      # instantiated a template by hand. Two probe changes had left them RED for
+      # weeks on exactly that gap.
+      #
+      # They now try `scripts/<f>` first (so an instantiated repo keeps testing
+      # its own vendored copy -- proven by breaking the template's PYSBOM marker
+      # and watching the selftest fail while the canonical copy was fine) and
+      # fall back to `_shared/probes/<f>`. Still fail closed when neither
+      # exists: rc 1/2/2, naming the canonical path.
+      - name: probe selftests
+        run: |
+          bash _shared/probes/load-rows-selftest.sh
+          bash _shared/probes/tests/probe-self-gate-selftest.sh
+          bash _shared/probes/check-registries-selftest.sh
+          bash _shared/probes/non-vacuity-selftest.sh
+          bash _shared/probes/sbom-ordering-selftest.sh
+          bash _shared/probes/policy-coverage.sh
+
+      # ADVISORY, and printed rather than gated. It answers "is each committed
+      # benchmark score still about the skill it sits next to?" -- currently no
+      # for all seven, by 10-12 days. Refreshing needs Codex credentials CI does
+      # not have, and a step that fails until someone supplies a secret it
+      # cannot supply is a step people delete. So it reports into the log where
+      # a reader of these scores will see it.
+      - name: benchmark currency (advisory)
+        run: bash _shared/probes/benchmark-currency.sh
+
+      # Validate the workflow definitions. CI cannot meaningfully validate its
+      # own file -- an invalid workflow yields ZERO checks, not a red one -- so
+      # this is also wired into the local cheap gate. Here it covers the
+      # template's three workflows, which are copied verbatim into every repo
+      # the skill scaffolds and are therefore the ones with real blast radius.
+      # The template's three are linted AFTER slot substitution, which is the
+      # only form that ever runs. Linted raw they fail with SC1073 "couldn't
+      # parse this redirection" on `go build ./cmd/<SERVICE>`: shellcheck reads
+      # the placeholder as a shell redirect. The tempting fix -- drop them from
+      # the lint -- would leave the three workflows with real blast radius (they
+      # are copied verbatim into every scaffolded repo) unchecked, so the slot
+      # is filled instead. Verified 2026-08-29: raw -> 3 errors, substituted ->
+      # clean, so this step is not passing by looking away.
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          AL="$(go env GOPATH)/bin/actionlint"
+          "$AL" -color .github/workflows/pr.yaml
+          mkdir -p /tmp/tmpl-wf
+          for f in ci pr nightly; do
+            sed 's/<SERVICE>/svc/g' \
+              "prod-new/template/.github/workflows/$f.yaml" > "/tmp/tmpl-wf/$f.yaml"
+          done
+          "$AL" -color /tmp/tmpl-wf/ci.yaml /tmp/tmpl-wf/pr.yaml /tmp/tmpl-wf/nightly.yaml
+
+      # End-to-end on the installer itself, into a throwaway config dir, so the
+      # TCB manifest and the staleness branch are exercised rather than assumed.
+      # install.sh honours CLAUDE_CONFIG_DIR, so this touches nothing real.
+      #
+      # --verify must be GREEN immediately after install: a fresh install that
+      # reports drift or staleness against the tree it was just made from is the
+      # installer contradicting itself.
+      - name: install.sh end-to-end (TCB manifest + staleness)
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/cfg
+        run: |
+          bash install.sh
+          bash install.sh --verify
+
+      # NON-VACUITY of the staleness branch. Without this the step above proves
+      # only that --verify can say yes. Touch a source file the installed copy
+      # cannot know about, and --verify MUST exit 2 and name it. If it stays
+      # green, the check that guards "the installed skills are the current ones"
+      # is decoration, and the whole TCB story with it.
+      - name: prove --verify actually goes red (mutation)
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/cfg
+        run: |
+          printf '\n<!-- ci staleness mutation -->\n' >> prod-ops/SKILL.md
+          if bash install.sh --verify > out.txt 2>&1; then
+            echo "FAIL: --verify reported success with a stale source file" >&2
+            cat out.txt >&2
+            exit 1
+          fi
+          grep -q "stale: prod-ops/SKILL.md" out.txt || {
+            echo "FAIL: --verify went red but did not NAME the stale file" >&2
+            cat out.txt >&2
+            exit 1
+          }
+          git checkout -- prod-ops/SKILL.md
+          bash install.sh --verify

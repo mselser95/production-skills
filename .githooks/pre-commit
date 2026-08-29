@@ -72,3 +72,43 @@ done
 if (( synced == 0 )); then
   echo "pre-commit: ${#mirrors[@]} mirror(s) already in step" >&2
 fi
+
+# --- repo-maintenance gates ---------------------------------------------------
+#
+# These two probes existed and NOTHING invoked them. Not the README, not a
+# Makefile, not a hook -- they ran only when someone remembered to type the
+# path. That is the same defect this repo has a memory about ("a target that
+# exists is not a gate that runs"), sitting in the repo that wrote it.
+#
+# It is not hypothetical. On 2026-08-29 the closing checklist recorded
+# "doctor --static: 0 errors on all nine" from an invocation that was mistyped
+# (`claude plugin skill doctor`, which does not exist): it printed
+# `error: unknown command 'skill'` and EXITED 0, nine times, and the count of
+# "errors" it produced was the error message counting itself. The real tool is
+# installed and does work -- but it is run from a checklist, and a checklist is
+# where a wrong invocation survives a whole session unnoticed. Running from the
+# hook does not make a command correct; it makes SKIPPING one impossible, which
+# is the half a checklist cannot give.
+#
+# The lesson that generalises: a per-subject measurement returning an identical
+# verdict for every subject is usually measuring the instrument. Nine skills,
+# exactly one "error" each, was the tell.
+#
+# Both are fast (well under a second) and both fail closed: skills-static exits
+# 2 when it finds no subjects at all, policy-coverage exits 2 when it extracts
+# zero rows or zero keys, so neither can report clean by checking nothing.
+for gate in _shared/probes/skills-static.sh _shared/probes/policy-coverage.sh; do
+  if [[ ! -x "$gate" && ! -r "$gate" ]]; then
+    # A missing gate is a failure, never a skip. Skipping is precisely how the
+    # uninstalled doctor stayed green for a whole session.
+    echo "pre-commit: $gate is missing or unreadable -- refusing to commit past" >&2
+    echo "            a gate that cannot run. Restore it or remove it here." >&2
+    exit 1
+  fi
+  if ! out=$(bash "$gate" 2>&1); then
+    echo "pre-commit: $gate FAILED" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+done
+echo "pre-commit: skills-static + policy-coverage green" >&2

@@ -31,12 +31,22 @@ jobs:
       # glob if the directory is ever renamed, which is the fail-open shape
       # every one of these files exists to refuse.
       - name: probe selftests (the verifier of the verifier)
-        run: |
-          bash scripts/tests/load-rows-selftest.sh
-          bash scripts/tests/probe-self-gate-selftest.sh
-          bash scripts/tests/sbom-ordering-selftest.sh
-          bash scripts/tests/check-registries-selftest.sh
-          bash scripts/tests/non-vacuity-selftest.sh
+        # ONE LIST, not three. This step used to restate the five scripts
+        # that `make probe-selftests` already names, and so did ci.yaml --
+        # three copies that had to agree. The pre-commit hook in the framework
+        # repo records the rule this breaks: "two lists that must agree are one
+        # list and one latent defect". Measured 2026-08-29: the Makefile target
+        # was referenced by NOTHING (not verify, not check-fast, no workflow,
+        # no doc), and while it sat uninvoked it went RED -- 10 failing cases
+        # across sbom-ordering and check-registries, both from probe changes
+        # that never updated their selftests. The duplicate lists are why the
+        # target could rot unnoticed: CI ran the scripts, so nobody missed the
+        # target, and the target was where the list lived.
+        #
+        # Still explicit, never a glob: the Makefile names all five, so a
+        # renamed directory breaks the build instead of reporting success over
+        # an empty glob.
+        run: make probe-selftests
 
   production-gates:
     needs: check-fast
