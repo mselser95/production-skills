@@ -72,7 +72,7 @@ quiet one.
 | `blocked` | attempted, could not be made honest on this stack — with the reason |
 
 **Where this table actually stands, counted from the rows below rather than
-remembered: 26 `pushed`, 8 `validated`.** `pushed` was missing from this
+remembered: 25 `pushed`, 9 `validated`.** `pushed` was missing from this
 vocabulary until 2026-08-29 — 27 of 34 rows carried a status the legend did not
 define, so a reader looking it up found nothing and would reasonably read it as
 a synonym for the one above it. It is not. The gap between the two is the whole
@@ -124,7 +124,7 @@ sentence is "34 published, 7 validated".
 | 9 | [vuln-reachability-demo](https://github.com/mselser95/vuln-reachability-demo) | "govulncheck is green" and "no known-vulnerable dependencies" are different claims, and the count is a property of the toolchain | govulncheck / SBOM tooling semantics | §9 `vuln_scan` | [A] | `pushed` |
 | 10 | [expand-contract-live-demo](https://github.com/mselser95/expand-contract-live-demo) | a schema change under live traffic with two app versions running at once, zero failed requests — and the one-shot ALTER measured holding ACCESS EXCLUSIVE on a rehearsal | Rae et al., F1 (VLDB 2013) | §19 `schema_evolution` | [A] | `pushed` |
 | 11 | [dependency-confusion-demo](https://github.com/mselser95/dependency-confusion-demo) | a committed, integrity-checked lockfile generated against the wrong default is a durable pin TO THE ATTACKER that `npm ci` reproduces on every clean build | Birsan (2021, disclosure) | §23; **corrects** `dependency_currency.lockfile` | [A]+[B] | `pushed` |
-| 12 | [clock-skew-demo](https://github.com/mselser95/clock-skew-demo) | 8 of 15 causal edges invert under wall-clock ordering, 0 under HLC — and 8 are ordered by the logical counter alone, the component an incomplete implementation drops | Kulkarni et al., HLC (OPODIS 2014); Lamport (1978) | the injected clock/random/ID rule — this demo is WHY | [A] | `pushed` |
+| 12 | [clock-skew-demo](https://github.com/mselser95/clock-skew-demo) | 8 of 15 causal edges invert under wall-clock ordering, 0 under HLC — and 8 are ordered by the logical counter alone, the component an incomplete implementation drops | Kulkarni et al., HLC (OPODIS 2014); Lamport (1978) | the injected clock/random/ID rule — this demo is WHY | [A] | `validated` |
 | 13 | [bulkhead-demo](https://github.com/mselser95/bulkhead-demo) | a healthy endpoint collapses because a sick one shares its pool; enlarging the shared pool postpones exhaustion instead of confining it | Nygard, *Release It!* (2018); SRE ch.22 | §7 `isolation_and_backpressure`, §26 | [A] | `pushed` |
 | 14 | [sbom-runtime-drift-demo](https://github.com/mselser95/sbom-runtime-drift-demo) | the application's OWN binary appears in zero SBOM components (syft derives its file inventory from the package DB), and a package-DB check passes while an LD_PRELOADed object executes | CycloneDX / SPDX specs; EO 14028 | §9 `supply_chain.sbom` | [A]+[B] | `pushed` |
 | 15 | [reproducible-builds-demo](https://github.com/mselser95/reproducible-builds-demo) | two builders differing in image, path, HOME, hostname, uid, timezone and VCS state produce byte-identical digests — with per-flag attribution showing which bytes each flag removes | Lamb & Zacchiroli (IEEE Software 2022) | §11 reproducibility; complements `artifact_provenance` | [A]+[B] | `pushed` |

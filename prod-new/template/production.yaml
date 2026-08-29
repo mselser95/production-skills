@@ -244,6 +244,20 @@ out_of_scope:
       unlimited container lets one runaway process take its host, which is a
       security property as much as an operational one.
 
+  - consistency_verification: >
+      This scaffold is SINGLE-WRITER and immediately consistent: internal/app.Ledger
+      holds one in-memory domain.State guarded by its own mutex, and no
+      concurrent-writer conflict resolution exists or is needed at this scale
+      (see semantics.consistency above, which this decline is the ratified form
+      of). A history checker looks for anomalies that arise between concurrent
+      writers reaching one store; with exactly one writer there is no interleaving
+      to record and nothing for Elle-style checking to find.
+
+      This decline LAPSES the moment a second writer appears -- a replica, a
+      second process, a sharded aggregate, or any path that mutates state without
+      going through that mutex. At that instant the model changes and the
+      dimension becomes required, against a RECORDED history under an induced
+      fault, not against the store's own reporting.
   - backup_restore_test: >
       This scaffold's only durable store is a local append-only file
       (internal/platform/eventlog) -- there is no managed backup/restore

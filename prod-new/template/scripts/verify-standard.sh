@@ -3015,6 +3015,32 @@ for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
   fi
 done
 
+# --- consistency verification -------------------------------------------------
+#
+# tier-policy: `consistency_verification.mode:
+# required_if_declared_consistency_model`, plus `history_checked: required`
+# ("against a recorded history, not against the store's own reporting") and
+# `under_induced_fault: required`.
+#
+# THE CONDITION COULD NEVER BE TRUE. `consistency_model` appears exactly once in
+# the whole repo -- inside that policy condition -- and is defined by no format
+# doc and shipped by no template. Meanwhile production.yaml DOES declare the
+# model, under `semantics.consistency`. Two names for one fact, so nothing
+# connected them, so the dimension was unreachable by construction: a
+# `required_if_declared_X` where X has no declaration format is permanently NA
+# and reads like a dimension that simply never applies. Found 2026-08-29 by
+# trying to score it.
+#
+# This reads the field that EXISTS. The policy's condition keeps its name; the
+# probe stops waiting for a key nobody can write.
+_cons=$(awk '/^[[:space:]]*semantics:/{f=1;next} f && /^[[:space:]]*consistency:/{sub(/^[^:]*:[[:space:]]*/,"");print;exit} f && /^[[:space:]]{0,4}[a-z_]+:/{f=0}' "$SPEC" 2>/dev/null | head -1)
+if [[ -z "$_cons" ]] || placeholder_value "$_cons"; then
+  row "consistency-verification" NA "no consistency model declared under semantics.consistency in $SPEC -- nothing to verify a history against"
+else
+  implemented_row "consistency-verification" consistency_verification \
+    "the test must check a RECORDED HISTORY (not the store's own reporting) under an INDUCED fault -- partition, failover or clock skew. A single-writer service with no concurrent-writer conflict resolution has no anomaly to find and should carry a ratified decline saying so, which is a stated answer rather than an unscored dimension"
+fi
+
 # --- 16a. SLO objectives: defined AND human-ratified -------------------------
 #
 # tier-policy: `slo.objective: human_ratified`, `slo.sli.defined:

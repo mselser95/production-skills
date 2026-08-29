@@ -38,6 +38,7 @@ backup_restore_test:backup-restore-test
 domain_boundaries:domain-boundaries:role_matches_topology
 slo:slo-objectives-ratified,ops:SLO.md
 write_surface_authn:write-surface-authn
+consistency_verification:consistency-verification
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -68,7 +69,6 @@ isolation_and_backpressure:scalability:partition_key
 KNOWN_UNSCORED="
 authz_invariants                least-privilege-rbac-demo
 chaos_engineering               chaos-steady-state-demo
-consistency_verification        partition-consistency-demo
 delivery                        canary-abort-demo
 mutation                        DELIBERATE: the policy itself says mode:advisory -- a
                                 trend, never a gate, so a PASS/FAIL row would
