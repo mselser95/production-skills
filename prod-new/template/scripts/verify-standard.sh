@@ -1688,6 +1688,22 @@ fi
 # whenever you like, because you are the only reader. You cannot migrate
 # someone else's consumer. A published event is an API.
 #
+# --- backup / restore ---------------------------------------------------
+#
+# tier-policy: `backup_restore_test: required_if_durable_state`. Third key off
+# policy-coverage's known-unscored work list; its demo is backup-restore-demo,
+# and the demo's whole finding is the hint below -- a restore checked by ROW
+# COUNT passes over a corrupted ledger, because the count is right and the
+# money is wrong.
+#
+# Uses implemented_row rather than a bespoke check, deliberately: that path
+# already resolves a ratified decline to NA, requires the spec to NAME the test,
+# and EXECUTES it rather than grepping for its existence. A hand-rolled row here
+# would be a fourth copy of logic already proven, which is the two-lists defect
+# this file keeps relearning.
+implemented_row "backup-restore-test" backup_restore_test \
+  "the test must RESTORE from a backup and then verify an INVARIANT of the restored state -- a row-count check passes over a corrupted ledger, which is exactly what backup-restore-demo demonstrates"
+
 # Kept separate from the `compatibility` row above on purpose: that row is
 # satisfied by any wire or golden test, including one over a format nobody
 # outside this repo parses. The audience is what makes this expensive, so the
@@ -2407,6 +2423,63 @@ if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
   fi
 else row "vuln-scan" FAIL "govulncheck not installed — gate unproven"; fi
 
+# --- dependency lockfile: committed AND not regenerated in CI ---------------
+#
+# tier-policy: `dependency_currency.lockfile: committed_and_ci_enforced`, whose
+# comment already names the mechanism -- "--frozen-lockfile / --locked /
+# -mod=readonly, not regenerated in CI". Second key off policy-coverage's
+# known-unscored work list; its demo is dependency-confusion-demo.
+#
+# COMMITTED is the easy half and the useless half on its own. A lockfile that CI
+# regenerates before building pins nothing: the build resolves whatever the
+# registry serves that morning, which is precisely the window a confusion or
+# substitution attack needs, and the committed file sits there looking like a
+# guarantee. So the row asks both questions and fails the second one loudly.
+#
+# WHAT IT CANNOT PROVE: that the pinned versions are current, or that the
+# registry served what the hash says. `vuln-scan` answers the first from the
+# other side; the second is what artifact provenance is for.
+_lock_files=""
+for _lf in go.sum package-lock.json yarn.lock pnpm-lock.yaml Cargo.lock poetry.lock uv.lock Gemfile.lock composer.lock; do
+  [[ -f "$_lf" ]] && _lock_files="${_lock_files} $_lf"
+done
+_lock_files="${_lock_files# }"
+
+# A manifest with no lockfile beside it is the failure; a repo with neither is
+# a repo with no third-party dependencies to pin.
+_dep_manifest=""
+for _dm in go.mod package.json Cargo.toml pyproject.toml Gemfile composer.json; do
+  [[ -f "$_dm" ]] && _dep_manifest="${_dep_manifest} $_dm"
+done
+_dep_manifest="${_dep_manifest# }"
+
+if [[ -z "$_dep_manifest" ]]; then
+  row "dependency-lockfile" NA "no dependency manifest in this repo, so there is no resolution to pin"
+elif [[ -z "$_lock_files" ]]; then
+  row "dependency-lockfile" FAIL "declares dependencies ($_dep_manifest) but commits no lockfile -- every build resolves afresh against whatever the registry serves"
+else
+  # Regeneration in CI, in command position. `grep -v '#'` first so a comment
+  # explaining why the repo does NOT run `go mod tidy` is not read as running
+  # it -- the comment-as-code defect three rows were fixed for on 2026-08-29.
+  _regen=$(grep -rhnE '^[^#]*(go mod tidy|go get -u|npm install|yarn install|pnpm install|bundle update|cargo update|poetry update)' \
+             .github/workflows/*.y*ml Makefile 2>/dev/null \
+           | grep -vE 'frozen-lockfile|--locked|npm ci|--frozen' | head -2 | tr '\n' ' ')
+  if [[ -n "$_regen" ]]; then
+    row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) but CI/Makefile REGENERATES it: $(printf '%s' "$_regen" | cut -c1-110) -- a lockfile the build rewrites pins nothing"
+  else
+    # Enforcement: explicit flag, or a toolchain whose default is readonly.
+    _enforced=$(grep -rhoE 'mod=readonly|--frozen-lockfile|--locked|npm ci|--frozen' \
+                  .github/workflows/*.y*ml Makefile 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
+    _gover=$(grep -m1 -oE '^go [0-9]+\.[0-9]+' go.mod 2>/dev/null | awk '{print $2}')
+    if [[ -n "$_enforced" ]]; then
+      row "dependency-lockfile" PASS "lockfile committed ($_lock_files) and enforced explicitly in CI ($_enforced); nothing regenerates it"
+    elif [[ -n "$_gover" ]] && awk -v v="$_gover" 'BEGIN{split(v,a,".");exit !(a[1]>1||(a[1]==1&&a[2]>=16))}'; then
+      row "dependency-lockfile" PASS "lockfile committed ($_lock_files), nothing in CI regenerates it, and go $_gover defaults to -mod=readonly so the build cannot silently rewrite it"
+    else
+      row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) and nothing regenerates it, but NOTHING ENFORCES readonly either -- no --frozen-lockfile/--locked/-mod=readonly and no toolchain default to lean on, so a build that resolves differently would not be refused"
+    fi
+  fi
+fi
 
 wf=".github/workflows"
 if [[ -d $wf ]]; then
@@ -2796,9 +2869,162 @@ else
 fi
 
 # --- 16. ops artifacts (present AND their citations resolve) --------------
+# PRESENT IS NOT WRITTEN. These four were `[[ -f $f ]] && row ... PASS "present"`
+# -- pure existence -- so a repo satisfied the runbook, SLO, alerting and
+# ownership dimensions with FOUR EMPTY FILES. Measured 2026-08-29 on an
+# instantiated template: truncating RUNBOOK.md, SLO.md and CODEOWNERS to 0 bytes
+# left every one of them reading `PASS  present`.
+#
+# It matters more here than elsewhere, because these are the artifacts a human
+# reaches for during an incident. An empty runbook is not the same as a missing
+# one: it LOOKS answered, so nobody writes the real thing, and the gap surfaces
+# at 3am. A comment-only CODEOWNERS is the same shape -- it assigns no owners
+# while appearing to.
+#
+# The bar is "at least one line that is neither blank nor a comment". Content
+# QUALITY is deliberately not judged: runbook-citations-resolve and the alert
+# rows already do that, and a keyword list here would be a second, worse copy of
+# them -- the two-lists defect this file has been bitten by repeatedly.
+# `#` IS A COMMENT IN CODEOWNERS AND A HEADING IN MARKDOWN, so the content test
+# cannot be the same for both. The first version of this fix applied the shell
+# comment rule to `.md` too, which would have failed a runbook written mostly as
+# headings -- legitimate content judged as silence. Caught reviewing this very
+# change, before it left the branch.
+#
+#   CODEOWNERS : a line that is neither blank nor `#`. A comment-only file
+#                assigns no owners while looking like it does.
+#   *.md       : any non-blank line. Headings ARE content; the failure this row
+#                is for is the EMPTY file, not the terse one.
 for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
-  [[ -f $f ]] && row "ops:$(basename "$f")" PASS "present" || row "ops:$(basename "$f")" FAIL "missing"
+  _ops_name="ops:$(basename "$f")"
+  case "$f" in
+    *.md) _content_re='^[[:space:]]*[^[:space:]]' ;;
+    *)    _content_re='^[[:space:]]*[^[:space:]#]' ;;
+  esac
+  if [[ ! -f $f ]]; then
+    row "$_ops_name" FAIL "missing"
+  elif [[ ! -s $f ]]; then
+    row "$_ops_name" FAIL "present but EMPTY (0 bytes) -- an empty $f is not a missing one, it is a file that looks answered and is not"
+  elif ! grep -qE "$_content_re" "$f" 2>/dev/null; then
+    row "$_ops_name" FAIL "present but carries no content line -- nothing in it is stated (for CODEOWNERS: only comments, which assigns no owners)"
+  else
+    row "$_ops_name" PASS "present, $(grep -cE "$_content_re" "$f" 2>/dev/null) content line(s)"
+  fi
 done
+
+# --- 16b. deployment resource limits ----------------------------------------
+#
+# tier-policy: `deployment_resource_limits: required_if_deployment_artifacts`.
+# One of the keys policy-coverage.sh has carried on its known-unscored work list
+# with the demo that proves the mechanism (noisy-neighbor-demo). The demo showed
+# it; this scores it.
+#
+# A container with no limits is not a container with generous limits: under
+# contention it takes whatever the node has, and the pod that gets OOM-killed is
+# whichever one asked politely. That is the whole noisy-neighbour failure, and
+# it is decidable statically from the manifests.
+#
+# REQUIRED_IF, so absence of deployment artifacts is NA and not a pass. A repo
+# that deploys nothing has nothing to limit -- checked-and-none. A repo WITH
+# manifests that omit limits has been measured and found wanting.
+#
+# WHAT THIS CANNOT PROVE, stated rather than implied:
+#   * limits injected at deploy time -- a Kustomize overlay, a Helm value, an
+#     admission webhook, a LimitRange in the namespace. This reads the manifests
+#     in the repo; a repo whose base has no limits and whose overlay adds them
+#     will FAIL here and be correct in production. That is a false red and the
+#     honest answer to it is a ratified decline naming the overlay, not a
+#     weaker check -- the alternative (accept any repo that mentions limits
+#     anywhere) passes the repo that mentions them in a comment.
+#   * whether the limit is the RIGHT size. A 1m CPU limit satisfies this row and
+#     throttles the service to a stop. Sizing is what the load baseline and the
+#     saturation point are for.
+# Both cpu AND memory are required because one alone is the common half-measure:
+# memory-only still lets a busy loop starve its neighbours, cpu-only still lets
+# a leak take the node down.
+_dep_files=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*(Deployment|StatefulSet|DaemonSet|CronJob|Pod)[[:space:]]*$' \
+               --include='*.yaml' --include='*.yml' . 2>/dev/null \
+             | grep -vE '/(\.git|node_modules|vendor)/' | sort -u)
+_compose=$(find . -maxdepth 3 \( -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' -o -name 'compose.y*ml' \) \
+             -not -path './.git/*' 2>/dev/null | sort -u)
+
+if [[ -z "$_dep_files" && -z "$_compose" ]]; then
+  row "deployment-resource-limits" NA "no deployment artifacts in this repo (no k8s workload manifest, no compose file), so there is nothing to set limits on -- checked and none, not unchecked"
+elif ! command -v python3 >/dev/null 2>&1; then
+  row "deployment-resource-limits" FAIL "python3 is unavailable, so the manifests could not be parsed -- unparsed is not compliant"
+else
+  _dl_out=$(printf '%s\n%s\n' "$_dep_files" "$_compose" | grep -v '^$' | python3 -c '
+import sys, yaml
+
+problems, checked = [], 0
+
+def want(c, path, kind):
+    """A container needs BOTH cpu and memory limits. One of the two is the
+    common half-measure: memory-only still lets a busy loop starve its
+    neighbours, cpu-only still lets a leak take the node down."""
+    global checked
+    checked += 1
+    name = c.get("name") or "<unnamed>"
+    res = (c.get("resources") or {}) if isinstance(c, dict) else {}
+    lim = (res.get("limits") or {}) if isinstance(res, dict) else {}
+    missing = [k for k in ("cpu", "memory") if not lim.get(k)]
+    if missing:
+        problems.append("%s: %s %s has no %s limit" % (path, kind, name, "/".join(missing)))
+
+for path in (l.strip() for l in sys.stdin if l.strip()):
+    try:
+        docs = list(yaml.safe_load_all(open(path).read()))
+    except Exception as e:
+        problems.append("%s: unparseable (%s)" % (path, str(e).replace("\n", " ")[:80]))
+        continue
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        # kubernetes workload
+        if d.get("kind") in ("Deployment", "StatefulSet", "DaemonSet", "CronJob", "Pod"):
+            spec = d.get("spec") or {}
+            # walk down to the pod template wherever it sits
+            for _ in range(4):
+                if isinstance(spec, dict) and "template" in spec:
+                    spec = (spec.get("template") or {}).get("spec") or {}
+                elif isinstance(spec, dict) and "jobTemplate" in spec:
+                    spec = (spec.get("jobTemplate") or {}).get("spec") or {}
+                else:
+                    break
+            for key in ("containers", "initContainers"):
+                for c in (spec.get(key) or []) if isinstance(spec, dict) else []:
+                    if isinstance(c, dict):
+                        want(c, path, d.get("kind"))
+        # docker compose
+        elif "services" in d and isinstance(d.get("services"), dict):
+            for sname, s in d["services"].items():
+                if not isinstance(s, dict):
+                    continue
+                checked += 1
+                dep = (s.get("deploy") or {}).get("resources", {}) if isinstance(s.get("deploy"), dict) else {}
+                lim = dep.get("limits") or {}
+                has_mem = bool(s.get("mem_limit") or lim.get("memory"))
+                has_cpu = bool(s.get("cpus") or lim.get("cpus"))
+                miss = [n for n, ok in (("cpu", has_cpu), ("memory", has_mem)) if not ok]
+                if miss:
+                    problems.append("%s: service %s has no %s limit" % (path, sname, "/".join(miss)))
+
+if checked == 0:
+    print("ZERO|deployment manifests were found but contained no container or service definition")
+elif problems:
+    print("FAIL|%d of %d container(s)/service(s) declare no resource limit: %s" %
+          (len(problems), checked, "; ".join(problems[:3])))
+else:
+    print("PASS|%d container(s)/service(s) across the deployment manifests declare both cpu and memory limits" % checked)
+' 2>&1)
+  case "${_dl_out%%|*}" in
+    PASS) row "deployment-resource-limits" PASS "${_dl_out#*|}" ;;
+    ZERO) row "deployment-resource-limits" FAIL "${_dl_out#*|} -- a manifest the parser could not find containers in is not a manifest that passed" ;;
+    FAIL) row "deployment-resource-limits" FAIL "${_dl_out#*|}. An unlimited container does not get generous limits, it gets whatever the node has under contention" ;;
+    *)    row "deployment-resource-limits" FAIL "the limits parser produced no verdict: $(printf '%s' "$_dl_out" | head -1 | cut -c1-160)" ;;
+  esac
+fi
+
 if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
   # Derive the series-name pattern from the MANIFEST, never from one org's
   # hardcoded prefix.
