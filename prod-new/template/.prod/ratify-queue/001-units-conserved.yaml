@@ -55,6 +55,17 @@ candidate_invariant:
 # cites line numbers that move, and a keyword grep over it can be satisfied
 # by typing the word "mutation" in a comment. This block is re-executed on
 # every probe run instead.
+test:
+  # THE DECLARATIVE CITATION, and it is deliberately a SECOND place
+  # naming the same test. `non_vacuity_check.expect_red` is what the
+  # probe EXECUTES; this is what the package CLAIMS. One field alone
+  # cannot detect drift, because there is nothing to compare it
+  # against -- and drift is real: a package in another repo cited
+  # TestFailedFetchNeverReplacesLiveCatalog while the test was named
+  # TestFailedFetchNeverDestroysLastKnownDrift, both existed, and
+  # every gate stayed green. verify-standard.sh's
+  # `ratification-citations` row requires the two to agree.
+  function: TestInvariant_UnitsConserved
 non_vacuity_check:
   file: 'internal/domain/ledger.go'
   expect_red: 'TestInvariant_UnitsConserved'

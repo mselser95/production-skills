@@ -40,6 +40,17 @@ candidate_invariant:
 
 # EXECUTABLE non-vacuity check -- see 001-units-conserved.yaml's block for
 # why this exists alongside the prose above rather than instead of it.
+test:
+  # THE DECLARATIVE CITATION, and it is deliberately a SECOND place
+  # naming the same test. `non_vacuity_check.expect_red` is what the
+  # probe EXECUTES; this is what the package CLAIMS. One field alone
+  # cannot detect drift, because there is nothing to compare it
+  # against -- and drift is real: a package in another repo cited
+  # TestFailedFetchNeverReplacesLiveCatalog while the test was named
+  # TestFailedFetchNeverDestroysLastKnownDrift, both existed, and
+  # every gate stayed green. verify-standard.sh's
+  # `ratification-citations` row requires the two to agree.
+  function: TestInvariant_DuplicateEventAppliedOnce
 non_vacuity_check:
   file: 'internal/domain/ledger.go'
   expect_red: 'TestInvariant_DuplicateEventAppliedOnce'

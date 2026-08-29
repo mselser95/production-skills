@@ -52,7 +52,30 @@ candidate_invariant:
     counter: <name>
     window: <days>
     firings: <n>
+
+# The two fields the probe SCORES, and which this spec did not describe until
+# 2026-08-28 — measured: the template's own packages carried non_vacuity_check
+# and not `test:`, so verify-standard.sh's `ratification-citations` row could
+# never pass on a freshly scaffolded repo.
+test:
+  function: <the test function this invariant is asserted by>
+non_vacuity_check:       # what the probe EXECUTES to prove the test is not decoration
+  file: <path>           # the mutation is applied here...
+  expect_red: <TestName> # ...and THIS test must go RED, or the invariant is
+  find: <exact text>     # satisfied by code that asserts nothing
+  replace: <exact text>
 ```
+
+**`test.function` and `non_vacuity_check.expect_red` name the SAME test, in two
+independently-written places, and that redundancy is the whole point.**
+`expect_red` is what the probe executes; `test.function` is what the package
+claims. A single field cannot detect a drift, because there is nothing to
+compare it against — and the drift is real: a package in another repo cited
+`TestFailedFetchNeverReplacesLiveCatalog` while the test was named
+`TestFailedFetchNeverDestroysLastKnownDrift`. Both functions existed, the
+citation resolved, every gate stayed green, and the package's evidence described
+something no run had ever executed. The `ratification-citations` row requires
+the two to agree.
 
 ## Missing-signal report
 
