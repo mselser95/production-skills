@@ -72,7 +72,7 @@ quiet one.
 | `blocked` | attempted, could not be made honest on this stack — with the reason |
 
 **Where this table actually stands, counted from the rows below rather than
-remembered: 27 `pushed`, 7 `validated`.** `pushed` was missing from this
+remembered: 26 `pushed`, 8 `validated`.** `pushed` was missing from this
 vocabulary until 2026-08-29 — 27 of 34 rows carried a status the legend did not
 define, so a reader looking it up found nothing and would reasonably read it as
 a synonym for the one above it. It is not. The gap between the two is the whole
@@ -84,6 +84,26 @@ point of having a status column:
   the property it demonstrates is removed. A demo whose failing case was never
   exercised is the same shape as a test that passes against a broken
   implementation: it proves the harness runs, not that the mechanism matters.
+
+**What promoting one actually costs, measured on the first one (2026-08-29,
+`usl-fit-demo`, row 22).** The demo publishes its own contract in its runner's
+header: `./run-demo.sh` exits 0, and five named controls each exit 1. Validating
+it meant running all six from a CLEAN CLONE of the public repo, not from the
+working copy that built it:
+
+    ./run-demo.sh                              -> exit 0
+    USL_CONTROL=short-range                    -> exit 1
+    USL_CONTROL=no-serialization               -> exit 1
+    USL_CONTROL=unmodelled-regime              -> exit 1
+    USL_CONTROL=unsaturated                    -> exit 1
+    USL_CONTROL=closed-loop                    -> exit 1
+
+Six runs, roughly twenty minutes of wall clock, and the clean clone is the part
+that cannot be skipped: a demo that only runs where it was written is a demo
+with an undeclared dependency on that machine.
+
+That is the unit of work behind each of the 26 remaining rows. It is why the
+column says `pushed`.
 
 Promoting a row from `pushed` to `validated` means doing that work, not editing
 this cell. Nothing here should be described as "34 validated demos"; the honest
@@ -114,7 +134,7 @@ sentence is "34 published, 7 validated".
 | 19 | [noisy-neighbor-demo](https://github.com/mselser95/noisy-neighbor-demo) | an unlimited pod degrades its neighbour on a shared node; limits-without-requests yields Burstable and still starves it — the QoS class, not the YAML's appearance, is what the kubelet acts on | k8s resource-management docs; SRE ch.22 | `deployment_resource_limits` — declared, never exercised | [A]+[B] | `pushed` |
 | 20 | [dynamic-credentials-demo](https://github.com/mselser95/dynamic-credentials-demo) | a leaked STATIC credential still works at t+300 and survives a full redeploy of the app that owned it; the dynamic one is dead at its TTL. A `;` inside a SQL COMMENT made `vault lease revoke` a no-op that exited 0 | Saltzer & Schroeder (Proc. IEEE 1975) | `signer.key_custody` | [A]+[B] | `pushed` |
 | 21 | [flag-lifecycle-demo](https://github.com/mselser95/flag-lifecycle-demo) | an expiry that reddens the build is the only thing that removes a dead flag; the entry deleted while the code still branches on it is worse, because it is silent | Humble & Farley (2010); Fowler toggles (2017) | `liability_registries`; prod-ops OP-5 | [A] | `pushed` |
-| 22 | [usl-fit-demo](https://github.com/mselser95/usl-fit-demo) | the knee a per-operation benchmark cannot see, because both terms that produce it vanish at N=1 — fitted, then MEASURED at the prediction | Gunther, *Guerrilla Capacity Planning* (2007); Amdahl (1967) | §25 saturation; `capacity.margin_target` | [A] | `pushed` |
+| 22 | [usl-fit-demo](https://github.com/mselser95/usl-fit-demo) | the knee a per-operation benchmark cannot see, because both terms that produce it vanish at N=1 — fitted, then MEASURED at the prediction | Gunther, *Guerrilla Capacity Planning* (2007); Amdahl (1967) | §25 saturation; `capacity.margin_target` | [A] | `validated` |
 | 23 | [trace-conformance-demo](https://github.com/mselser95/trace-conformance-demo) | a NARRATED trace conforms to a strict spec while the same run loses an effect — the code's model of itself is consistent precisely where the code is wrong for reasons its author did not think of | Lamport (2002); Davis et al., eXtreme Modelling (VLDB 2020) | `formal_methods` at T0 | [A] | `pushed` |
 | 24 | [transparency-log-demo](https://github.com/mselser95/transparency-log-demo) | an inclusion proof recomputed OFFLINE, not asked of the log; a tampered leaf diverges from the signed tree head | Newman et al., Sigstore (CCS 2022); RFC 6962; Merkle (1987) | `artifact_provenance` | [B] | `pushed` |
 | 25 | [config-error-demo](https://github.com/mselser95/config-error-demo) | a wrong-unit value starts fine and misbehaves under load; a syntax-only gate accepts all three broken configs | Xu et al., SOSP 2013 | §10 operability | [A]+[B] | `pushed` |
