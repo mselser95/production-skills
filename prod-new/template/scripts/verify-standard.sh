@@ -2423,10 +2423,24 @@ if [[ -d $wf ]]; then
     # Self-hosted runner labels are unknown to actionlint. Ignore ONLY that
     # rule: on the real defect its 8 label warnings buried the one line that
     # mattered, which is how the syntax error shipped in the first place.
-    if alout=$(PATH="$(gobin):$PATH" actionlint -ignore 'label ".+" is unknown' "$wf"/*.y*ml 2>&1); then
-      row "workflow-definitions-valid" PASS "actionlint clean on $(ls "$wf"/*.y*ml 2>/dev/null | wc -l | tr -d ' ') workflow file(s)"
+    # ZERO WORKFLOW FILES IS ITS OWN ANSWER. Named before running the linter,
+    # because actionlint on an unexpanded glob fails with a message carrying no
+    # `file.yaml:L:C:` diagnostic, the extraction below then matched nothing,
+    # and the row printed a bare "FAIL" with EMPTY evidence. Measured
+    # 2026-08-29 by moving the three workflows aside. A verdict with no reason
+    # is the shape row()'s own guard exists to refuse, reached by a route that
+    # guard could not see.
+    _wf_n=$(ls "$wf"/*.y*ml 2>/dev/null | wc -l | tr -d ' ')
+    if (( _wf_n == 0 )); then
+      row "workflow-definitions-valid" FAIL "no workflow files in $wf -- there is nothing to validate, and a lane that defines no workflows runs no checks at all, which is the failure mode this row exists for (an invalid workflow yields ZERO checks, never a red one)"
+    elif alout=$(PATH="$(gobin):$PATH" actionlint -ignore 'label ".+" is unknown' "$wf"/*.y*ml 2>&1); then
+      row "workflow-definitions-valid" PASS "actionlint clean on ${_wf_n} workflow file(s)"
     else
-      row "workflow-definitions-valid" FAIL "$(grep -m1 -E '\.ya?ml:[0-9]+:[0-9]+:' <<<"$alout")"
+      # Prefer the first real diagnostic; fall back to the raw output rather
+      # than emitting an empty reason when actionlint fails some other way.
+      _al_why=$(grep -m1 -E '\.ya?ml:[0-9]+:[0-9]+:' <<<"$alout")
+      [[ -n "$_al_why" ]] || _al_why="actionlint exited non-zero with no file:line diagnostic: $(head -2 <<<"$alout" | tr '\n' ' ' | cut -c1-200)"
+      row "workflow-definitions-valid" FAIL "$_al_why"
     fi
   else row "workflow-definitions-valid" FAIL "actionlint not installed — CI definitions unvalidated, and an invalid one yields NO checks at all"; fi
 
@@ -2971,9 +2985,47 @@ else row "registries-expiry-gated" FAIL "registries are recorded but nothing enf
 
 # --- 17. contract artifacts exist for the work (audit finding: never written) --
 ctxdir="${PROD_CONTEXT_DIR:-.prod/context}"
-if ls "$ctxdir"/*resolved-context*.y*ml >/dev/null 2>&1 && ls "$ctxdir"/*change-plan*.y*ml >/dev/null 2>&1; then
-  row "contract-artifacts" PASS "resolved-context + change-plan present in $ctxdir"
-else row "contract-artifacts" FAIL "no resolved-context/change-plan in $ctxdir — nothing to audit the diff against"; fi
+# PRESENT IS NOT POPULATED. This was two `ls` globs, so a pair of ZERO-BYTE
+# files named resolved-context.yaml and change-plan.yaml passed it. Measured
+# 2026-08-29 by truncating both in an instantiated template: PASS,
+# "resolved-context + change-plan present". The row exists because of an audit
+# finding that these were NEVER WRITTEN, and its whole point is that there is
+# something to audit the diff against -- which an empty file is not.
+#
+# Checked now: the file exists, is non-empty, and parses as a YAML MAPPING. Not
+# checked, deliberately: which keys it carries. The formats live in
+# _shared/formats/ and evolve; a key list here would be a second copy that must
+# agree with them, and this file has already been bitten twice today by two
+# lists that had to agree. Emptiness is the failure this row was written for.
+_ca_why=""
+_ca_ok=1
+for _pat in '*resolved-context*.y*ml' '*change-plan*.y*ml'; do
+  # shellcheck disable=SC2086
+  _f=$(ls $ctxdir/$_pat 2>/dev/null | head -1)
+  if [[ -z "$_f" ]]; then
+    _ca_ok=0; _ca_why="${_ca_why} no file matching ${_pat} in $ctxdir;"
+    continue
+  fi
+  if [[ ! -s "$_f" ]]; then
+    _ca_ok=0; _ca_why="${_ca_why} ${_f} is EMPTY (0 bytes) -- present but nothing to audit against;"
+    continue
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    _parse=$(python3 -c '
+import sys, yaml
+try:
+    d = yaml.safe_load(open(sys.argv[1]).read())
+except Exception as e:
+    print("unparseable: %s" % str(e).replace("\n"," ")[:120]); raise SystemExit(0)
+if d is None: print("parses to nothing")
+elif not isinstance(d, dict): print("is a %s, not a mapping" % type(d).__name__)
+' "$_f" 2>&1)
+    [[ -n "$_parse" ]] && { _ca_ok=0; _ca_why="${_ca_why} ${_f} ${_parse};"; }
+  fi
+done
+if (( _ca_ok )); then
+  row "contract-artifacts" PASS "resolved-context + change-plan present in $ctxdir, non-empty, and parsing as YAML mappings"
+else row "contract-artifacts" FAIL "contract artifacts unusable:${_ca_why} — nothing to audit the diff against"; fi
 
 # --- 18. ratification packages back every ratified invariant -----------------
 if ls verification/ratified/*_test.go >/dev/null 2>&1; then
