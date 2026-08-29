@@ -88,6 +88,24 @@ except Exception:
 done
 
 echo
+# NO REPORTS AT ALL IS A DIFFERENT ANSWER FROM "NEVER BENCHMARKED", and the
+# first version of this file gave both the same one. benchmark-results/ is not
+# committed -- it is generated output, deliberately kept out of the TCB -- so a
+# clean checkout has none, and CI printed "9 never benchmarked" about nine
+# skills of which seven have scores on the machine that produced them.
+#
+# That is the identical conflation this repo fixed in provenance-headers hours
+# earlier (a tree with no git reported as "no commits yet"), reproduced by me in
+# a file written minutes later. The lesson evidently has to be applied, not
+# merely known: whenever a check reports absence, ask whether the SUBJECT is
+# absent or the EVIDENCE simply is not here.
+if (( absent == ${#skills[@]} )); then
+  echo "benchmark-currency: no scores in this checkout at all."
+  echo "  benchmark-results/ is generated output and is not committed, so this question"
+  echo "  can only be answered where the benchmarks were RUN. This is not a finding that"
+  echo "  the skills were never benchmarked -- it is this checkout having no evidence."
+  exit 0
+fi
 if (( stale == 0 && absent == 0 )); then
   echo "benchmark-currency: all ${fresh} score(s) postdate the skill they measure."
 else
