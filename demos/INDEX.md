@@ -86,6 +86,24 @@ point of having a status column:
   exercised is the same shape as a test that passes against a broken
   implementation: it proves the harness runs, not that the mechanism matters.
 
+**One row stays `pushed` for a reason worth naming: partition-consistency-demo.**
+Its happy path and six of seven controls pass from a clean clone. The seventh,
+`PCX_CONTROL=healthy-follower-read`, is rejected by the runner itself --
+"unknown PCX_CONTROL ... expected: no-partition | checker-blind |
+partition-not-applied | linearizable-reader | endpoint-roundrobin |
+phase-label-drift".
+
+The header is stale, not the code. That control was never designed: it was a
+measurement the demo made OF ITSELF, finding that on a healthy three-member
+cluster a serializable follower read is already stale, so the demo's original
+"zero anomalies while healthy" assertion was WRONG rather than flaky. It was
+renamed and promoted to `phase-label-drift`, which the code implements -- and
+the header kept the old name beside the new one.
+
+A one-line fix in that repo (drop the stale line at run-demo.sh:21) makes it
+validatable. It is recorded here rather than fixed silently because the demo
+repos are outside the direct-push arrangement that covers this one.
+
 **One row reads `superseded`, and it is the pipeline working.**
 error-budget-freeze-demo existed to show two gaps: the probe had NO slo row, and
 `ops:SLO.md` was satisfied by an EMPTY docs/SLO.md. Both were closed on
