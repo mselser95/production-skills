@@ -395,6 +395,32 @@ row() { # row <dimension> <verdict> <evidence>
   ROWS+=("$1|$2|$3")
   case "$2" in PASS) passes=$((passes+1));; FAIL) fails=$((fails+1));; NA) nas=$((nas+1));; esac
 }
+# WHO STILL DOES NOT USE THIS, AND WHY — audited 2026-08-29, kept honest rather
+# than silently left. Three rows were found taking a COMMENT for code that day
+# (tracing-wired-in-prod, observability:log_handler_installed, and the pprof half
+# of profiling), each proven by mutation and each now filtered. These greps over
+# Go source still do not filter:
+#
+#   ~1411  grep -rqi "reconcil"          — already a loose keyword probe whose
+#                                          verdict is corroborated elsewhere;
+#                                          filtering would not change its
+#                                          weakness, which is the pattern itself.
+#   ~1780  grep -rql 'log/slog'          — gates whether the slog rows run at
+#                                          all. A comment naming log/slog would
+#                                          switch the block ON, which then FAILS
+#                                          honestly on its own checks; the
+#                                          failure mode is noisy, not silent.
+#   ~1808  slog_plain / slog_ctx         — a RATIO, not a presence test. Comments
+#   ~1809                                  would have to appear on both sides to
+#                                          shift it, and the row reports the
+#                                          numerator and denominator.
+#   ~2021  grep -rql "StartSpan" internal/ — evidence text only; named in the
+#                                          message, never decisive on its own.
+#
+# None of these is argued to be safe because it is inconvenient to fix. Each is
+# either non-decisive or fails loudly rather than passing quietly — which is the
+# distinction that mattered in the three that were fixed. If one is ever made
+# decisive, it needs this filter first.
 code_lines_only() { # filter `grep -rn` output down to lines that are CODE
   # `grep -rn` prints path:lineno:content. A content that starts with `//` is
   # PROSE, and every row in this file that greps for a call site is one doc
@@ -1204,7 +1230,14 @@ if [[ -f benchmarks/profile.sh ]]; then
     prof_capture=inert
   fi
 fi
-prof_live=$(grep -rql "net/http/pprof" --include='*.go' . 2>/dev/null && echo yes || echo no)
+# -rn + code_lines_only, not -rql. Third row in this file found taking a COMMENT
+# for code on 2026-08-29 (after tracing-wired-in-prod and
+# observability:log_handler_installed), and the same sentence applies: a line
+# explaining that the pprof endpoint is env-gated names `net/http/pprof` without
+# importing it, and satisfied this. `-l` gives filenames with nothing to filter,
+# so the count has to come from `-n`.
+prof_live=$([[ $(grep -rn "net/http/pprof" --include='*.go' . 2>/dev/null \
+  | code_lines_only | wc -l | tr -d ' ') -gt 0 ]] && echo yes || echo no)
 
 # -i on the package qualifier only: `profiling.`, `Profiling.`, `pyroscope.`.
 prof_cont_sites=$(grep -rnEi ':?=[[:space:]]*(profil|pyroscope)[A-Za-z0-9_]*\.[A-Za-z0-9_]*Start[A-Za-z0-9_]*\(' \
@@ -1820,8 +1853,24 @@ if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
   # A structured handler must actually be INSTALLED. slog.Default() is a text
   # handler writing to stderr; a repo can log diligently for months and emit
   # nothing a log store can parse into fields.
-  if grep -rqE 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
-    row "observability:log_handler_installed" PASS "a slog handler is constructed, not left at the default"
+  # code_lines_only, for the same reason tracing-wired-in-prod needed it. This
+  # was a bare `grep -rq`, so a COMMENT naming the constructor satisfied it.
+  # Measured 2026-08-29 on an instantiated template: renaming every real handler
+  # construction away and leaving only
+  #
+  #   // They are fanned out with the stdlib slog.NewMultiHandler rather than by
+  #
+  # still produced PASS "a slog handler is constructed, not left at the
+  # default". The row's own reason for existing -- that a repo can log
+  # diligently for months and emit nothing a log store can parse -- is exactly
+  # what a comment-satisfied check lets through.
+  #
+  # -n so the output is `file:line:text` and code_lines_only can strip the
+  # comment lines; -l would give filenames with nothing to filter.
+  log_handler_sites=$(grep -rnE 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' \
+    --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+  if (( log_handler_sites > 0 )); then
+    row "observability:log_handler_installed" PASS "a slog handler is constructed in $log_handler_sites non-comment line(s), not left at the default"
   else
     row "observability:log_handler_installed" FAIL "no slog handler is constructed anywhere -- slog.Default() emits unstructured text to stderr, so every structured field is lost before it reaches a log store"
   fi
