@@ -3010,7 +3010,23 @@ else
   # reports a defect about git history as though it were a defect in the code.
   # Same discriminator as the registries fix: answered-and-none, versus nothing
   # to answer with.
-  if ! git rev-parse HEAD >/dev/null 2>&1; then
+  # THREE STATES, NOT TWO. `git rev-parse HEAD` fails identically for a repo
+  # with zero commits and for a tree git is not tracking at all, so the second
+  # was handed the first one's message: "no commits yet", asserted about a
+  # directory where git can say nothing whatsoever. Measured 2026-08-29 on an
+  # instantiated template that was a plain copy rather than a clone -- the row
+  # read NA "no commits yet" over a tree with no .git anywhere in it.
+  #
+  # The distinction is the one this file keeps re-learning. An initialised repo
+  # with no commits is a POSITIVE fact: there are no changed lines, so there is
+  # nothing to carry provenance. A tree with no git is the INSTRUMENT missing:
+  # not "there are no changed lines" but "nobody can tell which lines changed".
+  # Both stay NA rather than FAIL -- prod-new leaves a scaffold in the first
+  # state at Phase 3 and must be able to reach FAIL 0 -- but they must not claim
+  # the same thing, because only one of them measured anything.
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    row "provenance-headers" NA "not a git work tree -- provenance is a property of CHANGED LINES, and without git there is no way to know which lines changed. The instrument is missing, which is not a clean result: run this in the repository rather than in a copy of it"
+  elif ! git rev-parse HEAD >/dev/null 2>&1; then
     row "provenance-headers" NA "no commits yet -- a tree with no history has no changed lines to carry provenance, so there is nothing to measure rather than something unmeasured"
   else
     row "provenance-headers" FAIL "no diff base resolves (tried origin/main, main, origin/HEAD) -- the repo HAS history, so this dimension went UNMEASURED, which is not the same as met"
