@@ -2407,6 +2407,63 @@ if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
   fi
 else row "vuln-scan" FAIL "govulncheck not installed — gate unproven"; fi
 
+# --- dependency lockfile: committed AND not regenerated in CI ---------------
+#
+# tier-policy: `dependency_currency.lockfile: committed_and_ci_enforced`, whose
+# comment already names the mechanism -- "--frozen-lockfile / --locked /
+# -mod=readonly, not regenerated in CI". Second key off policy-coverage's
+# known-unscored work list; its demo is dependency-confusion-demo.
+#
+# COMMITTED is the easy half and the useless half on its own. A lockfile that CI
+# regenerates before building pins nothing: the build resolves whatever the
+# registry serves that morning, which is precisely the window a confusion or
+# substitution attack needs, and the committed file sits there looking like a
+# guarantee. So the row asks both questions and fails the second one loudly.
+#
+# WHAT IT CANNOT PROVE: that the pinned versions are current, or that the
+# registry served what the hash says. `vuln-scan` answers the first from the
+# other side; the second is what artifact provenance is for.
+_lock_files=""
+for _lf in go.sum package-lock.json yarn.lock pnpm-lock.yaml Cargo.lock poetry.lock uv.lock Gemfile.lock composer.lock; do
+  [[ -f "$_lf" ]] && _lock_files="${_lock_files} $_lf"
+done
+_lock_files="${_lock_files# }"
+
+# A manifest with no lockfile beside it is the failure; a repo with neither is
+# a repo with no third-party dependencies to pin.
+_dep_manifest=""
+for _dm in go.mod package.json Cargo.toml pyproject.toml Gemfile composer.json; do
+  [[ -f "$_dm" ]] && _dep_manifest="${_dep_manifest} $_dm"
+done
+_dep_manifest="${_dep_manifest# }"
+
+if [[ -z "$_dep_manifest" ]]; then
+  row "dependency-lockfile" NA "no dependency manifest in this repo, so there is no resolution to pin"
+elif [[ -z "$_lock_files" ]]; then
+  row "dependency-lockfile" FAIL "declares dependencies ($_dep_manifest) but commits no lockfile -- every build resolves afresh against whatever the registry serves"
+else
+  # Regeneration in CI, in command position. `grep -v '#'` first so a comment
+  # explaining why the repo does NOT run `go mod tidy` is not read as running
+  # it -- the comment-as-code defect three rows were fixed for on 2026-08-29.
+  _regen=$(grep -rhnE '^[^#]*(go mod tidy|go get -u|npm install|yarn install|pnpm install|bundle update|cargo update|poetry update)' \
+             .github/workflows/*.y*ml Makefile 2>/dev/null \
+           | grep -vE 'frozen-lockfile|--locked|npm ci|--frozen' | head -2 | tr '\n' ' ')
+  if [[ -n "$_regen" ]]; then
+    row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) but CI/Makefile REGENERATES it: $(printf '%s' "$_regen" | cut -c1-110) -- a lockfile the build rewrites pins nothing"
+  else
+    # Enforcement: explicit flag, or a toolchain whose default is readonly.
+    _enforced=$(grep -rhoE 'mod=readonly|--frozen-lockfile|--locked|npm ci|--frozen' \
+                  .github/workflows/*.y*ml Makefile 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
+    _gover=$(grep -m1 -oE '^go [0-9]+\.[0-9]+' go.mod 2>/dev/null | awk '{print $2}')
+    if [[ -n "$_enforced" ]]; then
+      row "dependency-lockfile" PASS "lockfile committed ($_lock_files) and enforced explicitly in CI ($_enforced); nothing regenerates it"
+    elif [[ -n "$_gover" ]] && awk -v v="$_gover" 'BEGIN{split(v,a,".");exit !(a[1]>1||(a[1]==1&&a[2]>=16))}'; then
+      row "dependency-lockfile" PASS "lockfile committed ($_lock_files), nothing in CI regenerates it, and go $_gover defaults to -mod=readonly so the build cannot silently rewrite it"
+    else
+      row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) and nothing regenerates it, but NOTHING ENFORCES readonly either -- no --frozen-lockfile/--locked/-mod=readonly and no toolchain default to lean on, so a build that resolves differently would not be refused"
+    fi
+  fi
+fi
 
 wf=".github/workflows"
 if [[ -d $wf ]]; then
