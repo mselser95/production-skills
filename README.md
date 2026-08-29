@@ -114,8 +114,29 @@ incomparable.
 Two classes of check, used differently (the repo's own GATE/SIGNAL
 discipline):
 
-- **GATE:** `skill-optimizer doctor --static` — structural validity; must pass
-  for every skill before a change merges.
+- **GATE:** `bash _shared/probes/skills-static.sh` — structural validity; must
+  pass for every skill before a change merges. This one is IN THIS REPO on
+  purpose. The gate used to be named as `skill-optimizer doctor --static`,
+  which is a real and richer tool but a third-party install: on a machine that
+  does not have it, the documented gate did not fail — it never ran. Measured
+  2026-08-29 here, the invocation printed `error: unknown command 'skill'`
+  **and exited 0**, nine times in a row, while the closing checklist recorded
+  "0 errors on all nine". A gate whose absence is indistinguishable from its
+  success is not a gate, so the blocking one is now a probe that ships with the
+  skills and cannot go missing.
+
+  Do not substitute `claude plugin validate <skills-dir>` for it. Mutation-
+  probed the same day against a copy of two real skills, it PASSED a nested
+  skill whose `description` was empty, whose frontmatter was invalid YAML, and
+  whose `SKILL.md` had been deleted outright — it does not descend into nested
+  skill directories. `skills-static.sh` fails on all three, and
+  `skills-static-selftest.sh` proves every one of its rules fires on a fixture
+  where that rule's property is false (11 cases, including a green baseline and
+  a zero-subjects case that exits 2 rather than 0).
+
+- **GATE:** `skill-optimizer doctor --static` — run it too when the tool IS
+  installed; it checks more than the local probe. Its absence must never be
+  read as a pass.
 - **SIGNAL:** `skill-optimizer run` against the frozen tasks — the prompt
   surface scores *lexical recall* of section content, so a paraphrased-but-
   correct response can score low; treat deltas against the frozen baseline as
