@@ -91,12 +91,14 @@ if (( ${#controls[@]} == 0 )); then
 fi
 
 fails=0
+declare -a _rcs=()
 echo "== happy path"
 if ( cd "$clone" && ./run-demo.sh >"$work/happy.log" 2>&1 ); then
   echo "  ok    ./run-demo.sh -> exit 0"
+  _happy_rc=0
 else
-  rc=$?
-  echo "  FAIL  ./run-demo.sh -> exit $rc, expected 0"
+  _happy_rc=$?
+  echo "  FAIL  ./run-demo.sh -> exit $_happy_rc, expected 0"
   tail -5 "$work/happy.log" | sed 's/^/        /'
   fails=$((fails + 1))
 fi
@@ -105,6 +107,7 @@ echo "== ${#controls[@]} declared control(s), each must exit 1"
 for c in "${controls[@]}"; do
   ( cd "$clone" && env "$c" ./run-demo.sh >"$work/ctl.log" 2>&1 )
   rc=$?
+  _rcs+=("$rc")
   if (( rc == 1 )); then
     echo "  ok    $c -> exit 1"
   else
@@ -114,7 +117,32 @@ for c in "${controls[@]}"; do
   fi
 done
 
+# COULD-NOT-RUN IS NOT DISAGREED-WITH. If the happy path failed AND every
+# control failed with the SAME non-1 code, nothing was measured about the demo:
+# the harness never got far enough. Reporting that as "disagreed with its
+# contract" blames the demo for the machine, and the person who reads it goes
+# looking for a bug that is not there.
+#
+# Measured 2026-08-29 on expand-contract-live-demo: all five runs exited 125 --
+# docker's "container failed to start" -- with
+# "failed to set up container networking: driver failed programming external
+# connectivity" underneath. A port already in use on this laptop, not a defect
+# in the demo. The first version of this script called that NOT VALIDATED.
+_uniform=""
+if (( _happy_rc != 0 && ${#_rcs[@]} > 0 )); then
+  _uniform="$_happy_rc"
+  for r in "${_rcs[@]}"; do [[ "$r" == "$_happy_rc" ]] || { _uniform=""; break; }; done
+  [[ "$_uniform" == "1" ]] && _uniform=""   # all-1 is a real (if odd) contract result
+fi
+
 echo
+if [[ -n "$_uniform" ]]; then
+  echo "$demo: CANNOT VALIDATE -- every run, happy path included, exited $_uniform." >&2
+  echo "  A uniform non-contract exit code across every run is the harness failing, not the demo:" >&2
+  echo "  nothing about the mechanism was measured. Fix the environment and re-run." >&2
+  tail -4 "$work/happy.log" | sed 's/^/    /' >&2
+  exit 2
+fi
 if (( fails > 0 )); then
   echo "$demo: NOT validated -- ${fails} run(s) disagreed with the contract the runner publishes." >&2
   exit 1
