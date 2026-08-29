@@ -73,7 +73,7 @@ quiet one.
 | `superseded` | the gap it demonstrated has been CLOSED by the framework; the demo's own premise check now fails on purpose |
 
 **Where this table actually stands, counted from the rows below rather than
-remembered: 5 `pushed`, 28 `validated`, 1 `superseded`.** `pushed` was missing from this
+remembered: 3 `pushed`, 30 `validated`, 1 `superseded`.** `pushed` was missing from this
 vocabulary until 2026-08-29 — 27 of 34 rows carried a status the legend did not
 define, so a reader looking it up found nothing and would reasonably read it as
 a synonym for the one above it. It is not. The gap between the two is the whole
@@ -183,8 +183,8 @@ sentence is "34 published, 7 validated".
 | 24 | [transparency-log-demo](https://github.com/mselser95/transparency-log-demo) | an inclusion proof recomputed OFFLINE, not asked of the log; a tampered leaf diverges from the signed tree head | Newman et al., Sigstore (CCS 2022); RFC 6962; Merkle (1987) | `artifact_provenance` | [B] | `validated` |
 | 25 | [config-error-demo](https://github.com/mselser95/config-error-demo) | a wrong-unit value starts fine and misbehaves under load; a syntax-only gate accepts all three broken configs | Xu et al., SOSP 2013 | §10 operability | [A]+[B] | `validated` |
 | 26 | [partition-consistency-demo](https://github.com/mselser95/partition-consistency-demo) | the same cluster, workload and checker with NO partition finds zero anomalies and names itself the vacuous form — the run most "consistency testing" actually performs | Kingsbury & Alvaro, Elle (PODC 2021) | §20; `consistency_verification` | [A]+[B] | `pushed` |
-| 27 | [asymmetric-partition-demo](https://github.com/mselser95/asymmetric-partition-demo) | the partitions that break systems are partial and one-way, not the clean split everyone tests | Alquraan et al. (OSDI 2018) | §20; the `partition` scenario is three | [B]+[A] | `pushed` |
-| 28 | [chaos-steady-state-demo](https://github.com/mselser95/chaos-steady-state-demo) | an abort path that was never rehearsed fails when invoked, and the experiment continues past its own abort | Basiri et al. (IEEE Software 2016) | `chaos_engineering` (all three sub-keys) | [B]+[A] | `pushed` |
+| 27 | [asymmetric-partition-demo](https://github.com/mselser95/asymmetric-partition-demo) | the partitions that break systems are partial and one-way, not the clean split everyone tests | Alquraan et al. (OSDI 2018) | §20; the `partition` scenario is three | [B]+[A] | `validated` |
+| 28 | [chaos-steady-state-demo](https://github.com/mselser95/chaos-steady-state-demo) | an abort path that was never rehearsed fails when invoked, and the experiment continues past its own abort | Basiri et al. (IEEE Software 2016) | `chaos_engineering` (all three sub-keys) | [B]+[A] | `validated` |
 | 29 | [workload-identity-demo](https://github.com/mselser95/workload-identity-demo) | SPIRE perfect, SVIDs rotating, window bounded — and the service keeps a compat door open on the shared secret: bounded for ONE of its two doors | SPIFFE/SPIRE spec; BeyondCorp (2014) | `signer.key_custody`, service-to-service | [B] | `validated` |
 | 30 | [syscall-anomaly-demo](https://github.com/mselser95/syscall-anomaly-demo) | Falco with an EMPTY rules file starts cleanly, reports healthy, and detects nothing; rules find what somebody thought of | Forrest et al. (IEEE S&P 1996); Falco as tooling | §9 — proposes a NEW runtime-security key | [B] | `validated` |
 | 31 | [least-privilege-rbac-demo](https://github.com/mselser95/least-privilege-rbac-demo) | the gap between the role somebody guessed and the role the workload uses, measured — and a derived role nobody re-tested is an outage waiting for a code path | Saltzer & Schroeder (1975); k8s RBAC docs | `authz_invariants` | [A]+[B] | `pushed` |
