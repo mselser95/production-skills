@@ -1162,7 +1162,36 @@ else row "benchmarks" FAIL "no benchmarks"; fi
 # the uploads land, and that the store retains them. That lives in deployment
 # config this repo cannot see -- which is precisely why signal (2) is required
 # rather than nice to have: the gauge is what makes it answerable there.
-prof_capture=$([[ -f benchmarks/profile.sh ]] && echo yes || echo no)
+# prof_capture used to be `[[ -f benchmarks/profile.sh ]]` -- a pure existence
+# test, so a capture script that was syntactically broken, or that had been
+# emptied to a stub, satisfied it and one PASS branch below rests on this signal
+# plus prof_live alone. That is the shape the `benchmarks` row a few hundred
+# lines up explicitly refuses in its own evidence string: "a benchmark that
+# never runs is a file, not a measurement". The same sentence applies here and
+# the row was not honouring it.
+#
+# Three conditions now, and the third is the one that mattered: the script must
+# PARSE (`bash -n`), and must reference pprof in a command position rather than
+# only in a comment. Measured 2026-08-29 in an instantiated template: the
+# template's own profile.sh passes all three, and running it for real produced
+# __internal_domain-cpu.prof and -mem.prof, so this is not a bar the shipped
+# scaffold cannot clear.
+#
+# What is deliberately NOT done: executing it from here. It drives `go test
+# -cpuprofile` over the package's benchmarks (~9s), which the `benchmarks` row
+# already pays for separately, and a probe that silently doubles its own cost is
+# a probe people stop running. The evidence string says so rather than implying
+# the script was exercised.
+prof_capture=no
+if [[ -f benchmarks/profile.sh ]]; then
+  if ! bash -n benchmarks/profile.sh 2>/dev/null; then
+    prof_capture=broken
+  elif grep -qE '^[^#]*(go tool pprof|-cpuprofile|-memprofile|/debug/pprof)' benchmarks/profile.sh 2>/dev/null; then
+    prof_capture=yes
+  else
+    prof_capture=inert
+  fi
+fi
 prof_live=$(grep -rql "net/http/pprof" --include='*.go' . 2>/dev/null && echo yes || echo no)
 
 # -i on the package qualifier only: `profiling.`, `Profiling.`, `pyroscope.`.
@@ -1207,7 +1236,7 @@ else
 fi
 
 prof_ondemand="capture=$prof_capture live=$prof_live"
-prof_unproven="NOT proven here: that a deployment sets the profiler's server address, that uploads land, or that the store retains them — deployment config this repo cannot see; $prof_cont_gauge is what answers it in production"
+prof_unproven="NOT proven here: that a deployment sets the profiler's server address, that uploads land, or that the store retains them — deployment config this repo cannot see; $prof_cont_gauge is what answers it in production. Nor was benchmarks/profile.sh EXECUTED: it is checked for existence, parseability (bash -n) and a real pprof invocation, which is strictly more than the file-existence test this used to be, and strictly less than running it"
 if [[ "$prof_continuous" == yes && "$prof_capture" == yes && "$prof_live" == yes ]]; then
   row "profiling" PASS "CONTINUOUS ($prof_cont_sites composition-root start site(s) in non-test cmd/ keeping the profiler handle, observable as $prof_cont_gauge$prof_manifest_note) AND both on-demand halves ($prof_ondemand). $prof_unproven"
 elif [[ "$prof_continuous" == yes ]]; then
