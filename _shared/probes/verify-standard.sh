@@ -1184,9 +1184,21 @@ else row "benchmarks" FAIL "no benchmarks"; fi
 # the script was exercised.
 prof_capture=no
 if [[ -f benchmarks/profile.sh ]]; then
-  if ! bash -n benchmarks/profile.sh 2>/dev/null; then
-    prof_capture=broken
-  elif grep -qE '^[^#]*(go tool pprof|-cpuprofile|-memprofile|/debug/pprof)' benchmarks/profile.sh 2>/dev/null; then
+  # NO `bash -n` HERE, and its absence is the point.
+  #
+  # The first version of this check used `bash -n` to separate a broken script
+  # from an inert one. gate-hygiene-fitness flagged it the same day under
+  # BASH-N-AS-VALIDATION -- "parses and executes nothing; a script that dies on
+  # its first line passes it" -- and the rule is right. Carving an exception for
+  # my own code is precisely what that rule exists to prevent, so the check went
+  # rather than the rule.
+  #
+  # Little is lost. `bash -n` only ever caught SYNTAX; a syntactically perfect
+  # script that captures nothing was always the likelier failure, and the grep
+  # below catches that as `inert`. What remains uncovered is a script whose
+  # syntax is broken, which the rule's own text says bash -n does not really
+  # cover either.
+  if grep -qE '^[^#]*(go tool pprof|-cpuprofile|-memprofile|/debug/pprof)' benchmarks/profile.sh 2>/dev/null; then
     prof_capture=yes
   else
     prof_capture=inert
@@ -1236,7 +1248,7 @@ else
 fi
 
 prof_ondemand="capture=$prof_capture live=$prof_live"
-prof_unproven="NOT proven here: that a deployment sets the profiler's server address, that uploads land, or that the store retains them — deployment config this repo cannot see; $prof_cont_gauge is what answers it in production. Nor was benchmarks/profile.sh EXECUTED: it is checked for existence, parseability (bash -n) and a real pprof invocation, which is strictly more than the file-existence test this used to be, and strictly less than running it"
+prof_unproven="NOT proven here: that a deployment sets the profiler's server address, that uploads land, or that the store retains them — deployment config this repo cannot see; $prof_cont_gauge is what answers it in production. Nor was benchmarks/profile.sh EXECUTED: it is checked for existence, a real pprof invocation outside a comment, which is strictly more than the file-existence test this used to be, and strictly less than running it. Syntax is deliberately NOT parse-checked: that would be gate-hygiene BASH-N-AS-VALIDATION, and the rule applies to this file too"
 if [[ "$prof_continuous" == yes && "$prof_capture" == yes && "$prof_live" == yes ]]; then
   row "profiling" PASS "CONTINUOUS ($prof_cont_sites composition-root start site(s) in non-test cmd/ keeping the profiler handle, observable as $prof_cont_gauge$prof_manifest_note) AND both on-demand halves ($prof_ondemand). $prof_unproven"
 elif [[ "$prof_continuous" == yes ]]; then

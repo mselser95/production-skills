@@ -168,7 +168,24 @@ for f in "${files[@]}"; do
       advise "$f" "$n" "GREPQ-UNDER-PIPEFAIL" "grep -q kills the writer with SIGPIPE (141); pipefail turns the MATCH into a false. Capture the output and match the variable"
     fi
 
-    if [[ "$line" =~ bash[[:space:]]+-n ]]; then
+    # COMMAND POSITION ONLY. The bare match caught the words wherever they
+    # appeared, including inside a quoted MESSAGE -- measured 2026-08-29, this
+    # rule flagged verify-standard.sh:1239, an evidence string whose text
+    # explains that a script is checked "for parseability (bash -n)" and
+    # explicitly NOT executed. A line honouring this rule, reported as breaking
+    # it.
+    #
+    # A rule that punishes documenting its own lesson is one people route
+    # around: the fix everyone reaches for is to delete the explanation, and
+    # then nobody knows why the script is not run. The match now requires
+    # `bash -n` to START a command -- line start, or after `if`, `!`, `then`,
+    # `&&`, `||`, `;`, `(`, `$(` -- which covers every shape that RUNS it and
+    # none that merely name it.
+    #
+    # Still caught: `bash -n f`, `if ! bash -n f; then`, `bash -n f || exit 1`,
+    # `x=$(bash -n f)`. Not caught: the words inside a string. Comments were
+    # already stripped upstream; strings were not, and that was the gap.
+    if [[ "$line" =~ (^|[\;\&\|\(]|if|then|\!)[[:space:]]*bash[[:space:]]+-n[[:space:]] ]]; then
       report "$f" "$n" "BASH-N-AS-VALIDATION" "parses and executes nothing; run the gate, then break what it guards and watch it go red"
     fi
   done < "$f"
