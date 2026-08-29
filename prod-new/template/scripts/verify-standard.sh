@@ -686,6 +686,77 @@ else
   fi
 fi
 
+# --- domain boundaries (DOMA) ------------------------------------------------
+#
+# tier-policy: `domain_boundaries.role_matches_topology: required_if_declared`.
+# Fourth key off policy-coverage's known-unscored work list, and the one with no
+# demo -- the mechanism came from the DOMA layer itself (_shared/
+# domain-boundaries.md), which shipped with a registry, a topology format and a
+# vocabulary, and no gate. A layer nobody scores is documentation.
+#
+# OPT-IN BY CONSTRUCTION. `owning_domain` is commented out in the shipped
+# production.yaml, because a single-service org has no topology and inventing
+# one for it would be the framework answering a question only the org can. Not
+# declared is therefore NA, never a pass-by-default.
+#
+# UNRESOLVABLE IS ALSO NA, AND THE POLICY SAYS SO: `cross_repo_confirmation:
+# unverified_cross_repo_if_unresolvable`. The topology is org-specific data that
+# lives OUTSIDE any one repo (gitignored, copied from the example), so a repo
+# that declares a domain on a machine without the topology cannot be checked --
+# and "cannot check" must not read the same as "checked and fine". It gets its
+# own message.
+#
+# Injected, never hardcoded, for the reason the sbom row was fixed on
+# 2026-08-27: a path baked in here would describe one org's layout and quietly
+# fail every other.
+_dom_decl=$(grep -oE '^[[:space:]]*owning_domain:[[:space:]]*[A-Za-z0-9_-]+' "$SPEC" 2>/dev/null | awk '{print $2}' | head -1)
+_dom_role=$(grep -oE '^[[:space:]]*domain_role:[[:space:]]*[A-Za-z_]+' "$SPEC" 2>/dev/null | awk '{print $2}' | head -1)
+_topology="${PROD_DOMAIN_TOPOLOGY:-}"
+if [[ -z "$_topology" ]]; then
+  for _t in "_shared/domain-topology.yaml" \
+            "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/references/domain-topology.yaml" \
+            "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-spec/references/domain-topology.yaml"; do
+    [[ -r "$_t" ]] && { _topology="$_t"; break; }
+  done
+fi
+
+if [[ -z "$_dom_decl" ]]; then
+  row "domain-boundaries:role_matches_topology" NA "no owning_domain declared in $SPEC -- the DOMA layer is opt-in, and a single-service repo has no topology to match against (see _shared/domain-boundaries.md)"
+elif [[ -z "$_topology" ]]; then
+  row "domain-boundaries:role_matches_topology" NA "declares owning_domain '$_dom_decl' but no domain-topology.yaml is resolvable here (set PROD_DOMAIN_TOPOLOGY) -- policy calls this unverified_cross_repo_if_unresolvable, which is NOT the same as verified"
+elif ! command -v python3 >/dev/null 2>&1; then
+  row "domain-boundaries:role_matches_topology" FAIL "python3 unavailable, so $_topology could not be parsed -- unparsed is not matched"
+else
+  _dom_out=$(python3 -c '
+import sys, yaml
+topo_path, dom, role = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    t = yaml.safe_load(open(topo_path).read()) or {}
+except Exception as e:
+    print("FAIL|%s is unparseable: %s" % (topo_path, str(e).replace("\n"," ")[:100])); raise SystemExit(0)
+domains = (t.get("domains") or {}) if isinstance(t, dict) else {}
+if not isinstance(domains, dict) or not domains:
+    print("FAIL|%s declares no `domains:` mapping, so nothing can be matched against it" % topo_path); raise SystemExit(0)
+if dom not in domains:
+    print("FAIL|owning_domain %r is not a key in %s (known: %s) -- a domain the topology has never heard of" %
+          (dom, topo_path, ", ".join(sorted(domains)[:6]))); raise SystemExit(0)
+entry = domains.get(dom) or {}
+want = entry.get("role") if isinstance(entry, dict) else None
+if not want:
+    print("FAIL|%s lists domain %r but assigns it no role, so role_matches_topology has nothing to match" % (topo_path, dom)); raise SystemExit(0)
+if not role:
+    print("FAIL|declares owning_domain %r but no domain_role; the topology says it is %r" % (dom, want)); raise SystemExit(0)
+if role != want:
+    print("FAIL|domain_role is %r but %s classes domain %r as %r -- the repo and the org disagree about what this service IS" % (role, topo_path, dom, want)); raise SystemExit(0)
+print("PASS|owning_domain %r with role %r matches %s" % (dom, role, topo_path))
+' "$_topology" "$_dom_decl" "${_dom_role:-}" 2>&1)
+  case "${_dom_out%%|*}" in
+    PASS) row "domain-boundaries:role_matches_topology" PASS "${_dom_out#*|}" ;;
+    FAIL) row "domain-boundaries:role_matches_topology" FAIL "${_dom_out#*|}" ;;
+    *)    row "domain-boundaries:role_matches_topology" FAIL "the topology matcher produced no verdict: $(printf '%s' "$_dom_out" | head -1 | cut -c1-150)" ;;
+  esac
+fi
+
 # THE PROBE'S OWN FITNESS FUNCTION. `producer | grep -q PATTERN` under this
 # file's `set -o pipefail` is the SIGPIPE race documented on the
 # artifact-provenance and runbook-citations rows: -q exits at the first match,
