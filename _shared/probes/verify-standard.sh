@@ -283,6 +283,76 @@ PYNV
 }
 
 SPEC="${PROD_SPEC_FILE:-production.yaml}"
+
+# THE SPEC WALKERS ARE DEFINED HERE, BEFORE ANY ROW CALLS THEM, and the move
+# is a bug fix rather than tidying. `spec_seq_count` lived at line ~1410 and
+# the invariants-ratified row calls it at ~693. Bash executes definitions top
+# to bottom, so at that point the function did not exist: the call printed
+# `spec_seq_count: command not found` ON STDERR and the substitution returned
+# EMPTY. The row then PASSED while its evidence read
+#
+#   invariants-ratified  PASS  " ratified per production.yaml (+ pending ...)"
+#
+# -- a number-shaped hole where the count belongs, in the row about ratified
+# invariants, which is the most load-bearing dimension this file scores. It
+# was invisible for as long as anyone ran the probe with 2>/dev/null, which
+# is how every run in this session was invoked until one was not.
+#
+# SPEC_AWK_LIB moves with it because the function is useless without it, and
+# it was defined at ~1201 -- also after the call site.
+SPEC_AWK_LIB='
+    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
+    # A TAB IN THE INDENT COUNTS AS DEEP, NOT AS ONE CHARACTER. YAML forbids a
+    # tab there, so the file is malformed either way -- but the two wrong
+    # answers are not equal. Counting it as one character makes a tab-indented
+    # BODY measure narrower than its own header, so the block ends early and
+    # its prose is read as a declaration: `spec_field scalability
+    # partition_key` returned `ESTO-ES-PROSA` over the real value two lines
+    # below. Treating it as deep keeps the prose inside the block, which is the
+    # fail-CLOSED direction for a function whose job is to return declared
+    # values. Reported by agatticelli.
+    function indent_of(  m, lead) {
+      m = match($0, /[^ \t]/)
+      if (m == 0) return 0
+      lead = substr($0, 1, m - 1)
+      if (lead ~ /\t/) return 9999
+      return m - 1
+    }
+    # THE COMMENT STRIP THE BASH OPENER HAS, WHICH THIS DID NOT. `.*:` reaches a
+    # colon inside a trailing `#` comment, so
+    #   partition_key: el-valor-real   # ver nota: |
+    # was eaten as a block header and the real value disappeared -- spec_field
+    # returned empty. Cut outside quotes, for the same reason as next door: a
+    # quoted KEY may legitimately contain ` #`.
+    function strip_comment(line,   i, c, q, cut) {
+      q = ""; cut = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (q == "" && (c == "\"" || c == "'"'"'")) { q = c }
+        else if (q != "" && c == q) { q = "" }
+        else if (q == "" && c == "#" && i > 1 && substr(line, i-1, 1) ~ /[ \t]/) { cut = i; break }
+      }
+      return (cut ? substr(line, 1, cut - 1) : line)
+    }
+    function is_block_header(line,  l) {
+      l = strip_comment(line)
+      return (l ~ /^(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*$/)
+    }
+'
+
+spec_seq_count() {   # spec_seq_count <top-level-key> -> number of `- ` items
+  awk -v block="$1" "$SPEC_AWK_LIB"'
+    $0 ~ "^" block ":" {f=1;next}
+    f && /^[a-z_]+:/ {f=0}
+    f {
+      ind = indent_of()
+      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
+      if (is_block_header(txt())) { blkind = ind; inblk = 1; next }
+      if ($0 ~ /^[[:space:]]*-[[:space:]]/) c++
+    }
+    END{print c+0}' "$SPEC" 2>/dev/null
+}
+
 # Overridable for the SAME reason REGISTRIES_DIR is: the selftest for the
 # non-vacuity checker asserted three of its branches by grepping this script's
 # own SOURCE TEXT, and a grep cannot tell a branch that works from a branch
@@ -692,7 +762,21 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # a test file cannot confer it on itself.
     ratified_n=$(spec_seq_count invariants)
     pending_n=$(spec_seq_count invariants_pending_ratification)
+    # A COUNT THAT COULD NOT BE COMPUTED IS NOT A COUNT. Until 2026-08-29 this
+    # row printed PASS with an EMPTY $ratified_n -- spec_seq_count was defined
+    # 700 lines BELOW this call, so bash had not created it yet, wrote
+    # `command not found` to stderr, and the substitution returned "". The
+    # evidence then read " ratified per production.yaml (+ pending ...)": a
+    # number-shaped hole, in the row about ratified invariants, which is the
+    # most load-bearing dimension in this file. The ordering is fixed above;
+    # this guard is what stops the same shape returning by another route,
+    # because the file's own rule is that a check which checked nothing must
+    # FAIL rather than pass quietly.
+    if ! [[ "$ratified_n" =~ ^[0-9]+$ && "$pending_n" =~ ^[0-9]+$ ]]; then
+      row "invariants-ratified" FAIL "the ratified/pending counts could not be computed (got '$ratified_n'/'$pending_n') -- the tests may well be green, but this row cannot say how many invariants they cover, and a count-shaped hole is not evidence"
+    else
     row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $rat_pass/$n test func(s) ACTUALLY RAN green under -tags='$rat_tags'"
+    fi
   else row "invariants-ratified" FAIL "ratified tests red"; fi
   # --- non-vacuity: EXECUTE the mutations, do not grep for the word ----------
   #
@@ -1198,45 +1282,6 @@ fi
 # `is_block_header` carries the node-property and colon-optional grammar the
 # bash opener in check-registries.sh uses; `block_body` answers "is this line
 # inside the block that is open", which is what every caller actually needs.
-SPEC_AWK_LIB='
-    function txt(  l) { l=$0; sub(/^[[:space:]]+/, "", l); return l }
-    # A TAB IN THE INDENT COUNTS AS DEEP, NOT AS ONE CHARACTER. YAML forbids a
-    # tab there, so the file is malformed either way -- but the two wrong
-    # answers are not equal. Counting it as one character makes a tab-indented
-    # BODY measure narrower than its own header, so the block ends early and
-    # its prose is read as a declaration: `spec_field scalability
-    # partition_key` returned `ESTO-ES-PROSA` over the real value two lines
-    # below. Treating it as deep keeps the prose inside the block, which is the
-    # fail-CLOSED direction for a function whose job is to return declared
-    # values. Reported by agatticelli.
-    function indent_of(  m, lead) {
-      m = match($0, /[^ \t]/)
-      if (m == 0) return 0
-      lead = substr($0, 1, m - 1)
-      if (lead ~ /\t/) return 9999
-      return m - 1
-    }
-    # THE COMMENT STRIP THE BASH OPENER HAS, WHICH THIS DID NOT. `.*:` reaches a
-    # colon inside a trailing `#` comment, so
-    #   partition_key: el-valor-real   # ver nota: |
-    # was eaten as a block header and the real value disappeared -- spec_field
-    # returned empty. Cut outside quotes, for the same reason as next door: a
-    # quoted KEY may legitimately contain ` #`.
-    function strip_comment(line,   i, c, q, cut) {
-      q = ""; cut = 0
-      for (i = 1; i <= length(line); i++) {
-        c = substr(line, i, 1)
-        if (q == "" && (c == "\"" || c == "'"'"'")) { q = c }
-        else if (q != "" && c == q) { q = "" }
-        else if (q == "" && c == "#" && i > 1 && substr(line, i-1, 1) ~ /[ \t]/) { cut = i; break }
-      }
-      return (cut ? substr(line, 1, cut - 1) : line)
-    }
-    function is_block_header(line,  l) {
-      l = strip_comment(line)
-      return (l ~ /^(.*:[[:space:]]*)?((&[^[:space:]]+|![^[:space:]]*)[[:space:]]+)*[|>]([0-9]+[+-]?|[+-][0-9]*)?[[:space:]]*$/)
-    }
-'
 
 
 implemented_test() {
@@ -1407,18 +1452,6 @@ grep_x() {   # grep_x [grep-flags...] <extended-regex> <path>... -> matching FIL
 # two bullet points, `ratified_n` reported 3. The row's evidence then claims
 # more ratified invariants than the spec declares -- an over-count in the
 # direction that flatters. Reported by agatticelli.
-spec_seq_count() {   # spec_seq_count <top-level-key> -> number of `- ` items
-  awk -v block="$1" "$SPEC_AWK_LIB"'
-    $0 ~ "^" block ":" {f=1;next}
-    f && /^[a-z_]+:/ {f=0}
-    f {
-      ind = indent_of()
-      if (inblk) { if ($0 ~ /^[[:space:]]*$/) next; if (ind > blkind) next; inblk = 0 }
-      if (is_block_header(txt())) { blkind = ind; inblk = 1; next }
-      if ($0 ~ /^[[:space:]]*-[[:space:]]/) c++
-    }
-    END{print c+0}' "$SPEC" 2>/dev/null
-}
 
 spec_field() {
   awk -v block="$1" -v key="$2" "$SPEC_AWK_LIB"'
