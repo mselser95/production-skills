@@ -33,7 +33,24 @@ hash_tree() { # print "<sha256>  <relative path>" for every tracked TCB file
   # verbatim into new repositories -- tampering there injects code into every
   # repo the skill ever scaffolds, and the old extension filter did not hash a
   # single one of them.
-  ( cd "$base" && find "$@" -type f ! -name 'config.sh' -print0 2>/dev/null \
+  #
+  # benchmark-results/ is the ONE exclusion beyond config.sh, and it is not a
+  # convenience. It holds skill-optimizer's generated scores -- output, not
+  # source. Measured 2026-08-29: 179 of the 486 files in the local manifest
+  # were benchmark output, and creating a single new result file made
+  # `--verify` report STALE INSTALL. Running the SIGNAL tool that README tells
+  # people to run therefore set off the INTEGRITY alarm. A gate that fires on a
+  # legitimate, encouraged action is the gate that gets ignored, then widened,
+  # then removed, and it takes the real alarms with it.
+  #
+  # It also made the trusted set machine-dependent: 486 files on a laptop that
+  # had run benchmarks, 307 in CI on a clean checkout, for identical source.
+  # Nothing is lost by excluding it -- the frozen task set and config in
+  # .skill-optimizer/ ARE still hashed, and those are the reviewed inputs that
+  # decide what a benchmark measures. Scores are not something tampering with
+  # would compromise a skill; they are re-derived by the next run.
+  ( cd "$base" && find "$@" -type f ! -name 'config.sh' \
+      ! -path '*/benchmark-results/*' -print0 2>/dev/null \
       | sort -z | xargs -0 shasum -a 256 )
 }
 
@@ -78,7 +95,7 @@ case "${1:-install}" in
             # by extension here while hash_tree hashes everything would leave the
             # staleness check blind to exactly the files the manifest just
             # started protecting (prod-new's template sources).
-            [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' \
+            [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' ! -path '*/benchmark-results/*' \
                 -exec shasum -a 256 {} + 2>/dev/null )
           done | awk '{print $1}' | sort) )
       stale=$(printf '%s' "$stale_rows" | grep -c . || true)
@@ -96,7 +113,7 @@ case "${1:-install}" in
         # news is worst is not a diagnostic.
         stale_map=$(for s in "${skills[@]}"; do
           [[ -d "$src/$s" ]] || continue
-          ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' \
+          ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' ! -path '*/benchmark-results/*' \
               -exec shasum -a 256 {} + 2>/dev/null ) \
             | sed "s|  \./|  $s/|"
         done)
