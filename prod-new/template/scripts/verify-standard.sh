@@ -3015,6 +3015,36 @@ for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
   fi
 done
 
+# --- authz invariants ---------------------------------------------------------
+#
+# tier-policy: `authz_invariants: required_if_multi_tenant`. Demo:
+# least-privilege-rbac-demo.
+#
+# MULTI-TENANCY IS THE CONDITION, and it is detected from the domain rather than
+# asserted: a repo whose types and identifiers carry no tenant/account/org/
+# customer scope has no cross-tenant boundary to violate, so demanding an
+# invariant about one would red a correct single-tenant service.
+#
+# The decline path exists for the case the scaffold is in: tenancy words may
+# appear in prose while the example flow has no tenants at all. A ratified
+# decline is a stated answer; silence would leave the dimension unscored.
+#
+# code_lines_only: "per-tenant" inside a comment describes a concern, it does
+# not create a boundary. Four rows were fixed for that confusion on 2026-08-29.
+if declined "authz_invariants"; then
+  row "authz-invariants" NA "ratified decline in $SPEC"
+else
+  _tenant=$(grep -rnEi '\b(tenant|tenantid|accountid|orgid|customerid)\b' \
+              --include='*.go' --exclude='*_test.go' internal/ cmd/ pkg/ 2>/dev/null \
+            | code_lines_only | wc -l | tr -d ' ')
+  if (( _tenant == 0 )); then
+    row "authz-invariants" NA "no tenant scope anywhere in non-test code (no tenant/account/org/customer identifier), so there is no cross-tenant boundary an invariant could protect"
+  else
+    implemented_row "authz-invariants" authz_invariants \
+      "with ${_tenant} tenant-scoped site(s) in the code, the test must prove the INVARIANT -- that a principal of tenant A cannot read or mutate tenant B -- not merely that a role check exists somewhere"
+  fi
+fi
+
 # --- overload: shedding and retry budget --------------------------------------
 #
 # tier-policy: `overload.ingress_shedding: declared_and_tested` -- with the

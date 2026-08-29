@@ -40,6 +40,7 @@ slo:slo-objectives-ratified,ops:SLO.md
 write_surface_authn:write-surface-authn
 consistency_verification:consistency-verification
 overload:overload:ingress_shedding,overload:retry_budget
+authz_invariants:authz-invariants
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -68,7 +69,6 @@ isolation_and_backpressure:scalability:partition_key
 # work list, and a key here with a demo beside it is a row somebody can write
 # this afternoon.
 KNOWN_UNSCORED="
-authz_invariants                least-privilege-rbac-demo
 chaos_engineering               chaos-steady-state-demo
 delivery                        canary-abort-demo
 mutation                        DELIBERATE: the policy itself says mode:advisory -- a
