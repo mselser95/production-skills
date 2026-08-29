@@ -34,6 +34,7 @@ ALIASES="
 liability_registries:registries,registries-expiry-gated
 deployment_resource_limits:deployment-resource-limits
 dependency_currency:dependency-lockfile
+backup_restore_test:backup-restore-test
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -66,7 +67,6 @@ authz_invariants                least-privilege-rbac-demo
 chaos_engineering               chaos-steady-state-demo
 consistency_verification        partition-consistency-demo
 delivery                        canary-abort-demo
-backup_restore_test             backup-restore-demo
 domain_boundaries               (no demo yet)
 mutation                        DELIBERATE: the policy itself says mode:advisory -- a
                                 trend, never a gate, so a PASS/FAIL row would

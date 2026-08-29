@@ -1688,6 +1688,22 @@ fi
 # whenever you like, because you are the only reader. You cannot migrate
 # someone else's consumer. A published event is an API.
 #
+# --- backup / restore ---------------------------------------------------
+#
+# tier-policy: `backup_restore_test: required_if_durable_state`. Third key off
+# policy-coverage's known-unscored work list; its demo is backup-restore-demo,
+# and the demo's whole finding is the hint below -- a restore checked by ROW
+# COUNT passes over a corrupted ledger, because the count is right and the
+# money is wrong.
+#
+# Uses implemented_row rather than a bespoke check, deliberately: that path
+# already resolves a ratified decline to NA, requires the spec to NAME the test,
+# and EXECUTES it rather than grepping for its existence. A hand-rolled row here
+# would be a fourth copy of logic already proven, which is the two-lists defect
+# this file keeps relearning.
+implemented_row "backup-restore-test" backup_restore_test \
+  "the test must RESTORE from a backup and then verify an INVARIANT of the restored state -- a row-count check passes over a corrupted ledger, which is exactly what backup-restore-demo demonstrates"
+
 # Kept separate from the `compatibility` row above on purpose: that row is
 # satisfied by any wire or golden test, including one over a format nobody
 # outside this repo parses. The audience is what makes this expensive, so the
