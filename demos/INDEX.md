@@ -85,6 +85,18 @@ point of having a status column:
   exercised is the same shape as a test that passes against a broken
   implementation: it proves the harness runs, not that the mechanism matters.
 
+**The procedure is a script: `demos/validate-demo.sh <repo>`.** It clones fresh
+from the public URL every time, runs the happy path, reads the controls out of
+the runner's own header, and requires every one of them to exit 1. Zero declared
+controls is a refusal, not a pass.
+
+It was checked against a demo whose answer was already known (clock-skew-demo:
+4 controls, all 1) and, more importantly, watched REJECT three things: a demo
+whose declared control exits 0 anyway, a runner declaring no control at all, and
+a repo that does not clone. A validator nobody has seen say no is
+indistinguishable from one that always says yes — which is the very shape it
+exists to catch in the demos.
+
 **What promoting one actually costs, measured on the first one (2026-08-29,
 `usl-fit-demo`, row 22).** The demo publishes its own contract in its runner's
 header: `./run-demo.sh` exits 0, and five named controls each exit 1. Validating
