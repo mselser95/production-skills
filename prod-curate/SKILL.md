@@ -121,6 +121,15 @@ cheaper than authoring katas from scratch, and they come pre-proven to fail.
   laundering vector even when every test is good.
 - Never promote to fill a metric. An empty batch is a valid outcome.
 
+**A kata is not only a broken implementation — it can be a broken GATE.** The
+katas this skill screens against are deliberately wrong code that a candidate
+suite must fail. The same technique applies one level up and is cheaper: a
+fixture repo where a dimension's property is deliberately FALSE, which the
+probe row must fail. Measured 2026-08-29: four rows in this framework's own
+probe PASSED such a fixture (an empty check-fast recipe, a zero-byte nightly
+workflow, a `cosign sign` satisfying a row named artifact-PROVENANCE). Those
+fixtures belong in `PROD_KATA_DIR` beside the code katas, for the same reason.
+
 ## Bail
 
 Preamble format, and the two corpus gaps have DIFFERENT blast radii — joining

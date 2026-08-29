@@ -143,6 +143,14 @@ with its evidence attached.
     state-dump comment.
 - Output: sweep report — entries actioned, entries escalated, owners pinged.
 
+**A gate that reports a verdict it could not compute is an INCIDENT for this
+skill, not a flake.** Measured 2026-08-29 in this framework's own probe: a row
+printed PASS with an empty count because the function computing it was defined
+below its call site, so the substitution returned "" and the evidence read
+" ratified per production.yaml". Nothing was flaky — the gate was confidently
+wrong every single run. Classify by asking what the row MEASURED, never by
+rerunning it: a verdict that reproduces perfectly can still be about nothing.
+
 ### OP-6 Rebase an ejected PR
 - When: the merge queue ejected a PR (stale base or textual conflict).
 - Do: mechanical rebase onto trunk. Textual conflict → re-task the authoring
