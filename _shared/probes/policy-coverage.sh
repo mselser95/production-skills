@@ -39,6 +39,7 @@ domain_boundaries:domain-boundaries:role_matches_topology
 slo:slo-objectives-ratified,ops:SLO.md
 write_surface_authn:write-surface-authn
 consistency_verification:consistency-verification
+overload:overload:ingress_shedding,overload:retry_budget
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -73,7 +74,6 @@ delivery                        canary-abort-demo
 mutation                        DELIBERATE: the policy itself says mode:advisory -- a
                                 trend, never a gate, so a PASS/FAIL row would
                                 contradict the key it scores
-overload                        retry-storm-demo,bulkhead-demo
 sast_specialized                (no demo yet)
 "
 

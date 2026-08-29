@@ -3015,6 +3015,51 @@ for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
   fi
 done
 
+# --- overload: shedding and retry budget --------------------------------------
+#
+# tier-policy: `overload.ingress_shedding: declared_and_tested` -- with the
+# policy's own sharpening beside it, "with the CRITERION that decides what is
+# shed and what survives; 'it sheds under load' names no victim and tests
+# nothing" -- and `retry_budget: required_where_retries`, a GLOBAL amplification
+# cap, never the per-call policy.
+#
+# BOTH HALVES ARE CONDITIONAL ON THE SERVICE ACTUALLY HAVING THE HAZARD, and
+# saying so is the difference between a gate and a tax. A service whose only
+# ingress is a read-only health endpoint has no work to shed; a service that
+# never retries cannot amplify. Scoring those as failures would red a correct
+# repo for a risk it does not carry, which is how a gate earns a reputation
+# people route around.
+#
+# code_lines_only throughout: a comment about backoff is not a retry, and four
+# rows were fixed on 2026-08-29 for exactly that confusion.
+_ov_ingress=$(grep -rnE 'MethodPost|MethodPut|MethodPatch|MethodDelete|\.(Post|Put|Patch|Delete)\(' \
+                --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+if (( _ov_ingress == 0 )); then
+  row "overload:ingress_shedding" NA "no ingress accepts work (nothing outside tests registers a mutating HTTP method), so there is nothing to shed and no victim to name"
+elif declined "ingress_shedding"; then
+  row "overload:ingress_shedding" NA "ratified decline in $SPEC"
+else
+  implemented_row "overload:ingress_shedding" ingress_shedding \
+    "the test must name the CRITERION that decides what is shed and what survives -- 'it sheds under load' names no victim and tests nothing"
+fi
+
+# NO TRAILING WORD BOUNDARY, deliberately. `\bretry\b` is the natural regex and
+# the wrong one for Go: retries live inside identifiers -- retryOnce,
+# maxRetries, withBackoff, retrying -- and the strict form matched none of them.
+# Measured with a fixture calling `retryOnce()`: the row read NA "nothing
+# retries" with the retry three lines above it. A pattern that cannot see the
+# language it reads reports absence for everything.
+_ov_retry=$(grep -rniE '\b(retry|retries|backoff)' --include='*.go' --exclude='*_test.go' internal/ cmd/ pkg/ 2>/dev/null \
+              | code_lines_only | wc -l | tr -d ' ')
+if (( _ov_retry == 0 )); then
+  row "overload:retry_budget" NA "nothing outside tests retries, so there is no amplification to cap (required_where_retries)"
+elif declined "retry_budget"; then
+  row "overload:retry_budget" NA "ratified decline in $SPEC"
+else
+  implemented_row "overload:retry_budget" retry_budget \
+    "the budget must be a GLOBAL amplification cap, not the per-call policy: N clients each retrying 3 times politely is still 3x offered load at the dependency that is already failing"
+fi
+
 # --- consistency verification -------------------------------------------------
 #
 # tier-policy: `consistency_verification.mode:
