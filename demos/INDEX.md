@@ -73,7 +73,7 @@ quiet one.
 | `superseded` | the gap it demonstrated has been CLOSED by the framework; the demo's own premise check now fails on purpose |
 
 **Where this table actually stands, counted from the rows below rather than
-remembered: 1 `pushed`, 32 `validated`, 1 `superseded`.** `pushed` was missing from this
+remembered: 0 `pushed`, 33 `validated`, 1 `superseded`.** `pushed` was missing from this
 vocabulary until 2026-08-29 — 27 of 34 rows carried a status the legend did not
 define, so a reader looking it up found nothing and would reasonably read it as
 a synonym for the one above it. It is not. The gap between the two is the whole
@@ -86,7 +86,7 @@ point of having a status column:
   exercised is the same shape as a test that passes against a broken
   implementation: it proves the harness runs, not that the mechanism matters.
 
-**One row stays `pushed` for a reason worth naming: partition-consistency-demo.**
+**partition-consistency-demo is now `validated`; this note is kept because the finding is the point.**
 Its happy path and six of seven controls pass from a clean clone. The seventh,
 `PCX_CONTROL=healthy-follower-read`, is rejected by the runner itself --
 "unknown PCX_CONTROL ... expected: no-partition | checker-blind |
@@ -100,9 +100,10 @@ cluster a serializable follower read is already stale, so the demo's original
 renamed and promoted to `phase-label-drift`, which the code implements -- and
 the header kept the old name beside the new one.
 
-A one-line fix in that repo (drop the stale line at run-demo.sh:21) makes it
-validatable. It is recorded here rather than fixed silently because the demo
-repos are outside the direct-push arrangement that covers this one.
+Fixed at run-demo.sh:21 (9c31b96 in that repo): the header now names
+`phase-label-drift`, the six declared controls match the six the code accepts
+exactly, and re-validation from a clean clone passes all six -- including the
+one that previously did not exist.
 
 **One row reads `superseded`, and it is the pipeline working.**
 error-budget-freeze-demo existed to show two gaps: the probe had NO slo row, and
@@ -182,7 +183,7 @@ sentence is "34 published, 7 validated".
 | 23 | [trace-conformance-demo](https://github.com/mselser95/trace-conformance-demo) | a NARRATED trace conforms to a strict spec while the same run loses an effect — the code's model of itself is consistent precisely where the code is wrong for reasons its author did not think of | Lamport (2002); Davis et al., eXtreme Modelling (VLDB 2020) | `formal_methods` at T0 | [A] | `validated` |
 | 24 | [transparency-log-demo](https://github.com/mselser95/transparency-log-demo) | an inclusion proof recomputed OFFLINE, not asked of the log; a tampered leaf diverges from the signed tree head | Newman et al., Sigstore (CCS 2022); RFC 6962; Merkle (1987) | `artifact_provenance` | [B] | `validated` |
 | 25 | [config-error-demo](https://github.com/mselser95/config-error-demo) | a wrong-unit value starts fine and misbehaves under load; a syntax-only gate accepts all three broken configs | Xu et al., SOSP 2013 | §10 operability | [A]+[B] | `validated` |
-| 26 | [partition-consistency-demo](https://github.com/mselser95/partition-consistency-demo) | the same cluster, workload and checker with NO partition finds zero anomalies and names itself the vacuous form — the run most "consistency testing" actually performs | Kingsbury & Alvaro, Elle (PODC 2021) | §20; `consistency_verification` | [A]+[B] | `pushed` |
+| 26 | [partition-consistency-demo](https://github.com/mselser95/partition-consistency-demo) | the same cluster, workload and checker with NO partition finds zero anomalies and names itself the vacuous form — the run most "consistency testing" actually performs | Kingsbury & Alvaro, Elle (PODC 2021) | §20; `consistency_verification` | [A]+[B] | `validated` |
 | 27 | [asymmetric-partition-demo](https://github.com/mselser95/asymmetric-partition-demo) | the partitions that break systems are partial and one-way, not the clean split everyone tests | Alquraan et al. (OSDI 2018) | §20; the `partition` scenario is three | [B]+[A] | `validated` |
 | 28 | [chaos-steady-state-demo](https://github.com/mselser95/chaos-steady-state-demo) | an abort path that was never rehearsed fails when invoked, and the experiment continues past its own abort | Basiri et al. (IEEE Software 2016) | `chaos_engineering` (all three sub-keys) | [B]+[A] | `validated` |
 | 29 | [workload-identity-demo](https://github.com/mselser95/workload-identity-demo) | SPIRE perfect, SVIDs rotating, window bounded — and the service keeps a compat door open on the shared secret: bounded for ONE of its two doors | SPIFFE/SPIRE spec; BeyondCorp (2014) | `signer.key_custody`, service-to-service | [B] | `validated` |
