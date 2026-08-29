@@ -2838,6 +2838,120 @@ for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
     row "$_ops_name" PASS "present, $(grep -cE "$_content_re" "$f" 2>/dev/null) content line(s)"
   fi
 done
+
+# --- 16b. deployment resource limits ----------------------------------------
+#
+# tier-policy: `deployment_resource_limits: required_if_deployment_artifacts`.
+# One of the keys policy-coverage.sh has carried on its known-unscored work list
+# with the demo that proves the mechanism (noisy-neighbor-demo). The demo showed
+# it; this scores it.
+#
+# A container with no limits is not a container with generous limits: under
+# contention it takes whatever the node has, and the pod that gets OOM-killed is
+# whichever one asked politely. That is the whole noisy-neighbour failure, and
+# it is decidable statically from the manifests.
+#
+# REQUIRED_IF, so absence of deployment artifacts is NA and not a pass. A repo
+# that deploys nothing has nothing to limit -- checked-and-none. A repo WITH
+# manifests that omit limits has been measured and found wanting.
+#
+# WHAT THIS CANNOT PROVE, stated rather than implied:
+#   * limits injected at deploy time -- a Kustomize overlay, a Helm value, an
+#     admission webhook, a LimitRange in the namespace. This reads the manifests
+#     in the repo; a repo whose base has no limits and whose overlay adds them
+#     will FAIL here and be correct in production. That is a false red and the
+#     honest answer to it is a ratified decline naming the overlay, not a
+#     weaker check -- the alternative (accept any repo that mentions limits
+#     anywhere) passes the repo that mentions them in a comment.
+#   * whether the limit is the RIGHT size. A 1m CPU limit satisfies this row and
+#     throttles the service to a stop. Sizing is what the load baseline and the
+#     saturation point are for.
+# Both cpu AND memory are required because one alone is the common half-measure:
+# memory-only still lets a busy loop starve its neighbours, cpu-only still lets
+# a leak take the node down.
+_dep_files=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*(Deployment|StatefulSet|DaemonSet|CronJob|Pod)[[:space:]]*$' \
+               --include='*.yaml' --include='*.yml' . 2>/dev/null \
+             | grep -vE '/(\.git|node_modules|vendor)/' | sort -u)
+_compose=$(find . -maxdepth 3 \( -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' -o -name 'compose.y*ml' \) \
+             -not -path './.git/*' 2>/dev/null | sort -u)
+
+if [[ -z "$_dep_files" && -z "$_compose" ]]; then
+  row "deployment-resource-limits" NA "no deployment artifacts in this repo (no k8s workload manifest, no compose file), so there is nothing to set limits on -- checked and none, not unchecked"
+elif ! command -v python3 >/dev/null 2>&1; then
+  row "deployment-resource-limits" FAIL "python3 is unavailable, so the manifests could not be parsed -- unparsed is not compliant"
+else
+  _dl_out=$(printf '%s\n%s\n' "$_dep_files" "$_compose" | grep -v '^$' | python3 -c '
+import sys, yaml
+
+problems, checked = [], 0
+
+def want(c, path, kind):
+    """A container needs BOTH cpu and memory limits. One of the two is the
+    common half-measure: memory-only still lets a busy loop starve its
+    neighbours, cpu-only still lets a leak take the node down."""
+    global checked
+    checked += 1
+    name = c.get("name") or "<unnamed>"
+    res = (c.get("resources") or {}) if isinstance(c, dict) else {}
+    lim = (res.get("limits") or {}) if isinstance(res, dict) else {}
+    missing = [k for k in ("cpu", "memory") if not lim.get(k)]
+    if missing:
+        problems.append("%s: %s %s has no %s limit" % (path, kind, name, "/".join(missing)))
+
+for path in (l.strip() for l in sys.stdin if l.strip()):
+    try:
+        docs = list(yaml.safe_load_all(open(path).read()))
+    except Exception as e:
+        problems.append("%s: unparseable (%s)" % (path, str(e).replace("\n", " ")[:80]))
+        continue
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        # kubernetes workload
+        if d.get("kind") in ("Deployment", "StatefulSet", "DaemonSet", "CronJob", "Pod"):
+            spec = d.get("spec") or {}
+            # walk down to the pod template wherever it sits
+            for _ in range(4):
+                if isinstance(spec, dict) and "template" in spec:
+                    spec = (spec.get("template") or {}).get("spec") or {}
+                elif isinstance(spec, dict) and "jobTemplate" in spec:
+                    spec = (spec.get("jobTemplate") or {}).get("spec") or {}
+                else:
+                    break
+            for key in ("containers", "initContainers"):
+                for c in (spec.get(key) or []) if isinstance(spec, dict) else []:
+                    if isinstance(c, dict):
+                        want(c, path, d.get("kind"))
+        # docker compose
+        elif "services" in d and isinstance(d.get("services"), dict):
+            for sname, s in d["services"].items():
+                if not isinstance(s, dict):
+                    continue
+                checked += 1
+                dep = (s.get("deploy") or {}).get("resources", {}) if isinstance(s.get("deploy"), dict) else {}
+                lim = dep.get("limits") or {}
+                has_mem = bool(s.get("mem_limit") or lim.get("memory"))
+                has_cpu = bool(s.get("cpus") or lim.get("cpus"))
+                miss = [n for n, ok in (("cpu", has_cpu), ("memory", has_mem)) if not ok]
+                if miss:
+                    problems.append("%s: service %s has no %s limit" % (path, sname, "/".join(miss)))
+
+if checked == 0:
+    print("ZERO|deployment manifests were found but contained no container or service definition")
+elif problems:
+    print("FAIL|%d of %d container(s)/service(s) declare no resource limit: %s" %
+          (len(problems), checked, "; ".join(problems[:3])))
+else:
+    print("PASS|%d container(s)/service(s) across the deployment manifests declare both cpu and memory limits" % checked)
+' 2>&1)
+  case "${_dl_out%%|*}" in
+    PASS) row "deployment-resource-limits" PASS "${_dl_out#*|}" ;;
+    ZERO) row "deployment-resource-limits" FAIL "${_dl_out#*|} -- a manifest the parser could not find containers in is not a manifest that passed" ;;
+    FAIL) row "deployment-resource-limits" FAIL "${_dl_out#*|}. An unlimited container does not get generous limits, it gets whatever the node has under contention" ;;
+    *)    row "deployment-resource-limits" FAIL "the limits parser produced no verdict: $(printf '%s' "$_dl_out" | head -1 | cut -c1-160)" ;;
+  esac
+fi
+
 if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
   # Derive the series-name pattern from the MANIFEST, never from one org's
   # hardcoded prefix.

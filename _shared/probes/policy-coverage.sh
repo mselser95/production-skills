@@ -32,6 +32,7 @@ PROBE="_shared/probes/verify-standard.sh"
 # key:row[,row...] — the property is scored under a DIFFERENT name than the key.
 ALIASES="
 liability_registries:registries,registries-expiry-gated
+deployment_resource_limits:deployment-resource-limits
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -65,7 +66,6 @@ chaos_engineering               chaos-steady-state-demo
 consistency_verification        partition-consistency-demo
 delivery                        canary-abort-demo
 dependency_currency             dependency-confusion-demo
-deployment_resource_limits      noisy-neighbor-demo
 backup_restore_test             backup-restore-demo
 domain_boundaries               (no demo yet)
 mutation                        DELIBERATE: the policy itself says mode:advisory -- a
