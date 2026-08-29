@@ -4,3 +4,6 @@ domain-topology.yaml
 benchmark-results/
 node_modules/
 .DS_Store
+
+# transient worktrees (one already leaked in as a gitlink once)
+.wt/

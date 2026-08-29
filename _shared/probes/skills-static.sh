@@ -3,29 +3,39 @@
 #
 # WHY THIS EXISTS
 #
-# README documents the structural gate as `skill-optimizer doctor --static`.
-# That tool is real (github.com/fastxyz/skill-optimizer) and richer than this
-# file, but it is a third-party install: on a machine that does not have it the
-# documented gate does not fail, it simply never runs. Measured 2026-08-29 on
-# this laptop, `claude plugin skill doctor --static <s>` printed
-# `error: unknown command 'skill'` AND EXITED 0 -- for nine skills in a row --
-# while the closing checklist recorded "doctor --static: 0 errors on all nine".
-# Nine green verdicts about a command that does not exist. That is the exact
-# shape rule 1 warns about: ask of every gate what would go red if it could not
-# run at all, and the answer here was nothing.
+# NOT because the documented gate is missing. An earlier version of this header
+# said `skill-optimizer doctor --static` was "a third-party install" absent from
+# this machine, and cited `error: unknown command 'skill'` as proof. That was
+# wrong, and wrong in the way this repo exists to refuse: the tool IS installed
+# (/opt/homebrew/bin/skill-optimizer, v1.1.0), and the error I cited came from
+# `claude plugin skill doctor` -- a different, mistyped command. I asserted a
+# measurement I had taken of something else. The correction is kept here rather
+# than quietly deleted, because the claim shipped.
 #
-# The nearest built-in is no substitute. `claude plugin validate <skills-dir>`
-# was mutation-probed the same day against a copy of two real skills:
+# The real reason, measured 2026-08-29 by mutating a copy of prod-ops and
+# running each tool against the same fixtures:
 #
-#   mutation applied to a NESTED skill        | verdict
-#   -----------------------------------------|-------------------------
-#   description: present but empty            | PASSED
-#   frontmatter YAML syntactically invalid    | PASSED
-#   SKILL.md deleted entirely                 | PASSED
-#   frontmatter block removed                 | passed WITH WARNING
+#   mutation to SKILL.md            | skill-optimizer doctor --static | this probe
+#   --------------------------------|---------------------------------|-----------
+#   description: present but empty  | rc=0, "0 error(s)"              | FAILS
+#   frontmatter invalid YAML        | rc=0, "0 error(s)"              | FAILS
+#   SKILL.md deleted entirely       | rc=1  (caught)                  | FAILS
 #
-# It does not descend into nested skill directories, so for this repo's layout
-# it is close to vacuous. Hence a local probe that goes RED.
+# `doctor --static` validates the .skill-optimizer/ CONFIG -- authModes, task
+# freezing, benchmark wiring -- which is a different and useful question. It is
+# not a frontmatter check, and it reports "0 error(s)" on a skill whose
+# description is empty, which is the state that makes a skill unreachable in
+# practice while every other check stays green. So the two are complementary,
+# and README asks for both.
+#
+# The nearest built-in is no substitute either. `claude plugin validate
+# <skills-dir>` PASSED all three mutations above when applied to a NESTED skill:
+# it does not descend into nested skill directories.
+#
+# One thing the wrong version got right and is worth keeping: a gate can report
+# success having done nothing, and `skill-optimizer doctor --static` run from
+# the wrong directory prints `ERROR: Cannot read config` AND EXITS 0. Check the
+# output, not only the status, whichever tool you run.
 #
 # Usage: skills-static.sh [skills-root]   (default: the repo this file lives in)
 # Exit:  0 all checks pass · 1 a check failed · 2 nothing was checked
@@ -56,13 +66,35 @@ fail() { printf '  FAIL  %-16s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 # that evidence cited here. Until then this probe stays silent about length,
 # because an unmeasured bound is a guess wearing a gate's clothes.
 
+# Was an explicit root given? Against the DEFAULT root -- this repo -- the nine
+# are a fixed, known list and a missing one is a failure. Against an explicit
+# root the caller may legitimately be pointing at a subset (every selftest
+# fixture holds exactly one skill), so absence there is not this probe's
+# business to invent.
+#
+# The first version skipped a missing directory unconditionally, which meant
+# deleting prod-ops outright produced "ok -- 8 skill(s) structurally valid" and
+# exit 0. That is checked-and-none confused with nothing-checked, reintroduced
+# in a file written to enforce the distinction: 8 of 9 present is not a subset
+# the caller chose, it is a hole.
+# SKILLS_STATIC_REQUIRE_ALL=1 forces the strict reading on an explicit root.
+# Without it this branch would be unreachable from the selftest -- every fixture
+# passes a root, so it would take the lenient path every time and the rule could
+# never be shown firing. A rule with no fixture where its property is false is
+# the thing this repo calls decoration.
+subset_root=0
+[[ $# -ge 1 ]] && subset_root=1
+[[ "${SKILLS_STATIC_REQUIRE_ALL:-0}" == "1" ]] && subset_root=0
+
 for s in "${skills[@]}"; do
   dir="$root/$s"
-  # A skill absent from the root is not this probe's business to invent: the
-  # caller may legitimately point at a subset (the selftest does). But a skill
-  # whose DIRECTORY exists and whose SKILL.md does not is a hard failure -- that
-  # is the case `claude plugin validate` passes silently.
-  [[ -d "$dir" ]] || continue
+  if [[ ! -d "$dir" ]]; then
+    if (( subset_root )); then
+      continue
+    fi
+    fail "$s" "no directory at $s/ -- the nine are a fixed list, so a skill missing from this repo is a hole, not a subset the caller asked for"
+    continue
+  fi
   checked=$((checked + 1))
   md="$dir/SKILL.md"
 

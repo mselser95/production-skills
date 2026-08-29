@@ -86,15 +86,24 @@ case "${1:-install}" in
         echo "STALE INSTALL — ${stale} source file(s) in $src are not present in the installed copy." >&2
         # Map each stale hash back to the path(s) carrying it, so the operator
         # sees WHICH component is untrusted without rerunning this comparison.
-        while read -r h; do
-          [[ -n "$h" ]] || continue
-          for s in "${skills[@]}"; do
-            [[ -d "$src/$s" ]] || continue
-            ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' \
-                -exec shasum -a 256 {} + 2>/dev/null ) \
-              | awk -v h="$h" -v s="$s" '$1==h {sub(/^\.\//,"",$2); print "  stale: " s "/" $2}'
-          done
-        done <<<"$stale_rows" | sort -u >&2
+        #
+        # The source tree is hashed ONCE here, not once per stale hash. The
+        # first version nested the find+shasum inside the loop over stale
+        # hashes: fine for the two files that prompted it, but a large refactor
+        # or a first-ever install makes every source file stale, and 400 stale
+        # hashes x 9 skills is ~3600 full-tree hashings of a tree that includes
+        # prod-new/template. A diagnostic that becomes unusable exactly when the
+        # news is worst is not a diagnostic.
+        stale_map=$(for s in "${skills[@]}"; do
+          [[ -d "$src/$s" ]] || continue
+          ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' \
+              -exec shasum -a 256 {} + 2>/dev/null ) \
+            | sed "s|  \./|  $s/|"
+        done)
+        awk 'NR==FNR { want[$1]=1; next }
+             ($1 in want) { print "  stale: " $2 }' \
+          <(printf '%s\n' "$stale_rows") <(printf '%s\n' "$stale_map") \
+          | sort -u >&2
         echo "The manifest is intact but describes an OLDER trusted set. Re-run install.sh." >&2
         exit 2
       fi

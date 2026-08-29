@@ -80,13 +80,19 @@ fi
 # path. That is the same defect this repo has a memory about ("a target that
 # exists is not a gate that runs"), sitting in the repo that wrote it.
 #
-# It is not hypothetical. On 2026-08-29 the structural gate for the nine skills
-# was `skill-optimizer doctor --static`, a tool not installed on this machine:
-# it printed `error: unknown command 'skill'`, exited 0, and nine green
-# verdicts were recorded about a command that does not exist. A gate whose
-# absence is indistinguishable from its success is not a gate. So the local
-# replacement runs HERE, where forgetting is not an option, rather than in a
-# checklist someone has to remember.
+# It is not hypothetical. On 2026-08-29 the closing checklist recorded
+# "doctor --static: 0 errors on all nine" from an invocation that was mistyped
+# (`claude plugin skill doctor`, which does not exist): it printed
+# `error: unknown command 'skill'` and EXITED 0, nine times, and the count of
+# "errors" it produced was the error message counting itself. The real tool is
+# installed and does work -- but it is run from a checklist, and a checklist is
+# where a wrong invocation survives a whole session unnoticed. Running from the
+# hook does not make a command correct; it makes SKIPPING one impossible, which
+# is the half a checklist cannot give.
+#
+# The lesson that generalises: a per-subject measurement returning an identical
+# verdict for every subject is usually measuring the instrument. Nine skills,
+# exactly one "error" each, was the tell.
 #
 # Both are fast (well under a second) and both fail closed: skills-static exits
 # 2 when it finds no subjects at all, policy-coverage exits 2 when it extracts

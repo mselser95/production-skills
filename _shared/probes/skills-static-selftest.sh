@@ -23,9 +23,9 @@ trap 'chmod -R u+w "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 pass=0 fail=0
 # want_rc: expected exit code. want_msg: substring the output must contain.
 run_case() {
-  local desc="$1" want_rc="$2" want_msg="$3" root="$4"
+  local desc="$1" want_rc="$2" want_msg="$3" root="$4" env_require_all="${5:-0}"
   local out rc
-  out=$("$probe" "$root" 2>&1); rc=$?
+  out=$(SKILLS_STATIC_REQUIRE_ALL="$env_require_all" "$probe" "$root" 2>&1); rc=$?
   if [[ "$rc" == "$want_rc" ]] && [[ "$out" == *"$want_msg"* ]]; then
     printf '  ok   %s\n' "$desc"; pass=$((pass + 1))
   else
@@ -114,6 +114,18 @@ run_case "a root with no skills at all is not a pass" 2 "a check with no subject
 r=$(mk_root longdesc)
 { printf -- '---\nname: prod-ops\ndescription: '; head -c 4000 </dev/zero | tr '\0' 'x'; printf -- '\n---\nbody\n'; } >"$r/prod-ops/SKILL.md"
 run_case "a 4000-char description does NOT fail (no invented bound)" 0 "structurally valid" "$r"
+
+# --- 11/12. a skill missing ENTIRELY -------------------------------------------
+# The first version of the probe skipped a missing directory unconditionally, so
+# deleting prod-ops outright produced "ok -- 8 skill(s) structurally valid" and
+# exit 0 -- checked-and-none confused with nothing-checked, in a file written to
+# enforce that very distinction. The two cases below pin BOTH readings, because
+# fixing it in only one direction would break every fixture here (each holds a
+# single skill, so eight of the nine are legitimately absent).
+r=$(mk_root subset)   # 1 of 9 present, lenient: an explicit root is a subset
+run_case "an explicit root holding a subset is fine (lenient)" 0 "structurally valid" "$r" 0
+r=$(mk_root strict)   # same tree, strict: the other eight are a hole
+run_case "the same subset under REQUIRE_ALL fails for the missing eight" 1 "the nine are a fixed list" "$r" 1
 
 echo
 if (( fail > 0 )); then

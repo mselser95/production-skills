@@ -114,29 +114,37 @@ incomparable.
 Two classes of check, used differently (the repo's own GATE/SIGNAL
 discipline):
 
-- **GATE:** `bash _shared/probes/skills-static.sh` — structural validity; must
-  pass for every skill before a change merges. This one is IN THIS REPO on
-  purpose. The gate used to be named as `skill-optimizer doctor --static`,
-  which is a real and richer tool but a third-party install: on a machine that
-  does not have it, the documented gate did not fail — it never ran. Measured
-  2026-08-29 here, the invocation printed `error: unknown command 'skill'`
-  **and exited 0**, nine times in a row, while the closing checklist recorded
-  "0 errors on all nine". A gate whose absence is indistinguishable from its
-  success is not a gate, so the blocking one is now a probe that ships with the
-  skills and cannot go missing.
+Two GATEs, and they check different things. Run both.
 
-  Do not substitute `claude plugin validate <skills-dir>` for it. Mutation-
-  probed the same day against a copy of two real skills, it PASSED a nested
-  skill whose `description` was empty, whose frontmatter was invalid YAML, and
-  whose `SKILL.md` had been deleted outright — it does not descend into nested
-  skill directories. `skills-static.sh` fails on all three, and
-  `skills-static-selftest.sh` proves every one of its rules fires on a fixture
-  where that rule's property is false (11 cases, including a green baseline and
-  a zero-subjects case that exits 2 rather than 0).
+- **GATE:** `skill-optimizer doctor --static`, from inside each skill directory
+  (it reads `./.skill-optimizer/skill-optimizer.json`, so the working directory
+  is load-bearing). This validates the **optimizer config** — authModes, task
+  freezing, benchmark wiring. Run from the wrong directory it prints
+  `ERROR: Cannot read config` **and exits 0**, so read the output, not only the
+  status.
 
-- **GATE:** `skill-optimizer doctor --static` — run it too when the tool IS
-  installed; it checks more than the local probe. Its absence must never be
-  read as a pass.
+- **GATE:** `bash _shared/probes/skills-static.sh` — validates the **SKILL.md
+  frontmatter**, which the tool above does not. Measured 2026-08-29 by mutating
+  a copy of `prod-ops` and running both against the same fixtures:
+
+  | mutation to SKILL.md | `doctor --static` | `skills-static.sh` |
+  |---|---|---|
+  | `description:` present but empty | rc=0, "0 error(s)" | FAILS |
+  | frontmatter invalid YAML | rc=0, "0 error(s)" | FAILS |
+  | `SKILL.md` deleted entirely | rc=1 (caught) | FAILS |
+
+  An empty description is the state that makes a skill unreachable in practice
+  — it is the only text the model sees when choosing a skill — while every
+  other structural check stays green. That is the gap the local probe closes.
+
+  Do not substitute `claude plugin validate <skills-dir>` for either. Probed the
+  same day, it PASSED all three mutations when applied to a **nested** skill: it
+  does not descend into nested skill directories.
+
+  `skills-static-selftest.sh` proves every rule fires on a fixture where that
+  rule's property is false — 13 cases, including a green baseline (without which
+  every case could "pass" because the probe fails on everything) and a
+  zero-subjects case that exits 2 rather than 0.
 - **SIGNAL:** `skill-optimizer run` against the frozen tasks — the prompt
   surface scores *lexical recall* of section content, so a paraphrased-but-
   correct response can score low; treat deltas against the frozen baseline as
