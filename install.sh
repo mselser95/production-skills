@@ -50,7 +50,22 @@ case "${1:-install}" in
       # running the old probe while --verify reports a spotless TCB. That is a
       # false all-clear about the very component that decides what passes, so
       # it is reported here rather than left for someone to notice.
-      stale=$(comm -13 \
+      # Report the NAMES, not just a count. The drift branch twenty lines below
+      # already prints every affected path; this branch printed a bare number,
+      # so the same question -- "what is untrusted right now?" -- got a strictly
+      # worse answer depending on which way the tree happened to be wrong. And a
+      # count cannot be acted on: "2 source file(s)" reads identically whether
+      # the pair is two READMEs or verify-standard.sh plus the tier policy, so
+      # the operator has to redo this comm by hand to learn which it was.
+      # Measured 2026-08-29: the two were prod-ops/SKILL.md and
+      # prod-curate/SKILL.md, and naming them is precisely what showed the cause
+      # was a single commit that never got reinstalled.
+      #
+      # The source side keeps its path (prefixed with the skill, since `find .`
+      # yields ./SKILL.md in every one of them and the bare name would be
+      # ambiguous across nine skills); only the hash is compared, exactly as
+      # before, so which files this branch FIRES on is unchanged.
+      stale_rows=$(comm -13 \
         <(hash_tree "$cfg/skills" "${skills[@]}" | awk '{print $1}' | sort) \
         <(for s in "${skills[@]}"; do
             # -L is load-bearing: in the source repo the shared material reaches
@@ -65,9 +80,21 @@ case "${1:-install}" in
             # started protecting (prod-new's template sources).
             [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' \
                 -exec shasum -a 256 {} + 2>/dev/null )
-          done | awk '{print $1}' | sort) | wc -l | tr -d ' ')
+          done | awk '{print $1}' | sort) )
+      stale=$(printf '%s' "$stale_rows" | grep -c . || true)
       if (( stale > 0 )); then
         echo "STALE INSTALL — ${stale} source file(s) in $src are not present in the installed copy." >&2
+        # Map each stale hash back to the path(s) carrying it, so the operator
+        # sees WHICH component is untrusted without rerunning this comparison.
+        while read -r h; do
+          [[ -n "$h" ]] || continue
+          for s in "${skills[@]}"; do
+            [[ -d "$src/$s" ]] || continue
+            ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' \
+                -exec shasum -a 256 {} + 2>/dev/null ) \
+              | awk -v h="$h" -v s="$s" '$1==h {sub(/^\.\//,"",$2); print "  stale: " s "/" $2}'
+          done
+        done <<<"$stale_rows" | sort -u >&2
         echo "The manifest is intact but describes an OLDER trusted set. Re-run install.sh." >&2
         exit 2
       fi
