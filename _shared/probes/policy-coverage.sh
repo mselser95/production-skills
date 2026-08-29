@@ -42,6 +42,7 @@ consistency_verification:consistency-verification
 overload:overload:ingress_shedding,overload:retry_budget
 authz_invariants:authz-invariants
 sast_specialized:sast-blocking
+mutation:mutation-baseline (TREND)
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -72,12 +73,25 @@ isolation_and_backpressure:scalability:partition_key
 KNOWN_UNSCORED="
 chaos_engineering               chaos-steady-state-demo
 delivery                        canary-abort-demo
-mutation                        DELIBERATE: the policy itself says mode:advisory -- a
-                                trend, never a gate, so a PASS/FAIL row would
-                                contradict the key it scores
 "
 
-rows="$(grep -oE 'row "[a-z0-9:_-]+"' "$PROBE" | sed 's/row "//;s/"//' | sort -u)"
+# SPACES AND PARENS ARE PART OF SOME ROW NAMES. The pattern was
+# `row "[a-z0-9:_-]+"`, which cannot match `mutation-baseline (TREND)` or
+# `loc-ratio (informational)`, so neither ever entered this inventory. A key
+# aliased to one of them therefore looked unscored -- and that is exactly how
+# `mutation` came to be recorded on the work list as "DELIBERATE: a PASS/FAIL
+# row would contradict the key", when the row exists, emits PASS/FAIL, and was
+# mutation-tested on 2026-08-29 (move .prod/mutation aside -> FAIL "no baseline
+# artifact").
+#
+# There is no contradiction with `mode: advisory` either: the row gates that the
+# baseline ARTIFACT exists and is refreshed, not the mutation SCORE. That is
+# what "a baseline artifact, refreshed; trend, not a gate" asks for.
+#
+# An incomplete inventory turns an existing row into an absence, and the absence
+# then gets explained rather than checked. Same denominator defect that inflated
+# a coverage claim earlier the same day.
+rows="$(grep -oE 'row "[a-zA-Z0-9:_ ()-]+"' "$PROBE" | sed 's/row "//;s/"$//' | sort -u)"
 [[ -n "$rows" ]] || { echo "policy-coverage: extracted ZERO rows from $PROBE -- a comparison against nothing is not a comparison." >&2; exit 2; }
 
 keys="$(awk '/^defaults: &defaults/{f=1;next} /^tiers:/{f=0} f && /^  [a-z_]+:/{gsub(/:.*/,"");gsub(/ /,"");print}' "$POLICY" | sort -u)"
