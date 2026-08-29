@@ -3208,8 +3208,25 @@ LOAD_MAX_AGE_DAYS=30
 # fail-OPEN precedence bug, so the group is applied here where every caller
 # gets it rather than in each caller where one will eventually forget.
 load_field() { # load_field <key-extended-regex> -> the field's value, or empty
+  # The `s/^\*+//` is load-bearing. Both markdown styles reach this function:
+  #
+  #   - **measured**: 2026-08-29    colon OUTSIDE the bold -> value "2026-08-29"
+  #   - **measured:** 2026-08-29    colon INSIDE the bold  -> value "** 2026-08-29"
+  #
+  # and the second is the one a human writes, because every neighbouring line in
+  # the generated baseline uses it (`- **Toolchain:** ...`, `- **Host:** ...`).
+  # Without the strip the caller anchors on ^[0-9]{4}- , misses, and reports
+  # "carries no parseable measurement date" -- the SAME message as a file with
+  # no date at all, about a file whose date is sitting right there.
+  #
+  # Measured 2026-08-29: sweep.sh emitted the field in the inside-the-bold style
+  # and the row failed exactly that way, on a baseline `make load` had just
+  # written seconds earlier.
+  #
+  # Stripping leading asterisks cannot swallow a real value: no value this
+  # document accepts begins with '*'.
   grep -aiE "^[[:space:]]*[-*>]?[[:space:]]*\**(${1})\**[[:space:]]*:" "$LOAD_BASELINE" 2>/dev/null \
-    | head -1 | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]+$//'
+    | head -1 | sed -E 's/^[^:]*:[[:space:]]*//; s/^\*+[[:space:]]*//; s/[[:space:]]+$//'
 }
 
 # load_margin_norm normalises a headroom expression to "<kind> <number>", so
