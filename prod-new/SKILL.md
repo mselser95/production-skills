@@ -362,7 +362,14 @@ under the same condition), `CODEOWNERS` with a real owner,
 ## Phase 3 — Prove it, then hand it over
 
 1. Run `make verify` and `make verify-standard`. **The standard's own probe
-   must report zero FAIL on the empty service.** A scaffold that ships red
+   must report zero FAIL on the empty service** — the SERVICE, after this phase
+   completes, not the template directory it was copied from. Two rows are
+   legitimately red until this phase does its work, and knowing which is the
+   difference between finishing the scaffold and softening the probe:
+   `load-baseline` until `make load` mints a measurement ON THIS HARDWARE (no
+   baseline ships in the template, because a number measured on somebody else's
+   laptop is the one artifact people quote in design reviews without ever having
+   measured it), and `provenance-headers` until the first commit exists. A scaffold that ships red
    teaches that red is normal. This includes MINTING the load baseline: the
    template ships `benchmarks/load/` (the generator) plus only
    `baseline-TEMPLATE.md`, and the probe's `load-baseline` row engages the

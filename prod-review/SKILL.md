@@ -113,6 +113,15 @@ recovery on a durable path. Phase 1 fixes DIVERGENCE at BLOCKER and Phase 3
 fixes a deleted test at BLOCKER; without this line the other two classes
 had no mapping at all, and `severity` is mandatory on every finding.
 
+**A row's verdict is a claim about the REPO, and sometimes it is a claim about
+the ROW.** Before filing a probe FAIL as a finding against the diff, ask whether
+the row could pass at all for a repo of this shape: a row demanding a field no
+format defines, a structure only one organisation's CI produces, or a dimension
+with no decline branch cannot be satisfied honestly, and reporting it as the
+author's defect sends them to fake it. Measured on this framework's own
+scaffold, five of six probe FAILs were rows describing something other than the
+code under them. When that is the case, the finding is against the probe.
+
 ### Phase 3 — Provenance audit
 For every test file in the diff:
 - deleted test or weakened assertion → **BLOCKER: human review required**

@@ -2889,7 +2889,20 @@ if base="$prov_base"; [ -n "$base" ]; then
   elif (( heads >= added )); then row "provenance-headers" PASS "$added added test funcs, $heads provenance lines"
   else row "provenance-headers" FAIL "$added added test funcs but only $heads provenance headers ($((added-heads)) unheaded)"; fi
 else
-  row "provenance-headers" FAIL "no diff base resolves (tried origin/main, main, origin/HEAD) -- this dimension went UNMEASURED, which is not the same as met"
+  # NO HISTORY AND NO BASE ARE DIFFERENT ANSWERS, and the row used to give both
+  # the same one. A repo with commits but no resolvable base is misconfigured
+  # and stays a FAIL — the dimension went unmeasured and somebody must fix the
+  # setup. A repo with NO COMMITS AT ALL cannot have changed-line provenance,
+  # because there is no "changed" yet: that is the state prod-new leaves a
+  # scaffold in at Phase 3, before the first commit exists, and failing it there
+  # reports a defect about git history as though it were a defect in the code.
+  # Same discriminator as the registries fix: answered-and-none, versus nothing
+  # to answer with.
+  if ! git rev-parse HEAD >/dev/null 2>&1; then
+    row "provenance-headers" NA "no commits yet -- a tree with no history has no changed lines to carry provenance, so there is nothing to measure rather than something unmeasured"
+  else
+    row "provenance-headers" FAIL "no diff base resolves (tried origin/main, main, origin/HEAD) -- the repo HAS history, so this dimension went UNMEASURED, which is not the same as met"
+  fi
 fi
 
 # --- 21. CI actually runs what the standard requires ------------------------
@@ -3242,7 +3255,7 @@ load_baseline_row() {
   else engaged_by="benchmarks/load/ exists in this repo"; fi
 
   if [[ ! -f "$LOAD_BASELINE" ]]; then
-    row "load-baseline" FAIL "$engaged_by, but $LOAD_BASELINE does not exist -- the artifact this dimension is scored on is missing (prod-bootstrap ships benchmarks/load/baseline-TEMPLATE.md; copy it to $LOAD_BASELINE and fill it from a real run)"
+    row "load-baseline" FAIL "$engaged_by, but $LOAD_BASELINE does not exist -- the artifact this dimension is scored on is missing (run \`make load\` on the machine this service will run on -- prod-new Phase 3 mints this artifact and the number is only meaningful for the hardware that produced it, which is why no baseline ships in the template)"
     return
   fi
 
