@@ -36,6 +36,7 @@ deployment_resource_limits:deployment-resource-limits
 dependency_currency:dependency-lockfile
 backup_restore_test:backup-restore-test
 domain_boundaries:domain-boundaries:role_matches_topology
+slo:slo-objectives-ratified,ops:SLO.md
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -71,7 +72,6 @@ delivery                        canary-abort-demo
 mutation                        DELIBERATE: the policy itself says mode:advisory -- a
                                 trend, never a gate, so a PASS/FAIL row would
                                 contradict the key it scores
-slo                             error-budget-freeze-demo
 overload                        retry-storm-demo,bulkhead-demo
 sast_specialized                (no demo yet)
 write_surface_authn             (no demo yet)

@@ -2983,6 +2983,48 @@ for f in docs/RUNBOOK.md docs/SLO.md observability/alerts.md CODEOWNERS; do
   fi
 done
 
+# --- 16a. SLO objectives: defined AND human-ratified -------------------------
+#
+# tier-policy: `slo.objective: human_ratified`, `slo.sli.defined:
+# required_per_user_facing_capability`. Fifth key off policy-coverage's
+# known-unscored work list; its demo is error-budget-freeze-demo.
+#
+# ops:SLO.md above answers "is there a file with content". This answers the
+# question that file exists to settle: has a human AGREED to a number? An SLO
+# nobody ratified is a wish -- and the template says so about itself, in its own
+# first line, which is why the vocabulary below is the template's own:
+# `**Proposed objective:**` for a number awaiting agreement, `**Objective:**`
+# for one that has it.
+#
+# THE SCAFFOLD FAILS THIS UNTIL A HUMAN RATIFIES, and that is deliberate, the
+# same shape as load-baseline: the artifact cannot be minted by the framework
+# because the number is not the framework's to choose. prod-new Phase 3 gained
+# the ratification step in the same commit that added this row -- a red with no
+# documented path to green is the defect this repo keeps fixing, so the row and
+# the step ship together.
+#
+# NOT CHECKED HERE: `error_budget: computed` ("a balance, not a prose target")
+# and `window: declared`. Both need the objective to exist first; scoring them
+# before anything is ratified would red a repo for arithmetic on a number nobody
+# has agreed to yet.
+_slo_f="docs/SLO.md"
+if [[ ! -f "$_slo_f" ]]; then
+  row "slo-objectives-ratified" FAIL "$_slo_f is missing -- ops:SLO.md reports the file, this row reports whether anyone agreed to what is in it"
+else
+  _sli_n=$(grep -cE '^##+[[:space:]]*SLI[:[:space:]]' "$_slo_f" 2>/dev/null || true)
+  _obj_ratified=$(grep -cE '^[[:space:]]*[-*]?[[:space:]]*\*\*Objective:' "$_slo_f" 2>/dev/null || true)
+  _obj_proposed=$(grep -cE '^[[:space:]]*[-*]?[[:space:]]*\*\*Proposed objective:' "$_slo_f" 2>/dev/null || true)
+  if (( _sli_n == 0 )); then
+    row "slo-objectives-ratified" FAIL "$_slo_f declares no SLI (no '## SLI:' section) -- a document with no service level indicator states no service level"
+  elif (( _obj_ratified == 0 )); then
+    row "slo-objectives-ratified" FAIL "${_sli_n} SLI(s) defined but ZERO objectives ratified (${_obj_proposed} still marked 'Proposed objective') -- an objective nobody agreed to is a wish, and the error budget computed from it is arithmetic on a guess. prod-new Phase 3 step 4b is where this gets ratified"
+  elif (( _obj_ratified < _sli_n )); then
+    row "slo-objectives-ratified" PASS "${_obj_ratified}/${_sli_n} SLI(s) carry a ratified objective (+${_obj_proposed} still proposed and awaiting human ratification)"
+  else
+    row "slo-objectives-ratified" PASS "${_obj_ratified}/${_sli_n} SLI(s) carry a ratified objective"
+  fi
+fi
+
 # --- 16b. deployment resource limits ----------------------------------------
 #
 # tier-policy: `deployment_resource_limits: required_if_deployment_artifacts`.

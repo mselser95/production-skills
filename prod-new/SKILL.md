@@ -398,6 +398,22 @@ under the same condition), `CODEOWNERS` with a real owner,
    form is load-bearing: `<OWNER>`/`<SERVICE>` substitution makes the repo's
    copy legitimately differ from the template's, so a single-hash stamp reports
    permanent false drift on every slot-bearing file.
+4b. **Ratify the SLO objectives with the human.** `docs/SLO.md` ships with its
+   SLIs measurable and every objective marked `**Proposed objective:**`, and it
+   says so in its own first line. That is honest and it is not an SLO: an
+   objective nobody agreed to is a wish, and the error budget computed from it
+   is arithmetic on a guess. Walk each SLI, get a number, and rewrite the line
+   as `**Objective:**` with who ratified it and when.
+
+   `slo-objectives-ratified` FAILS until at least one is ratified, by design and
+   for the same reason `load-baseline` does: the number is not the framework's
+   to choose. Do NOT satisfy it by editing the marker without the conversation
+   -- that converts a wish into a wish with a date on it, and the next person
+   reads it as agreed.
+
+   An SLI whose objective genuinely cannot be set yet (no metric for it) stays
+   `**Proposed objective:**` and is reported as pending, not hidden.
+
 5. Emit the first `.prod/evidence/<sha>.json`. Delete any evidence record the
    template shipped: a record naming another commit, produced by an older
    probe with different row names, is a green attestation for a state this
