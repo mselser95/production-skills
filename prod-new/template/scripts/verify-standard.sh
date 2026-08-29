@@ -2552,6 +2552,38 @@ else
   fi
 fi
 
+# --- write surface authn ------------------------------------------------------
+#
+# tier-policy: `write_surface_authn: required_or_declined`, with the policy's own
+# reasoning beside it -- "a surface that ACCEPTS WORK needs a credential or a
+# ratified decline naming who may reach it. Read-only health/metrics endpoints
+# are exempt; anything that mutates is not, and 'it only binds to loopback'
+# stops being true the moment a container publishes the port."
+#
+# Sixth key off policy-coverage's known-unscored work list.
+#
+# code_lines_only on BOTH scans, for the reason four rows were fixed on
+# 2026-08-29: a comment reading "we deliberately expose no POST endpoint" must
+# not be read as exposing one, and a comment mentioning bearer tokens must not
+# be read as checking them.
+if declined "write_surface_authn"; then
+  row "write-surface-authn" NA "ratified decline in $SPEC naming who may reach the write surface"
+else
+  _ws=$(grep -rnE 'MethodPost|MethodPut|MethodPatch|MethodDelete|\.(Post|Put|Patch|Delete)\(' \
+          --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+  if (( _ws == 0 )); then
+    row "write-surface-authn" NA "no write surface: nothing outside tests registers a mutating HTTP method, so there is no work to authenticate"
+  else
+    _authn=$(grep -rnEi 'Authorization|Bearer |VerifyClientCert|ClientAuth|mTLS|middleware.*[Aa]uth|[Aa]uthenticat' \
+               --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+    if (( _authn > 0 )); then
+      row "write-surface-authn" PASS "${_ws} mutating handler registration(s) and ${_authn} authentication site(s) in non-test code"
+    else
+      row "write-surface-authn" FAIL "${_ws} mutating handler registration(s) and NO authentication anywhere in non-test code, and no ratified decline in $SPEC -- a surface that accepts work with no credential is reachable by whoever reaches the port, and 'it only binds to loopback' stops being true the moment a container publishes it"
+    fi
+  fi
+fi
+
 wf=".github/workflows"
 if [[ -d $wf ]]; then
   # --- the CI definitions themselves must be VALID -------------------------

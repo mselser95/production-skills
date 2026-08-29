@@ -37,6 +37,7 @@ dependency_currency:dependency-lockfile
 backup_restore_test:backup-restore-test
 domain_boundaries:domain-boundaries:role_matches_topology
 slo:slo-objectives-ratified,ops:SLO.md
+write_surface_authn:write-surface-authn
 runbooks:runbook-citations-resolve
 supply_chain:sbom,vuln-scan,secret-scan-all-triggers,artifact-provenance
 scenario_coverage:scenario-matrix
@@ -74,7 +75,6 @@ mutation                        DELIBERATE: the policy itself says mode:advisory
                                 contradict the key it scores
 overload                        retry-storm-demo,bulkhead-demo
 sast_specialized                (no demo yet)
-write_surface_authn             (no demo yet)
 "
 
 rows="$(grep -oE 'row "[a-z0-9:_-]+"' "$PROBE" | sed 's/row "//;s/"//' | sort -u)"
