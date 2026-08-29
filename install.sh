@@ -176,6 +176,10 @@ fi
 # standard exists to refuse.
 mirrors=(
   "prod-new/template/scripts/verify-standard.sh:_shared/probes/verify-standard.sh"
+  # row-vacuity-sweep travels with the probe it sweeps: it extracts patterns
+  # from verify-standard.sh, so a template copy that drifted from _shared would
+  # sweep a DIFFERENT file than the one that runs. Added 2026-08-29.
+  "prod-new/template/scripts/row-vacuity-sweep.sh:_shared/probes/row-vacuity-sweep.sh"
   # The non-vacuity selftest joins the mirrored set for the reason the probe
   # did: it is the verifier OF the verifier, and it was previously re-authored
   # per repo instead of vendored. Three repos wrote their own in one session

@@ -24,6 +24,8 @@ check-fast:
 	$(MAKE) error-handling-fitness
 	$(MAKE) gate-hygiene-fitness
 	$(MAKE) crash-only-selftest
+	@echo "Sweeping the probe's own presence checks for prose-only evidence..."
+	@bash scripts/row-vacuity-sweep.sh
 	@echo "Checking this repo is still in step with the standard..."
 	@bash scripts/check-template-drift.sh --local
 
