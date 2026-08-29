@@ -63,6 +63,15 @@ jobs:
           bash _shared/probes/tests/probe-self-gate-selftest.sh
           bash _shared/probes/policy-coverage.sh
 
+      # ADVISORY, and printed rather than gated. It answers "is each committed
+      # benchmark score still about the skill it sits next to?" -- currently no
+      # for all seven, by 10-12 days. Refreshing needs Codex credentials CI does
+      # not have, and a step that fails until someone supplies a secret it
+      # cannot supply is a step people delete. So it reports into the log where
+      # a reader of these scores will see it.
+      - name: benchmark currency (advisory)
+        run: bash _shared/probes/benchmark-currency.sh
+
       # Validate the workflow definitions. CI cannot meaningfully validate its
       # own file -- an invalid workflow yields ZERO checks, not a red one -- so
       # this is also wired into the local cheap gate. Here it covers the

@@ -145,6 +145,20 @@ Two GATEs, and they check different things. Run both.
   rule's property is false — 13 cases, including a green baseline (without which
   every case could "pass" because the probe fails on everything) and a
   zero-subjects case that exits 2 rather than 0.
+- **SIGNAL:** `bash _shared/probes/benchmark-currency.sh` — before reading any
+  score, ask whether it is still ABOUT the skill it sits next to. Measured
+  2026-08-29: **all seven committed scores predate the skill they measure**, by
+  10 to 12 days, and two skills have never been benchmarked at all. `prod-ops`
+  reads `FAIL, 12.5% < floor 60.0%` — a number about a document that no longer
+  exists, sitting in the directory of the document that replaced it.
+
+  A stale score is not a finding about the skill; it is a finding about the
+  score. Do not work the gaps in a stale report — they were measured against
+  text that has since changed. This probe is advisory (exit 0) on purpose:
+  refreshing needs Codex credentials, and a gate that fails until a human
+  performs an action they may not be able to perform is a gate that gets
+  disabled, taking the honest ones with it.
+
 - **SIGNAL:** `skill-optimizer run` against the frozen tasks — the prompt
   surface scores *lexical recall* of section content, so a paraphrased-but-
   correct response can score low; treat deltas against the frozen baseline as
