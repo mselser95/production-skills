@@ -12,3 +12,22 @@ PROD_CI_RUNNER="ubuntu-latest"
 # Default CODEOWNERS handle for the new repo. A placeholder gates nothing, so
 # this must be a REAL, resolvable handle.
 PROD_DEFAULT_OWNER="@your-handle"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SBOM ordering invariant — ORG-SPECIFIC, and optional
+# ─────────────────────────────────────────────────────────────────────────────
+# verify-standard.sh's `sbom` row checks that the SBOM is produced BEFORE any
+# job that deletes the artifact it describes. That ordering only means something
+# if the probe knows which of YOUR reusable workflows consume and delete which
+# artifacts — a fact about your CI, not about this framework.
+#
+# Leave both unset and the row still works for the common case: it recognises an
+# INLINE sbom step (one emitting -o cyclonedx / -o spdx) and, with no
+# artifact-deleting job to order against, reports the invariant satisfied.
+#
+# Set them if your pipeline is built from reusable workflows. Format:
+#   <workflow-file>:<artifact-kind>,<workflow-file>:<artifact-kind>
+# Example, from one real org (swept across all 27 of its reusable workflows —
+# a NEW deleting workflow added later would be invisible until this is updated):
+# PROD_SBOM_CONSUMES="sbom.yaml:image,image-push.yaml:image,sbom-scan.yaml:sbom"
+# PROD_SBOM_DELETES="image-push.yaml:image"

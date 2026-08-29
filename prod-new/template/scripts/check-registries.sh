@@ -580,8 +580,32 @@ echo "registries: ${total} entries checked, ${expired} expired, ${soon} expiring
 # A gate reporting that it gates the build while enforcing nothing is the exact
 # shape this change hard-failed one directory over (require_floors_file) and
 # inside the probe itself (nv_total == 0). This gate was the outlier.
+# ZERO IS AN ANSWER ONLY WHEN SOMETHING WAS ASKED. The paragraph above is
+# right about the hole it closed, and wrong about one case it swept in with it:
+# a freshly scaffolded repo has no liabilities, by definition, and had no honest
+# way to be green. prod-new Phase 3 requires the probe at FAIL 0 on the empty
+# service while this gate refused every empty service — two rules of the same
+# framework that could not both hold, recorded 2026-08-28 and resolved here.
+#
+# The discriminator is whether the registries ANSWERED. Four files, each
+# present, readable, and carrying an explicit `entries:` key, is a repo saying
+# "I have none" — checked, and empty. A missing file, an unreadable one, or a
+# directory whose glob matched nothing is a repo that said nothing at all, and
+# that stays a hard failure, because it is exactly the shape (a REGISTRIES_DIR
+# override pointing somewhere harmless) the original change was written for.
 if (( total == 0 )); then
-  echo "MALFORMED  no entries found in ${REGISTRIES_DIR:-registries/} — a registry gate that checks zero entries reports green while enforcing nothing" >&2
+  _declared=0 _expected=0
+  for _r in flags waivers quarantine contract-debt; do
+    _expected=$((_expected+1))
+    _f="${registries_dir}/${_r}.yaml"
+    [[ -r "$_f" ]] || continue
+    grep -qE '^[[:space:]]*entries:' "$_f" && _declared=$((_declared+1))
+  done
+  if (( _declared == _expected )); then
+    echo "registries: all ${_expected} present and EXPLICITLY empty -- a repo with no liabilities yet, which is checked-and-none, not nothing-checked"
+    exit 0
+  fi
+  echo "MALFORMED  ${_declared}/${_expected} registries in ${registries_dir}/ declare an \`entries:\` key -- the rest are missing or unreadable, so zero entries means the gate looked at nothing rather than found nothing" >&2
   exit 1
 fi
 

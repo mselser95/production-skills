@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -305,13 +306,23 @@ func TestNewTracer_OTLPRoutesExportFailuresToAStructuredLogger(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = shutdown(context.Background()) })
 
-	before := rec.snapshot().count
-	otel.GetErrorHandler().Handle(errors.New("simulated export failure"))
+	// IDENTITY, NOT COUNT. A previous test's batch exporter fails
+	// asynchronously against the same dead endpoint, and otel's error handler
+	// is process-global, so its failure lands on THIS sink. Counting made the
+	// test flaky (2 records where it asserted 1, under -count=10) without ever
+	// testing anything the count-free form does not. The needle is unique per
+	// run, so what is asserted is that THIS error routed to the structured
+	// sink -- a stronger claim than "some record arrived".
+	needle := fmt.Sprintf("simulated-export-failure-%d", time.Now().UnixNano())
+	rec.mu.Lock()
+	rec.needle = needle
+	rec.mu.Unlock()
+	otel.GetErrorHandler().Handle(errors.New(needle))
 	got := rec.snapshot()
-	if got.count != before+1 {
-		t.Fatalf("an SDK error produced %d records on the failure sink, want 1 -- "+
+	if !got.sawNeedle {
+		t.Fatalf("an SDK error carrying %q never reached the structured failure sink -- "+
 			"the default handler writes unstructured text to stderr, so the one signal "+
-			"that traces are being lost is the one line no log store can parse", got.count-before)
+			"that traces are being lost is the one line no log store can parse", needle)
 	}
 	// LEVEL AND MESSAGE, not just a count. Asserting arrival alone let a
 	// mutation to DebugContext stay green -- and in production that mutant is

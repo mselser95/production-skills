@@ -971,6 +971,17 @@ else row "integration-real-lane" FAIL "every test is hermetic — no real-depend
 # the test functions are extracted and RUN by name, and the row requires both a
 # non-zero count and a green run -- the same shape replay-corpus and benchmarks
 # already use in this file.
+# A DIMENSION THAT CANNOT BE DECLINED IS A DIMENSION THAT MUST BE FAKED.
+# Every other dimension row in this file honours a ratified decline; this one
+# had no such branch, so a repo that publishes no wire format to anyone —
+# which is exactly what this framework's own template is, its only egress
+# being a LogSink that emits a log line — had no honest way to be green. Its
+# choices were to invent a compatibility test or to carry a permanent red, and
+# both teach that red is normal. Added 2026-08-29; the decline still costs a
+# written reason in the spec, like every other one.
+if declined "compatibility"; then
+  row "compatibility" NA "ratified decline in $SPEC -- nothing here is parsed by a reader this repo does not own"
+else
 compat_files=$(grep -rl -E 'protoreflect\.|\.golden|UnknownFields|proto\.Unmarshal' --include='*_test.go' . 2>/dev/null || true)
 if [[ -z "$compat_files" ]]; then
   row "compatibility" FAIL "no compatibility tests: nothing in the tree calls protoreflect, compares a golden, round-trips unknown fields, or unmarshals raw proto"
@@ -988,6 +999,7 @@ else
       row "compatibility" FAIL "compatibility tests red: $(grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$compat_out" | cut -c1-120)"
     fi
   fi
+fi
 fi
 
 # --- 10. performance: benchmarks exist, RUN, and have a baseline -----------
@@ -2319,8 +2331,34 @@ import sys, json
 # row. The row is scoped per
 # workflow FILE, which is correct because artifacts are per-run: a job in
 # pr.yaml cannot consume an artifact a job in ci.yaml deleted.
-CONSUMES = {"sbom.yaml": "image", "image-push.yaml": "image", "sbom-scan.yaml": "sbom"}
-DELETES  = {"image-push.yaml": "image"}
+# ORG-SPECIFIC DATA, INJECTED — not baked in. Until 2026-08-29 these two maps
+# were literals naming one organisation's reusable workflows, inside a file
+# VENDORED into every repo this framework scaffolds, against the rule the
+# README states for the whole suite: no artifact names an org, repo, team or
+# channel. A repo on different CI could never satisfy a row written about
+# somebody else's pipeline.
+#
+# They now come from the environment, so the org fact lives in config.sh where
+# every other org fact lives. UNSET IS NOT EMPTY: with no map injected the
+# ordering invariant is UNKNOWABLE, and the row says so and returns NA rather
+# than inventing a verdict — a check with no inputs must never report clean.
+import os
+def _load_map(var, default):
+    raw = os.environ.get(var, "").strip()
+    if not raw:
+        return default, False
+    out = {}
+    for pair in raw.split(","):
+        if ":" not in pair:
+            continue
+        k, v = pair.split(":", 1)
+        out[k.strip()] = v.strip()
+    return out, True
+
+# The defaults describe THIS framework's own template, which produces its SBOM
+# from an inline step and deletes no artifact — the honest zero-config answer.
+CONSUMES, _c_injected = _load_map("PROD_SBOM_CONSUMES", {})
+DELETES,  _d_injected = _load_map("PROD_SBOM_DELETES",  {})
 
 any_consumer = False
 any_deleter  = False

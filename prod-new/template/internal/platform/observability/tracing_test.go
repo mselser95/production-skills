@@ -137,6 +137,16 @@ type recordingHandler struct {
 	// production, where the JSON lane is floored at LOG_LEVEL.
 	lastLevel slog.Level
 	lastMsg   string
+	// needle/sawNeedle exist because COUNTING records is not a safe assertion
+	// in this package. otel.SetErrorHandler is PROCESS-GLOBAL -- otlp_tracer.go
+	// says so twice in its own comments -- so a batch export failing
+	// ASYNCHRONOUSLY from an earlier test lands on the CURRENT test's sink.
+	// Measured 2026-08-29: under `go test -count=10` the export-routing test
+	// saw 2 records where it asserted 1, having produced exactly one itself.
+	// The count was never the property. The property is that THIS error reached
+	// the structured sink, so the assertion matches a per-run needle instead.
+	needle    string
+	sawNeedle bool
 }
 
 func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
@@ -149,6 +159,22 @@ func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 	if r.Level == slog.LevelError {
 		h.sawError = true
 	}
+	// Scan the message AND the attributes: the tracer logs a fixed message and
+	// carries the SDK's error text in an attribute, so a needle placed in the
+	// error itself is only visible from there.
+	if h.needle != "" && !h.sawNeedle {
+		if strings.Contains(r.Message, h.needle) {
+			h.sawNeedle = true
+		} else {
+			r.Attrs(func(a slog.Attr) bool {
+				if strings.Contains(a.Value.String(), h.needle) {
+					h.sawNeedle = true
+					return false
+				}
+				return true
+			})
+		}
+	}
 	return nil
 }
 
@@ -157,6 +183,7 @@ func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *recordingHandler) snapshot() struct {
 	count     int
 	sawError  bool
+	sawNeedle bool
 	lastLevel slog.Level
 	lastMsg   string
 } {
@@ -165,9 +192,10 @@ func (h *recordingHandler) snapshot() struct {
 	return struct {
 		count     int
 		sawError  bool
+		sawNeedle bool
 		lastLevel slog.Level
 		lastMsg   string
-	}{h.count, h.sawError, h.lastLevel, h.lastMsg}
+	}{h.count, h.sawError, h.sawNeedle, h.lastLevel, h.lastMsg}
 }
 
 func (h *recordingHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
