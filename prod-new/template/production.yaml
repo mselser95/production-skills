@@ -215,6 +215,19 @@ driven:
   trace_propagation: observability.InstallPropagation
 
 out_of_scope:
+  - compatibility: >
+      This scaffold publishes NO wire format to a reader it does not own. Its
+      only egress is store.LogSink, which "delivers" by emitting a structured
+      log line -- there is no proto, no golden payload, and no external parser,
+      so there is no shape whose change could break a consumer. The
+      `compatibility` probe row looks for protoreflect calls, golden
+      comparisons, unknown-field round trips and raw proto.Unmarshal, and finds
+      none because none belong here.
+
+      This decline LAPSES the moment a real Sink is wired -- the same instant
+      published_contract's does, and for the same reason: at that point the
+      payload becomes an API owned by whoever consumes it, and its shape becomes
+      something a test must pin.
   - write_surface_authn: >
       This scaffold exposes NO surface that accepts work. internal/adapter/in
       ships healthhttp (/healthz, /readyz, /metrics -- all read-only) and
