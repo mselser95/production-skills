@@ -83,11 +83,49 @@ runner="$clone/run-demo.sh"
 mapfile -t controls < <(grep -E '^#[[:space:]]+[A-Z][A-Z0-9_]*=[A-Za-z0-9._-]+[[:space:]]+\./.*exits?[[:space:]]+1' "$runner" \
   | sed -E 's/^#[[:space:]]+//; s/[[:space:]]+\..*$//' | sort -u)
 
+# ZERO EXTERNAL CONTROLS IS NOT AUTOMATICALLY A DEFICIENT DEMO, and the first
+# version of this script said it was.
+#
+# image-signing-demo declares no control variable at all, and its negative path
+# is INLINE: it signs one image, leaves another unsigned, and asserts the
+# cluster refuses the second --
+#
+#   run-demo.sh:186
+#   echo "!! the unsigned image was ADMITTED -- the demo did not prove anything"
+#
+# That is the same discipline the control variables express, written into the
+# single run instead of split across invocations. Calling it "cannot be
+# validated as written" was my rule failing to recognise a shape it had not
+# anticipated, on the demo that started this whole body of work.
+#
+# So: look for an inline guard that FAILS when the negative case succeeds. If
+# one exists, the happy path alone is the whole contract and a green run means
+# something. If neither external controls nor an inline guard exist, THEN the
+# refusal stands -- that really is a demo with no failing case.
 if (( ${#controls[@]} == 0 )); then
-  echo "  CANNOT VALIDATE: the runner declares NO control in its header." >&2
-  echo "  A demo with no failing case proves its harness runs, not that its mechanism matters." >&2
-  echo "  Zero controls is not a clean validation -- it is a demo that cannot be validated as written." >&2
-  exit 2
+  _inline=$(grep -cE 'the demo did not prove anything|was ADMITTED|expected: denied|should have (been )?(failed|refused|denied)' "$runner" 2>/dev/null || true)
+  if (( _inline == 0 )); then
+    echo "  CANNOT VALIDATE: no controls in the header AND no inline negative assertion." >&2
+    echo "  A demo with no failing case proves its harness runs, not that its mechanism matters." >&2
+    exit 2
+  fi
+  echo "== no external controls; ${_inline} inline negative assertion(s) found"
+  echo "   The negative path lives inside the single run (e.g. 'the unsigned image was"
+  echo "   ADMITTED -- the demo did not prove anything'), so the happy path IS the contract."
+  if ( cd "$clone" && ./run-demo.sh >"$work/happy.log" 2>&1 ); then
+    _teardown
+    echo
+    echo "$demo: VALIDATED (inline) -- happy path exit 0 from a clean clone, with its"
+    echo "  negative case asserted inside the run rather than by an external control."
+    exit 0
+  fi
+  _rc=$?
+  _teardown
+  echo "  FAIL  ./run-demo.sh -> exit $_rc, expected 0"
+  tail -5 "$work/happy.log" | sed 's/^/        /'
+  echo
+  echo "$demo: NOT validated -- the happy path, which carries this demo's whole contract, failed." >&2
+  exit 1
 fi
 
 # TEARDOWN BETWEEN RUNS, and this was learned by breaking a demo with it.
