@@ -54,7 +54,26 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
 # quoting inside the fixture heredocs broke `bash -n`, and a silently broken
 # file in the trusted set is worse than two slots a human fills in.
 # ---------------------------------------------------------------------------
-PROBE=scripts/verify-standard.sh
+# RESOLVE THE TARGET IN EITHER LAYOUT (added 2026-08-29).
+#
+# This line used to be `PROBE=scripts/verify-standard.sh` and nothing else. That path exists only in an
+# INSTANTIATED repo; in this framework repo the canonical file lives at
+# `_shared/probes/verify-standard.sh`. So the selftest refused to run (exit 2, fail-closed and correct
+# as far as it went) in the one repository where the file it tests is actually
+# EDITED. verify-standard.sh is changed here and executed there, which meant
+# every edit to the canonical probe went unverified by its own selftest unless
+# somebody happened to instantiate a template and run `make probe-selftests`.
+#
+# That is not hypothetical: on 2026-08-29 two probe changes had left this
+# selftest RED for weeks, and it was found only by running the target out of
+# curiosity about an unrelated reference.
+#
+# Template path first so an instantiated repo keeps testing ITS OWN vendored
+# copy (the one that will actually run there), canonical second. Still fails
+# closed when neither exists -- a gate that cannot run must not look like one
+# that passed.
+PROBE="scripts/verify-standard.sh"
+[[ -r "$PROBE" ]] || PROBE="_shared/probes/verify-standard.sh"
 [[ -r $PROBE ]] || { echo "selftest: no $PROBE" >&2; exit 2; }
 
 fails=0

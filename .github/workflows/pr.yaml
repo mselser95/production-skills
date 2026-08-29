@@ -57,10 +57,28 @@ jobs:
       # self-gating regression to the canonical probe landed here with no signal
       # at all until somebody scaffolded a repo. Verified from the framework
       # root: 29 ok, 0 failed.
+      # ALL FIVE, as of 2026-08-29. Three of them -- check-registries,
+      # non-vacuity, sbom-ordering -- could not run here at all until today:
+      # they resolved their target as `scripts/<f>`, which exists only in an
+      # INSTANTIATED repo, and exited 1 or 2 from this root. They failed closed,
+      # correctly, and the consequence was still bad: verify-standard.sh and
+      # check-registries.sh are EDITED here and EXECUTED there, so every edit to
+      # the canonical probe went unverified by its own selftest unless somebody
+      # instantiated a template by hand. Two probe changes had left them RED for
+      # weeks on exactly that gap.
+      #
+      # They now try `scripts/<f>` first (so an instantiated repo keeps testing
+      # its own vendored copy -- proven by breaking the template's PYSBOM marker
+      # and watching the selftest fail while the canonical copy was fine) and
+      # fall back to `_shared/probes/<f>`. Still fail closed when neither
+      # exists: rc 1/2/2, naming the canonical path.
       - name: probe selftests
         run: |
           bash _shared/probes/load-rows-selftest.sh
           bash _shared/probes/tests/probe-self-gate-selftest.sh
+          bash _shared/probes/check-registries-selftest.sh
+          bash _shared/probes/non-vacuity-selftest.sh
+          bash _shared/probes/sbom-ordering-selftest.sh
           bash _shared/probes/policy-coverage.sh
 
       # ADVISORY, and printed rather than gated. It answers "is each committed
