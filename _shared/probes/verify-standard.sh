@@ -1882,8 +1882,36 @@ inbound_route_sites() {
     --include='*.go' --exclude='*_test.go' cmd/ internal/ 2>/dev/null \
     | grep -vE 'healthhttp|pprofhttp|"/healthz|"/readyz|"/livez|"/startupz|"/metrics|"/debug/pprof'
 }
+# code_lines_only, and it is load-bearing. This was a raw grep, so a COMMENTED
+# OUT tracer injection counted as wiring. Measured 2026-08-29 on an instantiated
+# template: commenting out all ten tracer lines in cmd/unitsvc/main.go left this
+# row reporting the same "3 tracer call-site(s)" and PASSING.
+#
+# That is the precise failure this dimension exists to refuse. The standard's
+# own wording is "tracing wired in cmd/, not merely imported -- a tracer that is
+# never injected is a no-op in production", and a commented-out injection is
+# weaker still than an unused import. The helper was already used by the
+# profiling row a few hundred lines below; this row simply never got it.
+# ...and DEFINITIONS are not call sites. `[Tt]racer)` matched
+# `func adaptTracer(tr observability.Tracer) app.SpanFunc {` -- a function
+# declaration, which is the thing being wired, not the wiring.
+#
+# Measured 2026-08-29, with the one real injection removed and the build kept
+# valid (`ledger.SetTracer(adaptTracer(tracer))` -> `_ = tracer; _ = adaptTracer`):
+#
+#   tracing-wired-in-prod   PASS  "1 tracer call-site(s)"   <- the definition
+#   mechanisms-driven       PASS  "7/7 declared mechanism(s) survive linking"
+#
+# Both green with NO tracer wired at all. The second is not a backstop here:
+# tracing is not one of its seven declared mechanisms, so this row's claim that
+# "the mechanisms-driven row proves reachability properly" was false for the one
+# dimension it was written about. That is the exact wording the standard uses --
+# "tracing wired in cmd/, not merely imported; a tracer that is never injected
+# is a no-op in production" -- failing on its own example.
 tracer_sites=$(grep -rn --include='*.go' --exclude='*_test.go' \
-  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null | wc -l | tr -d ' ')
+  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null \
+  | code_lines_only | grep -vE '^[^:]+:[0-9]+:[[:space:]]*func[[:space:]]' \
+  | wc -l | tr -d ' ')
 
 # THE SECOND WIRING SHAPE: a process-wide TracerProvider instead of a threaded
 # tracer.
@@ -1968,7 +1996,7 @@ elif [[ "${tracer_sites:-0}" -gt 0 ]]; then
   # EXISTS; it cannot establish that it RUNS. Claiming "injected" was the defect
   # -- the row asserted more than it measured, which is the same failure it was
   # written to catch one level down.
-  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — existence only; the mechanisms-driven row proves reachability properly, and this one is kept as the earlier, weaker signal"
+  row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — call sites only, function declarations excluded. NOT proven here: that a span is ever emitted at runtime. And mechanisms-driven does NOT cover this -- tracing is not among its declared mechanisms, so an earlier version of this sentence pointed at a backstop that does not exist for this dimension"
 elif (( ${global_tp_install:-0} > 0 && ${cmd_tracing_boot:-0} > 0 )); then
   row "tracing-wired-in-prod" PASS "GLOBAL TracerProvider shape: $cmd_tracing_boot non-test cmd/ line(s) keep the result of a tracing bootstrap call, and $global_tp_install non-test otel.SetTracerProvider( call site(s) install the provider they read$global_tp_instr_note — existence only, same as the threaded shape above: this proves the wiring EXISTS in the entrypoints, not that it is reached in production; only a contract test exercising the entrypoint can"
 elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
