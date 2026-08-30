@@ -59,7 +59,14 @@ expect() {
     fails=$((fails + 1))
     return
   fi
-  if [[ "$want" == RED && -n "$needle" ]] && ! printf '%s\n' "$out" | grep -qF "$needle"; then
+  # Match a VARIABLE, not a pipeline. `printf ... | grep -qF` under `set -o
+  # pipefail` inverts this assertion exactly when it succeeds: grep -q exits 0 on
+  # the first match, printf takes SIGPIPE (141), pipefail makes that the
+  # pipeline's status, and the leading `!` turns a found needle into "went RED
+  # but never named it". Flagged as GREPQ-UNDER-PIPEFAIL by this repo's own
+  # gate-hygiene fitness and left advisory for weeks; it was the ONE true
+  # positive among eleven, the other ten being quoted fixtures.
+  if [[ "$want" == RED && -n "$needle" ]] && [[ "$out" != *"$needle"* ]]; then
     printf '  FAIL  %-44s went RED but never named %s\n' "$label" "$needle"
     printf '%s\n' "$out" | sed 's/^/          /'
     fails=$((fails + 1))

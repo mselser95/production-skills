@@ -164,7 +164,31 @@ for f in "${files[@]}"; do
       report "$f" "$n" "BARE-GREP-UNDER-SET-E" "no-match exit 1 is the PASSING case; terminate it explicitly (|| true) and check the count"
     fi
 
-    if (( uses_pipefail )) && [[ "$line" =~ $grepq_pipe ]]; then
+    # QUOTED SPANS REMOVED FIRST, for the same reason the rule below says
+    # COMMAND POSITION ONLY. Measured 2026-08-29: this rule reported 11
+    # advisories, and TEN of them were the test corpus of probe-self-gate-
+    # selftest.sh -- lines like
+    #   check FIRE "plain pipe into grep -q" 'go doc ./p | grep -q Foo'
+    # where the hazard is the test DATA, not something the file executes. The one
+    # true positive was buried among them, which is the actual cost: an advisory
+    # lane that is 91% noise is one nobody reads, so the real finding sat there
+    # for weeks. (It was error-handling-fitness-selftest.sh, whose assertion
+    # inverted exactly when it succeeded; demonstrated with 40MB of output and
+    # the needle on line 1, and fixed.)
+    #
+    # Stripping quoted spans keeps real pipelines: `printf '%s\n' "$out" | grep
+    # -qF "$needle"` still matches once its quoted arguments are gone, because
+    # the pipe and the grep are not inside quotes. A fixture line collapses to
+    # its bare command words and stops matching.
+    # ONE sed pass, not a bash substitution loop. The first version stripped the
+    # spans with `${unquoted/${BASH_REMATCH[1]}/}` inside a while, which HANGS:
+    # that expansion treats its pattern as a GLOB, so a match containing `*` or
+    # `[` -- and these lines are full of both -- never matches itself, the string
+    # never shrinks, and the loop spins forever. Killed at 2 minutes on the first
+    # run. A stripping step that cannot terminate is worse than the false
+    # positives it was written to remove.
+    unquoted=$(printf '%s' "$line" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
+    if (( uses_pipefail )) && [[ "$unquoted" =~ $grepq_pipe ]]; then
       advise "$f" "$n" "GREPQ-UNDER-PIPEFAIL" "grep -q kills the writer with SIGPIPE (141); pipefail turns the MATCH into a false. Capture the output and match the variable"
     fi
 
