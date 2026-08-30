@@ -115,6 +115,20 @@ done
 declare -a ROWS=(); fails=0; passes=0; nas=0
 
 BASE="$PWD"
+
+# to_base -- return to the repo root, and REFUSE to continue if it fails.
+#
+# 59 bare `cd "$BASE"` calls sat here until 2026-08-30, flagged by
+# `shellcheck -S warning` as SC2164 and never reviewed because the gate only
+# ran at -S error. The likelihood is low and the consequence is not: every one
+# of them is followed by an `expect` that evaluates a ROW against the current
+# directory, so a cd that silently failed would leave the assertion measuring
+# the fixture it was supposed to have left -- a selftest returning confident
+# verdicts about the wrong tree.
+#
+# One guarded helper rather than 59 hand-edited `|| exit`s: the same fix, and
+# the next person adding a case cannot forget it.
+to_base() { cd "$BASE" || { echo "load-rows selftest: cannot return to $BASE" >&2; exit 2; }; }
 _tmproot="$(mktemp -d "${TMPDIR:-/tmp}/load-rows-selftest.XXXXXX")"
 trap 'cd "$BASE" 2>/dev/null; rm -rf "$_tmproot"' EXIT INT TERM
 
@@ -143,6 +157,11 @@ fixture() { # fixture -> a fresh empty scratch repo, entered
   cd "$FIXTURE" || { echo "load-rows selftest: cannot enter scratch fixture" >&2; exit 2; }
 }
 
+# fails/passes/nas are reset here and INCREMENTED by the row's own `row()`.
+# The linter sees the assignment and not the indirect use. The directive is at
+# FUNCTION level: placed on the assignment line it covers only the first of the
+# four commands there, which is why three of them kept being reported.
+# shellcheck disable=SC2034
 verdict() { # verdict <row-fn> -> "<row-name>|<VERDICT>|<evidence>"
   ROWS=(); fails=0; passes=0; nas=0
   "$1"
@@ -208,24 +227,24 @@ good_doc() { # good_doc <measured-date> <saturation> <margin>
 fixture
 printf 'out_of_scope:\n  - load_baseline: >\n      no capacity question: this is a one-shot migration tool.\n' > production.yaml
 mkdir -p benchmarks/load; : > benchmarks/load/baseline.md   # present, and irrelevant: a decline wins
-cd "$BASE"
+to_base
 expect "ratified decline wins over everything else" load_baseline_row NA "ratified decline"
 
 fixture
 printf 'service:\n  name: legacy\n  tier: 2\n' > production.yaml
-cd "$BASE"
+to_base
 expect "spec predates dimension 25 (no block, no dir)" load_baseline_row NA "predates dimension 25"
 
 # --- engagement: either the spec block OR the benchmarks/load/ directory
 fixture
 spec_with_target 3x
-cd "$BASE"
+to_base
 expect "spec declares the block, artifact missing" load_baseline_row FAIL "does not exist"
 
 fixture
 printf 'service:\n  name: svc\n' > production.yaml
 mkdir -p benchmarks/load          # the directory alone is an obligation
-cd "$BASE"
+to_base
 expect "benchmarks/load/ alone engages the row" load_baseline_row FAIL "benchmarks/load/ exists"
 
 # --- the TARGET is scored before the document, so the finding names the file
@@ -233,19 +252,19 @@ expect "benchmarks/load/ alone engages the row" load_baseline_row FAIL "benchmar
 fixture
 printf 'load_baseline:\n  notes: ran a load test once\n' > production.yaml
 good_doc "$(days_ago 1)" "12000 rps" "3.4x"
-cd "$BASE"
+to_base
 expect "block declared but no margin_target" load_baseline_row FAIL "declares no load_baseline.margin_target"
 
 fixture
 spec_with_target TBD
 good_doc "$(days_ago 1)" "12000 rps" "3.4x"
-cd "$BASE"
+to_base
 expect "margin_target is a placeholder (TBD)" load_baseline_row FAIL "declares no load_baseline.margin_target"
 
 fixture
 spec_with_target "plenty of headroom"
 good_doc "$(days_ago 1)" "12000 rps" "3.4x"
-cd "$BASE"
+to_base
 expect "margin_target is prose, not a quantity" load_baseline_row FAIL "must START with the number"
 
 # --- freshness, read from INSIDE the document
@@ -253,31 +272,31 @@ fixture
 spec_with_target 3x
 mkdir -p benchmarks/load
 printf '# Load baseline\n\nsaturation point: 12000 rps\nmargin: 3.4x\n' > benchmarks/load/baseline.md
-cd "$BASE"
+to_base
 expect "no measurement date at all" load_baseline_row FAIL "no parseable measurement date"
 
 fixture
 spec_with_target 3x
 good_doc "2026-02-31" "12000 rps" "3.4x"   # well-formed, and not a real day
-cd "$BASE"
+to_base
 expect "a date that looks real and is not" load_baseline_row FAIL "could not compute the age"
 
 fixture
 spec_with_target 3x
 good_doc "$(days_ahead 3)" "12000 rps" "3.4x"
-cd "$BASE"
+to_base
 expect "a measurement stamped in the future" load_baseline_row FAIL "in the FUTURE"
 
 fixture
 spec_with_target 3x
 good_doc "$(days_ago $((LOAD_MAX_AGE_DAYS + 1)))" "12000 rps" "3.4x"
-cd "$BASE"
+to_base
 expect "one day past the window is stale" load_baseline_row FAIL "day(s) ago (limit ${LOAD_MAX_AGE_DAYS})"
 
 fixture
 spec_with_target 3x
 good_doc "$(days_ago "$LOAD_MAX_AGE_DAYS")" "12000 rps" "3.4x"
-cd "$BASE"
+to_base
 expect "exactly at the window is still fresh" load_baseline_row PASS "day(s) old, limit ${LOAD_MAX_AGE_DAYS}"
 
 # --- the saturation point must be a NUMBER where the number belongs. These two
@@ -289,7 +308,7 @@ mkdir -p benchmarks/load
 { printf 'measured: %s\n' "$(days_ago 1)"
   printf 'saturation point: not measured yet -- see the ticket\n'
   printf 'margin: 3.4x\n'; } > benchmarks/load/baseline.md
-cd "$BASE"
+to_base
 expect "'saturation point: not measured yet' is not a number" load_baseline_row FAIL "declares no saturation point"
 
 fixture
@@ -298,39 +317,39 @@ mkdir -p benchmarks/load
 { printf 'measured: %s\n' "$(days_ago 1)"
   printf 'We have never found the saturation point of this service under load.\n'
   printf 'margin: 3.4x\n'; } > benchmarks/load/baseline.md
-cd "$BASE"
+to_base
 expect "a PARAGRAPH about the saturation point is not a field" load_baseline_row FAIL "declares no saturation point"
 
 # --- the margin must be a comparable quantity, and comparable to THIS target
 fixture
 spec_with_target 3x
 good_doc "$(days_ago 1)" "12000 rps" "comfortable"
-cd "$BASE"
+to_base
 expect "'margin: comfortable' does not normalise" load_baseline_row FAIL "declares no parseable margin"
 
 fixture
 spec_with_target 3x
 good_doc "$(days_ago 1)" "12000 rps" "150%"
-cd "$BASE"
+to_base
 expect "percent margin against a factor target is refused" load_baseline_row FAIL "different quantities"
 
 fixture
 spec_with_target 3x
 good_doc "$(days_ago 1)" "12000 rps" "2x"
-cd "$BASE"
+to_base
 expect "a margin BELOW the declared target is a finding" load_baseline_row FAIL "does not meet what"
 
 # --- and the passes
 fixture
 spec_with_target 3x
 good_doc "$(days_ago 2)" "12000 rps sustained, p99 under 250ms" "3.4x expected peak"
-cd "$BASE"
+to_base
 expect "factor margin meets a factor target" load_baseline_row PASS "meets the declared target"
 
 fixture
 spec_with_target 250%
 good_doc "$(days_ago 2)" "900 msg/s" "300% of expected peak"
-cd "$BASE"
+to_base
 expect "percent margin meets a percent target" load_baseline_row PASS "meets the declared target"
 
 fixture
@@ -340,7 +359,7 @@ mkdir -p benchmarks/load
   printf -- '- **Measured on**: %s\n' "$(days_ago 5)"
   printf -- '- **Saturation point**: 12000 rps\n'
   printf -- '- **Headroom**: 3.1x expected peak\n'; } > benchmarks/load/baseline.md
-cd "$BASE"
+to_base
 expect "real markdown decoration parses (bullets, bold)" load_baseline_row PASS "meets the declared target"
 
 # --- a markdown TABLE is documented as NOT a field. Pinned so the limit is a
@@ -352,7 +371,7 @@ mkdir -p benchmarks/load
 { printf 'measured: %s\n' "$(days_ago 1)"
   printf '| saturation point | 12000 rps |\n'
   printf '| margin | 3.4x |\n'; } > benchmarks/load/baseline.md
-cd "$BASE"
+to_base
 expect "a markdown table cell is not a field (stated limit)" load_baseline_row FAIL "declares no saturation point"
 
 # --- error-handling-fitness (Yuan et al., OSDI 2014) -------------------------
@@ -382,7 +401,7 @@ wired_makefile() {
 }
 
 fixture
-cd "$BASE"
+to_base
 expect "absent script is UNASKED, not clean" error_handling_fitness_row NA "prod-bootstrap"
 
 # The mode bit is scored BEFORE the wiring, and this fixture has no Makefile at
@@ -392,7 +411,7 @@ fixture
 mkdir -p scripts
 printf '#!/usr/bin/env bash\nexit 0\n' > scripts/error-handling-fitness.sh
 chmod 644 scripts/error-handling-fitness.sh
-cd "$BASE"
+to_base
 expect "present but not executable is a FAIL, not a PASS" error_handling_fitness_row FAIL "not executable"
 
 # --- THE WIRING (landed 2026-08-27). A gate the cheap gate no longer calls is
@@ -400,7 +419,7 @@ expect "present but not executable is a FAIL, not a PASS" error_handling_fitness
 fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 printf 'check-fast:\n\t@echo "cheap gate"\n\tgo vet ./...\n' > Makefile
-cd "$BASE"
+to_base
 expect "check-fast recipe stripped of the invocation" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
 
 # THE MEASURED MISS, reproduced as a fixture. This Makefile still contains the
@@ -413,14 +432,14 @@ ehf_script 0 "scanned 214 handlers, 0 violations"
   printf '\n'
   printf 'error-handling-fitness:\n'
   printf '\tbash scripts/error-handling-fitness.sh\n'; } > Makefile
-cd "$BASE"
+to_base
 expect "standalone target still matches a whole-file grep" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
 
 # A repo with the gate and NO Makefile has no cheap gate to be wired into. It
 # fails closed, which is the same answer `cheap-gate` gives it.
 fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
-cd "$BASE"
+to_base
 expect "no Makefile at all is not 'wired'" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
 
 # THE THIRD REPAIR, found while landing rather than in the fragment: a recipe
@@ -441,7 +460,7 @@ fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 { printf 'check-fast:\n\t@echo "cheap gate"\n'
   printf '\t# $(MAKE) error-handling-fitness   # disabled while the lint lands\n'; } > Makefile
-cd "$BASE"
+to_base
 expect "a COMMENTED-OUT invocation is not wiring" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
 
 # The OTHER comment shape, kept as its own case because it is caught by a
@@ -451,7 +470,7 @@ fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 { printf 'check-fast:\n\t@echo "cheap gate"\n'
   printf '#\t$(MAKE) error-handling-fitness\n'; } > Makefile
-cd "$BASE"
+to_base
 expect "a hash-first line has already ended the recipe" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
 
 # ...and the converse, so the strip cannot be widened into refusing real lines:
@@ -460,7 +479,7 @@ fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 { printf 'check-fast:\n\t@echo "cheap gate"\n'
   printf '\t$(MAKE) error-handling-fitness   # the OSDI-2014 handler shapes\n'; } > Makefile
-cd "$BASE"
+to_base
 expect "a trailing comment does not un-wire a real call" error_handling_fitness_row PASS "scanned 214 handlers"
 
 # The recipe may call the script DIRECTLY rather than through $(MAKE); both are
@@ -468,7 +487,7 @@ expect "a trailing comment does not un-wire a real call" error_handling_fitness_
 fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 printf 'check-fast:\n\t@echo "cheap gate"\n\tbash scripts/error-handling-fitness.sh\n' > Makefile
-cd "$BASE"
+to_base
 expect "a direct script call in the recipe is wiring too" error_handling_fitness_row PASS "scanned 214 handlers"
 
 # The recipe ends where the tab-indentation does. A later target that DOES call
@@ -477,14 +496,14 @@ fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 { printf 'check-fast:\n\t@echo "cheap gate"\n'
   printf 'verify:\n\t$(MAKE) error-handling-fitness\n'; } > Makefile
-cd "$BASE"
+to_base
 expect "a LATER target's recipe is not check-fast's" error_handling_fitness_row FAIL "OWN RECIPE does not invoke it"
 
 # --- and, wired, the landed execute-and-report behaviour is unchanged.
 fixture
 ehf_script 1 "3 empty error handlers in internal/app"
 wired_makefile
-cd "$BASE"
+to_base
 expect "a red fitness script reds the row, with its message" error_handling_fitness_row FAIL "3 empty error handlers"
 
 # A script that reds SILENTLY still has to produce a finding. An evidence-free
@@ -492,13 +511,13 @@ expect "a red fitness script reds the row, with its message" error_handling_fitn
 fixture
 ehf_script 7
 wired_makefile
-cd "$BASE"
+to_base
 expect "a SILENT red still names its exit status" error_handling_fitness_row FAIL "exit 7"
 
 fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 wired_makefile
-cd "$BASE"
+to_base
 expect "green fitness script passes, quoting what it measured" error_handling_fitness_row PASS "scanned 214 handlers"
 
 # A green script that prints NOTHING must not produce a PASS with empty
@@ -507,7 +526,7 @@ expect "green fitness script passes, quoting what it measured" error_handling_fi
 fixture
 ehf_script 0
 wired_makefile
-cd "$BASE"
+to_base
 expect "green and silent still yields non-empty evidence" error_handling_fitness_row PASS "EXECUTED clean"
 
 # The PASS carries BOTH measurements, so a reader can tell "it ran" from "the
@@ -515,7 +534,7 @@ expect "green and silent still yields non-empty evidence" error_handling_fitness
 fixture
 ehf_script 0 "scanned 214 handlers, 0 violations"
 wired_makefile
-cd "$BASE"
+to_base
 expect "the PASS names the wiring as well as the run" error_handling_fitness_row PASS "check-fast's recipe invokes it"
 
 # --- simulation-advisory (dimension 27) -------------------------------------
@@ -526,27 +545,27 @@ fixture
 printf 'sim:\n\t@echo simulating\n' > Makefile
 mkdir -p verification/simulation
 printf 'package simulation\n' > verification/simulation/sim_test.go
-cd "$BASE"
+to_base
 expect "target + lane directory is the advisory PASS" simulation_advisory_row PASS "sim lane present (advisory)"
 
 fixture
 printf 'sim:\n\t@echo simulating\n' > Makefile
 mkdir -p verification/simulation      # deliberately EMPTY
-cd "$BASE"
+to_base
 expect "an empty lane passes, and the count says so" simulation_advisory_row PASS "(0 file(s))"
 
 fixture
 printf 'sim:\n\t@echo simulating\n' > Makefile
-cd "$BASE"
+to_base
 expect "a target with no lane directory is NA" simulation_advisory_row NA "no verification/simulation/"
 
 fixture
 mkdir -p verification/simulation
-cd "$BASE"
+to_base
 expect "a lane directory with no target is NA" simulation_advisory_row NA "no 'sim:' target"
 
 fixture
-cd "$BASE"
+to_base
 expect "neither half present is NA, naming both" simulation_advisory_row NA "no verification/simulation/"
 
 # `.PHONY: sim` NAMES the target without defining it. The distinction is the
@@ -556,7 +575,7 @@ expect "neither half present is NA, naming both" simulation_advisory_row NA "no 
 fixture
 printf '.PHONY: sim\nverify:\n\t@echo other\n' > Makefile
 mkdir -p verification/simulation
-cd "$BASE"
+to_base
 expect ".PHONY: sim is a mention, not a target" simulation_advisory_row NA "no 'sim:' target"
 
 # THE TWO CASES THAT ACTUALLY DISCRIMINATE THE ANCHOR, added after mutation
@@ -575,13 +594,13 @@ expect ".PHONY: sim is a mention, not a target" simulation_advisory_row NA "no '
 fixture
 printf '# sim: run the deterministic simulation lane (planned)\nverify:\n\t@echo other\n' > Makefile
 mkdir -p verification/simulation
-cd "$BASE"
+to_base
 expect "a COMMENT naming sim: is not a target" simulation_advisory_row NA "no 'sim:' target"
 
 fixture
 printf 'run-sim:\n\t@echo not the declared target name\n' > Makefile
 mkdir -p verification/simulation
-cd "$BASE"
+to_base
 expect "run-sim: is a different target, not sim" simulation_advisory_row NA "no 'sim:' target"
 
 # THE PROMISE, EXECUTED. Dimension 27 is advisory: this row must not be able to
@@ -603,7 +622,7 @@ for _shape in "target+lane" "target-only" "lane-only" "neither" "phony-only" "em
     renamed-target) printf 'run-sim:\n\t@echo o\n' > Makefile; mkdir -p verification/simulation ;;
   esac
   _got="$(verdict simulation_advisory_row)"
-  cd "$BASE"
+  to_base
   sim_seen=$((sim_seen+1))
   [[ "${_got#*|}" == FAIL* ]] && { echo "  FAIL advisory row produced a FAIL on shape '$_shape': $_got" >&2; sim_fails=$((sim_fails+1)); }
 done
@@ -638,12 +657,12 @@ kill_script() { # kill_script <assertion-name>
 }
 
 fixture
-cd "$BASE"
+to_base
 expect "absent kill scenario is UNASKED, not clean" crash_only_state_row NA "UNASKED"
 
 fixture
 kill_script assert_state_identical
-cd "$BASE"
+to_base
 expect "the state assertion present is the PASS" crash_only_state_row PASS "compares reconstructed state"
 
 # THE MUTATION THIS ROW EXISTS FOR: the assertion renamed out of the scenario.
@@ -652,7 +671,7 @@ expect "the state assertion present is the PASS" crash_only_state_row PASS "comp
 # weaker check the row's own evidence string names as insufficient.
 fixture
 kill_script assert_records_survived
-cd "$BASE"
+to_base
 expect "the state assertion renamed out is a FAIL" crash_only_state_row FAIL "never that replaying them reconstructs"
 
 # A scenario that MENTIONS the assertion in a comment and does not call it is
@@ -666,7 +685,7 @@ mkdir -p scripts
   printf '# TODO: call assert_state_identical once the digest endpoint lands\n'
   printf 'echo records survived\n'; } > scripts/kill-durability.sh
 chmod +x scripts/kill-durability.sh
-cd "$BASE"
+to_base
 expect "a COMMENT naming the assertion satisfies it (stated limit)" crash_only_state_row PASS "compares reconstructed state"
 
 # --- differential-observability (Huang et al., HotOS 2017) -------------------
@@ -692,12 +711,12 @@ gray_alert() { # gray_alert <expression-line>...
 }
 
 fixture
-cd "$BASE"
+to_base
 expect "neither observability file is UNASKED" differential_observability_row NA "no observability/alerts.md"
 
 fixture
 gray_alert 'probe_success < 0.99'
-cd "$BASE"
+to_base
 expect "an alert file with no manifest cannot be scored" differential_observability_row NA "no observability/emitted-metrics.yaml"
 
 fixture
@@ -706,7 +725,7 @@ gray_alert \
   '  min_over_time(svc_eventlog_writable[10m]) == 1' \
   'and on(instance)' \
   '  avg_over_time(probe_success{job="blackbox"}[10m]) < 0.99'
-cd "$BASE"
+to_base
 expect "an alert citing an out-of-process series is the PASS" differential_observability_row PASS "1 series this service does not emit"
 
 # THE MUTATION THIS ROW EXISTS FOR: the client half replaced by a series this
@@ -718,7 +737,7 @@ gray_alert \
   '  min_over_time(svc_eventlog_writable[10m]) == 1' \
   'and on(instance)' \
   '  avg_over_time(svc_readyz_stale_never_ready_audits_total[10m]) > 0'
-cd "$BASE"
+to_base
 expect "the client half replaced by a self-emitted series" differential_observability_row FAIL "cites ONLY series this service emits"
 
 # FIRST RECORDED FIRST-PASS REPAIR, pinned as its own case. Without the
@@ -733,7 +752,7 @@ gray_alert \
   '  min_over_time(svc_eventlog_writable[10m]) == 1' \
   'and on(instance)' \
   '  max_over_time(svc_eventlog_writable[10m]) == 1'
-cd "$BASE"
+to_base
 expect "PromQL builtins are calls, not external series" differential_observability_row FAIL "cites ONLY series this service emits"
 
 # SECOND RECORDED FIRST-PASS REPAIR. With `#` lines left inside the fence, the
@@ -747,7 +766,7 @@ gray_alert \
   '  min_over_time(svc_eventlog_writable[10m]) == 1' \
   'and on(instance)' \
   '  max_over_time(svc_eventlog_writable[10m]) == 1'
-cd "$BASE"
+to_base
 expect "a comment inside the fence is a mention, not a citation" differential_observability_row FAIL "cites ONLY series this service emits"
 
 # PROSE outside the fence names series too. Counting it would let a paragraph
@@ -759,7 +778,7 @@ emitted svc_eventlog_writable
   printf '```\n\n'
   printf 'We should compare this against probe_success from the blackbox exporter.\n'
 } > observability/alerts.md
-cd "$BASE"
+to_base
 expect "prose outside the fence is not the expression" differential_observability_row FAIL "cites ONLY series this service emits"
 
 # The next `## ` heading ENDS the section. A different alert's external series
@@ -773,14 +792,14 @@ emitted svc_eventlog_writable
   printf 'probe_success{job="blackbox"} < 1\n'
   printf '```\n'
 } > observability/alerts.md
-cd "$BASE"
+to_base
 expect "a NEIGHBOURING alert's series is not this one's" differential_observability_row FAIL "cites ONLY series this service emits"
 
 fixture
 emitted svc_eventlog_writable
 mkdir -p observability
 printf '## `SvcEventLogNotWritable` (page)\n\n```\nsvc_eventlog_writable == 0\n```\n' > observability/alerts.md
-cd "$BASE"
+to_base
 expect "no gray-failure alert at all, and no waiver" differential_observability_row FAIL "no alert on the DISAGREEMENT"
 
 # THE WAIVER NA. `waived` is the probe's own function, so this case also drives
@@ -792,7 +811,7 @@ printf '## `SvcEventLogNotWritable` (page)\n\n```\nsvc_eventlog_writable == 0\n`
 mkdir -p registries scripts
 printf -- '- obligation: gray-failure alert needs an out-of-process vantage\n  id: gray-failure-no-external-vantage\n  owner: platform\n  expires: 2099-01-01\n' > registries/waivers.yaml
 printf '#!/usr/bin/env bash\nexit 0\n' > scripts/check-registries.sh
-cd "$BASE"
+to_base
 expect "a live waiver is the NA, and names itself" differential_observability_row NA "live waiver"
 
 # A waiver for a DIFFERENT id does not cover this obligation. Without this the
@@ -803,7 +822,7 @@ printf '## `SvcEventLogNotWritable` (page)\n\n```\nsvc_eventlog_writable == 0\n`
 mkdir -p registries scripts
 printf -- '- obligation: something else entirely\n  id: some-other-waiver\n  owner: platform\n  expires: 2099-01-01\n' > registries/waivers.yaml
 printf '#!/usr/bin/env bash\nexit 0\n' > scripts/check-registries.sh
-cd "$BASE"
+to_base
 expect "another waiver's id does not cover this row" differential_observability_row FAIL "no alert on the DISAGREEMENT"
 
 echo

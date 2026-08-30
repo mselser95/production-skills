@@ -50,7 +50,15 @@ actionlint:
 # past reads it as a report. A lint that cannot run must not look like a lint
 # that found nothing.
 #
-# -S error only. The config.sh files are SOURCED, never executed, so they carry
+# -S warning, RAISED from -S error on 2026-08-30 after the warning tier was
+# classified and emptied: 67 findings -> 0. Raising it is the point. A tier
+# nobody enforces drifts back, and the 67 had accumulated precisely because
+# the gate stopped at error -- among them one genuinely dead expiry variable,
+# a LOC count that miscounts filenames with spaces, and 60 unguarded `cd`s in
+# a selftest, each followed by an assertion that would have measured the wrong
+# tree.
+#
+# The config.sh files are SOURCED, never executed, so they carry
 # `# shellcheck shell=bash` instead of a shebang rather than being excluded:
 # excluding them would take the nine files most likely to be hand-edited out of
 # the only check that reads them.
@@ -70,6 +78,17 @@ actionlint:
 lint:
 	@command -v shellcheck >/dev/null || { echo "shellcheck missing -- brew install shellcheck" >&2; exit 2; }
 #
+# TRACKED FILES ONLY (`git ls-files`), and that alignment was itself a finding.
+# The gate used to walk the working tree while CI lints what the clone contains,
+# so the two ran over different sets: raising this to -S warning turned the local
+# gate red on gitignored per-user `config.sh` files that CI has never seen, and a
+# gate that fails only on the author's machine is one they learn to bypass.
+#
+# `git ls-files` also covers a NEW file the moment it is staged, which is exactly
+# when the pre-commit hook runs -- so nothing being committed escapes the lint.
+# What it deliberately skips is uncommitted scratch and per-user config, neither
+# of which this gate is protecting anyone from.
+#
 # DEDUPED BY CONTENT, which is not a coverage compromise. install.sh mirrors the
 # shared probes into all nine skills, so `verify-standard.sh` alone appears ten
 # times byte-identically; shellcheck on identical bytes returns an identical
@@ -79,14 +98,14 @@ lint:
 # see the ratio rather than take the saving on trust. If the two ever converge,
 # the mirroring broke.
 	@set -e; \
-	  n=$$(find . -name '*.sh' -not -path './.wt/*' -not -path './.git/*' | grep -c .); \
+	  n=$$(git ls-files '*.sh' | grep -c .); \
 	  if [ "$$n" -eq 0 ]; then echo "lint: found ZERO shell scripts -- a clean lint over nothing is not a clean lint" >&2; exit 2; fi; \
-	  uniq_files=$$(find . -name '*.sh' -not -path './.wt/*' -not -path './.git/*' -print0 \
+	  uniq_files=$$(git ls-files '*.sh' -z \
 	    | xargs -0 shasum -a 256 | sort -k1,1 -u | awk '{ $$1=""; sub(/^ +/,""); print }'); \
 	  u=$$(printf '%s\n' "$$uniq_files" | grep -c .); \
 	  if [ "$$u" -eq 0 ]; then echo "lint: deduped to ZERO files -- refusing to report clean over nothing" >&2; exit 2; fi; \
-	  printf '%s\n' "$$uniq_files" | tr '\n' '\0' | xargs -0 shellcheck -S error; \
-	  echo "shellcheck: $$u unique script(s) of $$n clean at severity=error"
+	  printf '%s\n' "$$uniq_files" | tr '\n' '\0' | xargs -0 shellcheck -S warning; \
+	  echo "shellcheck: $$u unique script(s) of $$n clean at severity=warning"
 
 # The repo's own probes, run against the repo itself -- the half that was missing.
 gates:

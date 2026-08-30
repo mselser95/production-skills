@@ -621,8 +621,12 @@ if [[ -x scripts/coverage.sh ]]; then
 else row "coverage" FAIL "no scripts/coverage.sh"; fi
 
 # tests/prod LOC ratio — recorded, never a gate
-prod=$(find . -name '*.go' -not -name '*_test.go' -not -path './.git/*' | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
-tst=$(find . -name '*_test.go' -not -path './.git/*' | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+# -exec ... + rather than `| xargs`: a path containing a space or newline makes
+# xargs split it into pieces that are not files, and wc counts the wrong set. The
+# row is informational, never a gate, but a recorded number that is quietly wrong
+# is still wrong. Flagged SC2038, fixed 2026-08-30.
+prod=$(find . -name '*.go' -not -name '*_test.go' -not -path './.git/*' -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}')
+tst=$(find . -name '*_test.go' -not -path './.git/*' -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}')
 # N/A, not PASS, when there is nothing to measure. Found by disabling the
 # language guard above and running against a C++ repo: this row printed
 # `PASS test/prod = 0.00` because it counts *.go and found none -- a PASS over
@@ -1871,6 +1875,15 @@ else
     done < <(grep -rl -- "$base" --include='*_test.go' . 2>/dev/null)
   done
   obs_pkgs=$(printf '%s' "$obs_readers" | sort -u | sed '/^$/d')
+  # The `go test` branch below leaves its package list UNQUOTED on purpose: the
+  # inner printf builds a space-separated list and go test needs it as separate
+  # arguments. Quoting would pass one argument named './a ./b' and the row would
+  # fail on every multi-package repo. shellcheck cannot tell deliberate splitting
+  # from accidental, so SC2046 is disabled -- and the directive sits HERE, in
+  # front of the whole `if`, because one placed in front of an `elif` branch is a
+  # PARSE ERROR (SC1123/SC1072/SC1073). Measured 2026-08-30: putting it on the
+  # elif turned three clean files into three unparseable ones.
+  # shellcheck disable=SC2046
   if [[ -z "$obs_pkgs" ]]; then
     row "observability-contract-checked" FAIL "${#obs_manifests[@]} manifest(s) exist but no test READS one — naming it in a comment is not a check"
   elif obs_out=$(go test -count=1 $(printf './%s ' $(printf '%s' "$obs_pkgs" | sed 's|^\./||')) 2>&1); then
@@ -3666,7 +3679,10 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # does. A row that asserts a comparison it did not perform is worse than no
     # row.
     rp_fn=$(cited_function "$rp")
-    rp_red=$(executed_function "$rp")
+    # rp_red removed 2026-08-30: its value stopped being read when the guard
+    # described below was dropped and the comparison moved inside
+    # citation_drift, which calls executed_function itself. A dead assignment
+    # that still invokes a helper reads like it does something.
     [[ -z "$rp_fn" ]] && continue
     rp_checked=$((rp_checked+1))
     grep -rqE "func[[:space:]]+${rp_fn}\(" --include='*_test.go' . 2>/dev/null \

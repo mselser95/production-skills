@@ -7,13 +7,13 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 8ac9591d53b41ca33edff0ba99fbeadf2da15c7e2928cd0c350124551eece7df
-short: 8ac9591d53b4
+digest: 08c417e597ef0db3f18e1a6398f983721e15df3770707c5a18d1e0f013bc8d82
+short: 08c417e597ef
 files: 19
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
   scripts/changed-line-coverage.sh: 89438a28abea4bf522db07128e769c33c6848e059151de4f5860d2cd62ab12dd
-  scripts/check-registries.sh: 3aaa547209305cfb49117ce488610d7493cec7ce9db15826cdf6239ec2ce25df
+  scripts/check-registries.sh: 4497037c9816de4cd3717b5077fd64b0954059554baadec57af423d8341b55a1
   scripts/check-template-drift.sh: f65b6d1cc649b9a2d9b46532b491f4fd7fd47502458c38414fe6126fbd2e7703
   scripts/coverage.sh: 8ca0ad3413105fdc01e49caa0f171da22e85ed1d314dbd75274c5fb082adbf18
   scripts/error-handling-fitness.sh: cfb96953c7727fa872db162123963cfe5aca65102eeb6168cb7d08c7c9dd1327
@@ -25,8 +25,8 @@ per_file:
   scripts/tests/check-registries-selftest.sh: db12d993eda7ab8cc4b2705ca7c21ead308b995dd23d5948351161fcf2f8a41d
   scripts/tests/error-handling-fitness-selftest.sh: 37b2876aea9c242367a9df1ca7f6b544653e2a21c11ebcf354d20044d2067bbb
   scripts/tests/kill-durability-state-selftest.sh: 826ab6f357020d845edb3575a7da6847506e8bcbd2ac43938cbf144c274bb28e
-  scripts/tests/load-rows-selftest.sh: fbbf184058ea3e5e37f02837954714d7ebf189fdde1eb290e0050b816a76d8bd
+  scripts/tests/load-rows-selftest.sh: bdf8b5e22570884769e1765c2ccbb5fd0ac5e137964a8f91c30ea00b1298b198
   scripts/tests/non-vacuity-selftest.sh: 5b8ed57af31a342b23dd5096584868a6b4fd26c06559b55b8b912f24446e1905
   scripts/tests/probe-self-gate-selftest.sh: cee9417e48c2d910a054ca37574cc95debc2c3c52dc29e0c312aa93f9ae415c9
-  scripts/tests/sbom-ordering-selftest.sh: 8821fa66631765da1bedef30ff84831657792747dd34682fa31fea7fa0e90700
-  scripts/verify-standard.sh: 1d3402b3ba3eab59c9b3c20043f9d6c3f7c8de8179c7c2885ce32739eb8f6df1
+  scripts/tests/sbom-ordering-selftest.sh: a519d18f845f885ee9174c7a1759b2781e5cc1d041c07eb189861642110d6e7d
+  scripts/verify-standard.sh: 2a6b0de93efc8e2a0a249f0d107dde2801acf4fa966e4a1d1a6b9916802b66f3

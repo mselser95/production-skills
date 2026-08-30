@@ -36,7 +36,6 @@ while (($#)); do
   shift
 done
 
-today=$(date -u +%Y-%m-%d)
 # epoch_utc_midnight <YYYY-MM-DD> -- print the UTC-midnight epoch for that date,
 # or fail if the date is not real.
 #

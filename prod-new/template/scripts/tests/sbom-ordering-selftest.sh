@@ -22,7 +22,10 @@
 # The fixtures are the JSON the yq stage emits (`<file>\t<json>`), so these
 # cases need no yq and no workflow trees, and they run anywhere python3 does.
 set -uo pipefail
-cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Guarded: an unguarded cd here would leave the selftest running in whatever
+# directory the caller happened to be in, and every case below resolves its
+# subject relative to the repo root.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || { echo "sbom-ordering selftest: cannot reach the repo root" >&2; exit 2; }
 
 # RESOLVE THE TARGET IN EITHER LAYOUT (added 2026-08-29).
 #
