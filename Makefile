@@ -25,7 +25,7 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -33,6 +33,7 @@ help:
 	@echo "selftests   the probe selftests only"
 	@echo "evidence    run every gate and write .prod/evidence/<sha>.json (dimension 11)"
 	@echo "template-digest  recompute prod-new/TEMPLATE-DIGEST after a reviewed template change"
+	@echo "mutation-baseline  re-record benchmarks/mutation-baseline.md after adding/removing cases"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates
@@ -126,7 +127,15 @@ gates:
 	@bash scripts/template-digest.sh
 
 # ---- the full gate --------------------------------------------------------
-verify: check-fast selftests tcb
+verify: check-fast selftests tcb mutation
+
+# In `verify`, NOT in `check-fast`. It re-runs all ten selftests to count what
+# they actually execute, which costs about as much as the selftests target
+# itself -- putting it in the pre-commit path would take the hook from ~10s to
+# ~22s, and a hook people wait for is a hook people bypass with --no-verify.
+# A trend belongs in the fuller gate anyway.
+mutation:
+	@bash scripts/mutation-baseline.sh
 
 # Every selftest, enumerated by GLOB rather than by a list -- which directly
 # contradicts .github/workflows/pr.yaml:48 ("Listed individually, never
@@ -180,3 +189,9 @@ evidence:
 # the "re-stamp to silence the report" failure the provenance file warns about.
 template-digest:
 	@bash scripts/template-digest.sh --write
+
+# Re-recording is deliberate, like the template digest: a baseline refreshed
+# automatically records whatever the suite happens to do today, which is how a
+# shrinking one stops being visible.
+mutation-baseline:
+	@bash scripts/mutation-baseline.sh --write

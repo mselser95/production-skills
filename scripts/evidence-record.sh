@@ -42,6 +42,7 @@ GATES=(
   "gates-are-driven|bash _shared/probes/probe-wiring.sh"
   "gates-are-driven-scripts|bash _shared/probes/probe-wiring.sh scripts"
   "template-version|bash scripts/template-digest.sh"
+  "mutation-trend|bash scripts/mutation-baseline.sh"
   "probe-selftests|make --no-print-directory selftests"
   "tcb-integrity|bash install.sh --verify"
 )

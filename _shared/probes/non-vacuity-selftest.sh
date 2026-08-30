@@ -21,6 +21,13 @@
 # Exit:  0 all cases behaved; 1 a case did not.
 
 set -uo pipefail
+
+# CASES counts what actually RAN. Until 2026-08-30 this suite ended with a bare
+# "ok", which prints identically over sixty-five cases and over zero -- the
+# checked-and-none vs nothing-checked confusion this repo refuses everywhere
+# else, sitting in its own verifier. Found while deriving a mutation baseline
+# from these counts: three suites had none to give.
+CASES=0
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
 
 # ---------------------------------------------------------------------------
@@ -78,6 +85,7 @@ PROBE="scripts/verify-standard.sh"
 
 fails=0
 check() { # check <case> <expected-substring> <actual>
+  CASES=$((CASES+1))
   # REFUSE AN EMPTY EXPECTED, rather than documenting that callers must not
   # pass one. `grep -qF "" ` matches every input, so an empty pattern turns
   # this into a control that cannot fail -- and the note above only closed the
@@ -113,6 +121,7 @@ check() { # check <case> <expected-substring> <actual>
 # that exists to prove tests are not decoration was itself decoration, in both
 # directions. It needs its own assertion.
 check_empty() { # check_empty <case> <actual>
+  CASES=$((CASES+1))
   if [[ -z "${2//[[:space:]]/}" ]]; then
     echo "  ok   $1"
   else
@@ -750,5 +759,5 @@ if (( fails > 0 )); then
   echo "non-vacuity selftest: ${fails} case(s) failed" >&2
   exit 1
 fi
-echo "non-vacuity selftest: all cases behaved"
+echo "non-vacuity selftest: all cases behaved -- $CASES case(s)"
 

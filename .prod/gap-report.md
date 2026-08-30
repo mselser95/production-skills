@@ -54,9 +54,9 @@ not a legal state.
 | row | state | gap | sev |
 |---|---|---|---|
 | gate-runtime baseline | `benchmarks/gate-runtime.md`, measured 2026-08-29 over 3 runs each: check-fast 10.4/10.1/10.3s (the hook's budget), lint 4.5s after content-dedup took it from 29.8s, selftests 12.5s. SIGNAL, never a gate — a wall-clock number on one laptop cannot be a threshold. | closed | — |
-| coverage today vs tier signal | no coverage instrument exists for shell; the 6 selftests are the unit tests | no coverage number at all | low |
+| coverage today vs tier signal | **not applicable, with the property.** Line coverage answers "was this executed"; the repo already measures the strictly stronger question — "does breaking it get caught" — for 267 cases across 10 selftests, recorded in `benchmarks/mutation-baseline.md`. Adding a shell line-coverage percentage would put a weaker number beside a stronger one and invite people to read the weaker. There is also no shell coverage tool in this toolchain to produce it honestly. | — | — |
 | tests/prod LOC ratio (informational) | 6 selftests + 13 skills-static fixtures against 62 scripts | informational only | — |
-| mutation baseline | no artifact; mutation is applied MANUALLY and universally (72/72 probe rows, 4 Makefile targets, 3 install.sh branches today) | no recorded baseline to trend | low |
+| mutation baseline | **closed.** `benchmarks/mutation-baseline.md`, DERIVED by running all ten selftests rather than typed — 267 cases. `make mutation` gates in one direction only: a count that FALLS, because cases disappear silently and the suite still says ok. No target number, since there is no correct one. Proven by deleting a case: `FELL template-digest-selftest.sh 8 -> 7`. Producing it also found that three selftests ended with a bare "ok" that reads identically over sixty-five cases and over zero. | closed | — |
 | fuzz coverage of decode boundaries | the parsers are `grep`/`awk`/PyYAML over repo-controlled files; no untrusted input crosses a boundary | not applicable — property named | — |
 | failure-mode matrix completeness | 14/14, 0 blocked | none | — |
 | integration fidelity | install.sh e2e against a real filesystem ✓; template instantiation ✗ | see dimension 5 | high |
@@ -77,7 +77,12 @@ not a legal state.
 - **high (0).** Both of this report's original high rows — no template instantiation (dim 5) and no secret scanning (dim 9) — are closed by the change this report ships with, and the rows above say so rather than describing the repo as it was an hour earlier. A gap report that contradicts its own commit is worse than none: a reader either redoes closed work or trusts that a blocking gate is missing.
 - **med (1 remaining):** the three invariants in `.prod/ratify-queue/` are still `PENDING-HUMAN` (3), and ratification is not an agent's to perform — "what must never happen" is the one thing an inventory cannot infer. Everything else med is closed: evidence record (11), reverse policy check (19), tool pinning (23), producer-side breaking-change detection (14), and a pinnable template version (21). The forge query became an OPEN decision rather than an unknown.
 - **open (1), and it is the owner's to make:** the forge requires no status check on `master` (measured, not assumed — see the row above). Making the gates blocking at the forge means branch protection, and branch protection is incompatible with the direct-push-to-master workflow authorized on 2026-08-29. Both are defensible; only one person gets to pick, and it is not the agent that noticed.
-- **low (2):** coverage number, mutation baseline. (shellcheck's warning tier closed: classified, emptied, and the gate raised to it.) (Runbook closed: `RUNBOOK.md`.) (The GREPQ advisories under SAST are resolved — see dim 18.) (Gate-runtime baseline closed: `benchmarks/gate-runtime.md`.)
+- **low (0).** Every low row is closed or declined with a property: shellcheck's
+  warning tier (classified, emptied, and the gate raised to it), the mutation
+  baseline (`benchmarks/mutation-baseline.md`, derived, 267 cases, gated against
+  regression), line coverage (declined — mutation coverage is present and
+  strictly stronger), the runbook (`RUNBOOK.md`), the gate-runtime baseline
+  (`benchmarks/gate-runtime.md`), and the GREPQ advisories under dimension 18.
 - **not applicable (12),** each with the property that produced it.
 
 ## What this report does NOT claim

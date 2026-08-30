@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 08c417e597ef0db3f18e1a6398f983721e15df3770707c5a18d1e0f013bc8d82
-short: 08c417e597ef
+digest: ad38654aa572de798c7dec2fada919d00c06e7fff91e6ee39b930084a7b2a68e
+short: ad38654aa572
 files: 19
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -22,11 +22,11 @@ per_file:
   scripts/no-unfilled-slots.sh: 6c10999877d10ac23003b3314337d7c0d46620a20a3d778f361ea1fdc624dfb8
   scripts/row-vacuity-sweep.sh: 7a666802fdf34995ee308ecbb4e4a793e9bdb2c5b2b6b32967a429a61ae96a68
   scripts/stamp-template-provenance.sh: 1aa855ba28930eecb7bf46bdd424d28167deca356837a9a03249215af82d46d5
-  scripts/tests/check-registries-selftest.sh: db12d993eda7ab8cc4b2705ca7c21ead308b995dd23d5948351161fcf2f8a41d
+  scripts/tests/check-registries-selftest.sh: f3235366ca86906748d2481146606b7a7879f22985eaee5c7e51ae46bdcf541d
   scripts/tests/error-handling-fitness-selftest.sh: 37b2876aea9c242367a9df1ca7f6b544653e2a21c11ebcf354d20044d2067bbb
   scripts/tests/kill-durability-state-selftest.sh: 826ab6f357020d845edb3575a7da6847506e8bcbd2ac43938cbf144c274bb28e
   scripts/tests/load-rows-selftest.sh: bdf8b5e22570884769e1765c2ccbb5fd0ac5e137964a8f91c30ea00b1298b198
-  scripts/tests/non-vacuity-selftest.sh: 5b8ed57af31a342b23dd5096584868a6b4fd26c06559b55b8b912f24446e1905
+  scripts/tests/non-vacuity-selftest.sh: 9d26436c27bfd7bac1fb2b3000cd1297e46f3cee759864ecc303e05c4de339d0
   scripts/tests/probe-self-gate-selftest.sh: cee9417e48c2d910a054ca37574cc95debc2c3c52dc29e0c312aa93f9ae415c9
-  scripts/tests/sbom-ordering-selftest.sh: a519d18f845f885ee9174c7a1759b2781e5cc1d041c07eb189861642110d6e7d
+  scripts/tests/sbom-ordering-selftest.sh: 9ca6a2eff6c60a007525d0d9ec5a691fa8b5c9cdacfbb2d9afef4387494e8af3
   scripts/verify-standard.sh: 2a6b0de93efc8e2a0a249f0d107dde2801acf4fa966e4a1d1a6b9916802b66f3

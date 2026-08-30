@@ -22,6 +22,13 @@
 # The fixtures are the JSON the yq stage emits (`<file>\t<json>`), so these
 # cases need no yq and no workflow trees, and they run anywhere python3 does.
 set -uo pipefail
+
+# CASES counts what actually RAN. Until 2026-08-30 this suite ended with a bare
+# "ok", which prints identically over sixty-five cases and over zero -- the
+# checked-and-none vs nothing-checked confusion this repo refuses everywhere
+# else, sitting in its own verifier. Found while deriving a mutation baseline
+# from these counts: three suites had none to give.
+CASES=0
 # Guarded: an unguarded cd here would leave the selftest running in whatever
 # directory the caller happened to be in, and every case below resolves its
 # subject relative to the repo root.
@@ -88,6 +95,7 @@ SBOM_DELETES_FIXTURE="image-push.yaml:svc"
 
 # run_case <name> <expected-substring> <stdin-lines>
 run_case() {
+  CASES=$((CASES+1))
   local name="$1" want="$2" input="$3" got
   got="$(printf '%s\n' "$input" \
     | PROD_SBOM_CONSUMES="$SBOM_CONSUMES_FIXTURE" \
@@ -160,6 +168,7 @@ pr.yaml	${ORDERED}"
 # probe was never taught to classify. A repo of plain inline jobs with no SBOM
 # at all is perfectly knowable, and must still FAIL.
 run_case_nomap() {
+  CASES=$((CASES+1))
   local name="$1" want="$2" input="$3" got
   got="$(printf '%s\n' "$input" | env -u PROD_SBOM_CONSUMES -u PROD_SBOM_DELETES python3 -c "$prog" 2>&1)"
   if [[ "$got" == *"$want"* ]]; then
@@ -182,5 +191,5 @@ if (( fails != 0 )); then
   echo "sbom-ordering selftest: ${fails} case(s) failed" >&2
   exit 1
 fi
-echo "sbom-ordering selftest: ok"
+echo "sbom-ordering selftest: ok -- $CASES case(s)"
 exit 0

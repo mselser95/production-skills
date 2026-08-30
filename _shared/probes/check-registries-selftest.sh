@@ -37,6 +37,13 @@
 # Exit:  0 all cases behaved; 1 a case did not.
 
 set -uo pipefail
+
+# CASES counts what actually RAN. Until 2026-08-30 this suite ended with a bare
+# "ok", which prints identically over sixty-five cases and over zero -- the
+# checked-and-none vs nothing-checked confusion this repo refuses everywhere
+# else, sitting in its own verifier. Found while deriving a mutation baseline
+# from these counts: three suites had none to give.
+CASES=0
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
 
 # RESOLVE THE TARGET IN EITHER LAYOUT (added 2026-08-29).
@@ -69,6 +76,7 @@ fails=0
 # gate" had no case in the selftest that exists to verify exactly this parser.
 # A guard whose own selftest cannot reach it is the shape this file is for.
 run_empty_case() {
+  CASES=$((CASES+1))
   local name="$1" want_rc="$2" want_substr="$3"
   local dir out rc
 
@@ -93,6 +101,7 @@ run_empty_case() {
 }
 
 run_case() {
+  CASES=$((CASES+1))
   # run_case <name> <fixture-yaml> <expected-exit> <expected-output-substring>
   local name="$1" fixture="$2" want_rc="$3" want_substr="$4"
   local dir out rc
@@ -474,6 +483,7 @@ run_case "control: a tab inside a content line is not indentation" \
 # `printf '%s\n'` always adds one), so this case writes the fixture itself.
 # Reported by fd1az.
 _nonlcase() {
+  CASES=$((CASES+1))
   local d out rc
   d="$(mktemp -d)"
   printf 'entries:\n  - id: sin-newline\n    owner: someone\n    expires: 2020-01-01' > "${d}/waiver.yaml"
@@ -686,6 +696,7 @@ notes: |
 # checked. Reported by agatticelli. run_case writes `fixture.yaml`, so this one
 # builds its own directory to control the extension.
 _ymlcase() {
+  CASES=$((CASES+1))
   _d="$(mktemp -d)"
   printf '%s\n' "entries:
   - id: short-extension
@@ -998,5 +1009,5 @@ if [[ "$fails" -ne 0 ]]; then
   echo "check-registries selftest: ${fails} case(s) failed" >&2
   exit 1
 fi
-echo "check-registries selftest: ok"
+echo "check-registries selftest: ok -- $CASES case(s)"
 exit 0
