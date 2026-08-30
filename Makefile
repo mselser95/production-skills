@@ -25,13 +25,14 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
 	@echo "verify      check-fast + every probe selftest + TCB verification"
 	@echo "selftests   the probe selftests only"
 	@echo "evidence    run every gate and write .prod/evidence/<sha>.json (dimension 11)"
+	@echo "template-digest  recompute prod-new/TEMPLATE-DIGEST after a reviewed template change"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates
@@ -98,6 +99,12 @@ gates:
 # and instantiate-template.sh are gates by any reasonable reading, and they lived
 # outside the only check that asks whether a gate is driven.
 	@bash $(PROBES)/probe-wiring.sh scripts
+# The vended template's VERSION, and the producer side of the drift question.
+# check-template-drift.sh runs in the SCAFFOLDED repo and answers "am I behind?";
+# this runs here, where the template actually moves, and refuses to let the vended
+# surface change without the digest being updated in the same commit. Downstream
+# repos pin that digest, so a silent change is a silent divergence in every one.
+	@bash scripts/template-digest.sh
 
 # ---- the full gate --------------------------------------------------------
 verify: check-fast selftests tcb
@@ -148,3 +155,9 @@ tcb:
 # and must never be produced from an unclean tree.
 evidence:
 	@bash scripts/evidence-record.sh
+
+# Regenerating is a deliberate act, never part of a gate run. A digest recomputed
+# automatically would certify whatever happened to be on disk -- which is exactly
+# the "re-stamp to silence the report" failure the provenance file warns about.
+template-digest:
+	@bash scripts/template-digest.sh --write

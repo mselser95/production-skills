@@ -23,6 +23,20 @@ VENDORED=(
   scripts/check-template-drift.sh
   scripts/row-vacuity-sweep.sh
   scripts/no-unfilled-slots.sh
+  scripts/coverage.sh
+  scripts/changed-line-coverage.sh
+  # The stamper itself. Added 2026-08-30, and its absence was the sharpest
+  # instance of the shape this file's header warns about: the script that
+  # RECORDS which files came from the standard was not among them, so an edit
+  # to it drifted invisibly in every scaffolded repo. Found by the new
+  # producer-side digest reporting "in step" after this very file was edited.
+  scripts/stamp-template-provenance.sh
+  # DELIBERATELY NOT LISTED: scripts/coverage-floors.txt. Its own header says
+  # "generated from the measured per-package coverage on the scaffold's first
+  # run" -- it is per-repo DATA, not a framework artifact, and listing it would
+  # produce permanent false drift in every repo that ever raises a floor. That
+  # is the failure mode this list's header names; recording the exclusion here
+  # so the next reader does not "fix" the omission.
   scripts/tests/non-vacuity-selftest.sh
   scripts/tests/sbom-ordering-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh
@@ -36,7 +50,29 @@ VENDORED=(
 mkdir -p .prod
 out=".prod/template-provenance.yaml"
 TPL="${TEMPLATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/template}"
-src_commit="$(git -C "${TEMPLATE_SRC:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# THE VERSION IS READ FROM A FILE, not resolved with git, and the previous
+# version of this line is why. It ran
+#   git -C ${CLAUDE_CONFIG_DIR}/skills/prod-new rev-parse --short HEAD
+# against a directory install.sh produces by COPYING files. It is not a git work
+# tree and never was, so `git rev-parse` failed every single time and this field
+# recorded `production-skills@unknown` in every scaffold ever stamped. Measured
+# 2026-08-30: `fatal: not a git repository`. A version field that always says
+# `unknown` is worse than an absent one -- it looks answered.
+#
+# TEMPLATE-DIGEST sits beside the template inside the prod-new skill, so
+# install.sh copies it like everything else and it is readable wherever the
+# template is. It is a content hash over the vendored set, which means it cannot
+# go stale the way a hand-bumped number does.
+_digest_file="${TEMPLATE_DIGEST_FILE:-$TPL/../TEMPLATE-DIGEST}"
+if [[ -r "$_digest_file" ]]; then
+  src_commit="$(awk '/^short:/{print $2}' "$_digest_file")"
+  [[ -n "$src_commit" ]] || src_commit="unreadable-digest"
+else
+  # NOT "unknown". The two states are different and the reader needs to tell
+  # them apart: this one means the template was installed without its digest,
+  # which is a broken install rather than an old one.
+  src_commit="no-digest-beside-template"
+fi
 
 {
   printf '# Scaffold provenance — which files this repo VENDORED from the standard,\n'

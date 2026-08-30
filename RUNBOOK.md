@@ -42,6 +42,30 @@ is a document that looks like a gate. Three things it will tell you about:
 Give it a `*-selftest.sh` next to it. `make selftests` globs them, so it needs no
 registration anywhere — and CI runs `make selftests` for exactly that reason.
 
+## Changing the template blocks your commit until you say so
+
+`make check-fast` — what the pre-commit hook runs — includes
+`scripts/template-digest.sh`, and it fails when any of the 16 vendored files
+moves without `prod-new/TEMPLATE-DIGEST` moving with it. That is deliberate:
+every repo scaffolded from the previous template is now behind, and the change
+should be acknowledged by the person making it rather than discovered by whoever
+scaffolds next.
+
+```
+make template-digest      # recompute, then commit it alongside the change
+```
+
+The gate names which files changed and how their hashes moved, so the commit
+message can say what downstream repos have to do about it. **Never** regenerate
+the digest to make the red go away without reading what it lists — a digest
+taken to silence the report certifies a template nobody checked, which is the
+same failure the provenance file warns about for re-stamping.
+
+The digest is also the VERSION consumers pin: a scaffolded repo records
+`stamped_from: production-skills@<short digest>`. It used to record `unknown` —
+always, because the resolver ran `git rev-parse` inside the installed skill
+directory, which install.sh produces by copying and is not a git work tree.
+
 ## Two config dirs, and both must be installed
 
 `~/.claude-clc` and `~/.claude` each carry their own copy and manifest. Installing
