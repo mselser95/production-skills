@@ -125,6 +125,11 @@ gates:
 # surface change without the digest being updated in the same commit. Downstream
 # repos pin that digest, so a silent change is a silent divergence in every one.
 	@bash scripts/template-digest.sh
+# The gap report is the document this whole bootstrap produces, and its summary
+# is what gets read. It said high(0) while two high rows sat in a second table
+# nobody had updated, and one of them hid a genuinely open item. The numbers are
+# derived from the tables now and compared to what the prose claims.
+	@bash scripts/gap-report-consistency.sh
 
 # ---- the full gate --------------------------------------------------------
 verify: check-fast selftests tcb mutation

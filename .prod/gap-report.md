@@ -25,11 +25,11 @@ not a legal state.
 | 2 | Correctness — fault sensitivity | race detector / TSan equivalent | not applicable: no concurrent execution path exists. `install.sh` and every probe are single-process and sequential; there is no second thread for a detector to observe. | none | — |
 | 3 | Invariants and properties | ratified, provably non-vacuous | 3 invariants PROPOSED in `.prod/ratify-queue/`, each `PENDING-HUMAN` with a `non_vacuity_check` whose mutation was RUN, not written. `verification/ratified/` is deliberately empty — bootstrap never writes it. | **ratification is unfinished, and only a human can finish it** | med |
 | 4 | Scenarios — failure-mode matrix | real denominator, no `blocked` rows | `.prod/failure-modes.md`: 14 rows = 2 capabilities × the 7 scenarios `source_of_truth` declares. 6 tested with quoted output, 8 not-applicable with properties, **0 blocked, 0 untested**. | none | — |
-| 5 | Integration and contracts | the real-dependency lane actually RUN | `install.sh` e2e in CI against a throwaway config dir, **plus a `scaffold` job added in this change** that instantiates the template (contents AND paths), builds it, stamps provenance and runs the scaffold's own `make check-fast`. Measured by hand first: a correct instantiation reaches check-fast rc 0 and `verify-standard` PASS 64 / FAIL 3 / NA 18, all three FAILs being prod-new Phase-3 steps a machine cannot do — which is why the job gates on check-fast and not on verify-standard. | closed for check-fast; `verify-standard` on a scaffold is still human-gated by design | low |
-| 6 | Performance and capacity | benchmarks + recorded baselines | not applicable as a request path (see `out_of_scope.load_baseline`: no offered load exists). The real cost is gate runtime, now measured: check-fast 9.9s, of which shellcheck 4.5s after content-dedup (was 29.8s), probes 5.9s. | no recorded baseline file for gate runtime | low |
+| 5 | Integration and contracts | the real-dependency lane actually RUN | `install.sh` e2e in CI against a throwaway config dir, **plus a `scaffold` job added in this change** that instantiates the template (contents AND paths), builds it, stamps provenance and runs the scaffold's own `make check-fast`. Measured by hand first: a correct instantiation reaches check-fast rc 0 and `verify-standard` PASS 64 / FAIL 3 / NA 18, all three FAILs being prod-new Phase-3 steps a machine cannot do — which is why the job gates on check-fast and not on verify-standard. | closed for check-fast; `verify-standard` on a scaffold stays human-gated by design (SLO ratification, hardware-specific load baseline) | — |
+| 6 | Performance and capacity | benchmarks + recorded baselines | not applicable as a request path (see `out_of_scope.load_baseline`: no offered load exists). The real cost is gate runtime, now measured: check-fast 9.9s, of which shellcheck 4.5s after content-dedup (was 29.8s), probes 5.9s. | closed — `benchmarks/gate-runtime.md` | — |
 | 7 | Resilience and recovery | recovery tested, not asserted | `--verify` now has three distinct exit codes (1 drift / 2 stale / 3 writable), each proven red-then-green by mutation. Restore = clone, tested: a fresh clone reinstalls to a byte-identical 309-file manifest. | none | — |
 | 8 | Observability | metrics/spans contracts checked in CI; tracing wired in `cmd/` | not applicable: nothing here is deployed, so there is no running process to emit a series or a span. The gates' own output is the observability surface, and every failure branch names the FILES rather than a count — checked today for drift, staleness, writability and staleness-mapping. | none | — |
-| 9 | Security | govulncheck blocking, secret scanning every trigger, SBOM, provenance | `govulncheck`/`gosec` are Go-bound and this repo has no Go (gosec IS wired, blocking and pinned `v2.21.4`, in the template it vends). **Secret scanning was absent until this change** and is now a BLOCKING step: gitleaks pinned `v8.21.2` over full history (`fetch-depth: 0`, without which it would scan one commit and report clean). Proven non-vacuous — and the first attempt was a false negative worth keeping: AWS's own documentation keys are allowlisted, so they found nothing; non-allowlisted keys found 2. | no SBOM or build provenance for this repo's own artifacts | med |
+| 9 | Security | govulncheck blocking, secret scanning every trigger, SBOM, provenance | `govulncheck`/`gosec` are Go-bound and this repo has no Go (gosec IS wired, blocking and pinned `v2.21.4`, in the template it vends). **Secret scanning was absent until this change** and is now a BLOCKING step: gitleaks pinned `v8.21.2` over full history (`fetch-depth: 0`, without which it would scan one commit and report clean). Proven non-vacuous — and the first attempt was a false negative worth keeping: AWS's own documentation keys are allowlisted, so they found nothing; non-allowlisted keys found 2. | **declined with the property.** This repo produces no build artifact: `install.sh` copies files that are already in git, and `prod-skills.manifest` lists every distributed file with its sha256 and is verified on demand. That IS the inventory an SBOM of this artifact would contain, and it is checked rather than published. LAPSES the moment anything here is compiled, packaged, or published to a registry. | — |
 | 10 | Deployability and operability | runbook, required contexts, reconcilers | not deployed. `RUNBOOK.md` now carries what the failure MESSAGES cannot: that the gate is `make verify` and never `verify-standard.sh`, what each of `--verify`'s three exit codes means and which one you will actually hit, how to add a probe without `probe-wiring` failing your commit, that both config dirs must be reinstalled, and what is NOT enforced at the forge. It deliberately does not repeat the messages. | closed | — |
 | 11 | Reproducibility | per-commit evidence record from CI on a clean tree | **closed.** `scripts/evidence-record.sh` + `make evidence` record all 9 gates with each one's own summary line, and CI runs it last (on a clean tree, so the file is named `<sha>.json` and IS an attestation) and uploads it as an artifact — not committed, because this workflow holds `contents: read` and a record is not worth granting write access to master. Filename discipline inherited deliberately: a dirty tree yields `dirty-<sha>-<ts>.json` + `tree_clean:false`, gitignored. Proven it cannot lie: an injected policy key produced `pass:7 fail:2` and exit 1, with both failures named. | closed | — |
 | 12 | Scalability | vertical/horizontal headroom | not applicable: no request path and no instance count. The only quantity that grows is repo size, and the gates are linear in it. | none | — |
@@ -59,13 +59,13 @@ not a legal state.
 | mutation baseline | **closed.** `benchmarks/mutation-baseline.md`, DERIVED by running all ten selftests rather than typed — 267 cases. `make mutation` gates in one direction only: a count that FALLS, because cases disappear silently and the suite still says ok. No target number, since there is no correct one. Proven by deleting a case: `FELL template-digest-selftest.sh 8 -> 7`. Producing it also found that three selftests ended with a bare "ok" that reads identically over sixty-five cases and over zero. | closed | — |
 | fuzz coverage of decode boundaries | the parsers are `grep`/`awk`/PyYAML over repo-controlled files; no untrusted input crosses a boundary | not applicable — property named | — |
 | failure-mode matrix completeness | 14/14, 0 blocked | none | — |
-| integration fidelity | install.sh e2e against a real filesystem ✓; template instantiation ✗ | see dimension 5 | high |
-| compatibility / breaking change | see dimensions 14, 19, 21 | one-directional | med |
-| benchmark baseline + capacity margin | 7 committed scorecards, all 10–12 days older than the SKILL.md they score; `benchmark-currency.sh` reports this ADVISORY in CI | stale by design (refresh needs credentials CI lacks) | low |
+| integration fidelity | install.sh e2e against a real filesystem, PLUS the `scaffold` CI job that instantiates the template, builds it and runs its own check-fast | closed (see dim 5) | — |
+| compatibility / breaking change | producer side (`template-digest.sh`) and consumer side (`check-template-drift.sh`) both exist; the policy check now runs in both directions | closed (see dims 14, 19, 21) | — |
+| benchmark baseline + capacity margin | 7 committed scorecards, all 10–12 days older than the SKILL.md they score; `benchmark-currency.sh` runs ADVISORY in CI on every PR and names each stale one | **blocked on a credential, not on effort** — refreshing needs Codex credentials CI does not hold, and a step that fails until someone supplies a secret it cannot supply is a step people delete, so it reports into the log instead | blocked |
 | recovery / reconciliation / restore | restore tested (clone → identical manifest); reconciliation declined with property | none | — |
 | observability contract | see dimension 8 | none | — |
-| supply-chain gates | SBOM ordering selftest ✓ (for the template); secret scanning ✗; provenance/attestation ✗ | see dimension 9 | high |
-| delivery / rollback / runbooks | declined with property (dimension 17) | no runbook (dimension 10) | low |
+| supply-chain gates | secret scanning ✓ (gitleaks v8.21.2, blocking, full history); SBOM ordering selftest ✓ for the template; **no SBOM or build provenance for THIS repo's own artifacts** — and this repo ships no build artifact, only files install.sh copies, so what an SBOM would describe is the git tree itself | declined with the property — see dimension 9: the TCB manifest is this artifact's inventory, hash-verified | — |
+| delivery / rollback / runbooks | delivery declined with its property (dim 17); `RUNBOOK.md` written, carrying what the failure messages cannot say | closed | — |
 | **BLOCKING gates whose check context is in the forge's REQUIRED list** | **ANSWERED, and the answer is none.** Queried the forge directly on 2026-08-29: `branches/master/protection` → `Branch not protected` (404), and both `rulesets` and `rules/branches/master` → `[]`. So NO check is required by the forge, and "blocking" here means "the workflow goes red and a human reads it", not "the forge refuses the change". | **a decision for the owner, not a defect to fix silently** — required status checks and the direct-push-to-master workflow authorized on 2026-08-29 are mutually exclusive; enabling protection would break the workflow he chose | open |
 | declared surfaces no reconciler applies | none declared | not applicable | — |
 | declared backends with no producer | none declared | not applicable | — |
@@ -74,16 +74,38 @@ not a legal state.
 
 ## Severity summary
 
-- **high (0).** Both of this report's original high rows — no template instantiation (dim 5) and no secret scanning (dim 9) — are closed by the change this report ships with, and the rows above say so rather than describing the repo as it was an hour earlier. A gap report that contradicts its own commit is worse than none: a reader either redoes closed work or trusts that a blocking gate is missing.
-- **med (1 remaining):** the three invariants in `.prod/ratify-queue/` are still `PENDING-HUMAN` (3), and ratification is not an agent's to perform — "what must never happen" is the one thing an inventory cannot infer. Everything else med is closed: evidence record (11), reverse policy check (19), tool pinning (23), producer-side breaking-change detection (14), and a pinnable template version (21). The forge query became an OPEN decision rather than an unknown.
-- **open (1), and it is the owner's to make:** the forge requires no status check on `master` (measured, not assumed — see the row above). Making the gates blocking at the forge means branch protection, and branch protection is incompatible with the direct-push-to-master workflow authorized on 2026-08-29. Both are defensible; only one person gets to pick, and it is not the agent that noticed.
+Counts below are checked against the tables by `scripts/gap-report-consistency.sh`,
+which is wired into `make gates`. They were wrong once — the summary claimed
+`high (0)` while two `high` rows were still sitting in the second table — and a
+report that misstates its own gaps is read as the answer.
+
+- **high (0).** Both original high rows are closed: the `scaffold` CI job now
+  instantiates the template and runs its gates (dim 5), and secret scanning is a
+  blocking step (dim 9).
+- **med (1), and it is not an agent's to close.** The three invariants in
+  `.prod/ratify-queue/` are `PENDING-HUMAN`. `verification/ratified/` stays empty
+  by design: "what must never happen" is the one thing an inventory cannot infer,
+  and a seed list accepted by silence would put the framework's most load-bearing
+  artifact into the spec on the strength of nobody objecting.
 - **low (0).** Every low row is closed or declined with a property: shellcheck's
   warning tier (classified, emptied, and the gate raised to it), the mutation
   baseline (`benchmarks/mutation-baseline.md`, derived, 267 cases, gated against
   regression), line coverage (declined — mutation coverage is present and
-  strictly stronger), the runbook (`RUNBOOK.md`), the gate-runtime baseline
-  (`benchmarks/gate-runtime.md`), and the GREPQ advisories under dimension 18.
-- **not applicable (12),** each with the property that produced it.
+  strictly stronger), the runbook, the gate-runtime baseline, the GREPQ
+  advisories, and SBOM/provenance (declined — this repo produces no build
+  artifact, and the TCB manifest is the hash-verified inventory an SBOM of it
+  would contain).
+- **blocked (1), on a credential rather than on effort.** The seven benchmark
+  scorecards are 10–12 days older than the skills they score.
+  `benchmark-currency.sh` reports this advisory in CI on every PR and names each
+  one; refreshing needs Codex credentials CI does not hold.
+- **open (1), and it is the owner's to make:** the forge requires no status check
+  on `master` (measured, not assumed). Making the gates blocking at the forge
+  means branch protection, and that is incompatible with the direct-push-to-master
+  workflow authorized on 2026-08-29. Both are defensible; only one person gets to
+  pick, and it is not the agent that noticed.
+- **closed or not-applicable (40),** each not-applicable naming the property that
+  produced it rather than the word "N/A".
 
 ## What this report does NOT claim
 
