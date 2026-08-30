@@ -40,10 +40,39 @@ GATES=(
   "row-vacuity|bash _shared/probes/row-vacuity-sweep.sh"
   "liability-registries|bash _shared/probes/check-registries.sh"
   "gates-are-driven|bash _shared/probes/probe-wiring.sh"
+  "gates-are-driven-scripts|bash _shared/probes/probe-wiring.sh scripts"
+  "template-version|bash scripts/template-digest.sh"
   "probe-selftests|make --no-print-directory selftests"
   "tcb-integrity|bash install.sh --verify"
 )
 (( ${#GATES[@]} > 0 )) || { echo "evidence-record: ZERO gates declared -- a record over nothing attests nothing" >&2; exit 2; }
+
+# THE LIST ABOVE IS THIS RECORD'S DENOMINATOR, so it is cross-checked against the
+# Makefile rather than trusted. It rotted on its first day: `template-digest.sh`
+# was wired into `make gates` and this array still had nine entries, so the
+# artifact said "9/9 gates passed" over a repo with ten. A record that reports a
+# clean total while silently covering less than the repo runs is the exact defect
+# every probe here exists to refuse, and it was in the recorder itself.
+#
+# Compare by script basename: anything `make gates` executes must appear in some
+# gate command above. Makefile-internal targets (lint, actionlint, selftests) are
+# covered by their own entries and are not script invocations, so they are not
+# part of this comparison.
+if [[ -r Makefile ]]; then
+  uncovered=()
+  while IFS= read -r probe; do
+    [[ -n "$probe" ]] || continue
+    printf '%s\n' "${GATES[@]}" | grep -qF "$probe" || uncovered+=("$probe")
+  done < <(sed -n '/^gates:/,/^$/p' Makefile | grep -vE '^[[:space:]]*#' \
+             | grep -oE '[A-Za-z0-9_./$()-]+\.sh' | sed 's|.*/||' | sort -u)
+  if (( ${#uncovered[@]} > 0 )); then
+    echo "evidence-record: ${#uncovered[@]} gate(s) run by \`make gates\` are absent from this script's GATES list:" >&2
+    printf '  uncovered: %s\n' "${uncovered[@]}" >&2
+    echo "  The record would report a clean total while measuring less than the repo runs." >&2
+    echo "  Add them to GATES, or the attestation is narrower than it looks." >&2
+    exit 2
+  fi
+fi
 
 jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'; }
 
