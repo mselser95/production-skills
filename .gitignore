@@ -8,6 +8,15 @@ node_modules/
 # transient worktrees (one already leaked in as a gitlink once)
 .wt/
 
-# Local runs on a dirty tree produce records that are explicitly NOT attestations
-# (tree_clean:false). Only the clean-tree <sha>.json records CI writes belong in git.
-.prod/evidence/dirty-*.json
+# EVIDENCE RECORDS ARE NOT COMMITTED, in either shape, and the reason is what an
+# attestation is for. A record made on a developer machine attests to whatever
+# tools happened to be installed there; it is a convenience for the person who
+# ran it, not something a third party can rely on. The durable record is the one
+# CI writes on a clean tree and uploads as an artifact, whose provenance is the
+# run that produced it.
+#
+# Committing them would also lag by one: the record for commit N can only exist
+# after N does, so it would always land in N+1 and describe its parent.
+#
+# See .prod/evidence/README.md.
+.prod/evidence/*.json

@@ -33,20 +33,41 @@ command -v python3 >/dev/null || { echo "evidence-record: python3 required for J
 # denominator: a gate missing from here is a dimension the record silently does
 # not cover, so it is written once, next to the Makefile targets it mirrors.
 GATES=(
-  "ci-workflows-valid|make actionlint"
-  "shell-correctness|make lint"
+  "ci-workflows-valid|make --no-print-directory actionlint"
+  "shell-correctness|make --no-print-directory lint"
   "skills-structural|bash _shared/probes/skills-static.sh"
   "policy-coverage|bash _shared/probes/policy-coverage.sh"
   "row-vacuity|bash _shared/probes/row-vacuity-sweep.sh"
   "liability-registries|bash _shared/probes/check-registries.sh"
   "gates-are-driven|bash _shared/probes/probe-wiring.sh"
-  "probe-selftests|make selftests"
+  "probe-selftests|make --no-print-directory selftests"
   "tcb-integrity|bash install.sh --verify"
 )
 (( ${#GATES[@]} > 0 )) || { echo "evidence-record: ZERO gates declared -- a record over nothing attests nothing" >&2; exit 2; }
 
+jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'; }
+
 sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+# WHAT is dirty, not just THAT it is. The first version recorded a bare
+# tree_clean:false, and the CI run that produced it was unactionable: the record
+# said the attestation was void and gave nobody a way to find out why. Measured
+# 2026-08-29 on run 33284769197 -- a fresh CI checkout produced
+# dirty-d480857-*.json and there was no way to tell from the artifact what had
+# touched the tree.
+# .prod/evidence is EXCLUDED from the cleanliness question, and that is not a
+# convenience. It is this script's own output directory: gitignored, created by
+# this run, and present precisely because the record is being written. Letting it
+# count means the record's existence is what voids the record -- the second
+# invocation could never produce an attestation, and the first only by accident.
+# Reproduced locally: with the tree otherwise clean, `git status --porcelain`
+# returned exactly `?? .prod/evidence/`.
+#
+# Everything else still counts, and is NAMED in the record: a bare
+# tree_clean:false says the attestation is void and gives nobody a way to find
+# out why. Measured 2026-08-29 on CI run 33284769197, whose artifact was
+# dirty-d480857-*.json from a fresh checkout with no way to tell what touched it.
+dirty_paths=$(git status --porcelain 2>/dev/null | grep -vE '^\?\? \.prod/evidence/?$' | head -20)
+if [[ -n "$dirty_paths" ]]; then
   tree_clean=false
   record=".prod/evidence/dirty-${sha}-$(date -u +%Y%m%dT%H%M%SZ).json"
 else
@@ -54,8 +75,6 @@ else
   record=".prod/evidence/$sha.json"
 fi
 mkdir -p .prod/evidence || exit 2
-
-jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'; }
 
 passes=0; fails=0
 declare -a LINES=()
@@ -73,7 +92,21 @@ for g in "${GATES[@]}"; do
   # attestation, so a gate that prints nothing on success is a gate to invoke
   # through its Makefile target instead -- `make actionlint` says "workflows
   # valid", bare actionlint says nothing at all.
-  ev=$(printf '%s\n' "$out" | grep -vE '^[[:space:]]*$|^[[:space:]]+' | tail -1)
+  # make's own recursion chatter is filtered as well as suppressed. CI runs GNU
+  # make 4.x, which prints `make[1]: Entering/Leaving directory '...'` around
+  # every sub-make; those lines are unindented, so the rule above picked THEM as
+  # the summary. Measured on run 33284769197: three of nine gates recorded
+  # "make[1]: Leaving directory '/home/runner/work/production-skills/...'" as
+  # their evidence -- the record failing at its one job while the step showed
+  # green.
+  #
+  # --no-print-directory is passed to those gates too, but it is not enough on
+  # its own to rely on: macOS ships GNU make 3.81, which does not emit the lines
+  # at all, so the flag's effect CANNOT be observed on the machine this was
+  # written on. A filter can be, and is, below.
+  ev=$(printf '%s\n' "$out" \
+        | grep -vE "^make(\\[[0-9]+\\])?: (Entering|Leaving) directory" \
+        | grep -vE '^[[:space:]]*$|^[[:space:]]+' | tail -1)
   [[ -n "$ev" ]] || ev=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
   [[ -n "$ev" ]] || ev="(gate produced no output; verdict from exit code $rc alone)"
   if (( rc == 0 )); then verdict=PASS; passes=$((passes+1)); else verdict=FAIL; fails=$((fails+1)); fi
@@ -84,6 +117,7 @@ done
 {
   printf '{\n  "commit": "%s",\n' "$sha"
   printf '  "tree_clean": %s,\n' "$tree_clean"
+  printf '  "dirty_paths": %s,\n' "$(jstr "$dirty_paths")"
   printf '  "generated_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "spec": "production.yaml",\n'
   printf '  "tier": "%s",\n' "$(grep -m1 -E '^[[:space:]]*tier:' production.yaml 2>/dev/null | tr -d ' ' | cut -d: -f2)"
