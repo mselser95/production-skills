@@ -53,6 +53,7 @@ not a legal state.
 
 | row | state | gap | sev |
 |---|---|---|---|
+| gate-runtime baseline | `benchmarks/gate-runtime.md`, measured 2026-08-29 over 3 runs each: check-fast 10.4/10.1/10.3s (the hook's budget), lint 4.5s after content-dedup took it from 29.8s, selftests 12.5s. SIGNAL, never a gate — a wall-clock number on one laptop cannot be a threshold. | closed | — |
 | coverage today vs tier signal | no coverage instrument exists for shell; the 6 selftests are the unit tests | no coverage number at all | low |
 | tests/prod LOC ratio (informational) | 6 selftests + 13 skills-static fixtures against 62 scripts | informational only | — |
 | mutation baseline | no artifact; mutation is applied MANUALLY and universally (72/72 probe rows, 4 Makefile targets, 3 install.sh branches today) | no recorded baseline to trend | low |
@@ -76,7 +77,7 @@ not a legal state.
 - **high (0).** Both of this report's original high rows — no template instantiation (dim 5) and no secret scanning (dim 9) — are closed by the change this report ships with, and the rows above say so rather than describing the repo as it was an hour earlier. A gap report that contradicts its own commit is worse than none: a reader either redoes closed work or trusts that a blocking gate is missing.
 - **med (3 remaining):** producer-side breaking-change check for the template (14); no template VERSION for consumers to pin (21); invariant ratification pending (3). Four med rows closed in the second pass — evidence record (11), reverse policy check (19), tool pinning (23), and the forge query (now an OPEN decision rather than an unknown).
 - **open (1), and it is the owner's to make:** the forge requires no status check on `master` (measured, not assumed — see the row above). Making the gates blocking at the forge means branch protection, and branch protection is incompatible with the direct-push-to-master workflow authorized on 2026-08-29. Both are defensible; only one person gets to pick, and it is not the agent that noticed.
-- **low (5):** gate-runtime baseline, runbook, SAST warnings, coverage, mutation baseline.
+- **low (4):** runbook, SAST warnings, coverage, mutation baseline. (Gate-runtime baseline closed: `benchmarks/gate-runtime.md`.)
 - **not applicable (12),** each with the property that produced it.
 
 ## What this report does NOT claim

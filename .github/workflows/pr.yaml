@@ -233,14 +233,21 @@ jobs:
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/cfg
         run: |
           printf '\n<!-- ci staleness mutation -->\n' >> prod-ops/SKILL.md
-          if bash install.sh --verify > out.txt 2>&1; then
+          # Into RUNNER_TEMP, not the repo root. This step wrote ./out.txt and never
+          # removed it, so every run left a stray file at the top of the tree --
+          # found because the evidence record started NAMING what made the tree
+          # dirty and reported `?? out.txt` on run 33285082743. A scratch file at
+          # the repo root is one careless `git add -A` from being committed, which
+          # has happened here before.
+          out="$RUNNER_TEMP/verify-mutation.txt"
+          if bash install.sh --verify > "$out" 2>&1; then
             echo "FAIL: --verify reported success with a stale source file" >&2
-            cat out.txt >&2
+            cat "$out" >&2
             exit 1
           fi
-          grep -q "stale: prod-ops/SKILL.md" out.txt || {
+          grep -q "stale: prod-ops/SKILL.md" "$out" || {
             echo "FAIL: --verify went red but did not NAME the stale file" >&2
-            cat out.txt >&2
+            cat "$out" >&2
             exit 1
           }
           git checkout -- prod-ops/SKILL.md
