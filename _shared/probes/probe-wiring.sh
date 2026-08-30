@@ -53,6 +53,9 @@ fi
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
 
 PROBE_DIR="${1:-_shared/probes}"
+PROBE_DIR="${PROBE_DIR%/}"   # `scripts/` and `scripts` must name the same dir;
+                             # find would otherwise emit `scripts//x.sh` and no
+                             # exception key could ever match it.
 [[ -d "$PROBE_DIR" ]] || { echo "probe-wiring: no $PROBE_DIR -- nothing to check, which is not a pass" >&2; exit 2; }
 
 # The invoker surfaces. A probe is wired if any of these EXECUTES it.
@@ -96,12 +99,24 @@ fi
 # Each entry carries its reason, and an entry naming a probe that no longer
 # exists is an ERROR rather than a no-op: an exception list that can accumulate
 # dead entries eventually excuses something nobody decided to excuse.
+# Keyed by PATH, not basename, and that was a defect found by review on
+# 2026-08-29. With basename keys the staleness check fired for ANY directory
+# this probe was pointed at: `probe-wiring.sh scripts/` exited 2 complaining
+# that verify-standard.sh "does not exist in scripts/" -- which is true and not
+# a finding, since that exception was never about scripts/. The tool took a
+# directory argument it could not actually serve.
+#
+# A path key also says which tree the excuse belongs to, so an exception is
+# checked for staleness only when its own directory is the one being scanned.
 declare -A EXCEPT=(
-  [verify-standard.sh]="Go-only probe, refuses to run on this repo (exit 2); executed in scaffolded repos via the template Makefile"
+  [_shared/probes/verify-standard.sh]="Go-only probe, refuses to run on this repo (exit 2); executed in scaffolded repos via the template Makefile"
 )
 for e in "${!EXCEPT[@]}"; do
-  if ! printf '%s\n' "${PROBES[@]}" | grep -qF "/$e"; then
-    echo "probe-wiring: declared exception '$e' names a probe that does not exist in $PROBE_DIR." >&2
+  # Out of scope for this run rather than stale: an exception for another tree
+  # is not an excuse this scan could be honouring.
+  [[ "$(dirname "$e")" == "$PROBE_DIR" ]] || continue
+  if ! printf '%s\n' "${PROBES[@]}" | grep -qxF -- "$e"; then
+    echo "probe-wiring: declared exception '$e' names a probe that does not exist." >&2
     echo "  A stale exception silently excuses a gate nobody decided to excuse. Remove it." >&2
     exit 2
   fi
@@ -136,7 +151,7 @@ glob_covers() { # basename -> 0 if some harvested glob matches it
 orphans=(); wired=0; excused=0
 for p in "${PROBES[@]}"; do
   b=$(basename "$p")
-  if [[ -n "${EXCEPT[$b]:-}" ]]; then
+  if [[ -n "${EXCEPT[$p]:-}" ]]; then
     excused=$((excused + 1))
     continue
   fi
@@ -185,4 +200,9 @@ if (( ${#orphans[@]} > 0 )); then
 fi
 
 echo "probe-wiring: ok -- ${wired} invoked + ${excused} declared-exception of ${#PROBES[@]} probe(s), across ${#SURFACES[@]} surface(s) (comments not counted)"
-for e in "${!EXCEPT[@]}"; do echo "  excused: $e -- ${EXCEPT[$e]}"; done
+# Only the ones this scan could have honoured. Printing an out-of-scope
+# exception makes the report claim an excuse it never applied.
+for e in "${!EXCEPT[@]}"; do
+  [[ "$(dirname "$e")" == "$PROBE_DIR" ]] || continue
+  echo "  excused: $e -- ${EXCEPT[$e]}"
+done

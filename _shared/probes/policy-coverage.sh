@@ -97,6 +97,43 @@ rows="$(grep -oE 'row "[a-zA-Z0-9:_ ()-]+"' "$PROBE" | sed 's/row "//;s/"$//' | 
 keys="$(awk '/^defaults: &defaults/{f=1;next} /^tiers:/{f=0} f && /^  [a-z_]+:/{gsub(/:.*/,"");gsub(/ /,"");print}' "$POLICY" | sort -u)"
 [[ -n "$keys" ]] || { echo "policy-coverage: extracted ZERO keys from $POLICY." >&2; exit 2; }
 
+# THE REVERSE DIRECTION, added 2026-08-29. Everything above this point asks
+# "does every policy key have a row?". Nothing asked the opposite: does every
+# entry in the two EXCUSE LISTS still name a key the policy declares?
+#
+# The lists are ALIASES (which key is satisfied by which row names) and
+# KNOWN_UNSCORED (the work list of keys deliberately not scored yet). Both
+# excuse a key from the check above. Delete a key from tier-policy.yaml and its
+# entry stays behind, excusing nothing -- until somebody later adds a key with
+# that name and silently inherits an excuse nobody wrote for it.
+#
+# This is the same defect as a stale declared-exception in probe-wiring.sh, and
+# the same reason it is an ERROR rather than a no-op: a list that can accumulate
+# dead entries eventually excuses something nobody decided to excuse.
+#
+# Measured before wiring: 52 policy keys, 35 alias keys, 0 dead. Adding the check
+# while it is clean is the only cheap moment -- afterwards it cannot go in
+# without a cleanup first, which is how checks like this never get added.
+declare -a DEAD=()
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  ak="${entry%%:*}"
+  grep -qxF -- "$ak" <<<"$keys" || DEAD+=("ALIASES: $ak")
+done <<<"$ALIASES"
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  kk="$(awk '{print $1}' <<<"$entry")"
+  [[ -z "$kk" ]] && continue
+  grep -qxF -- "$kk" <<<"$keys" || DEAD+=("KNOWN_UNSCORED: $kk")
+done <<<"$KNOWN_UNSCORED"
+
+if (( ${#DEAD[@]} > 0 )); then
+  printf '\nSTALE EXCUSES -- entries naming a policy key that no longer exists:\n' >&2
+  for d in "${DEAD[@]}"; do printf '  %s\n' "$d" >&2; done
+  printf '\nEach one excuses a key from the coverage check above, and excuses nothing,\nbecause the key is gone. Remove the entry. Left in place it becomes an excuse\nwaiting for the next key that happens to reuse the name.\n' >&2
+  exit 1
+fi
+
 nkeys=0; nscored=0; nknown=0; nnew=0
 declare -a NEW=()
 while IFS= read -r k; do

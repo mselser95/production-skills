@@ -36,8 +36,35 @@ jobs:
         with:
           fetch-depth: 0
 
+      # PINNED, both of them, as of 2026-08-29. Until today this step accepted
+      # whatever PyYAML the runner image happened to ship and `make lint` used
+      # whatever shellcheck was preinstalled -- so the definition of "green" here
+      # moved whenever GitHub rebuilt its image, in either direction. A linter
+      # that silently stops reporting a class of finding is the worse half: the
+      # build stays green and the coverage shrinks, which is the same
+      # nothing-checked-looks-like-checked-and-none shape every probe in this
+      # repo refuses.
+      #
+      # actionlint (v1.7.7) and gosec (v2.21.4, in the template) were already
+      # pinned; these two were the remaining unpinned tools in the gate path.
       - name: python + PyYAML (skills-static parses frontmatter as real YAML)
-        run: python3 -c "import yaml; print('PyYAML', yaml.__version__)"
+        run: |
+          python3 -m pip install --quiet 'PyYAML==6.0.2'
+          python3 -c "import yaml; print('PyYAML', yaml.__version__)"
+
+      # Installed ahead of PATH so `make lint` picks up the pinned binary rather
+      # than the image's. Verified in the same run by printing the version the
+      # gate will actually use -- installing a pin and then linting with a
+      # different binary is a pin that documents an intention and enforces
+      # nothing.
+      - name: shellcheck (pinned)
+        run: |
+          ver=v0.10.0
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/$ver/shellcheck-$ver.linux.x86_64.tar.xz" \
+            | tar -xJf - -C /tmp
+          sudo install "/tmp/shellcheck-$ver/shellcheck" /usr/local/bin/shellcheck
+          command -v shellcheck
+          shellcheck --version | grep '^version:'
 
       # PROVE THE VERIFIER BEFORE TRUSTING ITS VERDICT.
       #
@@ -218,6 +245,44 @@ jobs:
           }
           git checkout -- prod-ops/SKILL.md
           bash install.sh --verify
+
+      # THE EVIDENCE RECORD (dimension 11, reproducibility), added 2026-08-29.
+      # Every repo scaffolded from prod-new gets one, written by
+      # verify-standard.sh -- which is Go-only and refuses to run here, so this
+      # repo inherited the dimension with its mechanism attached to a probe that
+      # cannot execute, and nothing filled the gap.
+      #
+      # LAST IN THE JOB, and the first draft had it fourth from last, which
+      # would have shipped a permanently red step: `make evidence` includes the
+      # tcb-integrity gate, `install.sh --verify` exits 1 with "no manifest ...
+      # run install.sh first" until the installer has run, and the installer
+      # step came AFTER it. Caught by reading the step order against what the
+      # gate needs, not by CI. It also needs the same CLAUDE_CONFIG_DIR those
+      # steps used, or it verifies a config dir nobody installed into.
+      #
+      # CI's tree is clean, so the record is named <sha>.json and IS an
+      # attestation. It is uploaded rather than committed: this workflow holds
+      # `contents: read`, and a durable record is not worth granting a job write
+      # access to master. The run that produced it is its provenance.
+      #
+      # It re-runs the gates rather than reusing the steps above, deliberately --
+      # a record assembled from another step's exit codes attests to what the
+      # YAML says ran, not to what ran.
+      - name: evidence record (dimension 11)
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/cfg
+        run: |
+          GOBIN="$(go env GOPATH)/bin"
+          export PATH="$GOBIN:$PATH"
+          make evidence
+
+      - name: upload the evidence record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ github.sha }}
+          path: .prod/evidence/*.json
+          if-no-files-found: error
 
   # THE VENDED PRODUCT, BUILT. Added 2026-08-29.
   #

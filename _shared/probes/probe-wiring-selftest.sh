@@ -129,6 +129,25 @@ d=$(fixture globbed_bare 'a.sh' -- a.sh lonely.sh)
 printf '\t@echo $(PROBES)/*.sh\n' >> "$d/Makefile"
 check "a bare *.sh does not excuse an orphan -> 1" 1 "$d" "orphaned: _shared/probes/lonely.sh"
 
+# 12. AN EXCEPTION BELONGS TO A DIRECTORY, and forgetting that made the tool
+#     refuse an argument it advertises. Found by review on 2026-08-29: the
+#     declared exception was keyed by BASENAME, so `probe-wiring.sh scripts`
+#     exited 2 complaining that verify-standard.sh "does not exist in scripts/"
+#     -- true, and not a finding, because that excuse was never about scripts/.
+#     Keys are paths now, and an exception for another tree is out of scope
+#     rather than stale.
+d=$(fixture otherdir a.sh -- a.sh)
+mkdir -p "$d/scripts"
+printf '#!/usr/bin/env bash\necho stub\n' > "$d/scripts/tool.sh"
+printf '\t@bash scripts/tool.sh\n' >> "$d/Makefile"
+out=$( cd "$d" && bash "$PROBE" scripts 2>&1 ); rc=$?
+if (( rc == 0 )) && ! grep -qF "verify-standard.sh" <<<"$out"; then
+  printf '  ok    %-58s\n' "scanning another dir: out-of-scope exception ignored"; ok=$((ok+1))
+else
+  printf '  FAIL  %-58s rc=%s\n' "scanning another dir: out-of-scope exception ignored" "$rc"
+  printf '%s\n' "$out" | sed 's/^/          /'; failed=$((failed+1))
+fi
+
 echo
 echo "$ok ok, $failed failed"
 (( failed == 0 )) || exit 1

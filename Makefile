@@ -25,12 +25,13 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
 	@echo "verify      check-fast + every probe selftest + TCB verification"
 	@echo "selftests   the probe selftests only"
+	@echo "evidence    run every gate and write .prod/evidence/<sha>.json (dimension 11)"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates
@@ -93,6 +94,10 @@ gates:
 	@bash $(PROBES)/row-vacuity-sweep.sh
 	@bash $(PROBES)/check-registries.sh
 	@bash $(PROBES)/probe-wiring.sh
+# scripts/ too, added after review noticed nothing covered it: evidence-record.sh
+# and instantiate-template.sh are gates by any reasonable reading, and they lived
+# outside the only check that asks whether a gate is driven.
+	@bash $(PROBES)/probe-wiring.sh scripts
 
 # ---- the full gate --------------------------------------------------------
 verify: check-fast selftests tcb
@@ -130,3 +135,16 @@ selftests:
 # meaningful if the installed copy is the one they describe.
 tcb:
 	@bash install.sh --verify
+
+# EVIDENCE RECORD (dimension 11, reproducibility). Separate from `verify` on
+# purpose: verify answers "is this tree green right now" and prints to a terminal
+# that scrolls away, while this writes the durable answer to "under what standard
+# was this commit held?". Ninety days later the CI log is gone and only the
+# record can answer it.
+#
+# Not folded into `verify` because a record written on every local run of a
+# dirty tree is noise -- those land as dirty-*.json and are gitignored, which is
+# also why the filename discipline matters: a <sha>.json name is an ATTESTATION
+# and must never be produced from an unclean tree.
+evidence:
+	@bash scripts/evidence-record.sh

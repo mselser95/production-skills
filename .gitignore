@@ -7,3 +7,7 @@ node_modules/
 
 # transient worktrees (one already leaked in as a gitlink once)
 .wt/
+
+# Local runs on a dirty tree produce records that are explicitly NOT attestations
+# (tree_clean:false). Only the clean-tree <sha>.json records CI writes belong in git.
+.prod/evidence/dirty-*.json
