@@ -1,0 +1,33 @@
+invariant: a-gate-never-reports-green-over-something-it-did-not-measure
+status: PENDING-HUMAN
+
+statement: >
+  No row in any probe this repo ships may report PASS for a dimension whose
+  evidence it did not actually obtain. Zero inputs, an unparseable file, a
+  missing tool, a branch that never emitted -- each must produce FAIL or a
+  reasoned NA, never green.
+
+why_this_one: >
+  It is the property the entire framework exists to enforce in other repos, and
+  on 2026-08-29 this repo violated it seven times in its own probe: a comment
+  counted as code in four rows (tracing-wired-in-prod passed with the tracer
+  never injected), two rows passed on zero-byte files, and one reported a count
+  it had failed to compute. If this invariant does not hold HERE, every repo
+  the framework touches inherits a lie.
+
+evidence:
+  fail_closed_sites:
+    - "_shared/probes/verify-standard.sh: the `not probed: no branch emitted this dimension, and an unemitted row counts in neither PASS, FAIL nor NA` row"
+    - "_shared/probes/verify-standard.sh: the invariants-ratified guard that FAILs when the ratified/pending counts are not computable"
+    - "_shared/probes/row-vacuity-sweep.sh: exit 2 on zero patterns extracted"
+    - "demos/validate-demo.sh: refusal when a runner declares no control and has no inline negative assertion"
+
+non_vacuity_check:
+  file: '_shared/probes/verify-standard.sh'
+  expect_red: 'probe-self-gate-selftest.sh'
+  find: 'not probed: no branch emitted this dimension'
+  replace: 'not probed: skipped'
+  note: >
+    The check is that an unemitted row cannot be quietly downgraded. Verified by
+    execution on 2026-08-29: appending `if false; then row "x" PASS "y"; fi` to
+    the probe made it emit `x FAIL not probed`, so the branch fires.

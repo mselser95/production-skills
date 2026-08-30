@@ -13,7 +13,11 @@
 #   install.sh --verify   compare the installed tree against the manifest
 #   install.sh --diff     show what drifted
 #
-# Exit 1 on verification failure, so it can gate a session or a cron.
+# Exit non-zero on verification failure, so it can gate a session or a cron.
+# The code says WHICH failure, because the three call for different actions:
+#   1  TCB DRIFT     — installed contents differ from the manifest (tamper)
+#   2  STALE INSTALL — manifest intact, but describes an OLDER source (reinstall)
+#   3  TCB WRITABLE  — contents correct, read-only guard missing (reinstall)
 
 set -uo pipefail
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,6 +102,45 @@ case "${1:-install}" in
             [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' ! -path '*/benchmark-results/*' \
                 -exec shasum -a 256 {} + 2>/dev/null )
           done | awk '{print $1}' | sort) )
+      # MODE IS PART OF THE TRUSTED SET, and until 2026-08-29 nothing checked it.
+      #
+      # Line ~307 chmods the installed tree read-only, and the comment there
+      # states the property it buys: an incidental write to the trusted copy
+      # "fails loudly at the moment it happens" instead of being discovered
+      # later or not at all. That property is worth exactly as much as the
+      # weakest file's mode -- and the manifest cannot see modes, only hashes.
+      #
+      # So the interrupted-install window was invisible: install.sh writes the
+      # manifest (line 299) and THEN chmods (line 307), so a crash between them
+      # leaves a trusted set whose contents are correct and whose permissions
+      # are wide open. --verify printed "TCB verified" over it, truthfully about
+      # hashes and misleadingly about trust. Found by expanding the
+      # source_of_truth scenario checklist in .prod/failure-modes.md rather than
+      # by an incident, which is the entire point of having a denominator.
+      #
+      # config.sh and benchmark-results/ are EXCLUDED, matching hash_tree's own
+      # exclusions -- they are deliberately outside the trusted set, config.sh
+      # is meant to be edited by hand (every skill's docs say so), and firing on
+      # it would be an assertion that goes off when nothing is wrong. That is
+      # the failure mode this repo has already recorded four times; the first
+      # draft of this check had it.
+      writable=$(for s in "${skills[@]}"; do
+          [[ -d "$cfg/skills/$s" ]] && find "$cfg/skills/$s" -type f \
+            ! -name 'config.sh' ! -path '*/benchmark-results/*' \
+            \( -perm -u+w -o -perm -g+w -o -perm -o+w \) 2>/dev/null
+        done
+        find "$cfg"/agents -maxdepth 1 -name 'prod-*.md' -type f \
+          \( -perm -u+w -o -perm -g+w -o -perm -o+w \) 2>/dev/null)
+      wcount=$(printf '%s' "$writable" | grep -c . || true)
+      if (( wcount > 0 )); then
+        echo "TCB WRITABLE — ${wcount} file(s) in the trusted set are not read-only." >&2
+        echo "The contents match the manifest, so nothing has been tampered with YET." >&2
+        echo "What is missing is the guard that makes the next accidental write fail loudly:" >&2
+        printf '%s\n' "$writable" | sed "s|^$cfg/|  writable: |" | sort -u >&2
+        echo "Usually an install interrupted between the manifest write and the chmod. Re-run install.sh." >&2
+        exit 3
+      fi
+
       stale=$(printf '%s' "$stale_rows" | grep -c . || true)
       if (( stale > 0 )); then
         echo "STALE INSTALL — ${stale} source file(s) in $src are not present in the installed copy." >&2

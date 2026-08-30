@@ -3727,8 +3727,27 @@ else row "candidate-lane-segregated" FAIL "$((cand-tagged)) of $cand candidate f
 # before giving up. Second, when none of them resolve, SAY SO in a row of this
 # dimension's own -- and say it as FAIL, because "I could not measure whether
 # added tests carry provenance headers" is not a ratified decline.
+#
+# THE LIST BELOW WAS HALF THE COMMENT ABOVE, until 2026-08-29. It read
+# `origin/main main <origin/HEAD>`: the remote HEAD the repo actually declares
+# was tried LAST rather than "before giving up", and `master` did not appear at
+# all -- so a repo whose default branch is master, with no local origin/HEAD
+# ref, resolved no base and this dimension reported FAIL/UNMEASURED while being
+# structured perfectly correctly.
+#
+# That is not a hypothetical. mselser95/production-skills, the repo that SHIPS
+# this probe, is on `master`. Measured 2026-08-29 by instantiating the template
+# into a sandbox on `master` with no remote: `no diff base resolves (tried
+# origin/main, main, origin/HEAD)`. Fail-closed and therefore not dangerous,
+# but an assertion that fires when nothing is wrong is the failure mode this
+# file has recorded four times -- it trains people to widen it until it is gone.
+#
+# Order is now: what the remote DECLARES first (authoritative, and it settles a
+# repo that carries both a stale `main` and a real `master`), then the four
+# literal fallbacks for a checkout with no origin/HEAD ref.
 prov_base=""
-for _ref in origin/main main "$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"; do
+for _ref in "$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)" \
+            origin/main origin/master main master; do
   [ -n "$_ref" ] || continue
   if prov_base=$(git merge-base HEAD "$_ref" 2>/dev/null) && [ -n "$prov_base" ]; then break; fi
   prov_base=""
@@ -3772,7 +3791,7 @@ else
   elif ! git rev-parse HEAD >/dev/null 2>&1; then
     row "provenance-headers" NA "no commits yet -- a tree with no history has no changed lines to carry provenance, so there is nothing to measure rather than something unmeasured"
   else
-    row "provenance-headers" FAIL "no diff base resolves (tried origin/main, main, origin/HEAD) -- the repo HAS history, so this dimension went UNMEASURED, which is not the same as met"
+    row "provenance-headers" FAIL "no diff base resolves (tried origin/HEAD, origin/main, origin/master, main, master) -- the repo HAS history, so this dimension went UNMEASURED, which is not the same as met"
   fi
 fi
 

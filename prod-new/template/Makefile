@@ -11,6 +11,8 @@ check-registries:
 	bash scripts/check-registries.sh
 
 check-fast:
+	@echo "Checking for unfilled template slots..."
+	@bash scripts/no-unfilled-slots.sh
 	@echo "Checking liability registries..."
 	bash scripts/check-registries.sh
 	@echo "Building..."

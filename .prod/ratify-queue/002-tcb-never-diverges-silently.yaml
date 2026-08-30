@@ -1,0 +1,31 @@
+invariant: the-installed-tcb-never-diverges-from-source-silently
+status: PENDING-HUMAN
+
+statement: >
+  The skills installed in ${CLAUDE_CONFIG_DIR}/skills must never differ from
+  this repo's source without install.sh --verify saying so and naming the files.
+  Both directions count: a tampered installed copy (drift) and an installed copy
+  older than source (staleness).
+
+why_this_one: >
+  The installed copy is what actually runs. On 2026-08-29 two SKILL.md files
+  were committed here and never reinstalled, so every session loaded the older
+  text while the repo looked current -- caught only because the staleness branch
+  exists. Integrity and currency are different questions and only the first had
+  a check until that day.
+
+evidence:
+  fail_closed_sites:
+    - "install.sh: TCB DRIFT branch, which diffs the manifest and names every path"
+    - "install.sh: STALE INSTALL branch, which names each stale file"
+    - ".githooks/pre-commit: refuses a commit when the maintenance gates fail"
+
+non_vacuity_check:
+  file: 'install.sh'
+  expect_red: 'install.sh --verify after touching a source file'
+  find: 'stale=$(printf'
+  replace: 'stale=0; _unused=$(printf'
+  note: >
+    Verified by execution on 2026-08-29: touching prod-ops/SKILL.md made
+    --verify exit 2 and print `stale: prod-ops/SKILL.md`; reinstalling returned
+    it to exit 0, silent.

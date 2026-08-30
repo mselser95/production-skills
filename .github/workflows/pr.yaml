@@ -27,7 +27,14 @@ jobs:
   gates:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 is what makes the secret scan below mean anything.
+      # actions/checkout defaults to depth 1, so `gitleaks detect` over history
+      # would scan ONE commit and report clean -- a scan whose denominator is a
+      # single commit is the zero-inputs shape wearing a green check.
+      # Measured locally at full depth: 231 commits scanned, no leaks.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: python + PyYAML (skills-static parses frontmatter as real YAML)
         run: python3 -c "import yaml; print('PyYAML', yaml.__version__)"
@@ -81,6 +88,31 @@ jobs:
           bash _shared/probes/sbom-ordering-selftest.sh
           bash _shared/probes/policy-coverage.sh
 
+      # SECRET SCANNING, added 2026-08-29. Until today this repo ran NONE -- a
+      # grep for gitleaks/trufflehog in this file returned zero, in the
+      # repository whose own standard lists secret scanning on every trigger as
+      # a blocking supply-chain gate. It is not advisory and it has no
+      # continue-on-error: a leaked credential is not a trend.
+      #
+      # PINNED to v8.21.2, and installed from `github.com/zricethezav/gitleaks`
+      # -- the module path the tool actually declares. `github.com/gitleaks/...`
+      # is the repo URL and `go install` rejects it with "module declares its
+      # path as", which is the kind of failure that gets a security step
+      # commented out at 6pm.
+      #
+      # PROVEN NON-VACUOUS before being wired, and the first attempt was a false
+      # negative worth recording: planting AWS's own DOCUMENTATION keys
+      # (AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI...) produced "no leaks found",
+      # because gitleaks allowlists exactly those. A scanner tested with a
+      # secret designed to be ignored proves nothing. Re-tested with
+      # non-allowlisted random keys plus an RSA private-key block: 2 leaks
+      # found, exit 1, and back to 0 once removed.
+      - name: secret scanning (blocking)
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.21.2
+          GOBIN="$(go env GOPATH)/bin"
+          "$GOBIN/gitleaks" detect --source . --no-banner --redact --exit-code 1
+
       # ADVISORY, and printed rather than gated. It answers "is each committed
       # benchmark score still about the skill it sits next to?" -- currently no
       # for all seven, by 10-12 days. Refreshing needs Codex credentials CI does
@@ -114,6 +146,41 @@ jobs:
               "prod-new/template/.github/workflows/$f.yaml" > "/tmp/tmpl-wf/$f.yaml"
           done
           "$AL" -color /tmp/tmpl-wf/ci.yaml /tmp/tmpl-wf/pr.yaml /tmp/tmpl-wf/nightly.yaml
+
+      # THE REPO'S OWN ENTRYPOINT, added 2026-08-29 along with the Makefile it
+      # calls. Every step above names a probe path directly, which is how the
+      # repo ended up running gates it did not know it was missing: measured the
+      # same day, `_shared/probes/row-vacuity-sweep.sh` was invoked by this
+      # workflow ZERO times and by the pre-commit hook ZERO times, while being
+      # wired into prod-new/template/Makefile so that every SCAFFOLDED repo runs
+      # it. The framework vended a gate it did not run on itself.
+      # check-registries.sh had the same shape -- its selftest ran here, the
+      # check itself never looked at this repo's own four registries.
+      #
+      # `make check-fast` is also what the pre-commit hook runs, so running it
+      # here is what keeps the two from drifting: a probe added to the Makefile
+      # is a probe both surfaces run, with nothing to remember. It adds
+      # shellcheck (36 unique scripts of 62, deduped by content because
+      # install.sh mirrors the shared probes into all nine skills
+      # byte-identically), the vacuity sweep, and the registry check.
+      #
+      # actionlint is installed by the step above; PATH does not survive between
+      # steps, so it is re-exported rather than reinstalled.
+      - name: make check-fast (the entrypoint the pre-commit hook runs)
+        run: |
+          GOBIN="$(go env GOPATH)/bin"
+          export PATH="$GOBIN:$PATH"
+          make check-fast
+          # `make selftests` too, and NOT because check-fast is incomplete.
+          # check-fast runs the gates; selftests runs the verifiers OF those
+          # gates, and it enumerates them by GLOB. The step above lists
+          # selftests by hand -- deliberately, see its comment -- and a hand
+          # list is exactly what let two selftests sit red for weeks here.
+          # This change adds two more (probe-wiring, no-unfilled-slots) and
+          # neither is in that list; the glob picks them up with nothing to
+          # remember. Both surfaces run, so a selftest is covered whichever
+          # one somebody forgets to update.
+          make selftests
 
       # End-to-end on the installer itself, into a throwaway config dir, so the
       # TCB manifest and the staleness branch are exercised rather than assumed.
@@ -151,3 +218,60 @@ jobs:
           }
           git checkout -- prod-ops/SKILL.md
           bash install.sh --verify
+
+  # THE VENDED PRODUCT, BUILT. Added 2026-08-29.
+  #
+  # This repository's product is a scaffolded repo, and until today nothing ever
+  # built one. The `actionlint` step above substitutes the template's slots and
+  # lints its three WORKFLOW FILES -- real coverage, and it stops at YAML. A
+  # change that broke the template's Makefile, its fitness checks or its Go code
+  # shipped green here and was discovered by whoever scaffolded next. The
+  # integration lane existed for install.sh and not for the thing this repo is
+  # for.
+  #
+  # Measured by hand before wiring, which is why the scope is check-fast and not
+  # verify-standard: a correctly instantiated template reaches `make check-fast`
+  # exit 0, and `make verify-standard` PASS 64 / FAIL 3 / NA 18 -- where all
+  # three FAILs are prod-new Phase-3 steps a machine cannot do (SLO objectives a
+  # human ratifies, a load baseline only meaningful on the target hardware, and
+  # provenance headers needing a diff base). Gating on verify-standard would
+  # make this job permanently red for reasons that are not defects; gating on
+  # check-fast asks the question a machine can answer.
+  #
+  # Its own job, not a step, so a red scaffold is distinguishable at a glance
+  # from a red framework.
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: prod-new/template/go.mod
+
+      # Slots live in PATHS as well as contents, and sed rewrites contents only.
+      # The script does both and then REFUSES if either kind survives -- a
+      # content grep alone reported zero remaining slots while cmd/<SERVICE> was
+      # still a directory, and `go build` then failed with `malformed import
+      # path ... invalid char '<'`, an error that names the import and sends the
+      # reader into go.mod.
+      - name: instantiate the template
+        run: bash scripts/instantiate-template.sh "$RUNNER_TEMP/scaffold" svc mselser95
+
+      - name: build the scaffold
+        working-directory: ${{ runner.temp }}/scaffold
+        run: go build ./...
+
+      # The scaffold checks itself against the template it came from, so the
+      # stamp has to exist -- absent provenance is "the question cannot be
+      # answered" (exit 2), not "no drift".
+      - name: stamp provenance and run the scaffold's own cheap gate
+        working-directory: ${{ runner.temp }}/scaffold
+        env:
+          TEMPLATE_DIR: ${{ github.workspace }}/prod-new/template
+        run: |
+          git init -q .
+          git add -A
+          git -c user.email=ci@example.com -c user.name=ci commit -qm scaffold
+          bash scripts/stamp-template-provenance.sh
+          make check-fast

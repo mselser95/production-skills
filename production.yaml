@@ -1,0 +1,140 @@
+# production.yaml — mselser95/production-skills
+#
+# Written by prod-bootstrap on 2026-08-29. This is the repo that DEFINES the
+# standard, and until now it was the one repo not held to it.
+#
+# Read the toolchain section of AGENTS.md before adding any gate here: this
+# repo is shell and markdown, `verify-standard.sh` implements Go only and
+# refuses to run, and vendoring it anyway would install a gate the repo
+# believes it has and does not.
+
+service:
+  name: production-skills
+  owner: mselser95
+
+  # T1, not T0, and not T2. The evidence:
+  #
+  # NOT T0 -- nothing here is an irreversible external effect and no data is
+  # unreconstructable. install.sh is idempotent and hash-verified; a bad
+  # install is fixed by running it again.
+  #
+  # NOT T2 -- this repo FEEDS T0 consumers. prod-new copies `template/`
+  # verbatim into every service it scaffolds, so a gate that is wrong here is
+  # wrong in every repo built from it, and nobody downstream can see the
+  # defect because their copy looks like the standard. That blast radius is
+  # what T1 exists for.
+  #
+  # T1 carries the T0 invariant-flake rule deliberately: a flaky invariant test
+  # in THIS repo would be quarantined into silence and then vended.
+  tier: 1
+
+  semantics:
+    consistency: >
+      Single-writer, file-system durable. There is no concurrent writer: every
+      mutation is a git commit or an install.sh run, both serialised by the
+      human or the hook that invoked them.
+
+capabilities:
+  # The only two real external boundaries. Everything else in this repo is a
+  # document, a probe that reads files, or a template that is copied.
+  - name: skill_distribution
+    class: source_of_truth
+    description: >
+      install.sh copies the nine skills into ${CLAUDE_CONFIG_DIR}/skills as
+      hash-verified real files and writes prod-skills.manifest. It is the only
+      thing here that writes outside the repo.
+    obligations_met_by:
+      integrity: install.sh --verify (manifest comparison)
+      currency: install.sh --verify's STALE INSTALL branch, which names the files
+
+  - name: template_vending
+    class: source_of_truth
+    description: >
+      prod-new copies prod-new/template/ verbatim into a new repository. The
+      copy is the product; drift between this tree and an instantiated repo is
+      the failure mode.
+    obligations_met_by:
+      drift: scripts/check-template-drift.sh in the scaffolded repo
+      provenance: .prod/template-provenance.yaml, stamped at scaffold time
+
+invariants:
+  # PROPOSED, NOT RATIFIED. Each package sits in .prod/ratify-queue/ with
+  # status PENDING-HUMAN. Bootstrap never writes verification/ratified/, and
+  # "what must never happen" is the one thing an inventory cannot infer -- so
+  # these are seeded from this repo's OWN fail-closed checks rather than
+  # invented, and they stay pending until a human ratifies them.
+  ratified: []
+  pending:
+    - a-gate-never-reports-green-over-something-it-did-not-measure
+    - the-installed-tcb-never-diverges-from-source-silently
+    - no-tier-policy-key-goes-unscored
+
+out_of_scope:
+  # Each decline names the PROPERTY that produced it, so a future reader can
+  # check it against the capability list rather than trust it.
+
+  - reconciliation: >
+      Both declared capabilities are source_of_truth with no external mirror to
+      drift against: install.sh's output IS the manifest it is checked with, and
+      the template's copy is checked by check-template-drift in the repo that
+      received it. There is no second system holding a version of this state
+      that could diverge, so there is nothing for a reconciler to reconcile.
+
+      LAPSES if this repo ever publishes to a registry it does not also read
+      back -- at that moment the registry becomes a mirror that can drift.
+
+  - effect_journal: >
+      Nothing leaves this process that a crash could lose. install.sh's only
+      effect is a file copy plus a manifest write, and a crash mid-run leaves
+      the previous install intact and the next run idempotent. There is no
+      at-least-once delivery to journal.
+
+  - outbox: >
+      Same property as effect_journal: no external effect is dispatched
+      asynchronously, so there is no window between commit and publish for an
+      outbox to close.
+
+  - consistency_verification: >
+      Single-writer, per semantics.consistency above. A history checker looks
+      for anomalies between concurrent writers reaching one store; with one
+      writer there is no interleaving to record.
+
+  - chaos_engineering: >
+      This repo is not deployed. There is no running system to hold a steady
+      state, and therefore no hypothesis an experiment could falsify. Its
+      failure mode is not an outage but a WRONG GATE vended to other repos, and
+      the instrument for that is mutation-testing the rows -- which is done, 72
+      of 72.
+
+      LAPSES if anything here is ever deployed as a service.
+
+  - delivery: >
+      Nothing ships this repo to an environment. Distribution is install.sh on
+      a developer machine and git clone for the template; there is no
+      progressive rollout and no artifact for a rollback to re-pin.
+
+  - backup_restore_test: >
+      The repo IS the durable state and git is its backup. A restore is a
+      clone, and its correctness is checked by the same gates that check the
+      working tree -- there is no separate restore path whose fidelity could
+      differ.
+
+  - load_baseline: >
+      No request path exists. The slowest thing here is the probe itself
+      (~20 min on a small runner, measured), and its cost is bounded by the
+      repo's size rather than by offered load. A saturation point is not a
+      property this repo has.
+
+  - published_contract: >
+      The consumers are this repo's own skills and the template it copies --
+      all inside the same TCB, all updated together, and all checked by
+      install.sh's mirror comparison. Nothing outside parses an artifact whose
+      shape this repo could break unilaterally.
+
+  - write_surface_authn: >
+      No surface accepts work. install.sh is a local script run by its owner;
+      there is no listener, no port and no request to authenticate.
+
+  - authz_invariants: >
+      Single-tenant by construction: one owner, one machine, no tenant scope
+      anywhere in the tree.

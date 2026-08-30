@@ -1,0 +1,9 @@
+# waivers registry — liability entries with owner + expiry.
+#
+# EXPLICITLY EMPTY, not unwritten. check-registries.sh distinguishes the two:
+# four files present and each carrying an `entries:` key is a repo saying "I
+# have none" (checked-and-none); a missing file is a repo that said nothing.
+#
+# Every entry: {id, obligation, owner, created, expires, reason}.
+# `expires: never` is the one legal non-date value.
+entries: []

@@ -182,6 +182,19 @@ must land on the same tree, so the order is fixed and each step is checkable:
 1. Copy `template/` whole and instantiate every `<slot>`. Start from the full
    tree even when the derivation trimmed it — removing from a working scaffold
    is checkable, and assembling one from parts is not.
+
+   **Slots live in PATHS as well as in file contents, and `sed` only rewrites
+   contents.** The template ships a directory literally named `cmd/<SERVICE>`.
+   Substitute the slot-bearing files and stop there and the scaffold is born
+   broken: `go build ./...` dies with `malformed import path
+   "github.com/<owner>/<svc>/cmd/<SERVICE>": invalid char '<'`, which names the
+   IMPORT rather than the directory and sends the reader looking in `go.mod`.
+   Measured 2026-08-29 by instantiating the template by hand.
+
+   Rename the path too, then check with `find . -name '*<*>*'` returning
+   nothing. A content grep is not that check: it reported zero remaining slots
+   while the directory was still sitting there, which is how this was missed the
+   first time.
 2. For each mechanism the derivation returned `not warranted`, apply its
    removal shape — and for the event log, note that the ROLE decides what
    comes out even when the log itself stays. The derivation reference's "What removal actually costs"

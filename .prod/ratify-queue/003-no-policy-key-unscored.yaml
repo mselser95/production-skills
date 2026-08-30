@@ -1,0 +1,30 @@
+invariant: no-tier-policy-key-goes-unscored
+status: PENDING-HUMAN
+
+statement: >
+  Every key declared in _shared/tier-policy.yaml must either be scored by a
+  named probe row, or appear on an explicit work list with the demo that proves
+  its mechanism. A key nothing scores is an obligation the framework states and
+  does not check.
+
+why_this_one: >
+  This is the framework claiming something about a repo that nobody verified.
+  On 2026-08-29 the count went from 39 scored / 13 unscored to 52 / 0 -- and one
+  of those thirteen, `mutation`, had been sitting on the work list with a prose
+  explanation for why it could not be scored, when a row scoring it already
+  existed and the coverage tool simply could not see its name.
+
+evidence:
+  fail_closed_sites:
+    - "_shared/probes/policy-coverage.sh: exits 1 on any NEW unscored key"
+    - "_shared/probes/policy-coverage.sh: exits 2 when it extracts zero rows or zero keys, so a comparison against nothing is not a clean comparison"
+
+non_vacuity_check:
+  file: '_shared/tier-policy.yaml'
+  expect_red: 'policy-coverage.sh'
+  find: 'defaults: &defaults'
+  replace: "defaults: &defaults\n  clave_sin_fila: required"
+  note: >
+    Verified by execution on 2026-08-29: injecting a key with no row into the
+    defaults block produced `NEW UNSCORED KEYS -- declared in policy, scored by
+    nothing` and a non-zero exit.

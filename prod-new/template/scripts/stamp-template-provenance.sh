@@ -22,6 +22,7 @@ VENDORED=(
   scripts/kill-durability.sh
   scripts/check-template-drift.sh
   scripts/row-vacuity-sweep.sh
+  scripts/no-unfilled-slots.sh
   scripts/tests/non-vacuity-selftest.sh
   scripts/tests/sbom-ordering-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh

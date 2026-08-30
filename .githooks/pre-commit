@@ -97,18 +97,37 @@ fi
 # Both are fast (well under a second) and both fail closed: skills-static exits
 # 2 when it finds no subjects at all, policy-coverage exits 2 when it extracts
 # zero rows or zero keys, so neither can report clean by checking nothing.
-for gate in _shared/probes/skills-static.sh _shared/probes/policy-coverage.sh; do
-  if [[ ! -x "$gate" && ! -r "$gate" ]]; then
-    # A missing gate is a failure, never a skip. Skipping is precisely how the
-    # uninstalled doctor stayed green for a whole session.
-    echo "pre-commit: $gate is missing or unreadable -- refusing to commit past" >&2
-    echo "            a gate that cannot run. Restore it or remove it here." >&2
-    exit 1
-  fi
-  if ! out=$(bash "$gate" 2>&1); then
-    echo "pre-commit: $gate FAILED" >&2
-    printf '%s\n' "$out" >&2
-    exit 1
-  fi
-done
-echo "pre-commit: skills-static + policy-coverage green" >&2
+# THE HOOK CALLS `make check-fast` RATHER THAN LISTING GATES, as of 2026-08-29,
+# and the reason is a gap this list had by construction.
+#
+# It named two probes. The repo has more, and the ones it did not name were run
+# by NOBODY: measured on 2026-08-29, `_shared/probes/row-vacuity-sweep.sh` was
+# invoked by CI zero times and by this hook zero times, while being wired at
+# prod-new/template/Makefile:28 so that every repo scaffolded from here runs it.
+# The framework vended a gate it did not run on itself. check-registries.sh had
+# the same shape -- its selftest ran in CI, the check never looked at this
+# repo's own four registries.
+#
+# A hand-maintained list of gates is a denominator someone has to remember to
+# extend, and forgetting is silent: the hook keeps printing green over a
+# shrinking set. Delegating to one entrypoint means a probe added to the
+# Makefile is a probe this hook runs, with nothing to remember.
+#
+# check-fast is ~10s (actionlint 0.1s, shellcheck deduped 4.5s, the four probes
+# 5.9s), measured, which is inside what a commit can absorb.
+if ! command -v make >/dev/null 2>&1; then
+  echo "pre-commit: make is missing -- refusing to commit past a gate that cannot run." >&2
+  exit 1
+fi
+if [[ ! -r Makefile ]]; then
+  # A missing gate is a failure, never a skip. Skipping is precisely how the
+  # uninstalled doctor stayed green for a whole session.
+  echo "pre-commit: no Makefile -- refusing to commit past a gate that cannot run." >&2
+  exit 1
+fi
+if ! out=$(make check-fast 2>&1); then
+  echo "pre-commit: 'make check-fast' FAILED" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+fi
+printf '%s\n' "$out" | sed 's/^/pre-commit: /' >&2
