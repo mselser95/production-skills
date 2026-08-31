@@ -1,5 +1,8 @@
 invariant: a-gate-never-reports-green-over-something-it-did-not-measure
-status: PENDING-HUMAN
+status: RATIFIED
+ratified_by: mselser95
+ratified_on: '2026-08-31'
+test: verification/ratified/inv-001-no-green-over-unmeasured.sh
 
 statement: >
   No row in any probe this repo ships may report PASS for a dimension whose
@@ -23,11 +26,18 @@ evidence:
     - "demos/validate-demo.sh: refusal when a runner declares no control and has no inline negative assertion"
 
 non_vacuity_check:
-  file: '_shared/probes/verify-standard.sh'
-  expect_red: 'probe-self-gate-selftest.sh'
-  find: 'not probed: no branch emitted this dimension'
-  replace: 'not probed: skipped'
+  file: 'scripts/mutation-baseline.sh'
+  expect_red: 'verification/ratified/inv-001-no-green-over-unmeasured.sh'
+  find: 'the `found ZERO selftests` guard block'
+  replace: 'deleted'
   note: >
-    The check is that an unemitted row cannot be quietly downgraded. Verified by
-    execution on 2026-08-29: appending `if false; then row "x" PASS "y"; fi` to
-    the probe made it emit `x FAIL not probed`, so the branch fires.
+    Verified 2026-08-31, not asserted. Case 8 of the test is ISOLATED on purpose --
+    its fixture carries a valid baseline file so the "nothing to compare against"
+    path cannot fire, leaving the zero-suites guard as the only thing between an
+    empty tree and a green report. Removing that guard (syntax confirmed still
+    valid, so the mutation breaks the TEST and not the build) turned inv-001 red:
+    `FAIL mutation-baseline over zero suites (isolated) -- REPORTED GREEN over an
+    absent subject`, 9 ok / 1 failed.
+    The other nine cases are protected by more than one guard -- measured by
+    removing each in turn and watching the test stay green -- which is fine for
+    the property and useless as evidence, so the package cites the isolated one.

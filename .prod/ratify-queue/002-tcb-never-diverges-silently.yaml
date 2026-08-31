@@ -1,5 +1,8 @@
 invariant: the-installed-tcb-never-diverges-from-source-silently
-status: PENDING-HUMAN
+status: RATIFIED
+ratified_by: mselser95
+ratified_on: '2026-08-31'
+test: verification/ratified/inv-002-tcb-never-diverges-silently.sh
 
 statement: >
   The skills installed in ${CLAUDE_CONFIG_DIR}/skills must never differ from
@@ -22,10 +25,12 @@ evidence:
 
 non_vacuity_check:
   file: 'install.sh'
-  expect_red: 'install.sh --verify after touching a source file'
-  find: 'stale=$(printf'
-  replace: 'stale=0; _unused=$(printf'
+  expect_red: 'verification/ratified/inv-002-tcb-never-diverges-silently.sh'
+  find: 'the `if (( wcount > 0 ))` TCB WRITABLE block'
+  replace: 'deleted'
   note: >
-    Verified by execution on 2026-08-29: touching prod-ops/SKILL.md made
-    --verify exit 2 and print `stale: prod-ops/SKILL.md`; reinstalling returned
-    it to exit 0, silent.
+    Verified 2026-08-31. With the writable-detection branch removed (syntax confirmed
+    still valid), inv-002 reported `FAIL a writable trusted set is caught, named --
+    rc=0 want=3`, 4 ok / 1 failed, and returned to 5 ok on revert. The test
+    asserts all three divergences AND that each NAMES the file, because a count
+    cannot be acted on.

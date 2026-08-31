@@ -23,7 +23,7 @@ not a legal state.
 |---|---|---|---|---|---|
 | 1 | Correctness — structural | build, vet, lint, unit tests, fitness | `make check-fast`: actionlint + shellcheck (36 unique of 62, `-S error`) + 4 probes; `make verify` adds 6 selftests + TCB. Wired into the pre-commit hook and CI **today**. All four targets mutation-proven to go red. | none | — |
 | 2 | Correctness — fault sensitivity | race detector / TSan equivalent | not applicable: no concurrent execution path exists. `install.sh` and every probe are single-process and sequential; there is no second thread for a detector to observe. | none | — |
-| 3 | Invariants and properties | ratified, provably non-vacuous | 3 invariants PROPOSED in `.prod/ratify-queue/`, each `PENDING-HUMAN` with a `non_vacuity_check` whose mutation was RUN, not written. `verification/ratified/` is deliberately empty — bootstrap never writes it. | **ratification is unfinished, and only a human can finish it** | med |
+| 3 | Invariants and properties | ratified, provably non-vacuous | **3 ratified 2026-08-31**, each an executable test in `verification/ratified/` run by `make invariants` on every `make verify`, each with a package in `.prod/ratify-queue/` recording the mutation that was RUN — and each mutation confirmed to break the TEST, not the build. Ratification was not a status flip: the standard calls writing the key without the test "laundering scaffold-time authorship into ratification". | closed | — |
 | 4 | Scenarios — failure-mode matrix | real denominator, no `blocked` rows | `.prod/failure-modes.md`: 14 rows = 2 capabilities × the 7 scenarios `source_of_truth` declares. 6 tested with quoted output, 8 not-applicable with properties, **0 blocked, 0 untested**. | none | — |
 | 5 | Integration and contracts | the real-dependency lane actually RUN | `install.sh` e2e in CI against a throwaway config dir, **plus a `scaffold` job added in this change** that instantiates the template (contents AND paths), builds it, stamps provenance and runs the scaffold's own `make check-fast`. Measured by hand first: a correct instantiation reaches check-fast rc 0 and `verify-standard` PASS 64 / FAIL 3 / NA 18, all three FAILs being prod-new Phase-3 steps a machine cannot do — which is why the job gates on check-fast and not on verify-standard. | closed for check-fast; `verify-standard` on a scaffold stays human-gated by design (SLO ratification, hardware-specific load baseline) | — |
 | 6 | Performance and capacity | benchmarks + recorded baselines | not applicable as a request path (see `out_of_scope.load_baseline`: no offered load exists). The real cost is gate runtime, now measured: check-fast 9.9s, of which shellcheck 4.5s after content-dedup (was 29.8s), probes 5.9s. | closed — `benchmarks/gate-runtime.md` | — |
@@ -82,11 +82,11 @@ report that misstates its own gaps is read as the answer.
 - **high (0).** Both original high rows are closed: the `scaffold` CI job now
   instantiates the template and runs its gates (dim 5), and secret scanning is a
   blocking step (dim 9).
-- **med (1), and it is not an agent's to close.** The three invariants in
-  `.prod/ratify-queue/` are `PENDING-HUMAN`. `verification/ratified/` stays empty
-  by design: "what must never happen" is the one thing an inventory cannot infer,
-  and a seed list accepted by silence would put the framework's most load-bearing
-  artifact into the spec on the strength of nobody objecting.
+- **med (0).** The three invariants were ratified on 2026-08-31, and ratifying
+  them meant building the tests rather than flipping a field: `verification/
+  ratified/` now holds one executable test per invariant, wired into `make
+  verify`, each backed by a mutation that was run and shown to turn its own test
+  red.
 - **low (0).** Every low row is closed or declined with a property: shellcheck's
   warning tier (classified, emptied, and the gate raised to it), the mutation
   baseline (`benchmarks/mutation-baseline.md`, derived, 267 cases, gated against

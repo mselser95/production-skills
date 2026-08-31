@@ -1,5 +1,8 @@
 invariant: no-tier-policy-key-goes-unscored
-status: PENDING-HUMAN
+status: RATIFIED
+ratified_by: mselser95
+ratified_on: '2026-08-31'
+test: verification/ratified/inv-003-no-policy-key-unscored.sh
 
 statement: >
   Every key declared in _shared/tier-policy.yaml must either be scored by a
@@ -20,11 +23,12 @@ evidence:
     - "_shared/probes/policy-coverage.sh: exits 2 when it extracts zero rows or zero keys, so a comparison against nothing is not a clean comparison"
 
 non_vacuity_check:
-  file: '_shared/tier-policy.yaml'
-  expect_red: 'policy-coverage.sh'
-  find: 'defaults: &defaults'
-  replace: "defaults: &defaults\n  clave_sin_fila: required"
+  file: '_shared/probes/policy-coverage.sh'
+  expect_red: 'verification/ratified/inv-003-no-policy-key-unscored.sh'
+  find: 'the `if (( nnew ))` NEW UNSCORED KEYS block'
+  replace: 'deleted'
   note: >
-    Verified by execution on 2026-08-29: injecting a key with no row into the
-    defaults block produced `NEW UNSCORED KEYS -- declared in policy, scored by
-    nothing` and a non-zero exit.
+    Verified 2026-08-31. Removing the forward detection turned inv-003 red: `FAIL a
+    declared key that no row scores -- rc=0 want=1`, 5 ok / 1 failed. The test
+    also runs against the REAL policy (52 keys, 52 scored) rather than fixtures
+    alone, so it cannot hold while the actual one drifts.

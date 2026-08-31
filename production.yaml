@@ -58,16 +58,24 @@ capabilities:
       provenance: .prod/template-provenance.yaml, stamped at scaffold time
 
 invariants:
-  # PROPOSED, NOT RATIFIED. Each package sits in .prod/ratify-queue/ with
-  # status PENDING-HUMAN. Bootstrap never writes verification/ratified/, and
-  # "what must never happen" is the one thing an inventory cannot infer -- so
-  # these are seeded from this repo's OWN fail-closed checks rather than
-  # invented, and they stay pending until a human ratifies them.
-  ratified: []
-  pending:
+  # RATIFIED 2026-08-31 by mselser95. Ratification here was not a status field:
+  # the standard requires an EXECUTABLE test whose failure IS the detection, and
+  # says that writing the key without one "launders scaffold-time authorship into
+  # ratification, which is the one thing the human gate exists to prevent".
+  #
+  # So each of the three has a test in verification/ratified/, run by `make
+  # invariants` on every `make verify`, and a package in .prod/ratify-queue/
+  # recording the mutation that was RUN to prove the test is not decoration --
+  # each one confirmed to break the TEST and not the build.
+  #
+  # They were seeded from this repo's own fail-closed checks rather than
+  # invented, which is why they are properties this code already tries to have
+  # rather than aspirations bolted on afterwards.
+  ratified:
     - a-gate-never-reports-green-over-something-it-did-not-measure
     - the-installed-tcb-never-diverges-from-source-silently
     - no-tier-policy-key-goes-unscored
+  pending: []
 
 out_of_scope:
   # Each decline names the PROPERTY that produced it, so a future reader can

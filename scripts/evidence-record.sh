@@ -44,6 +44,7 @@ GATES=(
   "template-version|bash scripts/template-digest.sh"
   "mutation-trend|bash scripts/mutation-baseline.sh"
   "gap-report-consistent|bash scripts/gap-report-consistency.sh"
+  "ratified-invariants|make --no-print-directory invariants"
   "probe-selftests|make --no-print-directory selftests"
   "tcb-integrity|bash install.sh --verify"
 )

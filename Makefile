@@ -25,12 +25,13 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
 	@echo "verify      check-fast + every probe selftest + TCB verification"
 	@echo "selftests   the probe selftests only"
+	@echo "invariants  the ratified invariants in verification/ratified/"
 	@echo "evidence    run every gate and write .prod/evidence/<sha>.json (dimension 11)"
 	@echo "template-digest  recompute prod-new/TEMPLATE-DIGEST after a reviewed template change"
 	@echo "mutation-baseline  re-record benchmarks/mutation-baseline.md after adding/removing cases"
@@ -119,6 +120,9 @@ gates:
 # and instantiate-template.sh are gates by any reasonable reading, and they lived
 # outside the only check that asks whether a gate is driven.
 	@bash $(PROBES)/probe-wiring.sh scripts
+# And the ratified invariants: an invariant nothing runs is precisely the shape
+# the three of them exist to refuse.
+	@bash $(PROBES)/probe-wiring.sh verification/ratified
 # The vended template's VERSION, and the producer side of the drift question.
 # check-template-drift.sh runs in the SCAFFOLDED repo and answers "am I behind?";
 # this runs here, where the template actually moves, and refuses to let the vended
@@ -132,7 +136,28 @@ gates:
 	@bash scripts/gap-report-consistency.sh
 
 # ---- the full gate --------------------------------------------------------
-verify: check-fast selftests tcb mutation
+verify: check-fast selftests invariants tcb mutation
+
+# THE RATIFIED INVARIANTS. Each is an executable test whose failure IS the
+# detection -- ratification here is not a status field, and the standard says so
+# in as many words: writing the key without the test 'launders scaffold-time
+# authorship into ratification, which is the one thing the human gate exists to
+# prevent'. Each has a package in .prod/ratify-queue/ carrying the mutation that
+# was RUN to prove the test is not decoration.
+#
+# Globbed with a zero-guard, for the same reason selftests are: a list is a
+# denominator somebody has to remember, and an invariant nothing runs is exactly
+# the shape these three exist to refuse.
+invariants:
+	@set -e; n=0; \
+	  for t in verification/ratified/inv-*.sh; do \
+	    [ -f "$$t" ] || continue; \
+	    printf '  %-52s ' "$$(basename $$t)"; \
+	    if bash "$$t" >/dev/null 2>&1; then echo ok; else echo FAIL; bash "$$t" 2>&1 | tail -20; exit 1; fi; \
+	    n=$$((n+1)); \
+	  done; \
+	  if [ "$$n" -eq 0 ]; then echo 'invariants: found ZERO ratified invariants -- refusing to report a pass over an empty set' >&2; exit 2; fi; \
+	  echo "invariants: $$n ratified invariant(s) hold"
 
 # In `verify`, NOT in `check-fast`. It re-runs all ten selftests to count what
 # they actually execute, which costs about as much as the selftests target
