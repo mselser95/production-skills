@@ -66,7 +66,7 @@ not a legal state.
 | observability contract | see dimension 8 | none | — |
 | supply-chain gates | secret scanning ✓ (gitleaks v8.21.2, blocking, full history); SBOM ordering selftest ✓ for the template; **no SBOM or build provenance for THIS repo's own artifacts** — and this repo ships no build artifact, only files install.sh copies, so what an SBOM would describe is the git tree itself | declined with the property — see dimension 9: the TCB manifest is this artifact's inventory, hash-verified | — |
 | delivery / rollback / runbooks | delivery declined with its property (dim 17); `RUNBOOK.md` written, carrying what the failure messages cannot say | closed | — |
-| **BLOCKING gates whose check context is in the forge's REQUIRED list** | **ANSWERED, and the answer is none.** Queried the forge directly on 2026-08-29: `branches/master/protection` → `Branch not protected` (404), and both `rulesets` and `rules/branches/master` → `[]`. So NO check is required by the forge, and "blocking" here means "the workflow goes red and a human reads it", not "the forge refuses the change". | **a decision for the owner, not a defect to fix silently** — required status checks and the direct-push-to-master workflow authorized on 2026-08-29 are mutually exclusive; enabling protection would break the workflow he chose | open |
+| **BLOCKING gates whose check context is in the forge's REQUIRED list** | **DECIDED 2026-08-31: none, deliberately.** Measured first, not assumed: `branches/master/protection` returns 404 and both rulesets endpoints return `[]`. Mati chose to keep direct-push-to-master, so "blocking" here means the workflow goes red and a human reads it, and the pre-commit hook runs the same gates before the push even happens. Required status checks would have forbidden the direct-push workflow he authorised on 2026-08-29; the two are mutually exclusive and the trade was his to make. | decided — do not re-open | — |
 | declared surfaces no reconciler applies | none declared | not applicable | — |
 | declared backends with no producer | none declared | not applicable | — |
 
@@ -99,11 +99,12 @@ report that misstates its own gaps is read as the answer.
   scorecards are 10–12 days older than the skills they score.
   `benchmark-currency.sh` reports this advisory in CI on every PR and names each
   one; refreshing needs Codex credentials CI does not hold.
-- **open (1), and it is the owner's to make:** the forge requires no status check
-  on `master` (measured, not assumed). Making the gates blocking at the forge
-  means branch protection, and that is incompatible with the direct-push-to-master
-  workflow authorized on 2026-08-29. Both are defensible; only one person gets to
-  pick, and it is not the agent that noticed.
+- **open (0).** The one open item was the forge's required-check list, and Mati
+  decided it on 2026-08-31: keep direct-push-to-master, no branch protection. The
+  gates still run — in the pre-commit hook before the push and in CI after it —
+  they simply are not enforced BY GitHub. That is a trade between two defensible
+  positions, made by the person entitled to make it, and it is recorded rather
+  than left to be re-litigated.
 - **closed or not-applicable (40),** each not-applicable naming the property that
   produced it rather than the word "N/A".
 
