@@ -3759,11 +3759,27 @@ else row "candidate-lane-segregated" FAIL "$((cand-tagged)) of $cand candidate f
 # file has recorded four times -- it trains people to widen it until it is gone.
 #
 # Order is now: what the remote DECLARES first (authoritative, and it settles a
-# repo that carries both a stale `main` and a real `master`), then the four
-# literal fallbacks for a checkout with no origin/HEAD ref.
+# repo that carries both a stale `main` and a real `master`), then the literal
+# fallbacks for a checkout with no origin/HEAD ref.
+#
+# `develop` JOINED THE LIST 2026-09-14, and the measurement that put it there
+# is worth keeping. bloXroute-Labs/falcon-xyz-api-service defaults to `develop`
+# -- the org's convention, with no `main` or `master` at all. It passed this row
+# locally and FAILED it in CI on the same commit, because the only thing that
+# resolved locally was `refs/remotes/origin/HEAD`, and actions/checkout does not
+# create that ref. So the authoritative path silently does not exist in CI, and
+# every fallback was a branch name the repo does not have.
+#
+# develop goes LAST deliberately. A repo whose default is main but which also
+# carries a stale `develop` must still resolve main, so the specific names keep
+# their precedence and this only catches the case where nothing else exists.
+#
+# This is widening the INPUTS the row accepts, not the ANSWER it demands: when
+# no base resolves it still FAILs, and it still refuses to call an unmeasured
+# dimension a met one.
 prov_base=""
 for _ref in "$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)" \
-            origin/main origin/master main master; do
+            origin/main origin/master main master origin/develop develop; do
   [ -n "$_ref" ] || continue
   if prov_base=$(git merge-base HEAD "$_ref" 2>/dev/null) && [ -n "$prov_base" ]; then break; fi
   prov_base=""
@@ -3807,7 +3823,7 @@ else
   elif ! git rev-parse HEAD >/dev/null 2>&1; then
     row "provenance-headers" NA "no commits yet -- a tree with no history has no changed lines to carry provenance, so there is nothing to measure rather than something unmeasured"
   else
-    row "provenance-headers" FAIL "no diff base resolves (tried origin/HEAD, origin/main, origin/master, main, master) -- the repo HAS history, so this dimension went UNMEASURED, which is not the same as met"
+    row "provenance-headers" FAIL "no diff base resolves (tried origin/HEAD, origin/main, origin/master, main, master, origin/develop, develop) -- the repo HAS history, so this dimension went UNMEASURED, which is not the same as met"
   fi
 fi
 
