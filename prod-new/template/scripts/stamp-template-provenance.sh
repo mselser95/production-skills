@@ -31,6 +31,12 @@ VENDORED=(
   # to it drifted invisibly in every scaffolded repo. Found by the new
   # producer-side digest reporting "in step" after this very file was edited.
   scripts/stamp-template-provenance.sh
+  # The CI retry wrapper and its selftest. Both are framework artifacts:
+  # every `go install` in the vendored workflows runs through retry.sh, and
+  # a silent edit to it would disarm gosec, govulncheck, gitleaks and
+  # actionlint at once.
+  scripts/retry.sh
+  scripts/tests/retry-selftest.sh
   # DELIBERATELY NOT LISTED: scripts/coverage-floors.txt. Its own header says
   # "generated from the measured per-package coverage on the scaffold's first
   # run" -- it is per-repo DATA, not a framework artifact, and listing it would

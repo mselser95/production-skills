@@ -281,3 +281,4 @@ probe-selftests:
 	bash scripts/tests/sbom-ordering-selftest.sh
 	bash scripts/tests/check-registries-selftest.sh
 	bash scripts/tests/non-vacuity-selftest.sh
+	bash scripts/tests/retry-selftest.sh

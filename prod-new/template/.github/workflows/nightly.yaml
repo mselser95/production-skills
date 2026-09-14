@@ -61,7 +61,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install gremlins
-        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@latest
+        run: bash scripts/retry.sh go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
       - name: Run mutation testing baseline
         run: |
           mkdir -p .prod/mutation
