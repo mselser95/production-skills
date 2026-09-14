@@ -27,7 +27,13 @@ func ServeListener(ctx context.Context, lis net.Listener) error {
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-	srv := &http.Server{Handler: mux}
+	// ReadHeaderTimeout is the Slowloris defence: without it a client can
+	// hold a connection open indefinitely by dribbling out header bytes, and
+	// http.Server has no default. It matters more here than it looks -- the
+	// pprof surface is the one that hands out goroutine dumps and profiles,
+	// so the cheapest denial of service against it is also the one that ties
+	// up the handler you would use to diagnose the denial of service.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(lis) }()
 

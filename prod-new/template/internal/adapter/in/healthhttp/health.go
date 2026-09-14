@@ -201,7 +201,12 @@ func (s *Server) ReadinessAt(now time.Time) (bool, Checks) {
 // port back off lis.Addr() -- never close-then-rebind, which races another
 // parallel test for the same port.
 func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
-	srv := &http.Server{Handler: s.mux()}
+	// ReadHeaderTimeout is the Slowloris defence -- http.Server has no
+	// default, so without it a client holds a connection open indefinitely by
+	// dribbling header bytes. On the readiness surface specifically, enough of
+	// those make the service look DOWN to its orchestrator while it is
+	// perfectly healthy, which turns a cheap attack into a restart loop.
+	srv := &http.Server{Handler: s.mux(), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(lis) }()
 

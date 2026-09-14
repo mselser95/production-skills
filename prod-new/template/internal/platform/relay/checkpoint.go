@@ -37,7 +37,7 @@ type FileCheckpoints struct {
 // boot.
 func OpenCheckpoints(path string) (*FileCheckpoints, error) {
 	c := &FileCheckpoints{path: path, pos: map[string]int64{}}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is checkpoint operator config, not request input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return c, nil
@@ -120,7 +120,7 @@ func (c *FileCheckpoints) writeLocked() error {
 	// this it can be lost in a machine crash while the file contents were
 	// already durable, leaving the old checkpoint in place with no sign that
 	// anything went wrong.
-	d, err := os.Open(dir)
+	d, err := os.Open(dir) // #nosec G304 -- path is checkpoint operator config, not request input
 	if err != nil {
 		return fmt.Errorf("relay: opening dir to sync rename: %w", err)
 	}

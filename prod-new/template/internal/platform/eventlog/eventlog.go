@@ -248,7 +248,7 @@ func (l *Log) traceParentOf(ctx context.Context) string {
 }
 
 func Open(path string) (*Log, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- path is EVENT_LOG_PATH operator config, not request input
 	if err != nil {
 		return nil, fmt.Errorf("eventlog: open %s: %w", path, err)
 	}
@@ -646,7 +646,7 @@ func (l *Log) Compact() (CompactStats, error) {
 
 	kept := records[keepFrom:]
 	tmp := l.path + ".compact"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- path is EVENT_LOG_PATH operator config, not request input
 	if err != nil {
 		return stats, fmt.Errorf("eventlog: compact open %s: %w", tmp, err)
 	}
@@ -693,7 +693,7 @@ func (l *Log) Compact() (CompactStats, error) {
 	if l.file != nil {
 		_ = l.file.Close()
 	}
-	reopened, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	reopened, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		l.file = nil
 		return stats, fmt.Errorf("eventlog: compact reopen %s: %w", l.path, err)
@@ -708,7 +708,7 @@ func (l *Log) Compact() (CompactStats, error) {
 
 // readRecords reads every line of the log into decoded records.
 func readRecords(path string) ([]record, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path is EVENT_LOG_PATH operator config, not request input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

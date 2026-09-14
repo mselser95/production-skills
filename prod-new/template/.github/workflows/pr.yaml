@@ -109,7 +109,11 @@ jobs:
           cache: true
       # Pinned, like every other tool here: an unpinned scanner changes what
       # "green" means without anyone editing the repo.
-      - run: bash scripts/retry.sh go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+      # v2.29.0, not v2.21.4. v2.21.4 DOES NOT BUILD under Go 1.26: it pulls
+      # x/tools@v0.25.0, which fails with `invalid array length -delta * delta`.
+      # A scaffolded repo on a current Go therefore had a blocking SAST gate
+      # that could not even be installed, let alone run.
+      - run: bash scripts/retry.sh go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
       # -exclude-generated: generated code is not this repo's to fix, and a
       # finding nobody can act on trains people to pass -exclude everything.
       # No -severity filter: the policy says blocking, and choosing which

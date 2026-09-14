@@ -138,7 +138,7 @@ type Log struct {
 
 // Open opens (creating if necessary) the log at path for appending.
 func Open(path string) (*Log, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- path is OUTBOX_LOG_PATH operator config, not request input
 	if err != nil {
 		return nil, fmt.Errorf("outboxlog: open %s: %w", path, err)
 	}
@@ -188,7 +188,7 @@ func (l *Log) Writable() bool {
 
 // Replay reads every transition previously appended, in order.
 func Replay(path string) ([]Record, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path is OUTBOX_LOG_PATH operator config, not request input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

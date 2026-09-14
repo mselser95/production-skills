@@ -226,7 +226,7 @@ func (l *Log) Compact(retain func(entryID, idempotencyKey string) bool) (Compact
 	// the owner released would let a post-Close Append succeed.
 	if l.file != nil {
 		_ = l.file.Close()
-		reopened, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		reopened, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			l.file = nil
 			return stats, fmt.Errorf("outboxlog: compact reopen %s: %w", l.path, err)
@@ -255,7 +255,7 @@ func (l *Log) Compact(retain func(entryID, idempotencyKey string) bool) (Compact
 // delayed-allocation filesystem the write error can surface only here, and
 // swallowing it would rename a replacement that was never fully written.
 func writeReplacement(tmp string, kept []Record) error {
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- path derives from OUTBOX_LOG_PATH config, not request input
 	if err != nil {
 		return fmt.Errorf("outboxlog: compact open %s: %w", tmp, err)
 	}

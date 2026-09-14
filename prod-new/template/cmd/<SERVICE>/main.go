@@ -147,7 +147,7 @@ func run(ctx context.Context) error {
 
 	// -- durable event journal + boot-time replay -------------------------
 	if dir := filepath.Dir(cfg.EventLogPath); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
 	}
@@ -191,7 +191,7 @@ func run(ctx context.Context) error {
 	// here would have been a durable mechanism nobody ran -- the same defect
 	// as a tracer that is instrumented and never injected.
 	if dir := filepath.Dir(cfg.OutboxLogPath); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
 	}
