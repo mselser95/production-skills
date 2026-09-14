@@ -47,10 +47,39 @@
 # Knobs (env):
 #   RATES              rates to sweep, ascending  (default "100 250 500 1000 2000 4000")
 #   DURATION           per-rate run length        (default 10s)
+#   GENERATOR_CEILING  a rate the GENERATOR has been shown to sustain against
+#                      a faster service. At or below it, a spoiled row is
+#                      attributed to the SERVICE rather than dismissed --
+#                      because the harness has already been proven capable
+#                      there. Requires GENERATOR_CEILING_EVIDENCE.
+#   GENERATOR_CEILING_EVIDENCE
+#                      how that ceiling was established. Recorded in the
+#                      baseline; without it the ceiling is refused, because an
+#                      undocumented one is just a switch that turns the
+#                      spoiled-row guard off.
+#   REPS               repetitions per rate, median reported (default 1).
+#                      Set it to 5 on a machine that also runs anything else:
+#                      this measurement is bimodal, and one bad draw in a
+#                      single-shot sweep invents a saturation point.
 #   TARGET_RPS         DECLARED peak; no default  (margin is not computed without it)
 #   LATENCY_BUDGET_MS  declared p99 budget; no default
 #   MARGIN_TARGET      headroom multiple          (default 2, from tier-policy.yaml)
 #   HEALTH_PORT        loopback port for the service under test (default 18081)
+#   TARGET_PATH        which endpoint to drive (default /healthz).
+#
+#                      THIS CHOICE DECIDES WHETHER THE NUMBER MEANS ANYTHING.
+#                      /healthz returns a couple of hundred bytes and does
+#                      almost no work, so on a fast machine the SERVICE never
+#                      becomes the bottleneck -- the generator does, and the
+#                      sweep correctly refuses to call that a saturation point.
+#                      Point this at an endpoint that does representative work
+#                      (/metrics renders the full exposition) and the service
+#                      saturates within a band the generator can actually
+#                      drive.
+#   SVC_GOMAXPROCS     cores the SERVICE may use; unset = all of them. Set it
+#                      when the generator is the bottleneck (see below), and
+#                      record it beside the number -- capacity without a stated
+#                      resource allocation is not a figure, it is a rumour.
 #   OUT                where to write             (default benchmarks/load/baseline.md)
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 2
@@ -58,10 +87,16 @@ cd .. || exit 2
 
 RATES="${RATES:-100 250 500 1000 2000 4000}"
 DURATION="${DURATION:-10s}"
+REPS="${REPS:-1}"
+GENERATOR_CEILING="${GENERATOR_CEILING:-}"
+GENERATOR_CEILING_EVIDENCE="${GENERATOR_CEILING_EVIDENCE:-}"
+
 TARGET_RPS="${TARGET_RPS:-}"
 LATENCY_BUDGET_MS="${LATENCY_BUDGET_MS:-}"
 MARGIN_TARGET="${MARGIN_TARGET:-2}"
 HEALTH_PORT="${HEALTH_PORT:-18081}"
+TARGET_PATH="${TARGET_PATH:-/healthz}"
+SVC_GOMAXPROCS="${SVC_GOMAXPROCS:-}"
 OUT="${OUT:-benchmarks/load/baseline.md}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
@@ -69,6 +104,19 @@ say()  { printf '  %s\n' "$*"; }
 step() { printf '\n\033[1m▸ %s\033[0m\n' "$*"; }
 good() { printf '  \033[32m%s\033[0m\n' "$*"; }
 bad()  { printf '  \033[31m%s\033[0m\n' "$*"; }
+# A ceiling with no evidence is a bypass, not a measurement.
+#
+# This flag suppresses the guard that stops a spoiled row setting the
+# saturation point -- the single most load-bearing refusal in this script. It
+# is legitimate ONLY when the generator has been independently shown to drive
+# that rate, and the way to keep it legitimate is to make the claim a required
+# input that lands in the artifact where a reader can judge it.
+if [[ -n "$GENERATOR_CEILING" && -z "$GENERATOR_CEILING_EVIDENCE" ]]; then
+  bad "GENERATOR_CEILING is set with no GENERATOR_CEILING_EVIDENCE."
+  say "The ceiling suppresses the spoiled-row guard, so it needs the measurement"
+  say "that justifies it -- e.g. 'same rate 5/5 clean at SVC_GOMAXPROCS=2'."
+  exit 2
+fi
 
 WORK="$(mktemp -d)"
 SVC_PID=""
@@ -87,16 +135,42 @@ say "built $svc_pkg"
 
 step "starting the service on 127.0.0.1:$HEALTH_PORT"
 mkdir -p "$WORK/data"
-EVENTLOG_PATH="$WORK/data/eventlog.jsonl" \
-OUTBOX_LOG_PATH="$WORK/data/outbox.jsonl" \
-CHECKPOINT_PATH="$WORK/data/checkpoints.json" \
-HEALTH_PORT="$HEALTH_PORT" \
-  "$WORK/svc" >"$WORK/svc.log" 2>&1 &
+# # SVC_GOMAXPROCS: give the service a DEFINED share of the machine
+#
+# Without it the service and the load generator compete for every core, and on
+# a developer's laptop the generator loses first: it cannot schedule sends fast
+# enough, its own lag dominates the reported tail, and the sweep correctly
+# refuses to call that a saturation point. Measured here on 16 cores -- 80,000/s
+# clean, and at 88,000/s nearly a third of the reported p99 was the harness's
+# own delay. The service's real limit was never reached.
+#
+# Pinning the service to fewer cores makes IT the bottleneck again, which is
+# the only configuration in which the number means anything. It also makes the
+# number honest in a way an unconstrained run is not: "this service saturates
+# at N req/s" is meaningless without saying on how much machine. A capacity
+# figure is a pair.
+#
+# Unset by default, so an unconstrained run behaves exactly as before.
+# Built as an array and launched through `env`, NOT as a bare
+# `${VAR:+NAME=value}` prefix: that expansion lands in COMMAND position, so
+# bash tried to execute a program literally named "GOMAXPROCS=2".
+svc_env=(
+  EVENTLOG_PATH="$WORK/data/eventlog.jsonl"
+  OUTBOX_LOG_PATH="$WORK/data/outbox.jsonl"
+  CHECKPOINT_PATH="$WORK/data/checkpoints.json"
+  HEALTH_PORT="$HEALTH_PORT"
+)
+[[ -n "$SVC_GOMAXPROCS" ]] && svc_env+=(GOMAXPROCS="$SVC_GOMAXPROCS")
+env "${svc_env[@]}" "$WORK/svc" >"$WORK/svc.log" 2>&1 &
 SVC_PID=$!
 
-target="http://127.0.0.1:$HEALTH_PORT/healthz"
+target="http://127.0.0.1:$HEALTH_PORT${TARGET_PATH}"
+# Readiness is polled on /healthz regardless of what is being DRIVEN: the
+# target may be an endpoint that is only meaningful once the process is warm,
+# and waiting on it would conflate "not up yet" with "not working".
+boot_probe="http://127.0.0.1:$HEALTH_PORT/healthz"
 waited=0
-until curl -sf "$target" >/dev/null 2>&1; do
+until curl -sf "$boot_probe" >/dev/null 2>&1; do
   if ! kill -0 "$SVC_PID" 2>/dev/null; then
     bad "the service exited during boot:"; tail -20 "$WORK/svc.log"; exit 1
   fi
@@ -124,32 +198,121 @@ saturation_reason=""
 suspect_rows=0
 measured_rows=0
 
+# median <numbers...> -> the middle value, for an ODD count.
+#
+# The median and not the mean, deliberately. The failure mode this exists to
+# survive is a single catastrophic outlier -- one repetition in five collapsing
+# to 1% of offered load -- and a mean would let that one run drag the reported
+# figure down by 20%, inventing a degradation the service never had.
+median() {
+  printf '%s\n' "$@" | sort -g | awk '{ v[NR]=$0 } END { print v[int((NR+1)/2)] }'
+}
+
 for rate in $RATES; do
-  step "offering ${rate}/s for $DURATION"
-  out="$WORK/run-$rate.txt"
-  "$WORK/loadgen" -target "$target" -rate "$rate" -duration "$DURATION" >"$out" 2>"$WORK/run-$rate.err"
-  code=$?
+  if (( REPS > 1 )); then
+    step "offering ${rate}/s for $DURATION, x${REPS} (median reported)"
+  else
+    step "offering ${rate}/s for $DURATION"
+  fi
 
-  achieved=$(kv achieved_rate_rps "$out")
-  ratio=$(kv achieved_over_offered "$out")
-  p99=$(kv latency_p99_ms "$out")
-  p999=$(kv latency_p999_ms "$out")
-  refused=$(kv responses_refused "$out")
-  failed=$(kv responses_failed "$out")
-  suspect=$(kv generator_suspect "$out")
-  lag_share=$(kv lag_share_of_tail "$out")
+  # # REPETITION, because this measurement is BIMODAL on a busy host
+  #
+  # Measured on a 16-core laptop at a fixed 56,000/s: four runs of five came
+  # back clean at ~56,000/s with p99 4-8ms, and the fifth collapsed to 557/s
+  # with a 12-second tail. Same rate, same binary, same machine, 100x apart.
+  #
+  # A single-shot sweep therefore INVENTS cliffs. Walk the rates once and the
+  # first rate to catch the bad draw looks like the saturation point, and the
+  # next run puts it somewhere else entirely -- which is exactly the shape of
+  # the contradictory results that made this capacity figure unreportable.
+  #
+  # Repeating and taking the median makes the number reproducible. It does not
+  # make the outlier disappear: the spread is printed, and a rate whose
+  # repetitions disagree wildly is visible rather than averaged away.
+  rep_ratios=(); rep_p99s=(); rep_achieved=(); rep_p999s=()
+  rep_refused=(); rep_failed=(); rep_suspect=0; rep_lag=""
+  worst_ratio=""; best_ratio=""
 
-  if [[ -z "$achieved" ]]; then
-    bad "loadgen produced no summary at ${rate}/s (exit $code):"; cat "$WORK/run-$rate.err"; exit 1
+  for (( rep = 1; rep <= REPS; rep++ )); do
+    out="$WORK/run-$rate-$rep.txt"
+    "$WORK/loadgen" -target "$target" -rate "$rate" -duration "$DURATION" >"$out" 2>"$WORK/run-$rate-$rep.err"
+    code=$?
+
+    a=$(kv achieved_rate_rps "$out")
+    if [[ -z "$a" ]]; then
+      bad "loadgen produced no summary at ${rate}/s rep ${rep} (exit $code):"
+      cat "$WORK/run-$rate-$rep.err"; exit 1
+    fi
+    rep_achieved+=("$a")
+    rep_ratios+=("$(kv achieved_over_offered "$out")")
+    rep_p99s+=("$(kv latency_p99_ms "$out")")
+    rep_p999s+=("$(kv latency_p999_ms "$out")")
+    rep_refused+=("$(kv responses_refused "$out")")
+    rep_failed+=("$(kv responses_failed "$out")")
+    if [[ "$(kv generator_suspect "$out")" == "true" ]]; then
+      rep_suspect=$((rep_suspect + 1))
+      rep_lag=$(kv lag_share_of_tail "$out")
+    fi
+  done
+
+  achieved=$(median "${rep_achieved[@]}")
+  ratio=$(median "${rep_ratios[@]}")
+  p99=$(median "${rep_p99s[@]}")
+  p999=$(median "${rep_p999s[@]}")
+  refused=$(median "${rep_refused[@]}")
+  failed=$(median "${rep_failed[@]}")
+  lag_share="$rep_lag"
+
+  # A rate is spoiled only when a MAJORITY of its repetitions were spoiled.
+  # One bad draw in five is the outlier this repetition exists to absorb;
+  # three in five is the generator genuinely at its limit.
+  suspect="false"
+  if (( REPS > 1 )); then
+    if (( rep_suspect * 2 > REPS )); then suspect="true"; fi
+  elif (( rep_suspect > 0 )); then
+    suspect="true"
+  fi
+
+  if (( REPS > 1 )); then
+    worst_ratio=$(printf '%s\n' "${rep_ratios[@]}" | sort -g | head -1)
+    best_ratio=$(printf '%s\n' "${rep_ratios[@]}" | sort -g | tail -1)
+    say "median of ${REPS}: ratio $ratio (spread ${worst_ratio}..${best_ratio}), ${rep_suspect} spoiled rep(s)"
   fi
 
   note="ok"
+  # # ATTRIBUTION: a spoiled row below a PROVEN generator ceiling is the service
+  #
+  # generator_suspect measures how much of the reported tail is the harness's
+  # own send lag. It cannot distinguish "the generator is too slow" from "the
+  # generator's sends are queueing behind a SATURATED SERVICE" -- both look
+  # like lag. Dismissing every such row means a service that genuinely
+  # saturates can never have a saturation point recorded.
+  #
+  # The discriminator is a control: run the SAME rate against a faster service.
+  # If the generator drives it cleanly there, it is capable of that rate, and
+  # lag at that rate against a slower service belongs to the service.
+  #
+  # GENERATOR_CEILING carries that finding in, and the evidence is required and
+  # printed, so the claim is auditable rather than asserted.
+  attributed=""
+  if [[ "$suspect" == "true" && -n "$GENERATOR_CEILING" ]] \
+     && awk -v r="$rate" -v c="$GENERATOR_CEILING" 'BEGIN { exit !(r <= c) }'; then
+    suspect="false"
+    attributed=" (lag attributed to the SERVICE: ${rate}/s is at or below the declared generator ceiling of ${GENERATOR_CEILING}/s)"
+    say "attributing the lag at ${rate}/s to the service -- the generator is proven at this rate"
+  fi
   if [[ "$suspect" == "true" ]]; then
     note="UNUSABLE — ${lag_share} of this tail is the generator's own send lag"
     suspect_rows=$((suspect_rows + 1))
     bad "generator_suspect at ${rate}/s: ${lag_share} of the reported p99 is this harness's own delay"
   else
+    note="ok${attributed}"
     measured_rows=$((measured_rows + 1))
+    # The highest rate the generator did NOT spoil. This is the only number in
+    # the sweep that can honestly be called observed capacity, and the markdown
+    # verdict below needs it to avoid claiming the service kept up at rates
+    # nobody measured.
+    highest_measured="$rate"
   fi
 
   rows+="| $rate | $achieved | $ratio | $p99 | $p999 | $refused | $failed | $note |"$'\n'
@@ -169,6 +332,7 @@ for rate in $RATES; do
 done
 
 highest="${RATES##* }"
+highest_measured="${highest_measured:-}"
 
 # --- verdict ---------------------------------------------------------------
 verdict=0
@@ -258,8 +422,27 @@ step "writing $OUT"
   printf -- '- **measured**: %s\n' "$(date -u '+%Y-%m-%d')"
   printf -- '- **Toolchain:** `%s`\n' "$(go version)"
   printf -- '- **Host:** %s %s, %s CPU(s)\n' "$(uname -s)" "$(uname -m)" "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?')"
-  printf -- '- **Target:** `%s` (the scaffold health endpoint; a real service repoints this at the surface whose budget it declared)\n' "$target"
-  printf -- '- **Per-rate duration:** %s\n\n' "$DURATION"
+  # The target is recorded WITH a warning when it is the near-empty one,
+  # because a capacity figure read off /healthz is a figure about the network
+  # stack rather than about this service.
+  if [[ "$TARGET_PATH" == "/healthz" ]]; then
+    printf -- '- **Target:** `%s` — a NEAR-EMPTY endpoint. The service is unlikely to be the bottleneck here; see TARGET_PATH\n' "$target"
+  else
+    printf -- '- **Target:** `%s` (TARGET_PATH)\n' "$target"
+  fi
+  printf -- '- **Per-rate duration:** %s\n' "$DURATION"
+  printf -- '- **Repetitions per rate:** %s%s\n' "$REPS" "$( ((REPS>1)) && printf ' (median reported)' || printf ' — single shot; see REPS' )"
+  if [[ -n "$GENERATOR_CEILING" ]]; then
+    printf -- '- **Declared generator ceiling:** %s/s — %s\n' \
+      "$GENERATOR_CEILING" "$GENERATOR_CEILING_EVIDENCE"
+  fi
+  # The allocation is recorded BESIDE the number, always. A capacity figure
+  # without the machine it was measured on is a rumour.
+  if [[ -n "$SVC_GOMAXPROCS" ]]; then
+    printf -- '- **Service CPU allocation:** GOMAXPROCS=%s (the generator had the rest)\n\n' "$SVC_GOMAXPROCS"
+  else
+    printf -- '- **Service CPU allocation:** unconstrained — service and generator shared every core\n\n'
+  fi
 
   printf '## Sweep\n\n'
   printf '| offered rps | achieved rps | achieved/offered | p99 ms | p99.9 ms | refused | failed | note |\n'
@@ -277,14 +460,58 @@ step "writing $OUT"
     printf 'was NOT evaluated: this saturation point is a throughput cliff only, and a\n'
     printf 'service can breach its latency budget well below it._\n\n'
   fi
+  # NOTE on the field NAME below, which is load-bearing.
+#
+  # verify-standard.sh's load-baseline row reads this file with
+  # `load_field 'saturation[_ -]?point'` -- it greps for a key matching
+  # "saturation point". This generator wrote "**Saturation:**", which does not
+  # match, so a sweep that HAD determined a saturation point still failed the row
+  # with "<no such field>" -- the same message a baseline with no number at all
+  # produces.
+#
+  # That is the second time the generator and the probe have disagreed about a
+  # field's spelling (see load_field's own comment about the bold/colon styles).
+  # The key must stay "Saturation point".
   if [[ -n "$saturation" ]]; then
-    printf -- '- **Saturation:** %s/s — %s\n' "$saturation" "$saturation_reason"
+    printf -- '- **Saturation point:** %s/s — %s\n' "$saturation" "$saturation_reason"
+  elif ((measured_rows == 0)); then
+    printf -- '- **Saturation point: UNKNOWN.** EVERY row was spoiled by the generator; nothing\n'
+    printf -- '  about the service was measured. Re-run on a quiet host.\n'
+  elif ((suspect_rows > 0)); then
+    # NOT-MEASURED IS NOT KEPT-UP -- and this file, not the terminal, is what
+    # anyone reads a week later.
+    #
+    # The terminal verdict has distinguished these two cases since 2026-08-29;
+    # this markdown branch did not, and printed "the service kept up at every
+    # rate offered, up to 192000/s" directly above a table whose 192000 row
+    # showed a collapse to 0.001 of offered load. The artifact contradicted
+    # both the table it sat under and the terminal that produced it, and it
+    # resolved the ambiguity in the service's favour -- which is the one
+    # direction a capacity claim must never drift.
+    printf -- '- **Saturation point: INDETERMINATE.** %d of the offered rates were spoiled by the\n' "$suspect_rows"
+    printf -- '  generator competing with the service for the same CPUs. A spoiled row says\n'
+    printf -- '  NOTHING about the service -- it is not evidence that the service kept up.\n'
+    printf -- '- **Highest rate actually MEASURED: %s/s.** Everything above it is unknown.\n' "${highest_measured:-none}"
+    printf -- '  Re-run from a host that is not also running the service before reading any\n'
+    printf -- '  capacity figure out of this file.\n'
   else
-    printf -- '- **Saturation: NOT REACHED.** The service kept up at every rate offered, up to %s/s.\n' "$highest"
+    printf -- '- **Saturation point: NOT REACHED.** The service kept up at every rate offered, up to %s/s,\n' "$highest"
+    printf -- '  and every row was usable.\n'
     printf -- '  The real saturation point is somewhere above that and this run did not find it.\n'
     printf -- '  Raise `RATES` and re-run; do not read the top row as a capacity figure.\n'
   fi
-  printf -- '- **Capacity margin:** %s — %s\n' "$margin" "$margin_note"
+  # The key is "Margin", not "Capacity margin", and that is not a style choice.
+  #
+  # verify-standard.sh reads this with `load_field 'margin|headroom'`, whose
+  # regex anchors the KEY: `\**(margin|headroom)\**[[:space:]]*:`. A key of
+  # "Capacity margin" does not match, so the row reported "declares no
+  # parseable margin: <no such field>" over a margin sitting right there.
+  #
+  # THIRD time the generator and the probe have disagreed about a field's
+  # spelling in this file -- after the bold/colon styles and "Saturation" vs
+  # "Saturation point". They are written in different repos and nothing tests
+  # them together, which is what makes this class keep recurring.
+  printf -- '- **Margin:** %s — %s\n' "$margin" "$margin_note"
   if ((suspect_rows > 0)); then
     printf -- '- **%d row(s) UNUSABLE:** more than a quarter of the tail those rows report is\n' "$suspect_rows"
     printf -- '  the generator\047s own send lag, or it dropped arrivals it never issued. Those\n'
