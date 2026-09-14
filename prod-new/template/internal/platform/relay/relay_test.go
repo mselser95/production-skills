@@ -445,24 +445,68 @@ func TestRelay_RunWakesOnNotify(t *testing.T) {
 // verifies: two concurrent Run calls on one relay are refused -- a second
 // runner would publish everything twice
 func TestRelay_ConcurrentRunIsRefused(t *testing.T) {
-	rel, _, _ := newTestRelay(t, &memReader{}, Options{Name: "rl", Idle: time.Hour})
+	// A HANDSHAKE, NOT A DEADLINE.
+	//
+	// This test used to poll RunToEnd up to 500 times at 2ms, hoping the Run
+	// goroutine had claimed the slot by then, and it went red in CI on
+	// 2026-09-14 with "second run returned <nil>" -- RunToEnd succeeding every
+	// time, which means Run was not holding the slot at all. It reproduced
+	// neither at -count=40 nor under GOMAXPROCS=1 locally, because a wall-clock
+	// budget is not a synchronisation primitive: it is a bet on the scheduler,
+	// and on a loaded runner the bet loses.
+	//
+	// Run claims the slot with a CompareAndSwap as its FIRST statement and only
+	// then calls Leader.Acquire. So a leader that signals from Acquire gives a
+	// genuine happens-before edge: once `acquired` is observed, `running` is
+	// already true, with no timing assumption anywhere. The test now waits for
+	// that edge and asserts exactly once.
+	acquired := make(chan struct{})
+	rel, err := New[ev](
+		&memReader{}, newMemCps(), idMapper, &memPub{failAt: map[string]int{}},
+		signalLeader{acquired: acquired},
+		Options{Name: "rl", Idle: time.Hour},
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errc := make(chan error, 1)
 	go func() { errc <- rel.Run(ctx) }()
 
-	var err error
-	for i := 0; i < 500; i++ {
-		if err = rel.RunToEnd(context.Background()); errors.Is(err, ErrRunning) {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
+	select {
+	case <-acquired:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run never reached leadership acquisition")
 	}
-	if !errors.Is(err, ErrRunning) {
+
+	if err := rel.RunToEnd(context.Background()); !errors.Is(err, ErrRunning) {
 		t.Fatalf("second run returned %v, want ErrRunning", err)
 	}
+
+	// ASSERT Run'''s OWN ERROR. The old test read it into nothing, which is why
+	// the CI failure could not say why the slot was free: if Run had exited
+	// early -- a leadership error, a drain error -- the symptom was identical
+	// to "the goroutine has not started yet", and the one value that
+	// distinguished them was being discarded.
 	cancel()
-	<-errc
+	if err := <-errc; err != nil {
+		t.Fatalf("Run returned %v, want nil after cancellation", err)
+	}
+}
+
+// signalLeader reports that Acquire was reached. Run does its
+// CompareAndSwap on the run slot BEFORE calling Acquire, so observing this
+// channel is a happens-before edge for `running == true` -- which is what lets
+// the concurrency test above assert without a wall-clock budget. Like
+// nopLeader it never loses the slot: lost is nil, so the receive blocks
+// forever.
+type signalLeader struct{ acquired chan struct{} }
+
+func (l signalLeader) Acquire(context.Context) (func(), <-chan struct{}, error) {
+	close(l.acquired)
+	return func() {}, nil, nil
 }
 
 // lossyLeader loses the slot on the first Acquire.
