@@ -132,12 +132,27 @@ jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 is what makes this scan mean anything -- the default is
+      # depth 1, and a scan whose denominator is one commit is the zero-inputs
+      # shape wearing a green check.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # THE PINNED BINARY, NOT `gitleaks/gitleaks-action@v2` -- the action
+      # needs a paid licence on an ORGANISATION repo and exits before scanning
+      # anything without one. See ci.yaml's secret-scan job for the full
+      # argument and for where known findings belong. The two jobs must stay
+      # IDENTICAL: a PR lane and a push lane that scan differently means the
+      # merge is the first thing that ever scans.
+      - name: secret scanning (blocking)
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.21.2
+          "$(go env GOPATH)/bin/gitleaks" detect --source . --no-banner --redact --exit-code 1
 
   # Advisory (candidate-provenance) lane: `continue-on-error: true` means a
   # red run shows a yellow warning on the PR check list but never blocks

@@ -47,12 +47,53 @@ jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 is what makes this scan mean anything. The default is
+      # depth 1, so `gitleaks detect` would scan ONE commit and report clean --
+      # a scan whose denominator is a single commit is the zero-inputs shape
+      # wearing a green check.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # THE PINNED BINARY, NOT `gitleaks/gitleaks-action@v2`.
+      #
+      # This template shipped the ACTION until 2026-09-14. The action requires
+      # a paid licence on any ORGANISATION repo and exits before scanning
+      # anything without one:
+      #
+      #     [<org>] is an organization. License key is required.
+      #
+      # So every repo scaffolded from this template into an org got a
+      # secret-scanning gate that had never scanned a single commit -- and
+      # because it fails CLOSED, its red is indistinguishable from a real
+      # finding, which is precisely the signal it exists to carry. Measured on
+      # a scaffolded repo: red on every push for the life of the repo, and the
+      # first time anyone read the log it turned out nothing had been scanned.
+      #
+      # The gitleaks CLI itself is MIT and needs no licence. Installed from
+      # `github.com/zricethezav/gitleaks` -- the module path the tool declares.
+      # `github.com/gitleaks/...` is the repo URL and `go install` rejects it
+      # with "module declares its path as", which is the kind of failure that
+      # gets a security step commented out at 6pm.
+      #
+      # Known findings belong in a `.gitleaksignore` at the repo root, pinned
+      # BY FINGERPRINT (`commit:file:rule:line`) with the remediation written
+      # beside each. Never mute a path or a rule: a fingerprint names one
+      # finding in one immutable commit and cannot widen, while a muted rule
+      # blinds the scanner to every future secret of that kind.
+      #
+      # When proving this non-vacuous, do NOT plant AWS's documentation keys
+      # (AKIAIOSFODNN7EXAMPLE and friends) -- gitleaks allowlists exactly
+      # those, so it reports clean and the proof proves nothing. Use a
+      # non-allowlisted random key plus an RSA private-key block.
+      - name: secret scanning (blocking)
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.21.2
+          "$(go env GOPATH)/bin/gitleaks" detect --source . --no-banner --redact --exit-code 1
 
   govulncheck:
     runs-on: ubuntu-latest
