@@ -7,15 +7,15 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: e6215c17ab09fbb807adcd258b0ddc0e3aba9d7260683ff1fc2b93d74566a3ed
-short: e6215c17ab09
+digest: f556eb06d9011ddabcb5729da2a5f48bb32e9abf5cad7d804e887dac5cf2a3a6
+short: f556eb06d901
 files: 21
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
   scripts/changed-line-coverage.sh: 89438a28abea4bf522db07128e769c33c6848e059151de4f5860d2cd62ab12dd
   scripts/check-registries.sh: 4497037c9816de4cd3717b5077fd64b0954059554baadec57af423d8341b55a1
   scripts/check-template-drift.sh: f65b6d1cc649b9a2d9b46532b491f4fd7fd47502458c38414fe6126fbd2e7703
-  scripts/coverage.sh: 8ca0ad3413105fdc01e49caa0f171da22e85ed1d314dbd75274c5fb082adbf18
+  scripts/coverage.sh: 2fb76fdfb68df4d4ce2202e4907a09fe3d5ca153b724b1e0194d5cb7d5b78f7e
   scripts/error-handling-fitness.sh: cfb96953c7727fa872db162123963cfe5aca65102eeb6168cb7d08c7c9dd1327
   scripts/gate-hygiene-fitness.sh: 620bbf6eebcc4b7503643337b7852d20e59b527daf5255a6533a7eb857045e5a
   scripts/kill-durability.sh: d31b8857fcd239c0081f5560694020c015593a253eef14828b3d05da1e68e922

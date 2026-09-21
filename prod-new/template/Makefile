@@ -283,3 +283,4 @@ probe-selftests:
 	bash scripts/tests/non-vacuity-selftest.sh
 	bash scripts/tests/retry-selftest.sh
 	bash scripts/tests/observability-provenance-selftest.sh
+	bash scripts/tests/coverage-ratchet-selftest.sh

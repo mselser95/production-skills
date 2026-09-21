@@ -17,9 +17,30 @@ go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
 total="$(go tool cover -func="${coverage_out}" | tail -n1 | grep -oE '[0-9]+\.[0-9]+%$' | tr -d '%')"
 echo "TOTAL COVERAGE: ${total}% (threshold ${coverage_min}%)"
 
+# The global verdict is RECORDED, not acted on yet. Exiting here is what this
+# script did until 2026-09-21, and it meant the per-package ratchet below
+# never ran on exactly the repos that needed it: a repo under its global floor
+# skipped the ratchet entirely, reported "not probed", and nobody looked,
+# because the repo's coverage waiver appeared to explain the red. A whole
+# second gate sat dead behind a waiver that was about a different number.
+#
+# That inverts the ratchet's own purpose, stated in its header below: it exists
+# BECAUSE a global average hides a per-package regression. Skipping it whenever
+# the global number is unhealthy hides the regression in precisely the case the
+# global number was already failing to describe.
+#
+# So both checks always run, both verdicts are always printed, and the exit
+# status is the union. An operator needs both facts in one run -- being told
+# about the global floor, fixing it, and only then discovering a package
+# regression is two round trips over one measurement.
+global_failed=0
+# Declared here, not inside the ratchet block below: under `set -u` the union
+# check at the end reads it unconditionally, including on the no-floors-file
+# path where the ratchet never assigns it.
+ratchet_failed=0
 if awk -v got="${total}" -v min="${coverage_min}" 'BEGIN { exit !(got < min) }'; then
   echo "coverage ${total}% is below ${coverage_min}%" >&2
-  exit 1
+  global_failed=1
 fi
 
 # --- per-package ratchet --------------------------------------------------
@@ -67,7 +88,6 @@ if [[ -f "${floors_file}" ]]; then
     }
   ' "${coverage_out}" > "${perpkg_out}"
 
-  ratchet_failed=0
   while read -r pkg floor; do
     [[ -z "${pkg}" || "${pkg}" == \#* ]] && continue
 
@@ -100,8 +120,25 @@ if [[ -f "${floors_file}" ]]; then
     fi
   done < "${perpkg_out}"
 
-  if [[ "${ratchet_failed}" -ne 0 ]]; then
-    exit 1
+  if [[ "${ratchet_failed}" -eq 0 ]]; then
+    echo "per-package coverage ratchet: all packages at/above their floor, and every measured package has one (${floors_file})"
   fi
-  echo "per-package coverage ratchet: all packages at/above their floor, and every measured package has one (${floors_file})"
+else
+  # No floors file means the ratchet had nothing to check. Say so rather than
+  # leaving silence, which reads identically to "checked and all clear".
+  echo "per-package coverage ratchet: SKIPPED -- no ${floors_file}" >&2
+fi
+
+# The union, reported as one verdict so neither failure can be read as the
+# whole story.
+if [[ "${global_failed}" -ne 0 || "${ratchet_failed}" -ne 0 ]]; then
+  # Plain `if`s, not `[[ … ]] && var=…`: under `set -e` a false test makes that
+  # form the failing last command of the list and kills the script before it
+  # can report anything -- the gate would die exactly when it has a verdict.
+  global_verdict="ok"
+  if [[ "${global_failed}" -ne 0 ]]; then global_verdict="FAIL"; fi
+  ratchet_verdict="ok"
+  if [[ "${ratchet_failed}" -ne 0 ]]; then ratchet_verdict="FAIL"; fi
+  echo "coverage: FAILED (global floor: ${global_verdict}, per-package ratchet: ${ratchet_verdict})" >&2
+  exit 1
 fi
