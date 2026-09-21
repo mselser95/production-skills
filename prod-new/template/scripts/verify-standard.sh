@@ -578,9 +578,6 @@ fi
 if [[ -x scripts/coverage.sh ]]; then
   if out=$(./scripts/coverage.sh 2>&1); then
     row "coverage" PASS "$(grep -oE 'TOTAL COVERAGE: [0-9.]+%' <<<"$out" | head -1)"
-    if grep -q "ratchet: all packages at/above" <<<"$out"; then
-      row "coverage-ratchet" PASS "per-package floors enforced"
-    else row "coverage-ratchet" FAIL "no per-package ratchet in the gate"; fi
   else
     # coverage.sh fails FOUR ways and this branch used to assume one.
     #
@@ -618,7 +615,44 @@ if [[ -x scripts/coverage.sh ]]; then
       row "coverage" FAIL "coverage gate did not complete: $(cut -c1-110 <<<"${detail:-<no output captured>}")"
     fi
   fi
-else row "coverage" FAIL "no scripts/coverage.sh"; fi
+
+  # The ratchet verdict is decided ONCE, on the captured output, OUTSIDE the
+  # success/failure split above.
+  #
+  # It used to live inside the success branch only, so a repo whose GLOBAL
+  # floor failed emitted no coverage-ratchet row at all -- the summary counted
+  # it in neither PASS, FAIL nor NA, and it surfaced as "not probed", which
+  # reads like a probe gap rather than the gate it actually is. Compounded by
+  # coverage.sh exiting before its own ratchet (fixed 2026-09-21), the
+  # per-package gate was invisible on exactly the repos that needed it: the
+  # ones already under their global floor.
+  #
+  # Two independent defects, same symptom, and neither one alone explains it --
+  # fixing only the script leaves this row silent, fixing only this row reports
+  # on a ratchet that never ran.
+  if grep -q "ratchet: all packages at/above" <<<"$out"; then
+    row "coverage-ratchet" PASS "per-package floors enforced"
+  elif rviol=$(grep -m1 -oE "[a-z/._-]+ is [0-9.]+%, below its floor of [0-9.]+%" <<<"$out"); then
+    row "coverage-ratchet" FAIL "$rviol"
+  elif rungated=$(grep -m1 -oE "package '[^']+' has measured coverage but NO floor" <<<"$out"); then
+    row "coverage-ratchet" FAIL "$rungated -- an ungated package is not a passing one"
+  elif grep -q "ratchet: SKIPPED" <<<"$out"; then
+    # Nothing to check is not the same as nothing wrong: the zero-inputs rule
+    # this file applies everywhere else says an empty denominator FAILS.
+    row "coverage-ratchet" FAIL "no floors file -- the ratchet had nothing to check, which is not the same as nothing wrong"
+  else
+    # Reached when coverage.sh emitted no ratchet verdict at all -- an older
+    # copy that still exits before its ratchet, or one edited to drop it.
+    row "coverage-ratchet" FAIL "no per-package ratchet in the gate"
+  fi
+else
+  # Both rows, not just the first: leaving coverage-ratchet unemitted here is
+  # the same "not probed" hole this section just closed above -- a dimension
+  # that counts in neither PASS, FAIL nor NA reads as a probe gap rather than
+  # as the missing gate it is.
+  row "coverage" FAIL "no scripts/coverage.sh"
+  row "coverage-ratchet" FAIL "no scripts/coverage.sh, so no per-package ratchet either"
+fi
 
 # tests/prod LOC ratio — recorded, never a gate
 # -exec ... + rather than `| xargs`: a path containing a space or newline makes

@@ -198,8 +198,86 @@ RUN_OUT="$(cd "${fixture}" && COVERAGE_MIN=0 COVERAGE_FLOORS=scripts/coverage-fl
 RUN_RC=$?
 expect "D skip is stated" "per-package coverage ratchet: SKIPPED" present
 
+# --------------------------------------------------------------------------
+# E. verify-standard.sh's coverage-ratchet ROW -- the second half of the defect
+#
+# Fixing coverage.sh alone is not enough. The probe used to emit the
+# coverage-ratchet row only inside its `if out=$(./scripts/coverage.sh)`
+# SUCCESS branch, so a repo whose global floor failed got no row at all: the
+# dimension counted in neither PASS, FAIL nor NA and surfaced as "not probed".
+# Two independent defects, one symptom -- fixing only the script leaves the row
+# silent, fixing only the row reports on a ratchet that never ran.
+#
+# This drives the probe's REAL decision chain, lifted by anchor rather than
+# restated, against synthetic coverage.sh output. If the chain is moved back
+# inside the success branch or deleted, the extraction below finds nothing and
+# this fails loudly rather than silently testing an empty string.
+# --------------------------------------------------------------------------
+echo "E. the probe emits a coverage-ratchet row regardless of coverage.sh's exit"
+
+probe=""
+for candidate in \
+  "${here}/verify-standard.sh" \
+  "${here}/../../_shared/probes/verify-standard.sh" \
+  "${here}/../verify-standard.sh"; do
+  if [[ -f "${candidate}" ]]; then probe="${candidate}"; break; fi
+done
+if [[ -z "${probe}" ]]; then
+  echo "  FAIL E: cannot locate verify-standard.sh to extract the row logic from" >&2
+  failures=$((failures + 1))
+else
+  chain="$(awk '/^  # The ratchet verdict is decided ONCE/{on=1} on{print} on && /^  fi$/{exit}' "${probe}")"
+  if ! grep -q 'row "coverage-ratchet"' <<<"${chain}"; then
+    echo "  FAIL E: extracted no coverage-ratchet decision chain from ${probe} -- the anchor moved, so this case proves nothing" >&2
+    failures=$((failures + 1))
+  else
+    emitted=""
+    # shellcheck disable=SC2317  # called via eval'd chain below
+    row() { emitted="$2 $3"; }
+
+    check_row() { # check_row <label> <synthetic $out> <want-verdict> <want-substring>
+      local label="$1" want_verdict="$3" want_sub="$4"
+      # shellcheck disable=SC2034  # read by the eval'd chain below, not here
+      out="$2"; emitted=""
+      eval "${chain}"
+      if [[ "${emitted%% *}" != "${want_verdict}" ]]; then
+        echo "  FAIL ${label}: verdict '${emitted%% *}', want '${want_verdict}' (emitted: ${emitted})" >&2
+        failures=$((failures + 1)); return
+      fi
+      if [[ -n "${want_sub}" ]] && ! grep -qF -- "${want_sub}" <<<"${emitted}"; then
+        echo "  FAIL ${label}: evidence lacks '${want_sub}' (emitted: ${emitted})" >&2
+        failures=$((failures + 1)); return
+      fi
+      echo "  ok   ${label}"
+    }
+
+    check_row "E healthy ratchet -> PASS" \
+      "TOTAL COVERAGE: 90.0%
+per-package coverage ratchet: all packages at/above their floor, and every measured package has one (f)" \
+      PASS ""
+    check_row "E package below floor -> FAIL naming it" \
+      "coverage 60.0% is below 85.0%
+per-package coverage ratchet: internal/app is 10.00%, below its floor of 50.0% (see f)" \
+      FAIL "below its floor of 50.0%"
+    check_row "E ungated package -> FAIL" \
+      "coverage 60.0% is below 85.0%
+per-package coverage ratchet: package 'internal/new' has measured coverage but NO floor in f" \
+      FAIL "NO floor"
+    check_row "E no floors file -> FAIL, not silence" \
+      "TOTAL COVERAGE: 90.0%
+per-package coverage ratchet: SKIPPED -- no f" \
+      FAIL "nothing to check"
+    check_row "E no ratchet verdict at all -> FAIL" \
+      "TOTAL COVERAGE: 90.0%
+coverage 60.0% is below 85.0%" \
+      FAIL "no per-package ratchet in the gate"
+
+    unset -f row check_row
+  fi
+fi
+
 if [[ "${failures}" -ne 0 ]]; then
   echo "coverage-ratchet-selftest: FAIL -- ${failures} assertion(s) failed" >&2
   exit 1
 fi
-echo "coverage-ratchet-selftest: PASS -- 4 cases, plus the regressed variant proving case A can fail"
+echo "coverage-ratchet-selftest: PASS -- 9 case(s): 4 driving coverage.sh, 5 driving the probe's row chain, plus the regressed variant proving case A can fail"
