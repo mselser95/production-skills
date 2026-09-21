@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: e836830be34e5024cd188aa9f5b0f643ba46f1e0e4096c6b4fda97d9e6726eaf
-short: e836830be34e
+digest: 4bb1cdad6a81061f7476c35cabdfa5c2b5fecfd010ce06f77e362e74f8990c1c
+short: 4bb1cdad6a81
 files: 21
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -19,7 +19,7 @@ per_file:
   scripts/error-handling-fitness.sh: cfb96953c7727fa872db162123963cfe5aca65102eeb6168cb7d08c7c9dd1327
   scripts/gate-hygiene-fitness.sh: 620bbf6eebcc4b7503643337b7852d20e59b527daf5255a6533a7eb857045e5a
   scripts/kill-durability.sh: d31b8857fcd239c0081f5560694020c015593a253eef14828b3d05da1e68e922
-  scripts/no-unfilled-slots.sh: 6c10999877d10ac23003b3314337d7c0d46620a20a3d778f361ea1fdc624dfb8
+  scripts/no-unfilled-slots.sh: d175595ad719026b7d0e240bebe4b46620f5c33b53ecc1409c32105ebbe848e8
   scripts/retry.sh: cc42a3d9eaae04ecb029505c1e98d39a3019121495684a70c6319daab21dbb46
   scripts/row-vacuity-sweep.sh: 7a666802fdf34995ee308ecbb4e4a793e9bdb2c5b2b6b32967a429a61ae96a68
   scripts/stamp-template-provenance.sh: d3ff93c27e5421efae8abb23c0f56f11a4bae5f55177e7ca56c237bbde63b986

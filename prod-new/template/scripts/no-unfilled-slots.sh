@@ -44,10 +44,19 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
 _lt='<'
 SLOTS="${_lt}SERVICE>|${_lt}OWNER>"
 
-# EXCLUDE this file and the skill docs that DOCUMENT the slots. A check that
-# fires on the sentence explaining the check is the "rule that punishes
-# documenting its own lesson" shape, and it gets widened until it is gone.
-excl='^\./(\.git|\.wt|vendor|node_modules)/|scripts/no-unfilled-slots\.sh$'
+# EXCLUDE this file and the other VENDORED scripts (stamp-template-
+# provenance.sh's own VENDORED list -- the files copied byte-for-byte into
+# every scaffold and never slot-substituted) that DOCUMENT the slots in
+# prose. A check that fires on the sentence explaining the check is the
+# "rule that punishes documenting its own lesson" shape, and it gets widened
+# until it is gone -- this measured twice: stamp-template-provenance.sh's own
+# "prod-new substitutes <OWNER>/<SERVICE> into it" comment, and verify-
+# standard.sh's inlining-example comment "at cmd/<SERVICE>/main.go:110",
+# both real prose in generic files that are never touched by substitution,
+# not unfilled slots in a scaffold. Widen this list only for a FILE THAT IS
+# IN VENDORED and genuinely mentions the slot syntax in prose -- never as a
+# workaround for a real unfilled slot in a repo-specific file.
+excl='^\./(\.git|\.wt|vendor|node_modules)/|scripts/no-unfilled-slots\.sh$|scripts/stamp-template-provenance\.sh$|scripts/verify-standard\.sh$'
 
 paths=$(find . \( -name '.git' -o -name '.wt' -o -name 'vendor' -o -name 'node_modules' \) -prune -o -print 2>/dev/null \
   | grep -E '<[A-Z_]+>' || true)
