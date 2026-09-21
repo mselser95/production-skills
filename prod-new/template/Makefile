@@ -282,3 +282,4 @@ probe-selftests:
 	bash scripts/tests/check-registries-selftest.sh
 	bash scripts/tests/non-vacuity-selftest.sh
 	bash scripts/tests/retry-selftest.sh
+	bash scripts/tests/observability-provenance-selftest.sh

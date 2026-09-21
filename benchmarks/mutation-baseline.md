@@ -17,10 +17,11 @@ here would be a threshold nobody derived.
 | `load-rows-selftest.sh` | 60 |
 | `no-unfilled-slots-selftest.sh` | 6 |
 | `non-vacuity-selftest.sh` | 57 |
+| `observability-provenance-selftest.sh` | 10 |
 | `policy-coverage-selftest.sh` | 7 |
 | `probe-wiring-selftest.sh` | 12 |
 | `sbom-ordering-selftest.sh` | 10 |
 | `skills-static-selftest.sh` | 13 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| **total** | **267** |
+| **total** | **277** |

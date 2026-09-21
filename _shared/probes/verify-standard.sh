@@ -1938,8 +1938,49 @@ if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
   # comment. Harmless at that ratio, and a wrong FAIL at a closer one.
   # (A trailing comment on a code line still counts; that is rare enough to
   # accept, and erring toward counting is the safe direction for this row.)
-  slog_plain=$(grep -rhE '\.(Info|Warn|Error|Debug)\(([^)]|$)' --include='*.go' --exclude='*_test.go' . 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '\.(Info|Warn|Error|Debug)\(([^)]|$)' | wc -l | tr -d ' ')
-  slog_ctx=$(grep -rhE '\.(Info|Warn|Error|Debug)Context\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '\.(Info|Warn|Error|Debug)Context\(' | wc -l | tr -d ' ')
+  #
+  # THE RECEIVER IS CHECKED, not just the method name. `status.Error(...)` is
+  # the gRPC status constructor and `http.Error(w, ...)` writes an HTTP
+  # response; neither is a log call, and both take arguments, so the
+  # `err.Error()` fix above does not exclude them. This is that same
+  # correction extended one step: the discriminator there was arity, here it
+  # is who the method is called ON.
+  #
+  # GENERATED FILES ARE EXCLUDED. A generated gRPC stub carries one
+  # `status.Error(codes.Unimplemented, ...)` per RPC in its
+  # Unimplemented<Service>Server, so the false-positive count scales with the
+  # size of the service's RPC surface -- a row that gets wronger as a service
+  # grows. Measured on falcon-xyz-udf-service: the row reported "19 of 32 log
+  # call sites drop the trace context" and NOT ONE of the 19 was a log call --
+  # 13 were `status.Error`/`http.Error` in hand-written code and the rest were
+  # generated stubs that multiplied when its proto went 2 -> 6 RPCs. The
+  # service's 12 real log sites were all *Context variants: the property this
+  # row protects was healthy, and the row said the opposite.
+  #
+  # `// Code generated ... DO NOT EDIT.` is Go's standard marker (go generate
+  # convention, required near the top of the file). It is matched against the
+  # first few lines captured into a VARIABLE rather than piped into `grep -q`
+  # -- see this file's own probe-self row: a producer piped into a quiet grep
+  # is the SIGPIPE-under-pipefail race that reports a match as a failure.
+  slog_plain=0
+  slog_ctx=0
+  while IFS= read -r _logf; do
+    [[ -n "$_logf" ]] || continue
+    _loghdr=$(head -n 5 "$_logf" 2>/dev/null)
+    [[ "$_loghdr" == *"Code generated"*"DO NOT EDIT."* ]] && continue
+    _n_plain=$(grep -hE '\.(Info|Warn|Error|Debug)\(([^)]|$)' "$_logf" 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '[A-Za-z0-9_]*\.(Info|Warn|Error|Debug)\(([^)]|$)' | grep -vcE '^(status|http)\.')
+    # `-o | wc -l`, NEVER `grep -oc`. Combining -o and -c is NOT portable: BSD
+    # grep (macOS, where this is usually developed) prints the number of
+    # MATCHES, GNU/busybox grep (ubuntu-latest, where CI runs it) prints the
+    # number of matching LINES. Measured on the two-calls-on-one-line case:
+    # macOS 2, alpine 1. A gate whose count depends on which grep ran is a
+    # gate that disagrees with itself across environments -- and it would have
+    # undercounted the *Context side in CI only, inflating the plain:ctx ratio
+    # and failing healthy repos on Linux while passing them on a laptop.
+    _n_ctx=$(grep -hE '\.(Info|Warn|Error|Debug)Context\(' "$_logf" 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '\.(Info|Warn|Error|Debug)Context\(' | wc -l | tr -d ' ')
+    slog_plain=$(( slog_plain + _n_plain ))
+    slog_ctx=$(( slog_ctx + _n_ctx ))
+  done < <(grep -rlE '\.(Info|Warn|Error|Debug)(Context)?\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null)
   if (( slog_plain + slog_ctx == 0 )); then
     row "observability:logs_correlate" NA "slog is imported but no log call sites found"
   elif (( slog_ctx == 0 )); then
@@ -3069,13 +3110,43 @@ PYSBOM
   # produced them, and that is the claim this row's name makes.
   #
   # `cosign sign` alone no longer matches. `cosign attest` does, as do the
-  # attestation-producing forms of the other three.
-  if grep -qE "cosign[[:space:]]+attest|--provenance=true|actions/attest-build-provenance|^[[:space:]]*attestations:[[:space:]]*(write|true)" <<<"$wf_exec"; then
+  # attestation-producing forms of the other two.
+  #
+  # PERMISSION IS NOT PROVENANCE -- the same correction as the paragraph above,
+  # one step further, and it was live in this row until 2026-09-21. The
+  # accepting pattern used to include `^[[:space:]]*attestations:[[:space:]]*
+  # (write|true)`, which is a PERMISSIONS GRANT in a job's `permissions:` block:
+  # it confers the capability to attest and produces nothing. Measured on
+  # falcon-xyz-udf-service, where this row reported PASS while the attest job
+  # was commented out in its entirety: the surviving match was a single
+  # `attestations: write` line in a DIFFERENT job (docker-build's permissions
+  # block, ci.yaml:92). The row reported provenance from a grant held by a job
+  # that never attests.
+  #
+  # Worth stating because the obvious diagnosis is wrong: the comment stripping
+  # works. `sed 's/#.*//'` does remove the commented-out block, and the match
+  # did not come from inside a comment -- it came from live YAML that grants a
+  # permission. A detector that accepts a capability as evidence of the act is
+  # the shape-without-the-property defect this file exists to refuse, and it is
+  # exactly what "signing is not provenance" already said about a different
+  # token.
+  # THE WAIVER IS CHECKED SECOND, not last, and that ordering is a fix rather
+  # than a style choice. It used to sit below the `cosign sign` branch, which
+  # made the waiver UNREACHABLE IN THE ONE CASE IT IS NAMED FOR: a repo that
+  # signs but does not attest hit the FAIL above and never reached
+  # `waived artifact-provenance-signing` -- a waiver that is dead code in its
+  # own use case, which is the same "a gate nobody can satisfy honestly" shape
+  # this file refuses elsewhere. A granted waiver is a human exemption from the
+  # obligation, so it outranks every diagnostic FAIL below it; only real
+  # provenance (PASS) outranks it.
+  if grep -qE "cosign[[:space:]]+attest|--provenance=true|actions/attest-build-provenance" <<<"$wf_exec"; then
     row "artifact-provenance" PASS "an attestation-PRODUCING step is present (signing alone does not satisfy this row)"
-  elif grep -qE "cosign[[:space:]]+sign" <<<"$wf_exec"; then
-    row "artifact-provenance" FAIL "the workflows SIGN but produce no provenance -- a signature attests custody of a key, not where the bytes came from (cosign attest / --provenance=true / actions/attest-build-provenance)"
   elif waived artifact-provenance-signing; then
     row "artifact-provenance" NA "live waiver with owner+expiry in registries/waivers.yaml"
+  elif grep -qE "^[[:space:]]*attestations:[[:space:]]*(write|true)" <<<"$wf_exec"; then
+    row "artifact-provenance" FAIL "a job GRANTS attestations: write but no step produces an attestation -- the permission confers the capability, not the act (cosign attest / --provenance=true / actions/attest-build-provenance). A commented-out attest job leaves exactly this residue"
+  elif grep -qE "cosign[[:space:]]+sign" <<<"$wf_exec"; then
+    row "artifact-provenance" FAIL "the workflows SIGN but produce no provenance -- a signature attests custody of a key, not where the bytes came from (cosign attest / --provenance=true / actions/attest-build-provenance)"
   else row "artifact-provenance" FAIL "no provenance and no live waiver (an expired or missing waiver is not an exemption)"; fi
 fi
 
