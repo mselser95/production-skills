@@ -27,8 +27,11 @@ floors_file="${COVERAGE_FLOORS:-scripts/coverage-floors.txt}"
 # that never had the detector -- the exact false green this guards. The
 # "completed" line is printed only after go test exited 0, so its absence is how
 # the probe knows the suite failed (set -e ends this script right there).
+# set -f: a flag list is words, not patterns -- never glob-expand it.
+set -f
 # shellcheck disable=SC2206 # intentional word-splitting of an opt-in flag list
 extra_flags=(${COVERAGE_GO_TEST_FLAGS:-})
+set +f
 if [[ "${#extra_flags[@]}" -gt 0 ]]; then
   echo "coverage: go test flags: ${extra_flags[*]}"
 fi

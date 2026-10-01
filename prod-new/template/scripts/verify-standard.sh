@@ -563,7 +563,11 @@ else row "build" FAIL "go build ./... failed"; fi
 # -race"); without the line it falls back to today's separate runs. The two
 # rows' evidence says which mode produced them.
 cov_out=""; cov_rc=0; single_run=0
+cov_prof="${COVERAGE_OUT:-coverage.out}"
 if [[ -x scripts/coverage.sh ]]; then
+  # Removed first so the corroboration below reads THIS run's profile, never a
+  # stale one left by an earlier run.
+  rm -f "$cov_prof"
   cov_out=$(COVERAGE_GO_TEST_FLAGS="-race" ./scripts/coverage.sh 2>&1); cov_rc=$?
   if grep -qxE 'coverage: go test flags: -race' <<<"$cov_out"; then single_run=1; fi
 fi
@@ -590,6 +594,22 @@ race_diagnose() {
   printf '%s%s' "${race_why:-race suite failed}" "${race_pkg:+ (in $race_pkg)}"
 }
 
+# The separate-run rows, shared by the fallback and by the red paths below.
+plain_tests_row() {
+  local o
+  if o=$(go test ./... -count=1 2>&1); then
+    row "tests" PASS "$(grep -c '^ok' <<<"$o") packages ok"
+  else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$o")"; fi
+}
+separate_race_row() {
+  local o
+  if o=$(go test ./... -race -count=1 2>&1); then
+    row "race" PASS "race detector clean"
+  else
+    row "race" FAIL "$(race_diagnose "$o")"
+  fi
+}
+
 if (( single_run )); then
   # "coverage: go test completed" is printed by coverage.sh only AFTER go test
   # exited 0. cov_rc alone is not enough: the script also exits 1 for a floor
@@ -597,30 +617,33 @@ if (( single_run )); then
   # not pass (or the script died before running it).
   if grep -qxE 'coverage: go test completed' <<<"$cov_out"; then
     row "tests" PASS "$(grep -c '^ok' <<<"$cov_out") packages ok (single -race+cover run)"
-    row "race" PASS "race detector clean (single -race+cover run)"
-  else
-    row "race" FAIL "$(race_diagnose "$cov_out") (single -race+cover run)"
-    if grep -qE 'WARNING: DATA RACE|race detected during execution' <<<"$cov_out"; then
-      # A race makes the -race run red, but the PLAIN `tests` row did not use to.
-      # Do not let a race also redden `tests`: re-run plain, on the failure path
-      # only, so the two rows keep the meaning they had when they were two runs.
-      if out=$(go test ./... -count=1 2>&1); then
-        row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
-      else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
+    # The handshake is a CLAIM by the script. -race forces covermode=atomic, so
+    # the profile it wrote is independent evidence of whether the detector was
+    # really on: a script that prints the line but drops the flags writes
+    # `mode: set`/`count`.
+    cov_mode=$(head -1 "$cov_prof" 2>/dev/null)
+    if [[ "$cov_mode" == "mode: atomic" ]]; then
+      row "race" PASS "race detector clean (single -race+cover run)"
+    elif [[ -z "$cov_mode" ]]; then
+      # Cannot corroborate (script writes its profile elsewhere): do not borrow
+      # a PASS and do not invent a FAIL -- run the race suite on its own.
+      separate_race_row
     else
-      row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$cov_out" || echo 'coverage.sh ended before the suite completed')"
+      row "race" FAIL "coverage.sh printed the -race handshake but its profile is '${cov_mode}', not 'mode: atomic' -- the run was not -race"
     fi
+  else
+    # The single run did not pass. Whatever killed it (a race, a failing test,
+    # `-race requires cgo`, a race-only timeout) is only the RACE row's story:
+    # `race` keeps this run's diagnosis, and every other row is re-derived from
+    # the separate no-flags path, so none of them is reddened by the detector.
+    # Red path only -- cost is irrelevant here, false evidence is not.
+    row "race" FAIL "$(race_diagnose "$cov_out") (single -race+cover run)"
+    plain_tests_row
+    cov_out=$(env -u COVERAGE_GO_TEST_FLAGS ./scripts/coverage.sh 2>&1); cov_rc=$?
   fi
 else
-  if out=$(go test ./... -count=1 2>&1); then
-    row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
-  else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
-
-  if race_out=$(go test ./... -race -count=1 2>&1); then
-    row "race" PASS "race detector clean"
-  else
-    row "race" FAIL "$(race_diagnose "$race_out")"
-  fi
+  plain_tests_row
+  separate_race_row
 fi
 
 # --- 2. coverage + per-package ratchet (measured, not claimed) ---------------

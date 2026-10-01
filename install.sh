@@ -269,6 +269,9 @@ mirrors=(
   # would refuse to run in every repo prod-new scaffolds. That is the loud
   # failure, but only because it was built to refuse. Mirror it anyway.
   "prod-new/template/scripts/tests/sbom-ordering-selftest.sh:_shared/probes/sbom-ordering-selftest.sh"
+  # The suite-run selftest lifts the probe's block by anchor and drives the
+  # template coverage.sh, so a drifted copy would certify a different probe.
+  "prod-new/template/scripts/tests/single-suite-run-selftest.sh:_shared/probes/single-suite-run-selftest.sh"
   # ADDED WITH THE THREE ROWS IT COVERS: dimension 25's `load-baseline`, the
   # `error-handling-fitness` row, and dimension 27's advisory
   # `simulation-advisory`. It lifts `row`, `spec_field`, the three row
