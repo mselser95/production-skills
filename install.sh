@@ -280,6 +280,8 @@ mirrors=(
   # it belongs in the mirrored set rather than in the "someone will notice"
   # category.
   "prod-new/template/scripts/tests/load-rows-selftest.sh:_shared/probes/load-rows-selftest.sh"
+  # The coverage row's failure text. Lifts coverage_fail_detail out of the probe by marker, so a stale copy would certify the old text.
+  "prod-new/template/scripts/tests/coverage-detail-selftest.sh:_shared/probes/coverage-detail-selftest.sh"
 )
 drift=0
 for m in "${mirrors[@]}"; do

@@ -45,6 +45,7 @@ VENDORED=(
   # so the next reader does not "fix" the omission.
   scripts/tests/non-vacuity-selftest.sh
   scripts/tests/sbom-ordering-selftest.sh
+  scripts/tests/coverage-detail-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh
   scripts/tests/load-rows-selftest.sh
   scripts/tests/check-registries-selftest.sh

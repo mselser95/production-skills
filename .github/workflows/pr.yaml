@@ -113,6 +113,7 @@ jobs:
           bash _shared/probes/check-registries-selftest.sh
           bash _shared/probes/non-vacuity-selftest.sh
           bash _shared/probes/sbom-ordering-selftest.sh
+          bash _shared/probes/coverage-detail-selftest.sh
           bash _shared/probes/policy-coverage.sh
 
       # SECRET SCANNING, added 2026-08-29. Until today this repo ran NONE -- a

@@ -540,6 +540,38 @@ classify_mutation_result() {   # <go-test-output> [test-name]
   fi
 }
 
+# BEGIN coverage_fail_detail
+# Pick the one-line evidence for a coverage gate whose `go test` did not
+# complete. Preference order (first non-empty wins):
+#   1. `--- FAIL: <name>` lines (all, de-duplicated, capped at 8) plus the first
+#      `file.go:N:` assertion line AFTER the first `--- FAIL`
+#   2. `panic:` / `test timed out` lines (plus the tests listed as running)
+#   3. a build `file.go:N:` diagnostic
+#   4. a `FAIL<tab>pkg` line
+#   5. the last line that is not noise -- `ok ...`, `? ... [no test files]`,
+#      `---`, a bare FAIL or a blank line are all noise
+# Each item is capped at 110 chars; the whole detail at 400.
+coverage_fail_detail() {
+  local out="$1" names diag d=""
+  names=$(grep -E '^[[:space:]]*--- FAIL: [^[:space:]]+' <<<"$out" | sed -E 's/^[[:space:]]*--- FAIL: ([^[:space:]]+).*/\1/' | awk '!seen[$0]++' | head -8 | paste -sd' ' -)
+  if [[ -n "$names" ]]; then
+    diag=$(awk '/^[[:space:]]*--- FAIL: /{f=1; next} f && /^[[:space:]]*[^[:space:]]+\.go:[0-9]+:/{print; exit}' <<<"$out" | sed -E 's/^[[:space:]]+//' | cut -c1-110)
+    d="failing test(s): $(cut -c1-110 <<<"$names")${diag:+ -- $diag}"
+  elif diag=$(grep -m1 -E '^[[:space:]]*(panic:|fatal error:)' <<<"$out"); [[ -n "$diag" ]]; then
+    d="$(sed -E 's/^[[:space:]]+//' <<<"$diag" | cut -c1-110)"
+    names=$(awk '/^[[:space:]]*running tests:/{f=1; next} f && /^[[:space:]]+Test/{print $1} f && !/^[[:space:]]+Test/{exit}' <<<"$out" | head -8 | paste -sd' ' -)
+    [[ -n "$names" ]] && d="$d -- running: $(cut -c1-110 <<<"$names")"
+  elif diag=$(grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$out"); [[ -n "$diag" ]]; then
+    d="build/vet error: $(cut -c1-110 <<<"$diag")"
+  elif diag=$(grep -m1 -E '^FAIL[[:space:]]+[^[:space:]]+' <<<"$out"); [[ -n "$diag" ]]; then
+    d="package failed: $(sed -E 's/[[:space:]]+/ /g' <<<"$diag" | cut -c1-110)"
+  else
+    d=$(grep -vE '^(ok|\?|---|FAIL$|[[:space:]]*$)' <<<"$out" | tail -1 | cut -c1-110)
+  fi
+  printf '%s' "$d" | cut -c1-400
+}
+# END coverage_fail_detail
+
 have() { command -v "$1" >/dev/null 2>&1; }
 gobin() { echo "$(go env GOPATH)/bin"; }
 
@@ -606,13 +638,16 @@ if [[ -x scripts/coverage.sh ]]; then
       row "coverage" FAIL "$missing (renamed or removed package? update scripts/coverage-floors.txt)"
     else
       # A gate that did not COMPLETE is an unproven gate, not a clean one,
-      # so the row has to carry whatever evidence exists. Prefer a real
-      # file:line diagnostic -- go test ends a build failure with a bare
-      # "FAIL", so "the last non-noise line" alone reported exactly that and
-      # was barely better than the empty evidence this branch replaced.
-      detail=$(grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$out")
-      [[ -n "$detail" ]] || detail=$(grep -vE '^(ok|---|FAIL$|[[:space:]]*$)' <<<"$out" | tail -1)
-      row "coverage" FAIL "coverage gate did not complete: $(cut -c1-110 <<<"${detail:-<no output captured>}")"
+      # so the row has to carry whatever evidence exists. The evidence is
+      # picked by coverage_fail_detail (defined above `have`): the failing
+      # TEST NAME first. This branch used to take the last line not matching
+      # `^(ok|---|FAIL$|blank)`, which excluded `--- FAIL: TestX` -- the one
+      # line naming the failing test -- and let a PASSING package's
+      # `?   pkg [no test files]` win. Observed on
+      # bloXroute-Labs/falcon-xyz-api-service CI run 36816769255: the row read
+      # "coverage gate did not complete: ?   .../udf/v1 [no test files]".
+      detail=$(coverage_fail_detail "$out")
+      row "coverage" FAIL "coverage gate did not complete: ${detail:-<no output captured>}"
     fi
   fi
 

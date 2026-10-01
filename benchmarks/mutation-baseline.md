@@ -14,6 +14,7 @@ here would be a threshold nobody derived.
 | selftest | cases |
 |---|---|
 | `check-registries-selftest.sh` | 65 |
+| `coverage-detail-selftest.sh` | 8 |
 | `coverage-ratchet-selftest.sh` | 9 |
 | `load-rows-selftest.sh` | 60 |
 | `no-unfilled-slots-selftest.sh` | 6 |
@@ -25,4 +26,4 @@ here would be a threshold nobody derived.
 | `skills-static-selftest.sh` | 13 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| **total** | **286** |
+| **total** | **294** |
