@@ -48,6 +48,36 @@ for c in "${here}/../../prod-new/template/scripts/coverage.sh" "${here}/../cover
   [[ -f "$c" ]] && { coverage_sh="$c"; break; }
 done
 [[ -n "$probe" && -n "$coverage_sh" ]] || { echo "single-suite-run-selftest: FAIL -- cannot locate probe/coverage.sh" >&2; exit 1; }
+# The script under test is a FIXTURE for the probe block, so it must run inside
+# the throwaway module. The scaffold's template script does. A brownfield repo's
+# own scripts/coverage.sh (custom -coverpkg lists, `go list ./internal/proto/...`)
+# generally cannot, so there a minimal reference script with the same observable
+# contract (go test line, completed marker, TOTAL line, floor + ratchet verdict
+# lines) stands in -- chosen by looking for the template's go test line, never
+# silently: the choice is printed.
+if ! grep -q '^go test -count=1 -coverpkg=\./\.\.\. \./\.\.\. -coverprofile=' "$coverage_sh"; then
+  ref="$(mktemp)"
+  cat > "$ref" <<'REF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+coverage_min="${COVERAGE_MIN:-85.0}"
+coverage_out="${COVERAGE_OUT:-coverage.out}"
+go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
+echo "coverage: go test completed"
+total="$(go tool cover -func="${coverage_out}" | tail -n1 | grep -oE '[0-9]+\.[0-9]+%$' | tr -d '%')"
+echo "TOTAL COVERAGE: ${total}% (threshold ${coverage_min}%)"
+failed=0
+if awk -v got="${total}" -v min="${coverage_min}" 'BEGIN { exit !(got < min) }'; then
+  echo "coverage ${total}% is below ${coverage_min}%" >&2
+  failed=1
+fi
+echo "per-package coverage ratchet: all packages at/above their floor, and every measured package has one (reference)"
+exit "${failed}"
+REF
+  coverage_sh="$ref"
+  echo "single-suite-run-selftest: note -- scripts/coverage.sh here is not the scaffold template; using the built-in reference script as the fixture" >&2
+fi
 REAL_GO="$(command -v go)" || { echo "single-suite-run-selftest: FAIL -- go is required" >&2; exit 1; }
 export REAL_GO
 
@@ -64,7 +94,7 @@ fi
 diag_fn="$(awk '/^race_diagnose\(\) \{/{on=1} on{print} on && /^}/{exit}' <<<"$block")"
 [[ -n "$diag_fn" ]] || { echo "single-suite-run-selftest: FAIL -- could not lift race_diagnose" >&2; exit 1; }
 
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d)"; trap 'rm -f "${ref:-}"; rm -rf "$work"' EXIT
 mkdir -p "$work/shim"
 cat > "$work/shim/go" <<'SH'
 #!/usr/bin/env bash
