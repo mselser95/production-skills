@@ -1,42 +1,52 @@
 #!/usr/bin/env bash
 # single-suite-run-selftest.sh -- the verifier of verify-standard.sh's "the suite
-# runs ONCE" block (rows tests / race / coverage / coverage-ratchet).
+# runs ONCE, and the probe runs it" block (rows tests / race / coverage /
+# coverage-ratchet).
 #
-# WHY THIS EXISTS. Those four rows used to be three executions of the same Go
-# suite (plain, -race, and coverage.sh's own), 48% of a real probe run. They now
-# share ONE run of the repo's coverage.sh with the race detector injected by the
-# PROBE (GOFLAGS gains -race), accepted only when corroborated. Every way that
-# goes silently green is pinned here:
+# THE CONTRACT UNDER TEST. The probe itself runs `go test ./... -race -count=1`
+# (explicit flags, scope ./..., exit status read directly). `tests` and `race`
+# come from that run ALONE, and only with positive evidence: exit 0 AND an `ok`
+# line for every package that has test files. Nothing the repo's coverage.sh
+# does can influence those two rows. If coverage.sh opts in (`--print-coverpkg`
+# and `COVERAGE_PROFILE`) the probe adds coverage flags to the SAME run and
+# hands the profile back, so the suite executes once; otherwise coverage.sh runs
+# as before (two executions). Earlier designs inferred the race verdict from
+# what the script chose to run and leaked a new way every round, which is why
+# the scenarios below are ATTACKS on that inference, not just happy paths.
 #
-#   A  healthy suite, template script        -> ONE `go test`, four rows PASS
-#   B  a real data race                      -> race FAIL; tests/coverage/ratchet
-#                                               keep their no-detector verdicts
-#   C  a failing test                        -> all four rows FAIL for real
-#   D  legacy script (no marker) + a race    -> race FAIL, separate path
-#   E  healthy suite + coverage FLOOR miss   -> suite rows PASS, coverage FAIL
-#                                               (why the marker, not the exit
-#                                               code, vouches for the suite)
-#   F  -race rejected for a non-race reason  -> race FAIL carrying the cause
-#   I  honest script, profile written elsewhere -> separate race run
-#   J  same, with a STALE `mode: atomic` profile left in the tree -> still
-#                                               separate (the rm -f guard)
-#   K  legacy script (no marker), healthy    -> ONE run, four rows PASS: the
-#                                               speedup needs no hook
-#   L  legacy `go test ... || true` over a red suite -> tests FAIL, not PASS
-#   M  script with explicit -covermode=atomic that CLEARS GOFLAGS -> must not
-#                                               report race PASS from that run
-#   M' clears GOFLAGS, default covermode     -> same
-#   N  explicit -covermode=set (illegal with -race) -> a race-clean suite is NOT
-#                                               turned into race FAIL
-#   P  go called by absolute path (the probe cannot see it) -> separate path
-#   Q  legacy script + floor miss -> separate path, real verdicts
-#   O  race_diagnose surfaces a non-test cause line (cgo / covermode)
+# SCENARIOS (the count is derived at run time, not written here):
+#   A  opted-in script, healthy            one execution, four rows PASS
+#   B  a real data race                    race FAIL; tests PASS (plain red-path
+#                                          run); coverage + ratchet unmodified
+#   C  a failing test                      tests, race, coverage, ratchet FAIL
+#   D  legacy script + race                race FAIL
+#   E  floor miss (opted-in and legacy)    tests/race PASS, coverage FAIL
+#   F  -race rejected (no cgo)             race FAIL naming the cause
+#   G  a package with tests prints no `ok` NOT certified: race FAIL
+#   H  reviewer attacks on a legacy script, each over a racy suite AND a red one:
+#      racefalse (-race=false after the flag), goflagsappend, pipeswallow
+#      (pipe that eats go test's exit), jsonswallow, subset (./p/... only),
+#      shortflag (-short -run)             none can produce tests/race PASS
+#   I  an opted-in script that LIES about its coverpkg (two lines / a subset)
+#                                          cannot change tests/race
+#   J  legacy healthy                      two executions, rows correct
+#   K  a no-test package that fails to build: ok lines alone would pass it
+#   O  race_diagnose carries non-test causes (no cgo, covermode)
+#   R  BROWNFIELD ONLY: the repo's own scripts/coverage.sh is exercised for the
+#      modes it supports (`--print-coverpkg` live; `COVERAGE_PROFILE` on a
+#      profile taken from one small package, asserting it prints the
+#      "evaluating supplied profile" line and runs no go test)
 #
 # HOW IT TESTS. It lifts the probe's REAL block out of verify-standard.sh by
-# anchor (never a restatement; the END anchor must be seen too) and evals it
-# inside a fixture module, with the REAL template coverage.sh and a `go` shim on
-# PATH that counts `go test` invocations. If an anchor moves, the lift fails
-# loudly rather than testing an empty string.
+# anchor (the END anchor must be seen too) and evals it inside a fixture module
+# with a `go` shim on PATH that counts `go test` invocations.
+#
+# WHAT IS AND IS NOT GUARANTEED. The fixtures run a built-in reference script
+# (and the scaffold template's script when this file sits beside it). A
+# brownfield repo's own coverage.sh generally cannot run inside a throwaway
+# module, so scenarios A-J do NOT prove that script's behaviour; scenario R
+# covers its two opt-in modes in the repo itself, and nothing here proves its
+# floor/ratchet logic (that is coverage-ratchet-selftest.sh's job).
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,36 +58,6 @@ for c in "${here}/../../prod-new/template/scripts/coverage.sh" "${here}/../cover
   [[ -f "$c" ]] && { coverage_sh="$c"; break; }
 done
 [[ -n "$probe" && -n "$coverage_sh" ]] || { echo "single-suite-run-selftest: FAIL -- cannot locate probe/coverage.sh" >&2; exit 1; }
-# The script under test is a FIXTURE for the probe block, so it must run inside
-# the throwaway module. The scaffold's template script does. A brownfield repo's
-# own scripts/coverage.sh (custom -coverpkg lists, `go list ./internal/proto/...`)
-# generally cannot, so there a minimal reference script with the same observable
-# contract (go test line, completed marker, TOTAL line, floor + ratchet verdict
-# lines) stands in -- chosen by looking for the template's go test line, never
-# silently: the choice is printed.
-if ! grep -q '^go test -count=1 -coverpkg=\./\.\.\. \./\.\.\. -coverprofile=' "$coverage_sh"; then
-  ref="$(mktemp)"
-  cat > "$ref" <<'REF'
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
-coverage_min="${COVERAGE_MIN:-85.0}"
-coverage_out="${COVERAGE_OUT:-coverage.out}"
-go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
-echo "coverage: go test completed"
-total="$(go tool cover -func="${coverage_out}" | tail -n1 | grep -oE '[0-9]+\.[0-9]+%$' | tr -d '%')"
-echo "TOTAL COVERAGE: ${total}% (threshold ${coverage_min}%)"
-failed=0
-if awk -v got="${total}" -v min="${coverage_min}" 'BEGIN { exit !(got < min) }'; then
-  echo "coverage ${total}% is below ${coverage_min}%" >&2
-  failed=1
-fi
-echo "per-package coverage ratchet: all packages at/above their floor, and every measured package has one (reference)"
-exit "${failed}"
-REF
-  coverage_sh="$ref"
-  echo "single-suite-run-selftest: note -- scripts/coverage.sh here is not the scaffold template; using the built-in reference script as the fixture" >&2
-fi
 REAL_GO="$(command -v go)" || { echo "single-suite-run-selftest: FAIL -- go is required" >&2; exit 1; }
 export REAL_GO
 
@@ -94,7 +74,7 @@ fi
 diag_fn="$(awk '/^race_diagnose\(\) \{/{on=1} on{print} on && /^}/{exit}' <<<"$block")"
 [[ -n "$diag_fn" ]] || { echo "single-suite-run-selftest: FAIL -- could not lift race_diagnose" >&2; exit 1; }
 
-work="$(mktemp -d)"; trap 'rm -f "${ref:-}"; rm -rf "$work"' EXIT
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/shim"
 cat > "$work/shim/go" <<'SH'
 #!/usr/bin/env bash
@@ -104,31 +84,98 @@ if [[ "${1:-}" == test ]]; then
     echo "go: -race requires cgo; enable cgo by setting CGO_ENABLED=1" >&2
     exit 2
   fi
+  if [[ -n "${GO_SHIM_DROP_OK:-}" ]]; then
+    o=$("$REAL_GO" "$@" 2>&1); rc=$?
+    grep -vE "^ok[[:space:]]+${GO_SHIM_DROP_OK}[[:space:]]" <<<"$o" || true
+    exit "$rc"
+  fi
 fi
 exec "$REAL_GO" "$@"
 SH
 chmod +x "$work/shim/go"
 
-# patch_script <dir> <sed-expr> <label>: mutate the copied coverage.sh, and
-# refuse to continue if the mutation changed nothing (a no-op proves nothing).
-patch_script() {
-  local d="$1" expr="$2" label="$3" before
-  before="$(cat "$d/scripts/coverage.sh")"
-  sed -i.bak "$expr" "$d/scripts/coverage.sh"; rm -f "$d/scripts/coverage.sh.bak"
-  if [[ "$before" == "$(cat "$d/scripts/coverage.sh")" ]]; then
-    echo "single-suite-run-selftest: FAIL -- '$label' variant is identical to the real script; the mutation proves nothing" >&2; exit 1
+# --- the scripts under test --------------------------------------------------
+# legacy_ref: a coverage.sh with no probe modes -- the pre-existing contract.
+# modes_ref:  the same with --print-coverpkg / COVERAGE_PROFILE. Used as the
+# opted-in script unless the scaffold template sits beside this file, in which
+# case the REAL template is used.
+emit_ref() { # emit_ref <modes 0|1>
+  cat <<'H'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+coverage_min="${COVERAGE_MIN:-85.0}"
+coverage_out="${COVERAGE_OUT:-coverage.out}"
+H
+  if [[ "$1" == 1 ]]; then
+    cat <<'M'
+if [[ "${1:-}" == "--print-coverpkg" ]]; then
+  echo "./..."
+  exit 0
+fi
+if [[ -n "${COVERAGE_PROFILE:-}" && -r "${COVERAGE_PROFILE}" ]]; then
+  coverage_out="${COVERAGE_PROFILE}"
+  echo "coverage: evaluating supplied profile ${coverage_out}"
+else
+  go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
+fi
+M
+  else
+    echo 'go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"'
   fi
+  cat <<'T'
+total="$(go tool cover -func="${coverage_out}" | tail -n1 | grep -oE '[0-9]+\.[0-9]+%$' | tr -d '%')"
+echo "TOTAL COVERAGE: ${total}% (threshold ${coverage_min}%)"
+failed=0
+if awk -v got="${total}" -v min="${coverage_min}" 'BEGIN { exit !(got < min) }'; then
+  echo "coverage ${total}% is below ${coverage_min}%" >&2
+  failed=1
+fi
+echo "per-package coverage ratchet: all packages at/above their floor, and every measured package has one (reference)"
+exit "${failed}"
+T
+}
+tpl_usable=0
+if grep -q -- '--print-coverpkg' "$coverage_sh" && grep -q 'COVERAGE_PROFILE' "$coverage_sh" \
+   && grep -q '^  go test -count=1 -coverpkg=\./\.\.\. \./\.\.\. -coverprofile=' "$coverage_sh"; then tpl_usable=1; fi
+
+# replace_gotest <file> <full replacement line>: swap the script's go test line,
+# refusing to continue if nothing changed (a no-op variant proves nothing).
+replace_gotest() {
+  local f="$1" repl="$2" before
+  before="$(cat "$f")"
+  awk -v r="$repl" '/^go test -count=1/ && !done {print r; done=1; next} {print}' "$f" > "$f.new" && mv "$f.new" "$f"
+  if [[ "$before" == "$(cat "$f")" ]]; then
+    echo "single-suite-run-selftest: FAIL -- variant did not change the script ($repl)" >&2; exit 1
+  fi
+}
+GT='-count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"'
+variant_line() { # variant_line <name> -> the replacement go test line
+  case "$1" in
+    racefalse)     echo "go test -race=false -covermode=atomic $GT" ;;
+    goflagsappend) echo "GOFLAGS=\"\${GOFLAGS:-} -race=false\" go test $GT" ;;
+    pipeswallow)   echo "set +o pipefail; go test $GT 2>&1 | cat > test.log; set -o pipefail" ;;
+    jsonswallow)   echo "set +o pipefail; go test -json $GT | cat >/dev/null; set -o pipefail" ;;
+    subset)        echo 'go test -count=1 -coverpkg=./... ./p/... -coverprofile="${coverage_out}"' ;;
+    shortflag)     echo "go test -short -run '^TestAdd\$' $GT" ;;
+  esac
 }
 
 # fixture <dir> <healthy|racy|failing> <script-variant>
 fixture() {
   local d="$1" kind="$2" script="$3"
-  mkdir -p "$d/scripts" "$d/p"
+  mkdir -p "$d/scripts" "$d/p" "$d/q"
   printf 'module example.com/suitefix\n\ngo 1.22\n' > "$d/go.mod"
-  cat > "$d/p/p.go" <<'GO'
-package p
-
-func Add(a, b int) int { return a + b }
+  printf 'package p\n\nfunc Add(a, b int) int { return a + b }\n' > "$d/p/p.go"
+  printf 'package p\n\nimport "testing"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal("bad")\n\t}\n}\n' > "$d/p/p_test.go"
+  # q carries the defect, so a script limited to ./p/... cannot see it.
+  local body='c++' qtest='_ = Count(1)'
+  case "$kind" in
+    healthy|failing|buildbroken) body='_ = c' ;;
+    racy) body='c++ // unsynchronised on purpose'; qtest='_ = Count(1000)' ;;
+  esac
+  cat > "$d/q/q.go" <<GO
+package q
 
 func Count(n int) int {
 	c := 0
@@ -136,7 +183,7 @@ func Count(n int) int {
 	for i := 0; i < 2; i++ {
 		go func() {
 			for j := 0; j < n; j++ {
-				c++ // unsynchronised on purpose in the racy fixture
+				$body
 			}
 			done <- struct{}{}
 		}()
@@ -146,51 +193,27 @@ func Count(n int) int {
 	return c
 }
 GO
-  case "$kind" in
-    healthy|failing)
-      local want=3; [[ "$kind" == failing ]] && want=4
-      cat > "$d/p/p_test.go" <<GO
-package p
-
-import "testing"
-
-func TestAdd(t *testing.T) {
-	if Add(1, 2) != $want {
-		t.Fatal("wrong")
-	}
-}
-func TestCountRuns(t *testing.T) { _ = Count(1) }
-GO
-      sed -i.bak 's/c++ \/\/ unsynchronised on purpose in the racy fixture/_ = c/' "$d/p/p.go"; rm -f "$d/p/p.go.bak" ;;
-    racy) cat > "$d/p/p_test.go" <<'GO'
-package p
-
-import "testing"
-
-func TestAdd(t *testing.T) {
-	if Add(1, 2) != 3 {
-		t.Fatal("bad")
-	}
-}
-func TestCountRaces(t *testing.T) { _ = Count(1000) }
-GO
-    ;;
-  esac
-  printf 'p 1.0\n' > "$d/scripts/coverage-floors.txt"
-  cp "$coverage_sh" "$d/scripts/coverage.sh"
-  local gt='^go test -count=1 -coverpkg=\./\.\.\. \./\.\.\. -coverprofile="\${coverage_out}"'
+  if [[ "$kind" == failing ]]; then
+    printf 'package q\n\nimport "testing"\n\nfunc TestCount(t *testing.T) {\n\t_ = Count(1)\n\tt.Fatal("deliberately red")\n}\n' > "$d/q/q_test.go"
+  else
+    printf 'package q\n\nimport "testing"\n\nfunc TestCount(t *testing.T) {\n\t%s\n}\n' "$qtest" > "$d/q/q_test.go"
+  fi
+  if [[ "$kind" == buildbroken ]]; then
+    # a package with NO tests that does not compile: every package that has tests
+    # still prints ok, so only the exit status can say the run was red
+    mkdir -p "$d/r"; printf 'package r\n\nvar X int = "not an int"\n' > "$d/r/r.go"
+  fi
+  printf 'p 1.0\nq 1.0\n' > "$d/scripts/coverage-floors.txt"
   case "$script" in
-    real) ;;
-    legacy) patch_script "$d" '/^echo "coverage: go test completed"$/d' legacy ;;
-    legacyortrue) patch_script "$d" '/^echo "coverage: go test completed"$/d' legacy
-                  patch_script "$d" "s|\\(${gt}\\)\$|\\1 \\|\\| true|" ortrue ;;
-    profelsewhere) patch_script "$d" 's|^coverage_out=.*|coverage_out="elsewhere.out"|' profelsewhere ;;
-    # explicit atomic, but the script clears GOFLAGS: -covermode=atomic does NOT
-    # prove the detector ran
-    clobberatomic) patch_script "$d" "s|^go test -count=1 -coverpkg=|GOFLAGS= go test -count=1 -covermode=atomic -coverpkg=|" clobberatomic ;;
-    clobber) patch_script "$d" "s|^go test -count=1 -coverpkg=|GOFLAGS= go test -count=1 -coverpkg=|" clobber ;;
-    abspath) patch_script "$d" 's|^go test -count=1 -coverpkg=|"${REAL_GO}" test -count=1 -coverpkg=|' abspath ;;
-    covermodeset) patch_script "$d" "s|^go test -count=1 -coverpkg=|go test -count=1 -covermode=set -coverpkg=|" covermodeset ;;
+    modes|cplie|cpsubset)
+      if (( tpl_usable )); then cp "$coverage_sh" "$d/scripts/coverage.sh"; else emit_ref 1 > "$d/scripts/coverage.sh"; fi
+      [[ "$script" == cplie ]] && { sed -i.bak 's|echo "\./\.\.\."|printf "a\\nb\\n"|' "$d/scripts/coverage.sh"; rm -f "$d/scripts/coverage.sh.bak"; }
+      [[ "$script" == cpsubset ]] && { sed -i.bak 's|echo "\./\.\.\."|echo "./p/..."|' "$d/scripts/coverage.sh"; rm -f "$d/scripts/coverage.sh.bak"; }
+      if [[ "$script" != modes ]] && cmp -s <( [[ $tpl_usable == 1 ]] && cat "$coverage_sh" || emit_ref 1 ) "$d/scripts/coverage.sh"; then
+        echo "single-suite-run-selftest: FAIL -- $script variant identical to its base" >&2; exit 1
+      fi ;;
+    legacy) emit_ref 0 > "$d/scripts/coverage.sh" ;;
+    *) emit_ref 0 > "$d/scripts/coverage.sh"; replace_gotest "$d/scripts/coverage.sh" "$(variant_line "$script")" ;;
   esac
   chmod +x "$d/scripts/coverage.sh"
 }
@@ -235,124 +258,139 @@ want_runs() { # want_runs <label> <n>  -- number of `go test` invocations
 
 # The eval runs in a subshell, so `row` writes to a file the parent reads back.
 row() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "${ROWS_FILE:-/dev/null}"; }
-# run_case <kind> <script> [coverage-min] [reject-race] [stale-profile]
+# run_case <kind> <script> [coverage-min] [reject-race] [drop-ok-pkg]
 run_case() {
-  local d="$work/$1-$2-${3:-0}-${4:-0}-${5:-0}"; fixture "$d" "$1" "$2"
-  [[ "${5:-0}" == 1 ]] && printf 'mode: atomic\n' > "$d/coverage.out"
+  local d="$work/$1-$2-${3:-0}-${4:-0}-${5:-none}"; fixture "$d" "$1" "$2"
   export GO_LOG="$d/go.log" ROWS_FILE="$d/rows.txt"; : > "$GO_LOG"; : > "$ROWS_FILE"
-  ( cd "$d" && export PATH="$work/shim:$PATH" COVERAGE_MIN="${3:-0}" GO_SHIM_REJECT_RACE="${4:-0}" && eval "$block" ) >"$d/probe.out" 2>&1
+  ( cd "$d" && export PATH="$work/shim:$PATH" COVERAGE_MIN="${3:-0}" GO_SHIM_REJECT_RACE="${4:-0}" GO_SHIM_DROP_OK="${5:-}" && eval "$block" ) >"$d/probe.out" 2>&1
   ROWS=$(<"$ROWS_FILE")
   if [[ -z "$ROWS" ]]; then echo "  FAIL $1/$2: block produced no rows: $(tail -5 "$d/probe.out")" >&2; failures=$((failures+1)); fi
 }
 
-scenario "A. healthy suite, template script -> ONE execution feeds all four rows"
-run_case healthy real
+scenario "A. opted-in script, healthy suite -> ONE execution feeds all four rows"
+run_case healthy modes
 want_runs "A suite executed exactly once" 1
-want_row "A tests PASS"            tests PASS "single -race+cover run"
-want_row "A race PASS says single" race PASS "single -race+cover run"
+want_row "A tests PASS"            tests PASS "probe-owned -race run"
+want_row "A race PASS"             race PASS "probe-owned -race run"
 want_row "A coverage PASS"         coverage PASS "TOTAL COVERAGE"
 want_row "A ratchet PASS"          coverage-ratchet PASS "per-package floors enforced"
 
 scenario "B. a real data race -> race FAIL; tests, coverage and ratchet keep their no-detector verdicts"
-run_case racy real
+run_case racy modes
 want_row "B race FAIL names the race" race FAIL "DATA RACE"
-want_row "B tests PASS (plain run has no detector)" tests PASS
+want_row "B tests PASS (plain red-path run)" tests PASS
 want_row "B coverage PASS (unmodified coverage.sh)" coverage PASS "TOTAL COVERAGE"
-want_row "B ratchet PASS (the ratchet exists; only the -race run died)" coverage-ratchet PASS "per-package floors enforced"
-want_runs "B single + plain + separate race + unmodified coverage.sh" 4
+want_row "B ratchet PASS" coverage-ratchet PASS "per-package floors enforced"
+want_runs "B race run + plain run + unmodified coverage.sh" 3
 
 scenario "C. a failing test -> tests, race, coverage and ratchet all FAIL for real"
-run_case failing real
+run_case failing modes
 want_row "C tests FAIL" tests FAIL "FAIL"
 want_row "C race FAIL"  race FAIL
 want_row "C coverage FAIL" coverage FAIL "did not complete"
 want_row "C ratchet FAIL" coverage-ratchet FAIL
-want_runs "C single + plain + race + coverage.sh" 4
+want_runs "C race run + plain run + coverage.sh" 3
 
-scenario "D. legacy script (no marker) over a real race -> race FAIL via the separate path"
+scenario "D. legacy script + a real race -> race FAIL"
 run_case racy legacy
 want_row "D race FAIL" race FAIL "DATA RACE"
-want_not "D ...attributed to the separate run" race "single"
 want_row "D tests PASS" tests PASS
-want_runs "D single + plain + race + coverage.sh" 4
+want_runs "D race run + plain run + coverage.sh" 3
 
-scenario "E. healthy suite + a coverage FLOOR miss -> suite rows PASS, coverage FAIL (the marker vouches, not the exit code)"
-run_case healthy real 101
-want_row "E tests PASS" tests PASS "single -race+cover run"
-want_row "E race PASS"  race PASS "single -race+cover run"
+scenario "E. coverage FLOOR miss -> suite rows PASS, coverage FAIL (opted-in and legacy)"
+run_case healthy modes 101
+want_row "E tests PASS" tests PASS "probe-owned"
+want_row "E race PASS"  race PASS "probe-owned"
 want_row "E coverage FAIL names the floor" coverage FAIL "below 101"
 want_row "E ratchet PASS" coverage-ratchet PASS
 want_runs "E suite executed once" 1
+run_case healthy legacy 101
+want_row "E' legacy tests PASS" tests PASS "probe-owned"
+want_row "E' legacy coverage FAIL" coverage FAIL "below 101"
+want_runs "E' race run + coverage.sh's own" 2
 
-scenario "F. -race rejected for a NON-race reason (no cgo) -> race FAIL carrying the cause; every other row real"
-run_case healthy real 0 1
+scenario "F. -race rejected for a NON-race reason (no cgo) -> race FAIL carrying the cause; other rows real"
+run_case healthy modes 0 1
 want_row "F race FAIL says why" race FAIL "requires cgo"
 want_row "F tests PASS" tests PASS
 want_row "F coverage PASS (unmodified run)" coverage PASS "TOTAL COVERAGE"
-want_row "F ratchet PASS (unmodified run)" coverage-ratchet PASS "per-package floors enforced"
 
-scenario "I. honest script, profile written elsewhere -> cannot corroborate, so a separate race run decides"
-run_case healthy profelsewhere
-want_row "I race PASS from its own run" race PASS "separate -race run"
-want_not "I ...not attributed to the single run" race "single"
-want_runs "I single + plain + race + coverage.sh" 4
-run_case racy profelsewhere
-want_row "I' a race is still caught" race FAIL "DATA RACE"
+scenario "G. exit 0 but a package that HAS tests printed no ok line -> NOT certified"
+run_case healthy modes 0 0 'example.com/suitefix/q'
+want_row "G race FAIL, not certified" race FAIL "not certified"
+want_not "G ...not attributed to a certified run" race "race detector clean"
 
-scenario "J. same, with a STALE mode: atomic profile in the tree -> the rm -f guard still forces the separate run"
-run_case healthy profelsewhere 0 0 1
-want_not "J stale profile did not vouch for the run" race "single"
-want_runs "J separate path taken" 4
+scenario "H. attacks on a legacy script (the script's own go test is no longer trusted for anything)"
+for v in racefalse goflagsappend pipeswallow jsonswallow subset shortflag; do
+  run_case racy "$v"
+  want_row "H $v: race FAIL over a racy suite" race FAIL "DATA RACE"
+  want_not "H $v: no certification" race "race detector clean"
+  run_case failing "$v"
+  want_row "H $v: tests FAIL over a red suite" tests FAIL
+  want_row "H $v: race FAIL over a red suite" race FAIL
+done
 
-scenario "K. legacy script (no marker, no hook), healthy -> ONE run, four rows PASS"
+scenario "I. an opted-in script that LIES about its coverpkg cannot touch tests/race"
+for v in cplie cpsubset; do
+  run_case racy "$v"
+  want_row "I $v: race FAIL over a racy suite" race FAIL "DATA RACE"
+  run_case failing "$v"
+  want_row "I $v: tests FAIL over a red suite" tests FAIL
+  run_case healthy "$v"
+  want_row "I $v: healthy suite still PASSes" race PASS "probe-owned"
+done
+
+scenario "J. legacy script, healthy -> two executions, every row correct"
 run_case healthy legacy
-want_runs "K suite executed exactly once" 1
-want_row "K tests PASS" tests PASS "single -race+cover run"
-want_row "K race PASS"  race PASS "single -race+cover run"
-want_row "K coverage PASS" coverage PASS "TOTAL COVERAGE"
-want_row "K ratchet PASS" coverage-ratchet PASS "per-package floors enforced"
+want_runs "J race run + coverage.sh's own" 2
+want_row "J tests PASS" tests PASS "probe-owned -race run"
+want_row "J race PASS"  race PASS "probe-owned -race run"
+want_row "J coverage PASS" coverage PASS "TOTAL COVERAGE"
+want_row "J ratchet PASS" coverage-ratchet PASS "per-package floors enforced"
 
-scenario "L. legacy script that swallows go test's exit (|| true) over a red suite -> tests FAIL, never PASS"
-run_case failing legacyortrue
-want_row "L tests FAIL" tests FAIL
-want_row "L race FAIL"  race FAIL
-want_not "L no single-run PASS" tests "single"
-
-scenario "M. explicit -covermode=atomic but GOFLAGS cleared -> NOT race PASS from that run"
-run_case healthy clobberatomic
-want_not "M race not certified by the single run" race "single"
-want_row "M race PASS from the separate run" race PASS "separate -race run"
-want_runs "M separate path taken" 4
-run_case racy clobberatomic
-want_row "M2 a real race is still caught" race FAIL "DATA RACE"
-scenario "M'. GOFLAGS cleared, default covermode (profile not atomic)"
-run_case healthy clobber
-want_not "M' race not certified by the single run" race "single"
-want_row "M' race PASS from the separate run" race PASS "separate -race run"
-
-scenario "P. script that calls go by absolute path (shim never sees it) -> unverifiable, separate path"
-run_case healthy abspath
-want_not "P race not certified by the single run" race "single"
-want_row "P race PASS from the separate run" race PASS "separate -race run"
-
-scenario "Q. legacy script (no marker) + coverage FLOOR miss -> cannot tell a floor miss from a dead suite: separate path, real verdicts"
-run_case healthy legacy 101
-want_not "Q no single-run certification" race "single"
-want_row "Q tests PASS" tests PASS
-want_row "Q race PASS from its own run" race PASS "separate -race run"
-want_row "Q coverage FAIL names the floor" coverage FAIL "below 101"
-
-scenario "N. explicit -covermode=set (illegal with -race) on a race-clean suite -> NOT race FAIL"
-run_case healthy covermodeset
-want_row "N race PASS from the separate run" race PASS "separate -race run"
-want_row "N tests PASS" tests PASS
-want_row "N coverage PASS" coverage PASS "TOTAL COVERAGE"
+scenario "K. a package WITHOUT tests that does not compile: every tested package prints ok, only the exit status is red"
+run_case buildbroken modes
+want_row "K race FAIL" race FAIL "probe-owned"
+want_not "K ...not certified" race "race detector clean"
+want_row "K tests FAIL (plain run is red too)" tests FAIL
+# Without coverage flags (a legacy script) every tested package still prints ok,
+# so here ONLY the exit status can say the run was red.
+run_case buildbroken legacy
+want_row "K' legacy: race FAIL on exit status alone" race FAIL "probe-owned"
+want_not "K' legacy: ...not certified" race "race detector clean"
 
 scenario "O. race_diagnose surfaces a cause line for failures that are not test failures"
 got="$(eval "$diag_fn"; race_diagnose $'go: -race requires cgo; enable cgo by setting CGO_ENABLED=1')"
 if grep -qF "requires cgo" <<<"$got"; then ok "O cgo cause carried"; else echo "  FAIL O: cgo cause lost (got: $got)" >&2; failures=$((failures+1)); fi
 got="$(eval "$diag_fn"; race_diagnose $'-covermode must be "atomic", not "set", when -race is enabled')"
 if grep -qF "covermode must be" <<<"$got"; then ok "O covermode cause carried"; else echo "  FAIL O: covermode cause lost (got: $got)" >&2; failures=$((failures+1)); fi
+
+# --- R. brownfield: the REPO's own coverage.sh, in the repo --------------------
+repo_root="$(cd "${here}/../.." 2>/dev/null && pwd)"
+if [[ "$coverage_sh" == "${here}/../coverage.sh" && -f "${repo_root}/go.mod" ]]; then
+  scenario "R. the repo's own scripts/coverage.sh, in the repo (brownfield contract)"
+  repo_cov="${repo_root}/scripts/coverage.sh"
+  if grep -q -- '--print-coverpkg' "$repo_cov" && grep -q 'COVERAGE_PROFILE' "$repo_cov"; then
+    rcp="$(cd "$repo_root" && "$repo_cov" --print-coverpkg 2>/dev/null)"; rrc=$?
+    if (( rrc == 0 )) && [[ -n "$rcp" && "$rcp" != *$'\n'* ]]; then ok "R --print-coverpkg exits 0 with one non-empty line (${#rcp} chars)"
+    else echo "  FAIL R: --print-coverpkg rc=$rrc output not a single non-empty line" >&2; failures=$((failures+1)); fi
+    # a profile from the smallest package that has tests, then evaluate it
+    small="$(cd "$repo_root" && go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{len .GoFiles}} {{.ImportPath}}{{end}}' ./... 2>/dev/null | sed '/^$/d' | sort -n | head -1 | awk '{print $2}')"
+    prof="$work/repo.cov"
+    if [[ -n "$small" ]] && (cd "$repo_root" && go test -count=1 -coverpkg="$rcp" -coverprofile="$prof" "$small" >/dev/null 2>&1) && [[ -s "$prof" ]]; then
+      export GO_LOG="$work/repo-go.log"; : > "$GO_LOG"
+      rout="$(cd "$repo_root" && PATH="$work/shim:$PATH" COVERAGE_PROFILE="$prof" "$repo_cov" 2>&1)"
+      if grep -q 'evaluating supplied profile' <<<"$rout"; then ok "R COVERAGE_PROFILE announces it evaluated the supplied profile"; else echo "  FAIL R: no 'evaluating supplied profile' line" >&2; failures=$((failures+1)); fi
+      if grep -q 'TOTAL COVERAGE:' <<<"$rout"; then ok "R COVERAGE_PROFILE reaches a coverage verdict"; else echo "  FAIL R: no TOTAL COVERAGE line from the supplied profile" >&2; failures=$((failures+1)); fi
+      n="$(wc -l < "$GO_LOG" | tr -d ' ')"
+      if [[ "$n" == 0 ]]; then ok "R COVERAGE_PROFILE ran no go test"; else echo "  FAIL R: COVERAGE_PROFILE still ran go test ${n}x" >&2; failures=$((failures+1)); fi
+    else
+      echo "  FAIL R: could not produce a sample profile to evaluate (package '${small:-none}')" >&2; failures=$((failures+1))
+    fi
+  else
+    echo "  note R: this repo's coverage.sh has no probe modes, so the probe runs it as a legacy script (two suite executions); nothing to contract-test" >&2
+  fi
+fi
 
 if [[ "$failures" -ne 0 ]]; then
   echo "single-suite-run-selftest: FAIL -- ${failures} assertion(s) failed" >&2

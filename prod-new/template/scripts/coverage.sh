@@ -3,6 +3,33 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# >>> probe-modes
+# TWO OPT-IN MODES, the contract with scripts/verify-standard.sh. The probe owns
+# the one execution of the suite (`go test ./... -race -count=1`, explicit flags
+# on its own command line) and decides the `tests` and `race` rows from THAT
+# run alone; this script can no longer influence them. To avoid running the
+# suite a second time just for coverage it asks this script for the coverage
+# scope, instruments its own run with it, and hands the profile back:
+#
+#   coverage.sh --print-coverpkg     print the -coverpkg value (comma list or
+#                                    pattern) on ONE line and exit 0, running nothing
+#   COVERAGE_PROFILE=<file> coverage.sh
+#                                    evaluate floors + ratchet on that profile
+#                                    and SKIP the go test below
+#
+# A copy of this script without them is still fully supported: the probe then
+# runs the race suite without coverage flags and this script runs as it always
+# did (two suite runs instead of three).
+#
+# The numbers are not identical to a plain run: a profile taken under -race is
+# in atomic mode. Measured on a real service: 90.91% under -race vs 90.79%
+# plain, i.e. inside the 2-point slack the per-package floors carry.
+if [[ "${1:-}" == "--print-coverpkg" ]]; then
+  echo "./..."
+  exit 0
+fi
+# <<< probe-modes
+
 coverage_min="${COVERAGE_MIN:-85.0}"
 coverage_out="${COVERAGE_OUT:-coverage.out}"
 floors_file="${COVERAGE_FLOORS:-scripts/coverage-floors.txt}"
@@ -13,13 +40,12 @@ floors_file="${COVERAGE_FLOORS:-scripts/coverage-floors.txt}"
 # identical source depending only on cache state. Measured: 64.71% vs 85.6% on
 # one package, same tree, differing only in whether the cache was warm. A gate
 # whose verdict depends on a cache is not a gate.
-go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
-# Printed only AFTER go test exited 0 (set -e ends the script before this line
-# otherwise). verify-standard.sh runs this script ONCE with the race detector
-# injected through GOFLAGS and reads this line to tell "the suite passed and a
-# floor/ratchet then failed" from "the suite itself failed". Do not remove it:
-# without it a floor miss forces the probe onto its slower separate-runs path.
-echo "coverage: go test completed"
+if [[ -n "${COVERAGE_PROFILE:-}" && -r "${COVERAGE_PROFILE}" ]]; then
+  coverage_out="${COVERAGE_PROFILE}"
+  echo "coverage: evaluating supplied profile ${coverage_out}"
+else
+  go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
+fi
 total="$(go tool cover -func="${coverage_out}" | tail -n1 | grep -oE '[0-9]+\.[0-9]+%$' | tr -d '%')"
 echo "TOTAL COVERAGE: ${total}% (threshold ${coverage_min}%)"
 

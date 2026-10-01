@@ -547,60 +547,76 @@ gobin() { echo "$(go env GOPATH)/bin"; }
 if go build ./... >/dev/null 2>&1; then row "build" PASS "go build ./... clean"
 else row "build" FAIL "go build ./... failed"; fi
 
-# --- the suite runs ONCE ------------------------------------------------------
-# `tests`, `race`, `coverage` and `coverage-ratchet` used to be four rows over
-# THREE executions of the same suite: `go test ./...`, `go test ./... -race`,
-# and coverage.sh's own `go test -coverpkg`. Measured on a real service: 63 s +
-# 77 s + 78 s = 48% of the whole probe. The -race run covers the same packages
-# and tests as the plain one and adds the detector, so one -race+cover run can
-# carry all four rows -- when it is TRUSTWORTHY. It is not a strict superset:
-# coverage under -race is measured in atomic mode and can differ slightly, and
-# files guarded by a `race` build tag compile differently. That is why every
-# doubt below sends the rows to the separate runs instead of a borrowed PASS.
+# --- the suite runs ONCE, and the PROBE runs it -------------------------------
+# `tests`, `race` and `coverage` used to be three executions of the same suite:
+# `go test ./...`, `go test ./... -race`, and coverage.sh's own `go test
+# -coverpkg`. Measured on a real service: 63 s + 77 s + 78 s = 48% of the whole
+# probe. Letting the repo's coverage.sh stand in for any of them was tried three
+# ways (a hook handshake, GOFLAGS injection plus a go shim, a completion marker)
+# and each leaked a new route to a false PASS, because every one INFERRED a race
+# verdict from what a script the repo controls chose to run: a subset of
+# packages, -run/-short, `-race=false` after the injected -race, a pipe or
+# redirect that swallows go test's exit code. So the inference is gone.
 #
-# The probe, not the repo's script, turns the detector on: coverage.sh runs with
-# GOFLAGS gaining -race, so the claim never rests on the script's honesty and a
-# legacy script needs no hook. What the probe then requires before it believes
-# the one run:
-#   * a `go` shim on PATH saw every `go test` the script ran with -race
-#     effective (a script that clears GOFLAGS, or passes -race=false, cannot
-#     pass -- and `-covermode=atomic` alone does not prove the detector);
-#   * the profile is `mode: atomic`, written by THIS run (removed beforehand, so
-#     a stale one cannot vouch for a script that wrote elsewhere);
-#   * no `FAIL` line (a script doing `go test ... || true` exits 0 over a red
-#     suite) and either exit 0 or the template's "coverage: go test completed"
-#     marker, which is printed only after go test exited 0 -- so a floor or
-#     ratchet miss is not mistaken for a failed suite.
-# Anything else: plain tests, a separate -race run, coverage.sh unchanged.
-cov_out=""; cov_rc=0; single_ok=0
-cov_prof="${COVERAGE_OUT:-coverage.out}"
+# The probe now runs the suite ITSELF, with explicit flags on its own command
+# line: `go test ./... -race -count=1`, scope ./..., no -run, no -short, exit
+# status taken directly (no pipe). `tests` and `race` come from that run ALONE,
+# with positive evidence: exit 0 AND every package that has test files printed
+# an `ok` line. Nothing the repo's scripts do can influence those two rows.
+#
+# Coverage still wants a profile. If coverage.sh opts in (it mentions
+# `--print-coverpkg` and `COVERAGE_PROFILE`), the probe asks it for its
+# -coverpkg value, adds `-coverpkg=<that> -coverprofile=<tmp>` to the SAME run,
+# and hands the profile back to coverage.sh, which evaluates floors and ratchet
+# on it without running the suite. Otherwise the race run carries no coverage
+# flags and coverage.sh runs as it always did. Either way the coverage and
+# ratchet rows mean what they always meant; coverage.sh could always misreport
+# coverage, it just can no longer touch `tests` or `race`.
+#
+# RUN COUNTS (go test executions of the suite):
+#   green, coverage.sh opted in ........ 1   (probe's -race+cover run)
+#   green, legacy coverage.sh ........... 2   (probe's -race run + coverage.sh's own)
+#   red -race run, opted in or legacy ... 3   (race run + plain run for `tests` + coverage.sh's own)
+# The red path pays for being exact: `tests` keeps its no-detector meaning (a
+# race alone must not redden it), and coverage is measured by an unmodified run.
+#
+# NOT the same measurement as a plain run: coverage under -race is taken in
+# atomic mode (measured 90.91% vs 90.79% on a real service, inside the 2-point
+# slack the per-package floors carry), and files behind a `race` build tag
+# compile differently. Those are properties of asking for the race verdict, not
+# of this design.
+cov_out=""; cov_rc=0; cov_tmp_profile=""
+cov_optin=0
 if [[ -x scripts/coverage.sh ]]; then
-  rm -f "$cov_prof"
-  cov_shimdir=$(mktemp -d)
-  cat > "$cov_shimdir/go" <<'SHIM'
-#!/usr/bin/env bash
-# Records, per `go test`, whether -race was effective, then runs the real go.
-if [[ "${1:-}" == test ]]; then
-  _re='(^| )-race($| |=(true|1|t|T|TRUE|True))'
-  if [[ "${GOFLAGS:-}" =~ $_re || " $* " =~ $_re ]]; then echo RACE >> "$PROBE_GO_LOG"; else echo NORACE >> "$PROBE_GO_LOG"; fi
+  if grep -q -- '--print-coverpkg' scripts/coverage.sh && grep -q 'COVERAGE_PROFILE' scripts/coverage.sh; then cov_optin=1; fi
 fi
-exec "$PROBE_REAL_GO" "$@"
-SHIM
-  chmod +x "$cov_shimdir/go"
-  cov_out=$(PROBE_REAL_GO="$(command -v go)" PROBE_GO_LOG="$cov_shimdir/log" PATH="$cov_shimdir:$PATH" \
-    GOFLAGS="${GOFLAGS:+$GOFLAGS }-race" ./scripts/coverage.sh 2>&1); cov_rc=$?
-  cov_n_race=$(grep -c '^RACE$' "$cov_shimdir/log" 2>/dev/null); cov_n_race=${cov_n_race:-0}
-  cov_n_norace=$(grep -c '^NORACE$' "$cov_shimdir/log" 2>/dev/null); cov_n_norace=${cov_n_norace:-0}
-  rm -rf "$cov_shimdir"
-  cov_mode=$(head -1 "$cov_prof" 2>/dev/null)
-  cov_has_fail=0
-  if grep -qE '^(--- )?FAIL' <<<"$cov_out"; then cov_has_fail=1; fi
-  cov_marker=0
-  if grep -qxE 'coverage: go test completed' <<<"$cov_out"; then cov_marker=1; fi
-  if [[ "$cov_mode" == "mode: atomic" ]] && (( cov_n_race >= 1 && cov_n_norace == 0 && cov_has_fail == 0 )); then
-    if (( cov_rc == 0 || cov_marker == 1 )); then single_ok=1; fi
-  fi
+cov_pkgs=""
+if (( cov_optin )); then
+  # Only a script that says it understands the flag is ever called with it: a
+  # legacy one would ignore it and RUN THE WHOLE SUITE.
+  cov_pkgs=$(./scripts/coverage.sh --print-coverpkg 2>/dev/null); cov_pk_rc=$?
+  # The value goes to go test as ONE argument (`-coverpkg=<value>`), so it cannot
+  # smuggle a flag, and go never fails on an odd pattern (measured: a value of
+  # `not a package!` or `./nope/...` only prints a warning). It can only narrow
+  # what is MEASURED, which is coverage.sh's own call, so it is not validated
+  # beyond "exited 0 and said something".
+  if (( cov_pk_rc != 0 )); then cov_pkgs=""; fi
 fi
+suite_flags=(-race -count=1)
+if [[ -n "$cov_pkgs" ]]; then
+  cov_tmp_profile=$(mktemp)
+  suite_flags+=("-coverpkg=$cov_pkgs" "-coverprofile=$cov_tmp_profile")
+fi
+suite_out=$(go test ./... "${suite_flags[@]}" 2>&1); suite_rc=$?
+
+# Positive evidence, not just an exit code: every package that HAS test files
+# must have printed `ok`. A package whose tests were filtered out, never ran or
+# printed nothing is "not certified", which is a FAIL here, never a PASS.
+suite_want=$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... 2>/dev/null); suite_list_rc=$?
+suite_missing=$(comm -23 <(sort -u <<<"$suite_want" | sed '/^$/d') <(awk '$1=="ok"{print $2}' <<<"$suite_out" | sort -u))
+suite_ok_n=$(grep -c '^ok' <<<"$suite_out")
+suite_certified=0
+if (( suite_rc == 0 && suite_list_rc == 0 )) && [[ -z "$suite_missing" ]]; then suite_certified=1; fi
 
 # race_diagnose <output>: why a red suite is red. Capture the output.
 # "race suite failed" names nothing -- not the test, not the package, not
@@ -628,23 +644,34 @@ race_diagnose() {
   printf '%s%s' "${race_why:-race suite failed}" "${race_pkg:+ (in $race_pkg)}"
 }
 
-if (( single_ok )); then
-  row "tests" PASS "$(grep -c '^ok' <<<"$cov_out") packages ok (single -race+cover run)"
-  row "race" PASS "race detector clean (single -race+cover run)"
+if (( suite_certified )); then
+  row "tests" PASS "${suite_ok_n} packages ok (probe-owned -race run)"
+  row "race" PASS "race detector clean (probe-owned -race run${cov_pkgs:+, coverage profile captured})"
 else
+  if (( suite_rc == 0 )); then
+    if (( suite_list_rc != 0 )); then
+      row "race" FAIL "suite exited 0 but 'go list' could not enumerate the packages, so nothing is certified"
+    else
+      row "race" FAIL "suite exited 0 but $(grep -c . <<<"$suite_missing") package(s) with tests printed no ok line, so not certified: $(head -3 <<<"$suite_missing" | paste -sd' ' -)"
+    fi
+  else
+    row "race" FAIL "$(race_diagnose "$suite_out") (probe-owned -race run)"
+  fi
+  # `tests` keeps its no-detector meaning: a race alone must not redden it.
   if out=$(go test ./... -count=1 2>&1); then
     row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
   else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
-
-  if race_out=$(go test ./... -race -count=1 2>&1); then
-    row "race" PASS "race detector clean (separate -race run)"
-  else
-    row "race" FAIL "$(race_diagnose "$race_out") (separate -race run)"
-  fi
-  # The single run is not evidence; coverage and the ratchet get their own,
-  # unmodified run.
-  if [[ -x scripts/coverage.sh ]]; then cov_out=$(./scripts/coverage.sh 2>&1); cov_rc=$?; fi
 fi
+
+# Coverage: evaluate the profile the probe captured, only if it is trustworthy.
+if [[ -x scripts/coverage.sh ]]; then
+  if (( suite_certified )) && [[ -n "$cov_tmp_profile" && -s "$cov_tmp_profile" ]]; then
+    cov_out=$(COVERAGE_PROFILE="$cov_tmp_profile" ./scripts/coverage.sh 2>&1); cov_rc=$?
+  else
+    cov_out=$(./scripts/coverage.sh 2>&1); cov_rc=$?
+  fi
+fi
+[[ -n "$cov_tmp_profile" ]] && rm -f "$cov_tmp_profile"
 
 # --- 2. coverage + per-package ratchet (measured, not claimed) ---------------
 if [[ -x scripts/coverage.sh ]]; then
@@ -747,9 +774,16 @@ fi
 
 # --- 3. lint + fitness functions --------------------------------------------
 if have golangci-lint || [[ -x "$(gobin)/golangci-lint" ]]; then
-  if PATH="$(gobin):$PATH" golangci-lint run --timeout=5m >/dev/null 2>&1; then
+  # The output is CAPTURED, not discarded: a lint FAIL that names no issue sends
+  # the reader to re-run the linter to find out what is wrong (and a cache or
+  # environment fault looks identical to a finding without the first lines).
+  if lint_out=$(PATH="$(gobin):$PATH" golangci-lint run --timeout=5m 2>&1); then
     row "lint" PASS "0 issues"
-  else row "lint" FAIL "golangci-lint reported issues"; fi
+  else
+    lint_first=$(grep -E '\.go:[0-9]+:[0-9]+:' <<<"$lint_out" | head -3 | cut -c1-120 | paste -sd';' -)
+    [[ -n "$lint_first" ]] || lint_first=$(grep -vE '^(level=|[[:space:]]*$)' <<<"$lint_out" | tail -1 | cut -c1-140)
+    row "lint" FAIL "golangci-lint reported issues: ${lint_first:-<no output captured>}"
+  fi
 else row "lint" FAIL "golangci-lint not installed"; fi
 
 # The suite's DIRECTORY was hardcoded to internal/architecture, which is
@@ -1119,24 +1153,63 @@ elif (( prop_n > 0 )); then
 else row "property-tests" FAIL "no property tests found (the word 'adequacy' in a test file is not a property test)"; fi
 
 mapfile -t fuzzes < <(grep -rho 'func \(Fuzz[A-Za-z0-9_]*\)' --include='*_test.go' . 2>/dev/null | sed 's/func //' | sort -u)
-if ((${#fuzzes[@]})); then
-  bad=0; infra=0
-  for f in "${fuzzes[@]}"; do
-    pkg=$(grep -rl "func $f(" --include='*_test.go' . | head -1 | xargs dirname)
-    fout=$(go test -run="^$f\$" -fuzz="^$f\$" -fuzztime=3s "$pkg" 2>&1) || {
-      fout=$(go test -run="^$f\$" -fuzz="^$f\$" -fuzztime=3s "$pkg" 2>&1) || {
-        if grep -q "setup failed" <<<"$fout"; then infra=$((infra+1)); else bad=$((bad+1)); fi; }; }
+# One entry per (package, target) PAIR. Two packages may each declare FuzzParse;
+# resolving the name to its first file (`head -1`) fuzzed one of them and
+# reported both as clean.
+fuzz_pairs=()
+for f in "${fuzzes[@]}"; do
+  while IFS= read -r pkgdir; do
+    [[ -n "$pkgdir" ]] && fuzz_pairs+=("$pkgdir $f")
+  done < <(grep -rl "func $f(" --include='*_test.go' . 2>/dev/null | xargs -n1 dirname 2>/dev/null | sort -u)
+done
+if ((${#fuzz_pairs[@]})); then
+  bad=0; infra=0; ran=0; fuzz_notrun=(); fuzz_gated=()
+  for pair in "${fuzz_pairs[@]}"; do
+    pkg=${pair% *}; f=${pair##* }
+    # Discovery is a textual grep that ignores build tags, so a target can exist
+    # in a file this lane never compiles. `go test -fuzz` on such a target prints
+    # "no fuzz tests to fuzz" and EXITS 0 -- a pass without the work (reproduced
+    # by two PR reviewers). So the toolchain must list it under the default tags
+    # before it counts as something this row fuzzed.
+    listed=$(go test -list "^$f\$" "$pkg" 2>&1)
+    if ! grep -qx "$f" <<<"$listed"; then
+      if grep -lE "^func $f\(" "$pkg"/*_test.go 2>/dev/null | xargs grep -lE '^//go:build' >/dev/null 2>&1; then
+        fuzz_gated+=("$pkg:$f")   # declared behind a build tag: reported, never counted as fuzzed
+      else
+        fuzz_notrun+=("$pkg:$f")  # in the source text but not a test the toolchain sees
+      fi
+      continue
+    fi
+    fout=$(go test -run="^$f\$" -fuzz="^$f\$" -fuzztime=3s "$pkg" 2>&1); frc=$?
+    if (( frc != 0 )); then
+      fout=$(go test -run="^$f\$" -fuzz="^$f\$" -fuzztime=3s "$pkg" 2>&1); frc=$?
+    fi
+    if (( frc != 0 )); then
+      if grep -q "setup failed" <<<"$fout"; then infra=$((infra+1)); else bad=$((bad+1)); fi
+    elif grep -q 'no fuzz tests to fuzz' <<<"$fout" || ! grep -q 'fuzz: elapsed' <<<"$fout"; then
+      # Exit 0 without go's `fuzz: elapsed` line, or with its "no fuzz tests"
+      # warning, means the target was never fuzzed.
+      bad=$((bad+1))
+    else
+      ran=$((ran+1))
+    fi
   done
-  if ((bad==0 && infra==0)); then row "fuzz" PASS "${#fuzzes[@]} targets, all ran clean 3s"
-  elif ((bad==0 && infra >= ${#fuzzes[@]})); then
+  nfz=${#fuzz_pairs[@]}
+  gated_note=""; (( ${#fuzz_gated[@]} )) && gated_note="; ${#fuzz_gated[@]} tag-gated, NOT fuzzed in this lane: ${fuzz_gated[*]}"
+  if (( ${#fuzz_notrun[@]} )); then
+    row "fuzz" FAIL "${#fuzz_notrun[@]} target(s) declared in test source but not listed by the toolchain under the default tags (deleted, commented out, or inside a string?): ${fuzz_notrun[*]}${gated_note}"
+  elif ((bad==0 && infra==0 && ran==0)); then
+    row "fuzz" FAIL "$nfz target(s) found, none fuzzed in this lane${gated_note}"
+  elif ((bad==0 && infra==0)); then row "fuzz" PASS "$ran target(s) (package, name) fuzzed 3s, 'fuzz: elapsed' seen for each${gated_note}"
+  elif ((bad==0 && ran==0)); then
     # EVERY target bucketed as toolchain-infra means NOT ONE was fuzzed, and
     # the old branch reported that as "targets clean". Tolerating some
     # inconclusive runs is reasonable -- Go's fuzz cache genuinely contends
     # under parallel packages -- but tolerating ALL of them turns the row into
     # a report that the tool failed to start, printed as a pass.
-    row "fuzz" FAIL "${#fuzzes[@]} targets, ALL inconclusive: no target was actually fuzzed, so this row proves nothing"
-  elif ((bad==0)); then row "fuzz" PASS "${#fuzzes[@]} targets, $((${#fuzzes[@]}-infra)) ran clean ($infra inconclusive: toolchain setup, not a finding)"
-  else row "fuzz" FAIL "${#fuzzes[@]} targets, $bad genuinely failed"; fi
+    row "fuzz" FAIL "$nfz targets, ALL inconclusive: no target was actually fuzzed, so this row proves nothing${gated_note}"
+  elif ((bad==0)); then row "fuzz" PASS "$ran target(s) fuzzed, $infra inconclusive (toolchain setup, not a finding)${gated_note}"
+  else row "fuzz" FAIL "$bad of $nfz target(s) failed or never ran a fuzz iteration${gated_note}"; fi
 else row "fuzz" FAIL "no fuzz targets"; fi
 
 # --- 6. mutation baseline (artifact + freshness) ----------------------------
@@ -2647,7 +2720,9 @@ if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
   if grep -qE "affected by 0 vulnerabilities|No vulnerabilities found" <<<"$vout"; then
     row "vuln-scan" PASS "govulncheck: 0 called vulnerabilities $(toolchain_note)"
   elif found=$(grep -m1 -E 'affected by [0-9]+ vulnerabilit' <<<"$vout"); then
-    row "vuln-scan" FAIL "$found $(toolchain_note)"
+    # The count alone says "go read the scan"; the IDs are the finding.
+    vuln_ids=$(grep -oE '^Vulnerability #[0-9]+: GO-[0-9]+-[0-9]+' <<<"$vout" | grep -oE 'GO-[0-9]+-[0-9]+' | sort -u | paste -sd' ' -)
+    row "vuln-scan" FAIL "$found${vuln_ids:+ [$vuln_ids]} $(toolchain_note)"
   else
     # Neither a clean verdict nor a count: the scanner did not complete (module
     # resolution, network, toolchain). That is an unproven gate, not a clean one.

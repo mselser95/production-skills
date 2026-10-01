@@ -110,6 +110,14 @@ fi
 # checked for staleness only when its own directory is the one being scanned.
 declare -A EXCEPT=(
   [_shared/probes/verify-standard.sh]="Go-only probe, refuses to run on this repo (exit 2); executed in scaffolded repos via the template Makefile"
+  [prod-new/template/scripts/changed-line-coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/check-template-drift.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/error-handling-fitness.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/kill-durability.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/no-unfilled-slots.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/retry.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/verify-standard.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
 )
 for e in "${!EXCEPT[@]}"; do
   # Out of scope for this run rather than stale: an exception for another tree

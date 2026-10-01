@@ -121,6 +121,10 @@ gates:
 # gate-hygiene-fitness.sh caught, because nothing in this repo ran it over the
 # files it vendors. Findings fail; the latent GREPQ advisories are printed.
 	@bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts
+# And the wiring of that step itself: probe-wiring over the template's scripts
+# reports gate-hygiene-fitness.sh as an orphan the moment the line above is
+# deleted. Every other template script is a declared exception (run downstream).
+	@bash $(PROBES)/probe-wiring.sh prod-new/template/scripts
 	@bash $(PROBES)/probe-wiring.sh
 # scripts/ too, added after review noticed nothing covered it: evidence-record.sh
 # and instantiate-template.sh are gates by any reasonable reading, and they lived
