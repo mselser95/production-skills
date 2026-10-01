@@ -547,36 +547,86 @@ gobin() { echo "$(go env GOPATH)/bin"; }
 if go build ./... >/dev/null 2>&1; then row "build" PASS "go build ./... clean"
 else row "build" FAIL "go build ./... failed"; fi
 
-if out=$(go test ./... -count=1 2>&1); then
-  row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
-else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
+# --- the suite runs ONCE ------------------------------------------------------
+# `tests`, `race`, `coverage` and `coverage-ratchet` used to be four rows over
+# THREE executions of the same suite: `go test ./...`, `go test ./... -race`,
+# and coverage.sh's own `go test -coverpkg`. Measured on a real service: 63 s +
+# 77 s + 78 s = 48% of the whole probe. The -race run is a strict superset of
+# the plain one (same packages, same flags, plus the detector), so one
+# -race+cover run carries all four rows.
+#
+# The handshake is what makes that safe. coverage.sh is the REPO'S script and
+# an adopting repo may carry an older copy that ignores COVERAGE_GO_TEST_FLAGS.
+# Such a script runs WITHOUT the detector, so reporting `race PASS` from it
+# would be a green over a run that never had -race. The probe therefore asks
+# (env var) and then VERIFIES (the script printing "coverage: go test flags:
+# -race"); without the line it falls back to today's separate runs. The two
+# rows' evidence says which mode produced them.
+cov_out=""; cov_rc=0; single_run=0
+if [[ -x scripts/coverage.sh ]]; then
+  cov_out=$(COVERAGE_GO_TEST_FLAGS="-race" ./scripts/coverage.sh 2>&1); cov_rc=$?
+  if grep -qxE 'coverage: go test flags: -race' <<<"$cov_out"; then single_run=1; fi
+fi
 
-# Capture the output. "race suite failed" names nothing -- not the test, not
-# the package, not whether it was a DATA RACE at all -- so the row sent the
-# reader back to re-run the suite themselves, and an INTERMITTENT failure may
-# not reproduce on that re-run. Evidence you have to regenerate is evidence you
-# may not get.
-if race_out=$(go test ./... -race -count=1 2>&1); then
-  row "race" PASS "race detector clean"
-else
+# race_diagnose <output>: why a red suite is red. Capture the output.
+# "race suite failed" names nothing -- not the test, not the package, not
+# whether it was a DATA RACE at all -- so the row sent the reader back to re-run
+# the suite themselves, and an INTERMITTENT failure may not reproduce on that
+# re-run. Evidence you have to regenerate is evidence you may not get.
+race_diagnose() {
+  local o="$1" race_name race_assert race_why race_pkg
   # The test NAME and the ASSERTION, not one or the other. Reporting only
   # `--- FAIL: TestX` sends the reader to re-run it for the message -- and for
   # an intermittent failure that re-run may come back clean, which is the whole
   # reason this row captures output at all. Measured: a red race row named
   # TestVenueView_LosingAVenueNeverMovesTheDemand and dropped
   # "InQuorum=1, want 3", the number that identified the mechanism.
-  race_name=$(grep -m1 -E '^--- FAIL: [A-Za-z0-9_/]+' <<<"$race_out")
-  race_assert=$(grep -m1 -E '^[[:space:]]+[^[:space:]]+\.go:[0-9]+:' <<<"$race_out")
-  race_why=$(grep -m1 -E '^[[:space:]]*(WARNING: DATA RACE)' <<<"$race_out")
+  race_name=$(grep -m1 -E '^--- FAIL: [A-Za-z0-9_/]+' <<<"$o")
+  race_assert=$(grep -m1 -E '^[[:space:]]+[^[:space:]]+\.go:[0-9]+:' <<<"$o")
+  race_why=$(grep -m1 -E '^[[:space:]]*(WARNING: DATA RACE)' <<<"$o")
   [[ -z "$race_why" ]] && race_why="$(printf '%s%s' "${race_name}" "${race_assert:+ -- $(printf '%s' "$race_assert" | sed 's/^[[:space:]]*//')}")"
-  [[ -z "$race_why" ]] && race_why=$(grep -m1 -E '^FAIL' <<<"$race_out")
-  race_pkg=$(grep -m1 -E '^FAIL[[:space:]]+[^[:space:]]+' <<<"$race_out" | awk '{print $2}')
-  row "race" FAIL "${race_why:-race suite failed}${race_pkg:+ (in $race_pkg)}"
+  [[ -z "$race_why" ]] && race_why=$(grep -m1 -E '^FAIL' <<<"$o")
+  race_pkg=$(grep -m1 -E '^FAIL[[:space:]]+[^[:space:]]+' <<<"$o" | awk '{print $2}')
+  printf '%s%s' "${race_why:-race suite failed}" "${race_pkg:+ (in $race_pkg)}"
+}
+
+if (( single_run )); then
+  # "coverage: go test completed" is printed by coverage.sh only AFTER go test
+  # exited 0. cov_rc alone is not enough: the script also exits 1 for a floor
+  # miss, which says nothing about the suite. Its absence means the suite did
+  # not pass (or the script died before running it).
+  if grep -qxE 'coverage: go test completed' <<<"$cov_out"; then
+    row "tests" PASS "$(grep -c '^ok' <<<"$cov_out") packages ok (single -race+cover run)"
+    row "race" PASS "race detector clean (single -race+cover run)"
+  else
+    row "race" FAIL "$(race_diagnose "$cov_out") (single -race+cover run)"
+    if grep -qE 'WARNING: DATA RACE|race detected during execution' <<<"$cov_out"; then
+      # A race makes the -race run red, but the PLAIN `tests` row did not use to.
+      # Do not let a race also redden `tests`: re-run plain, on the failure path
+      # only, so the two rows keep the meaning they had when they were two runs.
+      if out=$(go test ./... -count=1 2>&1); then
+        row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
+      else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
+    else
+      row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$cov_out" || echo 'coverage.sh ended before the suite completed')"
+    fi
+  fi
+else
+  if out=$(go test ./... -count=1 2>&1); then
+    row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
+  else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
+
+  if race_out=$(go test ./... -race -count=1 2>&1); then
+    row "race" PASS "race detector clean"
+  else
+    row "race" FAIL "$(race_diagnose "$race_out")"
+  fi
 fi
 
 # --- 2. coverage + per-package ratchet (measured, not claimed) ---------------
 if [[ -x scripts/coverage.sh ]]; then
-  if out=$(./scripts/coverage.sh 2>&1); then
+  out="$cov_out"
+  if (( cov_rc == 0 )); then
     row "coverage" PASS "$(grep -oE 'TOTAL COVERAGE: [0-9.]+%' <<<"$out" | head -1)"
   else
     # coverage.sh fails FOUR ways and this branch used to assume one.

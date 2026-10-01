@@ -13,7 +13,27 @@ floors_file="${COVERAGE_FLOORS:-scripts/coverage-floors.txt}"
 # identical source depending only on cache state. Measured: 64.71% vs 85.6% on
 # one package, same tree, differing only in whether the cache was warm. A gate
 # whose verdict depends on a cache is not a gate.
-go test -count=1 -coverpkg=./... ./... -coverprofile="${coverage_out}"
+#
+# COVERAGE_GO_TEST_FLAGS is an OPT-IN extra-flags hook (the probe passes
+# "-race"), so ONE suite execution can serve the tests, race, coverage and
+# ratchet rows instead of three. The suite is the slow part of the probe
+# (measured on a real service: coverage 78s + race 77s + tests 63s = 48% of the
+# whole run), and the -race run is a strict superset of the plain run.
+#
+# The handshake lines are the contract with verify-standard.sh and are NOT
+# decoration. A script that ignores the env var (an older copy) prints neither
+# line, and the probe then falls back to separate runs. Without the handshake a
+# probe that "knew" it had asked for -race would report `race PASS` over a run
+# that never had the detector -- the exact false green this guards. The
+# "completed" line is printed only after go test exited 0, so its absence is how
+# the probe knows the suite failed (set -e ends this script right there).
+# shellcheck disable=SC2206 # intentional word-splitting of an opt-in flag list
+extra_flags=(${COVERAGE_GO_TEST_FLAGS:-})
+if [[ "${#extra_flags[@]}" -gt 0 ]]; then
+  echo "coverage: go test flags: ${extra_flags[*]}"
+fi
+go test -count=1 ${extra_flags[@]+"${extra_flags[@]}"} -coverpkg=./... ./... -coverprofile="${coverage_out}"
+echo "coverage: go test completed"
 total="$(go tool cover -func="${coverage_out}" | tail -n1 | grep -oE '[0-9]+\.[0-9]+%$' | tr -d '%')"
 echo "TOTAL COVERAGE: ${total}% (threshold ${coverage_min}%)"
 
