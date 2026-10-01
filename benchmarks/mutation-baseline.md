@@ -22,8 +22,8 @@ here would be a threshold nobody derived.
 | `policy-coverage-selftest.sh` | 7 |
 | `probe-wiring-selftest.sh` | 12 |
 | `sbom-ordering-selftest.sh` | 10 |
-| `single-suite-run-selftest.sh` | 37 |
+| `single-suite-run-selftest.sh` | 59 |
 | `skills-static-selftest.sh` | 13 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| **total** | **323** |
+| **total** | **345** |

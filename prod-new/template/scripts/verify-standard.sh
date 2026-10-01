@@ -551,25 +551,55 @@ else row "build" FAIL "go build ./... failed"; fi
 # `tests`, `race`, `coverage` and `coverage-ratchet` used to be four rows over
 # THREE executions of the same suite: `go test ./...`, `go test ./... -race`,
 # and coverage.sh's own `go test -coverpkg`. Measured on a real service: 63 s +
-# 77 s + 78 s = 48% of the whole probe. The -race run is a strict superset of
-# the plain one (same packages, same flags, plus the detector), so one
-# -race+cover run carries all four rows.
+# 77 s + 78 s = 48% of the whole probe. The -race run covers the same packages
+# and tests as the plain one and adds the detector, so one -race+cover run can
+# carry all four rows -- when it is TRUSTWORTHY. It is not a strict superset:
+# coverage under -race is measured in atomic mode and can differ slightly, and
+# files guarded by a `race` build tag compile differently. That is why every
+# doubt below sends the rows to the separate runs instead of a borrowed PASS.
 #
-# The handshake is what makes that safe. coverage.sh is the REPO'S script and
-# an adopting repo may carry an older copy that ignores COVERAGE_GO_TEST_FLAGS.
-# Such a script runs WITHOUT the detector, so reporting `race PASS` from it
-# would be a green over a run that never had -race. The probe therefore asks
-# (env var) and then VERIFIES (the script printing "coverage: go test flags:
-# -race"); without the line it falls back to today's separate runs. The two
-# rows' evidence says which mode produced them.
-cov_out=""; cov_rc=0; single_run=0
+# The probe, not the repo's script, turns the detector on: coverage.sh runs with
+# GOFLAGS gaining -race, so the claim never rests on the script's honesty and a
+# legacy script needs no hook. What the probe then requires before it believes
+# the one run:
+#   * a `go` shim on PATH saw every `go test` the script ran with -race
+#     effective (a script that clears GOFLAGS, or passes -race=false, cannot
+#     pass -- and `-covermode=atomic` alone does not prove the detector);
+#   * the profile is `mode: atomic`, written by THIS run (removed beforehand, so
+#     a stale one cannot vouch for a script that wrote elsewhere);
+#   * no `FAIL` line (a script doing `go test ... || true` exits 0 over a red
+#     suite) and either exit 0 or the template's "coverage: go test completed"
+#     marker, which is printed only after go test exited 0 -- so a floor or
+#     ratchet miss is not mistaken for a failed suite.
+# Anything else: plain tests, a separate -race run, coverage.sh unchanged.
+cov_out=""; cov_rc=0; single_ok=0
 cov_prof="${COVERAGE_OUT:-coverage.out}"
 if [[ -x scripts/coverage.sh ]]; then
-  # Removed first so the corroboration below reads THIS run's profile, never a
-  # stale one left by an earlier run.
   rm -f "$cov_prof"
-  cov_out=$(COVERAGE_GO_TEST_FLAGS="-race" ./scripts/coverage.sh 2>&1); cov_rc=$?
-  if grep -qxE 'coverage: go test flags: -race' <<<"$cov_out"; then single_run=1; fi
+  cov_shimdir=$(mktemp -d)
+  cat > "$cov_shimdir/go" <<'SHIM'
+#!/usr/bin/env bash
+# Records, per `go test`, whether -race was effective, then runs the real go.
+if [[ "${1:-}" == test ]]; then
+  _re='(^| )-race($| |=(true|1|t|T|TRUE|True))'
+  if [[ "${GOFLAGS:-}" =~ $_re || " $* " =~ $_re ]]; then echo RACE >> "$PROBE_GO_LOG"; else echo NORACE >> "$PROBE_GO_LOG"; fi
+fi
+exec "$PROBE_REAL_GO" "$@"
+SHIM
+  chmod +x "$cov_shimdir/go"
+  cov_out=$(PROBE_REAL_GO="$(command -v go)" PROBE_GO_LOG="$cov_shimdir/log" PATH="$cov_shimdir:$PATH" \
+    GOFLAGS="${GOFLAGS:+$GOFLAGS }-race" ./scripts/coverage.sh 2>&1); cov_rc=$?
+  cov_n_race=$(grep -c '^RACE$' "$cov_shimdir/log" 2>/dev/null); cov_n_race=${cov_n_race:-0}
+  cov_n_norace=$(grep -c '^NORACE$' "$cov_shimdir/log" 2>/dev/null); cov_n_norace=${cov_n_norace:-0}
+  rm -rf "$cov_shimdir"
+  cov_mode=$(head -1 "$cov_prof" 2>/dev/null)
+  cov_has_fail=0
+  if grep -qE '^(--- )?FAIL' <<<"$cov_out"; then cov_has_fail=1; fi
+  cov_marker=0
+  if grep -qxE 'coverage: go test completed' <<<"$cov_out"; then cov_marker=1; fi
+  if [[ "$cov_mode" == "mode: atomic" ]] && (( cov_n_race >= 1 && cov_n_norace == 0 && cov_has_fail == 0 )); then
+    if (( cov_rc == 0 || cov_marker == 1 )); then single_ok=1; fi
+  fi
 fi
 
 # race_diagnose <output>: why a red suite is red. Capture the output.
@@ -578,7 +608,7 @@ fi
 # the suite themselves, and an INTERMITTENT failure may not reproduce on that
 # re-run. Evidence you have to regenerate is evidence you may not get.
 race_diagnose() {
-  local o="$1" race_name race_assert race_why race_pkg
+  local o="$1" race_name race_assert race_why race_pkg race_cause
   # The test NAME and the ASSERTION, not one or the other. Reporting only
   # `--- FAIL: TestX` sends the reader to re-run it for the message -- and for
   # an intermittent failure that re-run may come back clean, which is the whole
@@ -589,61 +619,31 @@ race_diagnose() {
   race_assert=$(grep -m1 -E '^[[:space:]]+[^[:space:]]+\.go:[0-9]+:' <<<"$o")
   race_why=$(grep -m1 -E '^[[:space:]]*(WARNING: DATA RACE)' <<<"$o")
   [[ -z "$race_why" ]] && race_why="$(printf '%s%s' "${race_name}" "${race_assert:+ -- $(printf '%s' "$race_assert" | sed 's/^[[:space:]]*//')}")"
+  # A failure that is not a test failure at all names its cause on a line of
+  # its own ("go: -race requires cgo", "-covermode must be atomic ... -race").
+  race_cause=$(grep -m1 -E 'requires cgo|-covermode must be|^go: ' <<<"$o")
+  [[ -z "$race_why" ]] && race_why="$race_cause"
   [[ -z "$race_why" ]] && race_why=$(grep -m1 -E '^FAIL' <<<"$o")
   race_pkg=$(grep -m1 -E '^FAIL[[:space:]]+[^[:space:]]+' <<<"$o" | awk '{print $2}')
   printf '%s%s' "${race_why:-race suite failed}" "${race_pkg:+ (in $race_pkg)}"
 }
 
-# The separate-run rows, shared by the fallback and by the red paths below.
-plain_tests_row() {
-  local o
-  if o=$(go test ./... -count=1 2>&1); then
-    row "tests" PASS "$(grep -c '^ok' <<<"$o") packages ok"
-  else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$o")"; fi
-}
-separate_race_row() {
-  local o
-  if o=$(go test ./... -race -count=1 2>&1); then
-    row "race" PASS "race detector clean"
-  else
-    row "race" FAIL "$(race_diagnose "$o")"
-  fi
-}
-
-if (( single_run )); then
-  # "coverage: go test completed" is printed by coverage.sh only AFTER go test
-  # exited 0. cov_rc alone is not enough: the script also exits 1 for a floor
-  # miss, which says nothing about the suite. Its absence means the suite did
-  # not pass (or the script died before running it).
-  if grep -qxE 'coverage: go test completed' <<<"$cov_out"; then
-    row "tests" PASS "$(grep -c '^ok' <<<"$cov_out") packages ok (single -race+cover run)"
-    # The handshake is a CLAIM by the script. -race forces covermode=atomic, so
-    # the profile it wrote is independent evidence of whether the detector was
-    # really on: a script that prints the line but drops the flags writes
-    # `mode: set`/`count`.
-    cov_mode=$(head -1 "$cov_prof" 2>/dev/null)
-    if [[ "$cov_mode" == "mode: atomic" ]]; then
-      row "race" PASS "race detector clean (single -race+cover run)"
-    elif [[ -z "$cov_mode" ]]; then
-      # Cannot corroborate (script writes its profile elsewhere): do not borrow
-      # a PASS and do not invent a FAIL -- run the race suite on its own.
-      separate_race_row
-    else
-      row "race" FAIL "coverage.sh printed the -race handshake but its profile is '${cov_mode}', not 'mode: atomic' -- the run was not -race"
-    fi
-  else
-    # The single run did not pass. Whatever killed it (a race, a failing test,
-    # `-race requires cgo`, a race-only timeout) is only the RACE row's story:
-    # `race` keeps this run's diagnosis, and every other row is re-derived from
-    # the separate no-flags path, so none of them is reddened by the detector.
-    # Red path only -- cost is irrelevant here, false evidence is not.
-    row "race" FAIL "$(race_diagnose "$cov_out") (single -race+cover run)"
-    plain_tests_row
-    cov_out=$(env -u COVERAGE_GO_TEST_FLAGS ./scripts/coverage.sh 2>&1); cov_rc=$?
-  fi
+if (( single_ok )); then
+  row "tests" PASS "$(grep -c '^ok' <<<"$cov_out") packages ok (single -race+cover run)"
+  row "race" PASS "race detector clean (single -race+cover run)"
 else
-  plain_tests_row
-  separate_race_row
+  if out=$(go test ./... -count=1 2>&1); then
+    row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
+  else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
+
+  if race_out=$(go test ./... -race -count=1 2>&1); then
+    row "race" PASS "race detector clean (separate -race run)"
+  else
+    row "race" FAIL "$(race_diagnose "$race_out") (separate -race run)"
+  fi
+  # The single run is not evidence; coverage and the ratchet get their own,
+  # unmodified run.
+  if [[ -x scripts/coverage.sh ]]; then cov_out=$(./scripts/coverage.sh 2>&1); cov_rc=$?; fi
 fi
 
 # --- 2. coverage + per-package ratchet (measured, not claimed) ---------------

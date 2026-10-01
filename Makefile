@@ -115,6 +115,12 @@ gates:
 	@bash $(PROBES)/policy-coverage.sh
 	@bash $(PROBES)/row-vacuity-sweep.sh
 	@bash $(PROBES)/check-registries.sh
+# The shell files this repo VENDORS into scaffolds are held to the template's own
+# gate-hygiene rules HERE, before a consumer's check-fast finds them: the
+# single-suite selftest shipped a PREFIX-ASSIGN-EXPAND that only the consumer's
+# gate-hygiene-fitness.sh caught, because nothing in this repo ran it over the
+# files it vendors. Findings fail; the latent GREPQ advisories are printed.
+	@bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts
 	@bash $(PROBES)/probe-wiring.sh
 # scripts/ too, added after review noticed nothing covered it: evidence-record.sh
 # and instantiate-template.sh are gates by any reasonable reading, and they lived

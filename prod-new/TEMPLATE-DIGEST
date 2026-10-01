@@ -7,15 +7,15 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 2562b860e98922d0274b19363f846d949816c7be667d8750b7ae92b70af98e24
-short: 2562b860e989
+digest: da09dff01b1324942abce87b6de3f9ab12fc826818205da521f9b613649068fb
+short: da09dff01b13
 files: 22
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
   scripts/changed-line-coverage.sh: 89438a28abea4bf522db07128e769c33c6848e059151de4f5860d2cd62ab12dd
   scripts/check-registries.sh: 4497037c9816de4cd3717b5077fd64b0954059554baadec57af423d8341b55a1
   scripts/check-template-drift.sh: f65b6d1cc649b9a2d9b46532b491f4fd7fd47502458c38414fe6126fbd2e7703
-  scripts/coverage.sh: 62adc65747378c45ca7e66d273e5e898cbd70a0cfa63907eac7b2d23e289db0f
+  scripts/coverage.sh: 1cf7c02137a208cbf0c1be4a7d7d310c7b819f049ed20f10b79753867dc22a11
   scripts/error-handling-fitness.sh: cfb96953c7727fa872db162123963cfe5aca65102eeb6168cb7d08c7c9dd1327
   scripts/gate-hygiene-fitness.sh: 620bbf6eebcc4b7503643337b7852d20e59b527daf5255a6533a7eb857045e5a
   scripts/kill-durability.sh: d31b8857fcd239c0081f5560694020c015593a253eef14828b3d05da1e68e922
@@ -31,5 +31,5 @@ per_file:
   scripts/tests/probe-self-gate-selftest.sh: cee9417e48c2d910a054ca37574cc95debc2c3c52dc29e0c312aa93f9ae415c9
   scripts/tests/retry-selftest.sh: be8d6ca86f42d4753d2421fe0518da79b69fb5474721fc62a806a7d0a24315a6
   scripts/tests/sbom-ordering-selftest.sh: 9ca6a2eff6c60a007525d0d9ec5a691fa8b5c9cdacfbb2d9afef4387494e8af3
-  scripts/tests/single-suite-run-selftest.sh: 901b00228d0b4d9500c4e1bf5554cd19c7e88c7f326c0e7a89adb87ad77f50d7
-  scripts/verify-standard.sh: 008ea4033fe0d30d1b691d56f9fd3c96ad044be51a29ae158db2bd240745ccea
+  scripts/tests/single-suite-run-selftest.sh: 17a52c4572d867daddedc591d67ed4fda67e8eb9773ffd2ddb4bf00122afa7ef
+  scripts/verify-standard.sh: d902cc4331abf7a60a5967ed140f1bb3e8745f36669f1ad6b005849071727d1a
