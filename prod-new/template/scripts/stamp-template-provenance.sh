@@ -46,6 +46,8 @@ VENDORED=(
   scripts/tests/non-vacuity-selftest.sh
   scripts/tests/sbom-ordering-selftest.sh
   scripts/tests/single-suite-run-selftest.sh
+  scripts/gate-run.sh
+  scripts/tests/gate-run-selftest.sh
   scripts/acceptance-coverage.sh
   scripts/tests/acceptance-coverage-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh

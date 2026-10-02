@@ -274,6 +274,10 @@ mirrors=(
   "prod-new/template/scripts/tests/single-suite-run-selftest.sh:_shared/probes/single-suite-run-selftest.sh"
   # Added 2026-10-02: the acceptance-spec gate, vendored so a scaffolded repo's
   # copy is drift-checked like every other probe.
+  # Added 2026-10-02: gate-run, the context-sparing gate runner (full log kept,
+  # only failures + tail printed), vendored so scaffolded repos' agents have it.
+  "prod-new/template/scripts/gate-run.sh:_shared/probes/gate-run.sh"
+  "prod-new/template/scripts/tests/gate-run-selftest.sh:_shared/probes/gate-run-selftest.sh"
   "prod-new/template/scripts/acceptance-coverage.sh:_shared/probes/acceptance-coverage.sh"
   "prod-new/template/scripts/tests/acceptance-coverage-selftest.sh:_shared/probes/acceptance-coverage-selftest.sh"
   # ADDED WITH THE THREE ROWS IT COVERS: dimension 25's `load-baseline`, the
