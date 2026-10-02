@@ -59,10 +59,40 @@ and the hard rules every agent in this repo follows.
 | `make check-fast` | build, vet, plain test, architecture — seconds, the cheap presubmit gate |
 | `make verify` | lint, architecture, race, coverage, chaos, e2e, fuzz — the full presubmit |
 | `make verify-standard` | the standard's own probe (`scripts/verify-standard.sh`) — must report zero FAIL |
+| `make verify-standard-group GROUP=<g>` / `make verify-standard-merge` | the same probe sharded into four groups; see "verify-standard in CI" below. Run groups one after another locally. A full `make verify-standard` is unchanged. |
 | `make test-advisory` | the candidate-provenance lane (`-tags=candidate`) — never blocks |
 | `make check-registries` | liability-registry expiry gate |
 | `make bench` | benchmarks — recording only, never a gate |
 | `make sim` | stage-1 deterministic simulation (`verification/simulation`) — fixed seed by default, `SIM_SEED=<n>` to sweep; the sweep is advisory |
+
+### verify-standard in CI: sharded, merged, one required check
+
+`.github/workflows/pr.yaml` runs the probe as a matrix of four jobs, one row
+GROUP each, every leg on its own checkout:
+
+| group | rows |
+|---|---|
+| `suite` | build, tests, race, coverage, coverage-ratchet (one probe-owned `go test ./... -race` run) |
+| `dynamic` | ratified invariants and their non-vacuity mutations, integration lane, compatibility, replay corpus, observability contract test, every `implemented:` test the spec names |
+| `fuzzbench` | fuzz, benchmarks, profiling |
+| `static` | everything else (greps, spec reads, lint, govulncheck, workflow validation, ops artifacts) |
+
+Each row's group is DECLARED in `scripts/verify-standard.sh` (gated regions,
+`implemented_row`, `# @shard-rows`), never inferred from a run, and the probe
+refuses to shard if those declarations contradict each other.
+
+The job named `verify-standard` is the required check. It runs `if: always()`
+and fails unless every leg's result is `success` -- a skipped or cancelled leg
+never counts as passed -- then runs `scripts/verify-standard.sh --merge` over
+the legs' results. The merge refuses on a missing or duplicated group, a
+declared row missing or emitted by a group that does not own it, an unknown
+row, results written by a different probe or for a different commit, tree or
+working-tree state, and on any FAIL. When it passes it prints the same table
+and writes the same `.prod/evidence/<sha>.json` record a full run does.
+
+Keep the four groups in the matrix: the merge takes its group list from the
+probe, so a group dropped from the workflow turns the required check red
+rather than quietly checking less.
 
 ## What this template does NOT ship
 

@@ -30,6 +30,11 @@ export REAL_GO
 
 block="$(awk '/^fuzz_test_files\(\) \{/{on=1} on{print} on && /^else row "fuzz" FAIL "no fuzz targets"; fi$/{seen=1; exit} END{exit seen ? 0 : 1}' "$probe")" || {
   echo "fuzz-row-selftest: FAIL -- the fuzz block's start or end anchor is gone from $probe" >&2; exit 1; }
+# The probe gates this block to its `fuzzbench` shard group; the region's
+# opening line falls inside the lifted span and its closing `fi` just after it.
+# Drop the marker line so the lifted block is the row logic alone (exactly what
+# a full or fuzzbench run executes).
+block="$(grep -vE '^if shard_run [a-z]+; then[[:space:]]+# @shard-begin [a-z]+[[:space:]]*$' <<<"$block")"
 grep -q 'fuzz: elapsed' <<<"$block" || { echo "fuzz-row-selftest: FAIL -- lifted block carries no elapsed check; anchor moved" >&2; exit 1; }
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT

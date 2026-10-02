@@ -85,6 +85,11 @@ block="$(awk '/^# --- the suite runs ONCE/{on=1} /^# tests\/prod LOC ratio/{on=0
   echo "single-suite-run-selftest: FAIL -- the end anchor '# tests/prod LOC ratio' is gone from $probe; the lift would run to EOF" >&2
   exit 1
 }
+# The probe gates this block to its `suite` shard group, and the region's
+# closing `fi   # @shard-end` falls inside the lifted span (its opening line sits
+# just above the start anchor). Drop shard marker lines so the lifted block is the
+# row logic alone -- exactly what a full or suite-group run executes.
+block="$(grep -vE '^(if shard_run [a-z]+; then|fi)[[:space:]]+# @shard-(begin [a-z]+|end)[[:space:]]*$' <<<"$block")"
 if ! grep -q 'race_diagnose()' <<<"$block" || ! grep -q 'row "coverage-ratchet"' <<<"$block"; then
   echo "single-suite-run-selftest: FAIL -- lifted no suite-run block from $probe; an anchor moved, so every case would test an empty string" >&2
   exit 1

@@ -1,3 +1,5 @@
 /data/
 /coverage.out
 /benchmarks/profiles/*.prof
+# Group results of `make verify-standard-group` (inputs to the merge, never a record).
+/.prod/verify-standard/

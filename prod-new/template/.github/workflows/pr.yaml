@@ -196,9 +196,36 @@ jobs:
   # targets, tracing WIRED in the entrypoints, the observability
   # contracts, the security scanners, the ops artifacts and their
   # citations -- and fails on any FAIL.
-  verify-standard:
+  #
+  #
+  # SHARDED. One sequential job runs every row, ~5 minutes on a real service,
+  # and `go test` already saturates a 4-vCPU runner, so backgrounding inside
+  # the script gains little. The probe declares four row GROUPS (suite: build,
+  # tests, race, coverage; dynamic: ratified invariants and their non-vacuity
+  # mutations, the integration lane, compatibility, replay, the observability
+  # contract test, every spec-named implemented test; fuzzbench: fuzz,
+  # benchmarks, profiling; static: everything else) and each leg below runs ONE
+  # group on its OWN checkout -- which is also what keeps the non-vacuity
+  # mutations of production source away from every other reader of the tree.
+  #
+  # The `verify-standard` job further down is the REQUIRED check, same name as
+  # before. It merges the legs' results and refuses unless every group the
+  # PROBE declares is present exactly once (so a group dropped from this matrix
+  # is a MISSING group, not less coverage), every declared row came from the
+  # group that owns it exactly once, every file was written by this probe for
+  # this commit and tree, and no row is FAIL.
+  #
+  # Results go to $RUNNER_TEMP, OUTSIDE the checkout: a results file inside it
+  # would be an uncommitted change, and the merge refuses results whose
+  # working-tree state differs from its own.
+  verify-standard-group:
+    name: verify-standard (${{ matrix.group }})
     runs-on: ubuntu-latest
     needs: check-fast
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [suite, dynamic, fuzzbench, static]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -207,21 +234,62 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Install probe tooling
+      # Only `static` owns the rows that shell out to these tools (lint,
+      # vuln-scan, workflow-definitions-valid); the other groups drop those
+      # rows, so installing the tools there buys nothing. Every tool the
+      # probe shells to still has to be installed by the job that OWNS the
+      # row -- the same mistake in the other direction cost
+      # clcsolutions/marketdata a red gate with 60 rows green and only `lint`
+      # red, because THAT job installed actionlint and not golangci-lint.
+      - name: Install probe tooling (static group)
+        if: matrix.group == 'static'
         run: |
           bash scripts/retry.sh go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           bash scripts/retry.sh go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-          # actionlint too. The probe's workflow-definitions-valid row shells
-          # out to it and FAILS with "actionlint not installed" when it is
-          # absent, so a repo scaffolded from this template took its whole
-          # verify-standard job down on a missing tool. Every tool the probe
-          # shells to has to be installed by the job that runs the probe --
-          # the same mistake in the other direction cost clcsolutions/marketdata
-          # a red gate with 60 rows green and only `lint` red, because THAT job
-          # installed actionlint and not golangci-lint.
           bash scripts/retry.sh go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      - name: Verify every dimension of the production standard
-        run: make verify-standard
+      - name: Verify this group of the production standard
+        run: bash scripts/verify-standard.sh --group "${{ matrix.group }}" --out "$RUNNER_TEMP/verify-standard/${{ matrix.group }}.json"
+      # always(): a RED group must still upload its results, so its findings
+      # are on record next to the failed leg.
+      - name: Upload this group's results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-standard-${{ matrix.group }}
+          path: ${{ runner.temp }}/verify-standard/${{ matrix.group }}.json
+          if-no-files-found: error
+
+  # The REQUIRED check. `if: always()` is load-bearing: a job whose `needs`
+  # failed, was cancelled or was skipped is itself SKIPPED by default, and a
+  # skipped required check counts as PASSED at the branch-protection layer. So
+  # this job always runs and fails explicitly unless every need is `success`
+  # (for a matrix, `needs.<job>.result` is success only when EVERY leg is).
+  verify-standard:
+    runs-on: ubuntu-latest
+    needs: [check-fast, verify-standard-group]
+    if: always()
+    steps:
+      - name: Every upstream job must have succeeded (skipped or cancelled is not success)
+        run: |
+          if [[ "${{ needs.check-fast.result }}" != "success" || "${{ needs.verify-standard-group.result }}" != "success" ]]; then
+            echo "verify-standard: check-fast=${{ needs.check-fast.result }} groups=${{ needs.verify-standard-group.result }} -- a group that failed, was cancelled or was skipped is a finding, never a pass" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download every group's results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: verify-standard-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/verify-standard
+      - name: Merge the groups and decide
+        run: bash scripts/verify-standard.sh --merge "$RUNNER_TEMP"/verify-standard/*.json
 
   # Real build-provenance attestation via GitHub's own OIDC-based action --
   # no stored signing key, no external service, a genuine SLSA-style

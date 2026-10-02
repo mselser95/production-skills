@@ -1,4 +1,4 @@
-.PHONY: check-registries verify-standard bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness template-drift probe-selftests crash-only-selftest sim load soak
+.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness template-drift probe-selftests crash-only-selftest sim load soak
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
 # checks + a plain (no -race) `go test ./...` + architecture. It must stay
@@ -255,6 +255,23 @@ sim:
 # to soften.
 verify-standard:
 	bash scripts/verify-standard.sh
+
+# The same probe, one group at a time, and the aggregator -- what CI runs as
+# parallel jobs on separate checkouts (see .github/workflows/pr.yaml).
+# `make verify-standard` above is unchanged and runs everything.
+#   make verify-standard-group GROUP=suite    (suite | dynamic | fuzzbench | static)
+#   make verify-standard-merge                (after every group has run)
+# Locally, run the groups ONE AFTER ANOTHER: `dynamic` mutates production source
+# (non-vacuity) and nothing may read the tree meanwhile. Two probes started on
+# one checkout serialise on the probe's lock, and one that cannot take it exits.
+# Results land in .prod/verify-standard/ (gitignored), which is where the merge
+# target reads them.
+verify-standard-group:
+	@test -n "$(GROUP)" || { echo "usage: make verify-standard-group GROUP=<suite|dynamic|fuzzbench|static>" >&2; exit 2; }
+	bash scripts/verify-standard.sh --group "$(GROUP)"
+
+verify-standard-merge:
+	bash scripts/verify-standard.sh --merge .prod/verify-standard/*.json
 
 # Prove the verifier before trusting its verdict. Each selftest drives
 # verify-standard.sh's own row logic against crafted fixtures and asserts BOTH

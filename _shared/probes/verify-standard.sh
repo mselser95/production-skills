@@ -13,7 +13,17 @@
 # defect this file exists to refuse, appearing in its own header.
 #
 # Usage:  bash verify-standard.sh [repo-root]
+#         bash verify-standard.sh --group <suite|dynamic|fuzzbench|static> [--out FILE] [repo-root]
+#         bash verify-standard.sh --merge <results.json>... [repo-root]
 # Exit:   0 = every probe PASS or NA; 1 = at least one FAIL.
+#
+# --group runs only that group's rows (so CI can run the groups as parallel
+# jobs) and writes a machine-readable results file (default
+# .prod/verify-standard/<group>.json). --merge is the aggregator: it refuses
+# unless every group is present exactly once, every declared row is accounted
+# for exactly once, nothing unknown appears, all files describe THIS commit and
+# tree, and no row is FAIL; then it prints the combined table and writes the
+# same per-commit evidence record a full run writes. See "SHARDING" below.
 #
 # Language-specific probes assume Go; adapt the marked blocks for other stacks.
 
@@ -35,6 +45,33 @@ if (( BASH_VERSINFO[0] < 4 )); then
   echo "    brew install bash   # then re-run" >&2
   exit 2
 fi
+# --- SHARDING flags (see "SHARDING" below) ----------------------------------
+#   verify-standard.sh [repo-root]                      every row, exactly as before
+#   verify-standard.sh --group <name> [--out F] [root]  only that group's rows
+#   verify-standard.sh --merge <file>...                the aggregator; it merges
+#                                                       for the checkout it runs in
+# Parsed BEFORE the repo-root positional so `[repo-root]` keeps working. File
+# paths are made absolute HERE, before the cd below changes what a relative path
+# means.
+SHARD_GROUP=""; SHARD_MERGE=0; SHARD_OUT=""; SHARD_FILES=()
+_shard_abs() { case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$PWD" "$1";; esac; }
+while (( $# )); do
+  case "$1" in
+    --group) [[ $# -ge 2 && -n "$2" ]] || { echo "verify-standard: --group needs a name" >&2; exit 2; }
+             [[ -z "$SHARD_GROUP" ]] || { echo "verify-standard: --group given twice -- one invocation runs ONE group" >&2; exit 2; }
+             SHARD_GROUP="$2"; shift 2 ;;
+    --out)   [[ $# -ge 2 && -n "$2" ]] || { echo "verify-standard: --out needs a path" >&2; exit 2; }
+             SHARD_OUT="$(_shard_abs "$2")"; shift 2 ;;
+    --merge) SHARD_MERGE=1; shift
+             while (( $# )); do SHARD_FILES+=("$(_shard_abs "$1")"); shift; done ;;
+    --) shift; break ;;
+    -*) echo "verify-standard: unknown flag '$1'" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+if (( SHARD_MERGE )) && [[ -n "$SHARD_GROUP$SHARD_OUT" ]]; then echo "verify-standard: --merge takes no --group/--out" >&2; exit 2; fi
+if [[ -n "$SHARD_OUT" && -z "$SHARD_GROUP" ]]; then echo "verify-standard: --out only makes sense with --group" >&2; exit 2; fi
+
 # Resolved BEFORE the cd below, and that ordering is the whole point.
 #
 # The not-probed guard derives the declared dimension list by grepping this
@@ -50,6 +87,136 @@ fi
 PROBE_SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 root="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$root" || exit 2
+
+# =============================================================================
+# SHARDING. One sequential job is ~5 minutes on a real service, and `go test`
+# already saturates a 4-vCPU runner, so backgrounding inside this script gains
+# little. Instead the rows are split into GROUPS that separate CI jobs run in
+# parallel, each on its own checkout, and an aggregator (`--merge`) proves
+# nothing was lost on the way.
+#
+# EVERY ROW HAS EXACTLY ONE OWNING GROUP, and the owner is DECLARED in this
+# source -- never inferred from what a run happened to emit:
+#
+#   1. CODE REGIONS. Expensive code sits in a gated region
+#
+#        if shard_run suite; then   # @shard-begin suite
+#          ...
+#        fi   # @shard-end
+#
+#      which executes only in a full run or a run of that group. Everything
+#      outside a gated region is UNGATED: cheap code (greps, spec reads) that
+#      runs in every group, because later rows read the variables it defines
+#      and this 5,000-line script has no seam to slice it along. Running it in
+#      every shard costs seconds; the expensive ungated tools (lint, govulncheck,
+#      the ./cmd link) are themselves gated to `static`.
+#   2. A LITERAL row id is owned by the group of the gated region it appears
+#      in, or by `static` if it appears only in ungated code.
+#   3. An id passed to `implemented_row` is owned by `dynamic` (that helper
+#      EXECUTES a named test, and runs only in group dynamic). Its ratified-
+#      decline / N/A branches may sit in ungated code: they run in the dynamic
+#      shard too, so the owner emits whichever branch the repo takes.
+#   4. An id built from a variable is invisible to (2)/(3), so it is declared
+#      on a `# @shard-rows <group> <id>...` line below.
+#
+# row() drops any row whose owner is not the running group, so ungated code
+# cannot leak a row into every shard. An id with NO declared owner is never
+# dropped -- it reaches the results file and the merge refuses it as unknown
+# (fail closed: a new variable-named row cannot silently vanish from CI).
+#
+# The derivation (shard_owners) REFUSES, and a shard will not run, when the
+# declarations contradict each other: an id in two groups' gated regions, an
+# implemented_row id in a non-dynamic gated region, a @shard-rows id that is
+# also literal, an unbalanced or nested region, or a region marker whose line
+# does not gate on the group it names. It also refuses unless the literal ids
+# it derives are EXACTLY the set the full run's not-probed guard derives (that
+# guard greps every line, comments included): two derivations that drift apart
+# would make a full run and a merged run disagree about what "every row" means.
+#
+# NON-VACUITY ROWS MUTATE SOURCE FILES (`invariants-non-vacuity` edits
+# production code and restores it). They are group `dynamic`; a group runs as
+# ONE process, strictly sequentially, and one invocation runs at most one group
+# (`--group` twice is refused). Two probe processes on ONE checkout serialise on
+# the LOCK directory below -- and a process that cannot take it within the wait
+# EXITS rather than running beside a mutation. In CI every group is its own job
+# with its own checkout, so no two groups ever share a tree.
+#
+# @shard-groups suite dynamic fuzzbench static
+# @shard-rows dynamic effect_journal_outbox effect_journal_atomic reconciliation backup_restore_test
+# @shard-rows dynamic scalability:bounded_boot scalability:bounded_storage scalability:egress_backpressure
+# @shard-rows static cheap-gate advisory-lane
+# @shard-rows static ops:RUNBOOK.md ops:SLO.md ops:alerts.md ops:CODEOWNERS
+shard_run() { [[ -z "$SHARD_GROUP" || "$SHARD_GROUP" == "$1" ]]; }
+shard_groups() { sed -n 's/^# @shard-groups //p' "$PROBE_SELF" | head -1; }
+# The literal id set the full run's not-probed guard derives. ONE definition,
+# used by that guard and by the parity check in shard_owners.
+declared_literal_rows() {
+  grep -oE 'row "[a-zA-Z][^"$]*"' "$PROBE_SELF" | sed -E 's/row "([^"]*)"/\1/' | sort -u
+}
+# shard_owners -> "<id>\t<group>" for every row id this script can emit, or a
+# non-zero exit naming each contradiction on stderr.
+shard_owners() {
+  local own rc
+  own=$(awk -v groups="$(shard_groups)" '
+    BEGIN { n = split(groups, G, " "); for (i = 1; i <= n; i++) known[G[i]] = 1; err = 0 }
+    function bad(m) { print "shard declarations: line " NR ": " m > "/dev/stderr"; err = 1 }
+    /^# @shard-rows / {
+      g = $3; if (!(g in known)) bad("@shard-rows names unknown group \x27" g "\x27")
+      for (i = 4; i <= NF; i++) { if ($i in decl) bad("id \x27" $i "\x27 declared twice in @shard-rows"); decl[$i] = g }
+      next }
+    /^[[:space:]]*#/ { next }
+    /# @shard-begin [a-z]+[[:space:]]*$/ {
+      g = $0; sub(/.*# @shard-begin /, "", g); sub(/[[:space:]].*$/, "", g)
+      if (cur != "") bad("@shard-begin " g " nested inside " cur)
+      if (!(g in known)) bad("@shard-begin names unknown group \x27" g "\x27")
+      if ($0 !~ ("^if shard_run " g "; then[[:space:]]+# @shard-begin " g "[[:space:]]*$"))
+        bad("@shard-begin " g " must sit on exactly `if shard_run " g "; then   # @shard-begin " g "`")
+      cur = g; next }
+    /# @shard-end[[:space:]]*$/ {
+      if (cur == "") bad("@shard-end without @shard-begin")
+      if ($0 !~ /^fi[[:space:]]+# @shard-end[[:space:]]*$/) bad("@shard-end must sit on exactly `fi   # @shard-end`")
+      cur = ""; next }
+    { rest = $0
+      while (match(rest, /row "[a-zA-Z][^"$]*"/)) {
+        id = substr(rest, RSTART + 5, RLENGTH - 6)
+        if (substr(rest, 1, RSTART - 1) ~ /implemented_$/) { impl[id] = 1; if (cur != "" && cur != "dynamic") bad("implemented_row \x27" id "\x27 inside a gated " cur " region: it only runs in group dynamic") }
+        else if (cur != "") { if ((id in gated) && gated[id] != cur) bad("row \x27" id "\x27 is in gated regions of BOTH " gated[id] " and " cur); gated[id] = cur }
+        lit[id] = 1
+        rest = substr(rest, RSTART + RLENGTH)
+      } }
+    END {
+      if (cur != "") bad("@shard-begin " cur " never closed before end of file")
+      for (id in lit) {
+        if (id in decl) bad("row \x27" id "\x27 is literal AND declared in @shard-rows -- one declaration per id")
+        if (id in impl) { if ((id in gated) && gated[id] != "dynamic") bad("row \x27" id "\x27 is implemented (dynamic) but also gated to " gated[id]); o = "dynamic" }
+        else if (id in gated) o = gated[id]
+        else o = "static"
+        print id "\t" o "\tliteral" }
+      for (id in decl) if (!(id in lit)) print id "\t" decl[id] "\tdeclared"
+      exit err }
+  ' "$PROBE_SELF") || return 1
+  # Parity with the full run's own derivation (which greps comments too).
+  local mine
+  mine=$(awk -F'\t' '$3 == "literal" { print $1 }' <<<"$own" | sort -u)
+  if [[ "$mine" != "$(declared_literal_rows)" ]]; then
+    echo "shard declarations: the literal row ids derived from CODE lines differ from the full run's not-probed set (a row literal that exists only in a comment?):" >&2
+    diff <(printf '%s\n' "$mine") <(declared_literal_rows) >&2
+    return 1
+  fi
+  sort <<<"$own"
+}
+declare -A SHARD_OWNER=()
+SHARD_REG_S=(); SHARD_REG_E=()
+if [[ -n "$SHARD_GROUP" ]] || (( SHARD_MERGE )); then
+  if [[ -n "$SHARD_GROUP" ]]; then
+    case " $(shard_groups) " in *" $SHARD_GROUP "*) ;; *) echo "verify-standard: unknown group '$SHARD_GROUP' (known: $(shard_groups))" >&2; exit 2;; esac
+  fi
+  SHARD_OWNERS_TSV="$(shard_owners)" || { echo "verify-standard: refusing to shard -- the row-ownership declarations above are inconsistent" >&2; exit 2; }
+  while IFS=$'\t' read -r _id _g _; do [[ -n "$_id" ]] && SHARD_OWNER["$_id"]="$_g"; done <<<"$SHARD_OWNERS_TSV"
+  # gated regions as "<first line> <last line>", for shard_order_key
+  while read -r _s _e; do [[ -n "$_s" ]] && { SHARD_REG_S+=("$_s"); SHARD_REG_E+=("$_e"); }; done < <(
+    awk '/^[[:space:]]*#/ { next } /# @shard-begin [a-z]+[[:space:]]*$/ { s = NR } /# @shard-end[[:space:]]*$/ { print s, NR }' "$PROBE_SELF")
+fi
 
 # --- LANGUAGE GUARD: refuse a repo this probe cannot measure -----------------
 #
@@ -115,8 +282,20 @@ fi
 # Two concurrent probe runs in the same repo fight over Go's fuzz cache and
 # produce a spurious "setup failed" — serialize on a lock dir instead of
 # reporting a false FAIL.
-LOCK="${TMPDIR:-/tmp}/prod-probe-$(echo "$root" | shasum | cut -c1-12).lock"
-for _ in $(seq 1 120); do mkdir "$LOCK" 2>/dev/null && break; sleep 5; done
+#
+# The key is the PHYSICAL path of the checkout, not the argument as typed: `.`,
+# a relative path and an absolute one used to hash to three different locks for
+# one tree. And a process that cannot take the lock EXITS instead of running
+# anyway: proceeding after the wait used to put two probes on one tree -- one of
+# them possibly mid-way through a non-vacuity mutation of production source --
+# and its EXIT trap then deleted the lock it never held.
+LOCK="${TMPDIR:-/tmp}/prod-probe-$(pwd -P | shasum | cut -c1-12).lock"
+_locked=0
+for _ in $(seq 1 "${PROBE_LOCK_TRIES:-120}"); do mkdir "$LOCK" 2>/dev/null && { _locked=1; break; }; sleep 5; done
+if (( ! _locked )); then
+  echo "verify-standard: another probe holds $LOCK on this checkout; refusing to run beside it (a non-vacuity row may be mutating source). Remove the directory if no probe is running." >&2
+  exit 2
+fi
 # Restore any in-flight mutation before anything else. The non-vacuity check
 # below deliberately edits PRODUCTION source files, and a probe killed between
 # the edit and its restore would otherwise leave the working tree holding a file
@@ -362,9 +541,36 @@ spec_seq_count() {   # spec_seq_count <top-level-key> -> number of `- ` items
 RATIFY_QUEUE_DIR="${RATIFY_QUEUE_DIR:-.prod/ratify-queue}"
 fails=0; passes=0; nas=0
 declare -a ROWS
+# ROW_KEYS[i] (group runs only) is where ROWS[i] sits in a FULL run's order, so
+# the merge can print the groups' rows in exactly the order a full run would.
+# The key is "<U> <kind> <region>": U counts the row calls UNGATED code has made
+# so far -- the same sequence in every shard, because every shard runs that code
+# (a dropped row still counts) -- kind is 0 inside a gated region (sorted before
+# the next ungated row), 1 for an ungated row, 2 for a not-probed row; region is
+# the gated region's first line. Ties keep emission order. Ordering is cosmetic:
+# no merge CHECK depends on it.
+declare -a ROW_KEYS
+SHARD_U=0
+# shard_order_key <id>: record ROW_KEYS for a row about to be emitted; return 1
+# (after counting it) when the running group does not own <id>.
+shard_order_key() {
+  local L=${BASH_LINENO[${#BASH_LINENO[@]}-2]} rs=0 i own="${SHARD_OWNER[$1]-}"
+  for i in "${!SHARD_REG_S[@]}"; do
+    if (( L >= SHARD_REG_S[i] && L <= SHARD_REG_E[i] )); then rs=${SHARD_REG_S[i]}; break; fi
+  done
+  if [[ -n "$own" && "$own" != "$SHARD_GROUP" ]]; then
+    (( rs )) || SHARD_U=$((SHARD_U+1))
+    return 1
+  fi
+  if (( rs )); then ROW_KEYS+=("$SHARD_U 0 $rs"); else ROW_KEYS+=("$SHARD_U 1 0"); SHARD_U=$((SHARD_U+1)); fi
+}
 
 # --- helpers -----------------------------------------------------------------
 row() { # row <dimension> <verdict> <evidence>
+  # In a group run, a row OWNED by another group is dropped here, so the ungated
+  # code that runs in every shard cannot leak its rows into each of them. An id
+  # with no declared owner is kept: the merge then refuses it as unknown.
+  if [[ -n "${SHARD_GROUP:-}" ]]; then shard_order_key "$1" || return 0; fi
   # A PASS WITH NO EVIDENCE IS A FAIL.
   #
   # Every PASS in this file is supposed to carry the measurement that earned
@@ -543,6 +749,214 @@ classify_mutation_result() {   # <go-test-output> [test-name]
 have() { command -v "$1" >/dev/null 2>&1; }
 gobin() { echo "$(go env GOPATH)/bin"; }
 
+# --- report pieces, FUNCTIONS so a merged sharded run emits exactly what a full
+# run emits (same table, same summary, same per-commit evidence record) ---------
+shard_print_table() {
+  printf '\n%-34s %-5s %s\n' "DIMENSION" "VERDICT" "EVIDENCE"
+  printf '%s\n' "$(printf '%0.s-' {1..96})"
+  for r in "${ROWS[@]}"; do IFS='|' read -r d v e <<<"$r"; printf '%-34s %-5s %s\n' "$d" "$v" "$e"; done
+  printf '%s\n' "$(printf '%0.s-' {1..96})"
+  printf 'PASS %d   FAIL %d   NA %d\n' "$passes" "$fails" "$nas"
+}
+shard_write_record() {
+
+  # Evidence record (dimension 11, reproducibility): one file per commit so the
+  # question "under what standard was this commit held?" is answerable later
+  # without archaeology. Ephemeral stdout is not a record.
+  #
+  # The filename is an ATTESTATION, so it must not be able to lie. Stamping
+  # `git rev-parse HEAD` onto a run measured on a DIRTY tree produces a record
+  # named after a commit it was never measured on — and that is not theoretical:
+  # a committed record named <sha>.json once claimed a PASS for a probe row that
+  # did not exist in that commit's tree, on a commit whose workflow file was
+  # invalid and would have FAILED it. A plausible-looking green attestation for a
+  # state that never passed is worse than no record at all.
+  #
+  # So: a record named <sha>.json means "measured on exactly that commit". A dirty
+  # tree gets a name that cannot be mistaken for one, and carries tree_clean:false.
+  sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+  # .prod/verify-standard/ holds the group results a merge reads; they are the
+  # run's own inputs, not a change to the commit (absent in a full run).
+  if [[ -n "$(git status --porcelain -- . ':(exclude).prod/verify-standard' 2>/dev/null)" ]]; then
+    tree_clean=false
+    record=".prod/evidence/dirty-${sha}-$(date -u +%Y%m%dT%H%M%SZ).json"
+  else
+    tree_clean=true
+    record=".prod/evidence/$sha.json"
+  fi
+  mkdir -p .prod/evidence
+  {
+    printf '{\n  "commit": "%s",\n' "$sha"
+    printf '  "tree_clean": %s,\n' "$tree_clean"
+    printf '  "generated_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "spec": "%s",\n' "$SPEC"
+    printf '  "tier": "%s",\n' "$(grep -m1 -E '^[[:space:]]*tier:' "$SPEC" 2>/dev/null | tr -d ' ' | cut -d: -f2)"
+    printf '  "totals": { "pass": %d, "fail": %d, "na": %d },\n' "$passes" "$fails" "$nas"
+    printf '  "probes": [\n'
+    first=1
+    for r in "${ROWS[@]}"; do IFS='|' read -r d v e <<<"$r"
+      [[ $first -eq 1 ]] || printf ',\n'; first=0
+      printf '    { "dimension": %s, "verdict": "%s", "evidence": %s }' \
+        "$(printf '%s' "$d" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" "$v" \
+        "$(printf '%s' "$e" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
+    done
+    printf '\n  ]\n}\n'
+  } > "$record"
+  echo "evidence record: $record${tree_clean:+}"
+  [[ "$tree_clean" == true ]] || echo "  (working tree DIRTY: this record is NOT an attestation for commit $sha)"
+}
+shard_verdict() {
+  (( fails == 0 )) || { echo "VERDICT: INCOMPLETE — $fails probe(s) failed; each is a finding, not a reason to soften the probe."; exit 1; }
+  echo "VERDICT: COMPLETE — every dimension probed; N/A entries are ratified declines."
+}
+
+# shard_state -> "<commit> <tree> <clean|dirty> <fingerprint>" of THIS checkout.
+# The fingerprint covers every uncommitted change -- tracked diffs AND the
+# content of untracked, non-ignored files -- excluding only the two directories
+# this probe itself writes (group results, evidence records), so one run's output
+# cannot make the next run look like a different tree.
+shard_state() {
+  local c t clean fp ex=':(exclude).prod/verify-standard' ex2=':(exclude).prod/evidence'
+  c=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+  t=$(git rev-parse 'HEAD^{tree}' 2>/dev/null || echo unknown)
+  if [[ -z "$(git status --porcelain -- . "$ex" "$ex2" 2>/dev/null)" ]]; then clean=clean; else clean=dirty; fi
+  fp=$( { git diff HEAD -- . "$ex" "$ex2" 2>/dev/null
+          git ls-files -z --others --exclude-standard -- . "$ex" "$ex2" 2>/dev/null | xargs -0 shasum 2>/dev/null
+        } | shasum | cut -c1-16)
+  echo "$c $t $clean $fp"
+}
+shard_probe_sha() { shasum -a 256 "$PROBE_SELF" | cut -c1-64; }
+# shard_write_results: the machine-readable file a group run leaves for --merge.
+# Rows travel NUL-separated so an evidence string containing a newline or a `|`
+# reaches the merge byte for byte.
+shard_write_results() {
+  local out="${SHARD_OUT:-$PWD/.prod/verify-standard/${SHARD_GROUP}.json}" tmp
+  mkdir -p "$(dirname "$out")" || return 1
+  tmp=$(mktemp -d)
+  printf '%s\0' "${ROWS[@]}" > "$tmp/rows"
+  printf '%s\0' "${ROW_KEYS[@]}" > "$tmp/keys"
+  printf '%s\n' "$SHARD_OWNERS_TSV" > "$tmp/owners"
+  python3 - "$out" "$SHARD_GROUP" "$tmp" "$(shard_state)" "$(shard_probe_sha)" "$passes" "$fails" "$nas" <<'PYW' || { rm -rf "$tmp"; echo "verify-standard: could not write $out" >&2; return 1; }
+import json, sys
+out, group, tmp, state, probe_sha, p, f, n = sys.argv[1:9]
+commit, tree, clean, fp = state.split()
+rows = open(tmp + "/rows", "rb").read().decode().split("\0")[:-1]
+keys = open(tmp + "/keys", "rb").read().decode().split("\0")[:-1]
+if len(rows) != len(keys):
+    sys.exit("rows/keys length mismatch %d/%d" % (len(rows), len(keys)))
+R = []
+for seq, (r, k) in enumerate(zip(rows, keys)):
+    d, v, e = (r.split("|", 2) + ["", ""])[:3]
+    R.append({"dimension": d, "verdict": v, "evidence": e, "order": [int(x) for x in k.split()] + [seq]})
+expected = sorted(l.split("\t")[0] for l in open(tmp + "/owners") if l.strip() and l.split("\t")[1] == group)
+doc = {"schema": 2, "probe": "verify-standard", "probe_sha256": probe_sha, "group": group,
+       "commit": commit, "tree": tree, "tree_state": clean, "fingerprint": fp,
+       "expected": expected, "totals": {"pass": int(p), "fail": int(f), "na": int(n)}, "rows": R}
+json.dump(doc, open(out, "w"), indent=1)
+PYW
+  rm -rf "$tmp"
+  echo "results: $out"
+}
+# shard_merge: the aggregator. It REFUSES (exit 1, every cause listed) unless:
+#   - every group in @shard-groups is present exactly once, and nothing else is;
+#   - every file was written by THIS probe (same sha256) for THIS checkout (same
+#     commit, tree, clean/dirty state and fingerprint);
+#   - each file's expected-id list is this script's owned set for its group;
+#   - every row came from the group that OWNS its id (an id nobody owns is
+#     unknown), and every declared id -- literal and @shard-rows alike -- came
+#     from exactly one file.
+# Then it rebuilds ROWS in the order a full run prints them (ROW_KEYS), and
+# reports exactly what a full run reports: the table, the totals, the
+# per-commit evidence record, and the verdict -- FAIL on any FAIL row.
+shard_merge() {
+  local tmp state
+  state=$(shard_state); tmp=$(mktemp -d)
+  printf '%s\n' "$SHARD_OWNERS_TSV" > "$tmp/owners"
+  if ! python3 - "$(shard_groups)" "$state" "$(shard_probe_sha)" "$tmp" "${SHARD_FILES[@]}" <<'PYM'
+import json, sys
+groups, state, probe_sha, tmp, *files = sys.argv[1:]
+groups = groups.split()
+cur_commit, cur_tree, cur_clean, cur_fp = state.split()
+owner = {}
+for l in open(tmp + "/owners"):
+    if l.strip():
+        i, g, _ = l.rstrip("\n").split("\t")
+        owner[i] = g
+owned = {g: {i for i, o in owner.items() if o == g} for g in groups}
+err = []
+if not files:
+    err.append("no result files given (usage: --merge <group-results.json>...)")
+docs = {}
+for f in files:
+    try:
+        d = json.load(open(f))
+        assert isinstance(d, dict) and d.get("probe") == "verify-standard" and d.get("schema") == 2
+    except Exception as ex:
+        err.append(f"{f}: not a verify-standard schema-2 results file ({type(ex).__name__})"); continue
+    g = d.get("group")
+    if g not in groups:
+        err.append(f"{f}: unknown group '{g}' (known: {' '.join(groups)})"); continue
+    docs.setdefault(g, []).append((f, d))
+for g in groups:
+    n = len(docs.get(g, []))
+    if n == 0:
+        err.append(f"group '{g}' is MISSING -- a skipped, cancelled or failed shard never counts as passed")
+    elif n > 1:
+        err.append(f"group '{g}' appears {n} times ({', '.join(f for f, _ in docs[g])})")
+src = {}
+for g, lst in docs.items():
+    for f, d in lst:
+        if d.get("probe_sha256") != probe_sha:
+            err.append(f"{f}: written by a different probe (sha256 {str(d.get('probe_sha256'))[:12]} vs this one's {probe_sha[:12]})")
+        for key, want in (("commit", cur_commit), ("tree", cur_tree)):
+            if d.get(key) != want:
+                err.append(f"{f}: {key} {d.get(key)} is not this checkout's {want} -- results from a different {key}")
+        if (d.get("tree_state"), d.get("fingerprint")) != (cur_clean, cur_fp):
+            err.append(f"{f}: working-tree state {d.get('tree_state')}/{d.get('fingerprint')} differs from this checkout's {cur_clean}/{cur_fp}")
+        if set(d.get("expected", [])) != owned[g]:
+            err.append(f"{f}: its expected-id list does not match this script's declarations for group '{g}'")
+        for r in d.get("rows", []):
+            i = r.get("dimension")
+            if i not in owner:
+                err.append(f"unknown row '{i}' in {f}: no group owns it in this script's declarations")
+            elif owner[i] != g:
+                err.append(f"row '{i}' came from group '{g}' ({f}) but is owned by '{owner[i]}'")
+            src.setdefault(i, set()).add(f)
+for i, fs in sorted(src.items()):
+    if len(fs) > 1:
+        err.append(f"row '{i}' appears in {len(fs)} files ({', '.join(sorted(fs))})")
+for i in sorted(owner):
+    if i not in src:
+        err.append(f"declared row '{i}' (group {owner[i]}) is missing from every results file")
+if err:
+    print("MERGE REFUSED:", file=sys.stderr)
+    for e in err:
+        print("  - " + e, file=sys.stderr)
+    sys.exit(1)
+# Full-run order: every row carries [U, kind, region, seq] (see ROW_KEYS).
+# seq only breaks ties inside one shard, where emission order IS full-run order.
+out = [r for g in groups for _, d in docs[g] for r in d["rows"]]
+out.sort(key=lambda r: tuple(r.get("order") or [0, 0, 0, 0]))
+with open(tmp + "/rows", "wb") as o:
+    for r in out:
+        o.write(f'{r["dimension"]}|{r["verdict"]}|{r["evidence"]}'.encode() + b"\0")
+PYM
+  then rm -rf "$tmp"; exit 1; fi
+  ROWS=(); mapfile -d '' -t ROWS < "$tmp/rows"
+  rm -rf "$tmp"
+  passes=0; fails=0; nas=0
+  local r
+  for r in "${ROWS[@]}"; do
+    case "$(cut -d'|' -f2 <<<"$r" | head -1)" in PASS) passes=$((passes+1));; FAIL) fails=$((fails+1));; NA) nas=$((nas+1));; esac
+  done
+  echo "merged ${#SHARD_FILES[@]} group result file(s) for $(cut -d' ' -f1 <<<"$state")"
+  shard_print_table
+  shard_write_record
+  shard_verdict
+}
+if (( SHARD_MERGE )); then shard_merge; exit 0; fi
+
+if shard_run suite; then   # @shard-begin suite
 # --- 1. build + tests --------------------------------------------------------
 if go build ./... >/dev/null 2>&1; then row "build" PASS "go build ./... clean"
 else row "build" FAIL "go build ./... failed"; fi
@@ -834,6 +1248,7 @@ else
   row "coverage-ratchet" FAIL "no scripts/coverage.sh, so no per-package ratchet either"
 fi
 
+fi   # @shard-end
 # tests/prod LOC ratio — recorded, never a gate
 # -exec ... + rather than `| xargs`: a path containing a space or newline makes
 # xargs split it into pieces that are not files, and wc counts the wrong set. The
@@ -853,6 +1268,9 @@ else
 fi
 
 # --- 3. lint + fitness functions --------------------------------------------
+# Gated to `static` (see SHARDING): ~10 s warm, minutes cold, and no later
+# row reads anything it defines.
+if shard_run static; then   # @shard-begin static
 if have golangci-lint || [[ -x "$(gobin)/golangci-lint" ]]; then
   # The output is CAPTURED, not discarded: a lint FAIL that names no issue sends
   # the reader to re-run the linter to find out what is wrong (and a cache or
@@ -865,6 +1283,7 @@ if have golangci-lint || [[ -x "$(gobin)/golangci-lint" ]]; then
     row "lint" FAIL "golangci-lint reported issues: ${lint_first:-<no output captured>}"
   fi
 else row "lint" FAIL "golangci-lint not installed"; fi
+fi   # @shard-end
 
 # The suite's DIRECTORY was hardcoded to internal/architecture, which is
 # binance-marketdata's name for it, not the standard's. bitgo-marketdata calls
@@ -880,6 +1299,9 @@ else row "lint" FAIL "golangci-lint not installed"; fi
 # "forbidden" appears in an error-message assertion there -- so the row would
 # have run the wrong package and called it the fitness suite. Measured before
 # claiming the fix.
+# Gated to `static` (see SHARDING): it runs a go test, and no later row reads
+# anything it defines.
+if shard_run static; then   # @shard-begin static
 fitness_dir=""
 for _cand in internal/architecture internal/arch internal/fitness architecture arch; do
   if ls "$_cand"/*_test.go >/dev/null 2>&1; then fitness_dir="./$_cand"; break; fi
@@ -910,6 +1332,7 @@ else
     row "fitness-functions" FAIL "no architecture/fitness test found anywhere in the tree"
   fi
 fi
+fi   # @shard-end
 
 # --- domain boundaries (DOMA) ------------------------------------------------
 #
@@ -1050,6 +1473,7 @@ else
   row "probe-self:no-pipe-into-grep-q" FAIL "PROBE_SELF unset or unreadable, so this probe cannot check itself -- a self-check that cannot run is not a check"
 fi
 
+if shard_run dynamic; then   # @shard-begin dynamic
 # --- 4. ratified invariants (exist AND run AND provably non-vacuous) --------
 if ls verification/ratified/*_test.go >/dev/null 2>&1; then
   n=$(grep -h '^func Test' verification/ratified/*_test.go 2>/dev/null | wc -l | tr -d ' ')
@@ -1214,6 +1638,7 @@ open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$
   fi
 else row "invariants-ratified" FAIL "verification/ratified/ has no tests"; fi
 
+fi   # @shard-end
 # --- 5. properties + fuzz (each target actually executed) -------------------
 # The CONDITION and the EVIDENCE must count the same thing. This used to pass
 # on `func TestProperty` OR the bare word `adequacy` appearing in any test
@@ -1252,6 +1677,7 @@ fuzzes=()
 if ((${#fuzz_files[@]})); then
   mapfile -t fuzzes < <(grep -ho 'func \(Fuzz[A-Za-z0-9_]*\)' "${fuzz_files[@]}" 2>/dev/null | sed 's/func //' | sort -u)
 fi
+if shard_run fuzzbench; then   # @shard-begin fuzzbench
 # One entry per (package, target) PAIR. Two packages may each declare FuzzParse;
 # resolving the name to its first file (`head -1`) fuzzed one of them and
 # reported both as clean.
@@ -1310,6 +1736,7 @@ if ((${#fuzz_pairs[@]})); then
   elif ((bad==0)); then row "fuzz" PASS "$ran target(s) fuzzed, $infra inconclusive (toolchain setup, not a finding)${gated_note}"
   else row "fuzz" FAIL "$bad of $nfz target(s) failed or never ran a fuzz iteration${gated_note}"; fi
 else row "fuzz" FAIL "no fuzz targets"; fi
+fi   # @shard-end
 
 # --- 6. mutation baseline (artifact + freshness) ----------------------------
 if ls .prod/mutation/baseline-*.md >/dev/null 2>&1; then
@@ -1394,6 +1821,7 @@ extract_real_tag() {   # extract_real_tag [dir] -> the chosen build tag, or empt
 }
 real_tag=$(extract_real_tag .)
 live_gate=$(grep -rlE 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
+if shard_run dynamic; then   # @shard-begin dynamic
 if [[ -n "$real_tag" ]]; then
   # Scope the run to the packages that actually CONTAIN the tagged files, and
   # keep the output.
@@ -1417,7 +1845,9 @@ if [[ -n "$real_tag" ]]; then
 elif [[ -n "$live_gate" ]]; then
   row "integration-real-lane" PASS "env-gated live lane only ($live_gate)"
 else row "integration-real-lane" FAIL "every test is hermetic — no real-dependency lane"; fi
+fi   # @shard-end
 
+if shard_run dynamic; then   # @shard-begin dynamic
 # --- 9. compatibility ------------------------------------------------------
 # EXECUTED, not grepped, and matched on executable identifiers rather than
 # prose.
@@ -1466,6 +1896,8 @@ else
 fi
 fi
 
+fi   # @shard-end
+if shard_run fuzzbench; then   # @shard-begin fuzzbench
 # --- 10. performance: benchmarks exist, RUN, and have a baseline -----------
 # "$nb benchmarks run" used to be a GREP of `func Benchmark` across every test
 # file, while the run itself was untagged. Measured in clcsolutions/marketdata:
@@ -1648,7 +2080,9 @@ else
   row "profiling" FAIL "no profiling at all: $prof_ondemand, and $prof_cont_why (claiming 'documented' is the known lie)"
 fi
 
+fi   # @shard-end
 # --- 12. recovery / replay corpus -----------------------------------------
+if shard_run dynamic; then   # @shard-begin dynamic
 if ls regressions/*/events.json >/dev/null 2>&1; then
   n=$(ls -d regressions/*/ 2>/dev/null | wc -l | tr -d ' ')
   if go test ./... -run 'Replay|Regression' -count=1 >/dev/null 2>&1; then
@@ -1665,6 +2099,7 @@ else
   # derivation into an escape hatch.
   row "replay-corpus" FAIL "no replay corpus -- required regardless of whether event sourcing applies (the LOG is derived, the CORPUS is not)"
 fi
+fi   # @shard-end
 
 # implemented_test reads an OPTIONAL `implemented:` block from the spec:
 #
@@ -1755,6 +2190,11 @@ implemented_test() {
 # copy is where the keyword-grep habit creeps back in: this helper cannot be
 # satisfied by a word appearing anywhere.
 implemented_row() { # implemented_row <label> <spec-key> <extra-fail-hint>
+  # It EXECUTES a named test, so every id it emits is owned by group `dynamic`
+  # (see SHARDING); in any other shard it does nothing at all.
+  # (shard_order_key still counts the row it would have emitted, so ungated
+  # code keeps the same row sequence in every shard.)
+  if ! shard_run dynamic; then shard_order_key "$1"; return 0; fi
   local label="$1" key="$2" hint="${3:-}"
   if declined "$key"; then row "$label" NA "ratified decline in $SPEC"; return; fi
   local spec_test; spec_test="$(implemented_test "$key")"
@@ -2130,6 +2570,7 @@ esac
 # the manifest went back to being documentation. Now: the manifest must exist,
 # some test must both name it AND actually read a file, and that test package
 # must run green.
+if shard_run dynamic; then   # @shard-begin dynamic
 mapfile -t obs_manifests < <(find . -path ./.git -prune -o \
   \( -name 'spans.yaml' -o -name 'emitted-metrics.*' \) -print 2>/dev/null)
 if ((${#obs_manifests[@]} == 0)); then
@@ -2177,6 +2618,7 @@ else
     row "observability-contract-checked" FAIL "the test(s) that read the manifest are RED: ${obs_why:-unknown}"
   fi
 fi
+fi   # @shard-end
 
 # Logs correlate, or they are a second system nobody can join to the first.
 #
@@ -2609,6 +3051,9 @@ fi
 # row will pass it. Plain functions and methods outside any used interface are
 # eliminated precisely. That covers all four defects above; it is not a
 # universal reachability proof, and it is not claimed as one.
+# Gated to `static` (see SHARDING): it links every ./cmd binary, and no later
+# row reads anything it defines.
+if shard_run static; then   # @shard-begin static
 if [[ -z "$(driven_keys)" ]]; then
   row "mechanisms-driven" FAIL "no driven: block in $SPEC -- every mechanism the service declares must name the symbol that proves production reaches it, or nothing distinguishes an implemented mechanism from a dead one"
 else
@@ -2713,6 +3158,7 @@ else
     fi
   fi
 fi
+fi   # @shard-end
 
 # --- 14. security: RUN the scanners ---------------------------------------
 # A vulnerability count is a property of the TOOLCHAIN, not of this code, so a
@@ -2801,6 +3247,9 @@ toolchain_note() {
   fi
 }
 
+# Gated to `static` (see SHARDING): a whole-module call-graph analysis, and
+# no later row reads anything it defines.
+if shard_run static; then   # @shard-begin static
 if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
   vout=$(PATH="$(gobin):$PATH" govulncheck ./... 2>&1)
   # govulncheck has TWO clean phrasings and the difference is not cosmetic: a
@@ -2828,6 +3277,7 @@ if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
     row "vuln-scan" FAIL "govulncheck produced no verdict — gate unproven: $(head -1 <<<"$vout")"
   fi
 else row "vuln-scan" FAIL "govulncheck not installed — gate unproven"; fi
+fi   # @shard-end
 
 # --- dependency lockfile: committed AND not regenerated in CI ---------------
 #
@@ -4962,8 +5412,9 @@ differential_observability_row
 #
 # Caught by a reviewer, not by me, and the lesson is the one this file keeps
 # relearning -- an anchor that fits the shape you happened to look at.
-declared_rows=$(grep -oE 'row "[a-zA-Z][^"$]*"' "$PROBE_SELF" \
-  | sed -E 's/row "([^"]*)"/\1/' | sort -u)
+# (declared_literal_rows is that grep, defined once near the top so the sharding
+# derivation can check itself against exactly this set.)
+declared_rows=$(declared_literal_rows); declared_all="$declared_rows"
 # 50, not 20: the real count is 61 (re-measured 2026-08-27 at the wiring-rows
 # landing; 56 at the 2026-08-26 reconciliation merge, 55 when this line was
 # written), and a floor low enough to be met by a half-broken matcher is a floor
@@ -4988,65 +5439,37 @@ declared_rows=$(grep -oE 'row "[a-zA-Z][^"$]*"' "$PROBE_SELF" \
 if (( $(grep -c . <<<"$declared_rows") < 50 )); then
   # The derivation itself must not fail open. If it stops matching, this guard
   # would silently protect nothing -- exactly the shape it exists to catch.
-  ROWS+=("row-derivation|FAIL|could not derive the declared dimension list from this script -- the not-probed guard is inert")
+  [[ -z "$SHARD_GROUP" ]] || ROW_KEYS+=("$SHARD_U 2 0"); ROWS+=("row-derivation|FAIL|could not derive the declared dimension list from this script -- the not-probed guard is inert")
   fails=$((fails+1))
 else
+  # In a shard, only the literal ids this group OWNS are owed a row here; every
+  # other group's are owed by that group's shard, and the merge checks each
+  # declared id (variable-named ones included) is accounted for exactly once.
+  if [[ -n "$SHARD_GROUP" ]]; then
+    declared_rows=$(awk -F'\t' -v g="$SHARD_GROUP" '$2 == g && $3 == "literal" { print $1 }' <<<"$SHARD_OWNERS_TSV" | sort -u)
+  fi
   emitted_rows=$(printf '%s\n' "${ROWS[@]}" | cut -d'|' -f1 | sort -u)
   while IFS= read -r d; do
     [[ -n "$d" ]] || continue
     grep -qxF "$d" <<<"$emitted_rows" && continue
+    # (key: the id's position in the FULL run's sorted list, so the merge
+    # interleaves the groups' not-probed rows exactly as a full run lists them)
+    [[ -z "$SHARD_GROUP" ]] || ROW_KEYS+=("$SHARD_U 2 $(grep -nxF -- "$d" <<<"$declared_all" | cut -d: -f1)")
     ROWS+=("$d|FAIL|not probed: no branch emitted this dimension, and an unemitted row counts in neither PASS, FAIL nor NA")
     fails=$((fails+1))
   done <<<"$declared_rows"
 fi
 
-printf '\n%-34s %-5s %s\n' "DIMENSION" "VERDICT" "EVIDENCE"
-printf '%s\n' "$(printf '%0.s-' {1..96})"
-for r in "${ROWS[@]}"; do IFS='|' read -r d v e <<<"$r"; printf '%-34s %-5s %s\n' "$d" "$v" "$e"; done
-printf '%s\n' "$(printf '%0.s-' {1..96})"
-printf 'PASS %d   FAIL %d   NA %d\n' "$passes" "$fails" "$nas"
-
-# Evidence record (dimension 11, reproducibility): one file per commit so the
-# question "under what standard was this commit held?" is answerable later
-# without archaeology. Ephemeral stdout is not a record.
-#
-# The filename is an ATTESTATION, so it must not be able to lie. Stamping
-# `git rev-parse HEAD` onto a run measured on a DIRTY tree produces a record
-# named after a commit it was never measured on — and that is not theoretical:
-# a committed record named <sha>.json once claimed a PASS for a probe row that
-# did not exist in that commit's tree, on a commit whose workflow file was
-# invalid and would have FAILED it. A plausible-looking green attestation for a
-# state that never passed is worse than no record at all.
-#
-# So: a record named <sha>.json means "measured on exactly that commit". A dirty
-# tree gets a name that cannot be mistaken for one, and carries tree_clean:false.
-sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-  tree_clean=false
-  record=".prod/evidence/dirty-${sha}-$(date -u +%Y%m%dT%H%M%SZ).json"
-else
-  tree_clean=true
-  record=".prod/evidence/$sha.json"
+if [[ -n "$SHARD_GROUP" ]]; then
+  # A SHARD: print the usual table for this group's rows, write the
+  # machine-readable results file the aggregator consumes, and exit. No evidence
+  # record -- that is the aggregator's to write, once, for the whole commit.
+  shard_print_table
+  shard_write_results || exit 1
+  (( fails == 0 )) || { echo "GROUP $SHARD_GROUP: INCOMPLETE -- $fails probe(s) failed."; exit 1; }
+  echo "GROUP $SHARD_GROUP: COMPLETE -- results written; the aggregator (--merge) decides the verdict."
+  exit 0
 fi
-mkdir -p .prod/evidence
-{
-  printf '{\n  "commit": "%s",\n' "$sha"
-  printf '  "tree_clean": %s,\n' "$tree_clean"
-  printf '  "generated_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '  "spec": "%s",\n' "$SPEC"
-  printf '  "tier": "%s",\n' "$(grep -m1 -E '^[[:space:]]*tier:' "$SPEC" 2>/dev/null | tr -d ' ' | cut -d: -f2)"
-  printf '  "totals": { "pass": %d, "fail": %d, "na": %d },\n' "$passes" "$fails" "$nas"
-  printf '  "probes": [\n'
-  first=1
-  for r in "${ROWS[@]}"; do IFS='|' read -r d v e <<<"$r"
-    [[ $first -eq 1 ]] || printf ',\n'; first=0
-    printf '    { "dimension": %s, "verdict": "%s", "evidence": %s }' \
-      "$(printf '%s' "$d" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" "$v" \
-      "$(printf '%s' "$e" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
-  done
-  printf '\n  ]\n}\n'
-} > "$record"
-echo "evidence record: $record${tree_clean:+}"
-[[ "$tree_clean" == true ]] || echo "  (working tree DIRTY: this record is NOT an attestation for commit $sha)"
-(( fails == 0 )) || { echo "VERDICT: INCOMPLETE — $fails probe(s) failed; each is a finding, not a reason to soften the probe."; exit 1; }
-echo "VERDICT: COMPLETE — every dimension probed; N/A entries are ratified declines."
+shard_print_table
+shard_write_record
+shard_verdict
