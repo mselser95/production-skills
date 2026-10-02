@@ -112,6 +112,7 @@ declare -A EXCEPT=(
   [_shared/probes/verify-standard.sh]="Go-only probe, refuses to run on this repo (exit 2); executed in scaffolded repos via the template Makefile"
   [prod-new/template/scripts/changed-line-coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/check-template-drift.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
+  [prod-new/template/scripts/acceptance-coverage.sh]="executed in scaffolded repos by the template Makefile (`make acceptance`, inside check-fast); edited here, not run here"
   [prod-new/template/scripts/coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/error-handling-fitness.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/kill-durability.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"

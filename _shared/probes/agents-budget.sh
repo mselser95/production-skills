@@ -43,7 +43,9 @@ print("" if t is None else str(t))
 ' 2>&1) || { fail "$a" "frontmatter does not parse: $tools"; continue; }
   if [[ -z "$tools" ]]; then
     fail "$a" "no tools: restriction -- the full roster costs ~25-35k extra tokens of context on EVERY turn"
-  elif printf '%s\n' "$tools" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxE 'Agent|Task'; then
+  # captured, then matched: `| grep -q` under pipefail can turn a MATCH into
+  # false when the writer dies of SIGPIPE (gate-hygiene-fitness GREPQ-UNDER-PIPEFAIL)
+  elif tool_lines=$(printf '%s\n' "$tools" | tr ',' '\n' | sed 's/^ *//; s/ *$//'); [[ $'\n'"$tool_lines"$'\n' == *$'\n'Agent$'\n'* || $'\n'"$tool_lines"$'\n' == *$'\n'Task$'\n'* ]]; then
     fail "$a" "tools: includes Agent/Task -- a pinned agent never spawns (NO SPAWNING)"
   fi
   [[ "$a" == prod-scout ]] && continue   # read-only and short-lived: tools only

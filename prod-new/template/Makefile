@@ -1,4 +1,4 @@
-.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness template-drift probe-selftests crash-only-selftest sim load soak
+.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness template-drift acceptance probe-selftests crash-only-selftest sim load soak
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
 # checks + a plain (no -race) `go test ./...` + architecture. It must stay
@@ -15,6 +15,7 @@ check-fast:
 	@bash scripts/no-unfilled-slots.sh
 	@echo "Checking liability registries..."
 	bash scripts/check-registries.sh
+	@$(MAKE) --no-print-directory acceptance
 	@echo "Building..."
 	go build ./...
 	@echo "Running go vet..."
@@ -302,3 +303,17 @@ probe-selftests:
 	bash scripts/tests/observability-provenance-selftest.sh
 	bash scripts/tests/coverage-ratchet-selftest.sh
 	bash scripts/tests/single-suite-run-selftest.sh
+	bash scripts/tests/acceptance-coverage-selftest.sh
+
+# acceptance: every acceptance/<feature>.yaml is complete, approved, and traced
+# to tests both ways (_shared/formats/acceptance-spec.md in production-skills).
+# Zero specs is SAID, not passed silently: "nothing to check yet" and "checked,
+# all fine" must not print the same line.
+acceptance:
+	@set -e; n=0; \
+	  for s in acceptance/*.yaml; do \
+	    [ -f "$$s" ] || continue; \
+	    bash scripts/acceptance-coverage.sh "$$s"; n=$$((n+1)); \
+	  done; \
+	  if [ "$$n" -eq 0 ]; then echo "acceptance: 0 specs -- nothing checked yet (features start at prod-spec, which writes acceptance/<feature>.yaml)"; \
+	  else echo "acceptance: $$n spec(s) checked"; fi

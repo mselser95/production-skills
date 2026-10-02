@@ -272,6 +272,10 @@ mirrors=(
   # The suite-run selftest lifts the probe's block by anchor and drives the
   # template coverage.sh, so a drifted copy would certify a different probe.
   "prod-new/template/scripts/tests/single-suite-run-selftest.sh:_shared/probes/single-suite-run-selftest.sh"
+  # Added 2026-10-02: the acceptance-spec gate, vendored so a scaffolded repo's
+  # copy is drift-checked like every other probe.
+  "prod-new/template/scripts/acceptance-coverage.sh:_shared/probes/acceptance-coverage.sh"
+  "prod-new/template/scripts/tests/acceptance-coverage-selftest.sh:_shared/probes/acceptance-coverage-selftest.sh"
   # ADDED WITH THE THREE ROWS IT COVERS: dimension 25's `load-baseline`, the
   # `error-handling-fitness` row, and dimension 27's advisory
   # `simulation-advisory`. It lifts `row`, `spec_field`, the three row
