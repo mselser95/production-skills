@@ -39,7 +39,7 @@ BASELINE="benchmarks/mutation-baseline.md"
 # this is supposed to notice, and a static count would report it as covered.
 declare -a NAMES=() COUNTS=()
 total=0
-for t in _shared/probes/*-selftest.sh _shared/probes/tests/*-selftest.sh; do
+for t in _shared/probes/*-selftest.sh _shared/probes/tests/*-selftest.sh scripts/tests/*-selftest.sh; do
   [[ -f "$t" ]] || continue
   name="$(basename "$t")"
   out=$(bash "$t" 2>&1); rc=$?

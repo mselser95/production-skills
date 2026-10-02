@@ -25,7 +25,7 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -35,6 +35,8 @@ help:
 	@echo "evidence    run every gate and write .prod/evidence/<sha>.json (dimension 11)"
 	@echo "template-digest  recompute prod-new/TEMPLATE-DIGEST after a reviewed template change"
 	@echo "mutation-baseline  re-record benchmarks/mutation-baseline.md after adding/removing cases"
+	@echo "token-report    agent token cost per (agentType, model) from ~/.claude* transcripts; exit 1 if tokens/completed rose >25%"
+	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates
@@ -198,7 +200,7 @@ mutation:
 # HERE, with the guard closing the hole the workflow names.
 selftests:
 	@set -e; n=0; \
-	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh; do \
+	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh; do \
 	    [ -f "$$t" ] || continue; \
 	    printf '  %-52s ' "$$(basename $$t)"; \
 	    if bash "$$t" >/dev/null 2>&1; then echo "ok"; else echo "FAIL"; bash "$$t" 2>&1 | tail -20; exit 1; fi; \
@@ -236,3 +238,11 @@ template-digest:
 # shrinking one stops being visible.
 mutation-baseline:
 	@bash scripts/mutation-baseline.sh --write
+
+# Agent token cost, as a TREND. Deliberately outside `gates`/`check-fast`: it
+# reads the user's home directory (transcripts), not the repo.
+token-report:
+	@bash scripts/token-report.sh
+
+token-baseline:
+	@bash scripts/token-report.sh --write
