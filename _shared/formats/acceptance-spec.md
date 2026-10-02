@@ -75,5 +75,6 @@ cases:
 - **Changing an approved spec** is a new approval. An implementer that finds a
   case wrong BAILs (`blocked_on: acceptance-case:<id>`); it never edits the
   case or its test.
+- **Exercised, not just green.** `make acceptance-audit` requires ≥80% of the feature's changed lines to be executed by the acceptance run; code the suite never reaches is a finding, because a green oracle over dead code is the documented failure mode (2606.28430; and failure on held-out tests rises 28pp per 10x code size, 2605.21384).
 - **Size.** Author dispatches carry ~8 cases each, grouped by matrix row, so
   they run small and in parallel (`references/dispatch.md`).

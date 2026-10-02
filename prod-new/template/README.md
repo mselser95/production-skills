@@ -57,7 +57,8 @@ and the hard rules every agent in this repo follows.
 | command | what it runs |
 |---|---|
 | `make check-fast` | build, vet, plain test, architecture — seconds, the cheap presubmit gate |
-| `make verify` | lint, architecture, race, coverage, chaos, e2e, fuzz — the full presubmit |
+| `make verify` | check-fast, lint, architecture, race, coverage, chaos, e2e, fuzz, acceptance-audit — the full presubmit |
+| `make acceptance-audit` | runs `internal/e2e` with a coverage profile and requires >= `ACCEPTANCE_AUDIT_FLOOR` (default 80) percent of the diff's changed lines executed by it; `make acceptance` checks the specs are traced, this checks the suite actually reaches the new code. Integration lane, so not in check-fast. |
 | `make verify-standard` | the standard's own probe (`scripts/verify-standard.sh`) — must report zero FAIL |
 | `make verify-standard-group GROUP=<g>` / `make verify-standard-merge` | the same probe sharded into four groups; see "verify-standard in CI" below. Run groups one after another locally. A full `make verify-standard` is unchanged. |
 | `make test-advisory` | the candidate-provenance lane (`-tags=candidate`) — never blocks |

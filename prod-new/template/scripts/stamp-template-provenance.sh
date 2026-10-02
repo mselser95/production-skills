@@ -50,6 +50,7 @@ VENDORED=(
   scripts/tests/gate-run-selftest.sh
   scripts/acceptance-coverage.sh
   scripts/tests/acceptance-coverage-selftest.sh
+  scripts/tests/acceptance-audit-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh
   scripts/tests/load-rows-selftest.sh
   scripts/tests/check-registries-selftest.sh

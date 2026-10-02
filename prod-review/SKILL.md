@@ -135,7 +135,7 @@ For every test file in the diff:
   arithmetic) → finding even when the coverage number is fine.
 - **acceptance suite** (when the plan carries an acceptance spec): run
   `references/probes/acceptance-coverage.sh <spec>`; any FAIL is a
-  **BLOCKER**. A test or spec case edited by an implementer task →
+  **BLOCKER**. The audit also requires `make acceptance-audit` green on the diff (changed lines actually executed by the suite); a green `acceptance` with a red `acceptance-audit` is a BLOCKER (a green oracle over dead code, 2606.28430). A test or spec case edited by an implementer task →
   **BLOCKER** (only the author agent writes them, only against an approved
   spec). Then judge what the probe cannot: is each matrix `na:` reason true
   for this feature, does each test drive the declared surface and assert what

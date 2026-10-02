@@ -1,4 +1,5 @@
-.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness template-drift acceptance probe-selftests crash-only-selftest sim load soak
+.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness help template-drift acceptance acceptance-audit probe-selftests crash-only-selftest sim load soak
+SHELL := /usr/bin/env bash
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
 # checks + a plain (no -race) `go test ./...` + architecture. It must stay
@@ -154,7 +155,7 @@ fuzz:
 # all. pr.yaml happened to invoke check-fast separately, which is why nobody
 # noticed: the gates were reachable on one route and absent on the other, and
 # the lane documented as "the full presubmit" was the one missing them.
-verify: check-fast lint architecture race coverage chaos e2e fuzz
+verify: check-fast lint architecture race coverage chaos e2e fuzz acceptance-audit
 
 bench:
 	@echo "Running benchmarks (recording, never a gate)..."
@@ -305,6 +306,7 @@ probe-selftests:
 	bash scripts/tests/coverage-ratchet-selftest.sh
 	bash scripts/tests/single-suite-run-selftest.sh
 	bash scripts/tests/acceptance-coverage-selftest.sh
+	bash scripts/tests/acceptance-audit-selftest.sh
 
 # acceptance: every acceptance/<feature>.yaml is complete, approved, and traced
 # to tests both ways (_shared/formats/acceptance-spec.md in production-skills).
@@ -318,3 +320,40 @@ acceptance:
 	  done; \
 	  if [ "$$n" -eq 0 ]; then echo "acceptance: 0 specs -- nothing checked yet (features start at prod-spec, which writes acceptance/<feature>.yaml)"; \
 	  else echo "acceptance: $$n spec(s) checked"; fi
+
+# acceptance-audit: the code the feature ADDED must be EXERCISED by the
+# acceptance suite, not merely green (2606.28430: a green oracle over dead
+# code). Runs internal/e2e with a coverage profile over ./..., then asks the
+# existing scripts/changed-line-coverage.sh (COVERAGE_OUT, base ref
+# CHANGED_LINE_COVERAGE_BASE, default origin/main) how much of the diff the
+# run executed; below ACCEPTANCE_AUDIT_FLOOR percent fails. Runs the
+# integration lane, so it is in `verify`, NOT in check-fast. Fails closed:
+# a missing/empty profile (changed-line-coverage.sh would otherwise fall back
+# to scoring the UNIT suite into the same path) and a 0/0 result are FAILs,
+# except 0/0 over a genuinely empty Go diff, which is said and passes.
+ACCEPTANCE_AUDIT_FLOOR ?= 80
+ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
+acceptance-audit:
+	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; n=0; \
+	  for s in acceptance/*.yaml; do [ -f "$$s" ] && n=$$((n+1)); done; \
+	  if [ "$$n" -eq 0 ]; then echo "acceptance-audit: 0 specs -- nothing to audit yet"; exit 0; fi; \
+	  mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; rm -f "$$PROFILE"; \
+	  go test -count=1 -tags=integration -coverpkg=./... -coverprofile="$$PROFILE" ./internal/e2e/...; \
+	  [ -s "$$PROFILE" ] || { echo "acceptance-audit: FAIL -- acceptance run wrote no coverage profile (nothing was measured)"; exit 1; }; \
+	  rc=0; out=$$(COVERAGE_OUT="$$PROFILE" CHANGED_LINE_COVERAGE_BASE="$$BASE" bash scripts/changed-line-coverage.sh 2>&1) || rc=$$?; echo "$$out"; \
+	  [ "$$rc" -eq 0 ] || { echo "acceptance-audit: FAIL -- changed-line-coverage.sh exited $$rc"; exit 1; }; \
+	  line=$$(printf '%s\n' "$$out" | grep '^changed-line coverage: [0-9.]*% ' | tail -n 1); \
+	  pct=$$(printf '%s' "$$line" | sed -E 's/^changed-line coverage: ([0-9.]+)%.*/\1/'); \
+	  tot=$$(printf '%s' "$$line" | sed -E 's/.*\/([0-9]+) lines\).*/\1/'); \
+	  [ -n "$$pct" ] && [ -n "$$tot" ] || { echo "acceptance-audit: FAIL -- no changed-line coverage figure produced"; exit 1; }; \
+	  if [ "$$tot" = "0" ]; then \
+	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go'; then \
+	      echo "acceptance-audit: 0 changed Go lines vs $$BASE -- nothing to audit"; exit 0; fi; \
+	    echo "acceptance-audit: FAIL -- 0/0 changed lines but the Go diff vs $$BASE is not empty (or base missing): unmeasurable"; exit 1; fi; \
+	  if awk -v p="$$pct" -v f="$(ACCEPTANCE_AUDIT_FLOOR)" 'BEGIN{exit !(p+0>=f+0)}'; then \
+	    echo "acceptance-audit: $$pct% >= $(ACCEPTANCE_AUDIT_FLOOR)% floor over $$n spec(s)"; \
+	  else echo "acceptance-audit: FAIL -- $$pct% of changed lines executed by the acceptance run < $(ACCEPTANCE_AUDIT_FLOOR)% floor"; exit 1; fi
+
+help:
+	@echo "acceptance        every acceptance/<feature>.yaml complete, approved, traced to tests (in check-fast)"
+	@echo "acceptance-audit  >= ACCEPTANCE_AUDIT_FLOOR (default $(ACCEPTANCE_AUDIT_FLOOR))% of changed lines executed by the acceptance run (in verify)"

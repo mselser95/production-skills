@@ -280,6 +280,7 @@ mirrors=(
   "prod-new/template/scripts/tests/gate-run-selftest.sh:_shared/probes/gate-run-selftest.sh"
   "prod-new/template/scripts/acceptance-coverage.sh:_shared/probes/acceptance-coverage.sh"
   "prod-new/template/scripts/tests/acceptance-coverage-selftest.sh:_shared/probes/acceptance-coverage-selftest.sh"
+  "prod-new/template/scripts/tests/acceptance-audit-selftest.sh:_shared/probes/acceptance-audit-selftest.sh"
   # ADDED WITH THE THREE ROWS IT COVERS: dimension 25's `load-baseline`, the
   # `error-handling-fitness` row, and dimension 27's advisory
   # `simulation-advisory`. It lifts `row`, `spec_field`, the three row
