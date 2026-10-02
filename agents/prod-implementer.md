@@ -10,12 +10,6 @@ description: >
   full contract in the dispatch message; escalates ambiguity instead of
   resolving it.
 model: sonnet
-# The tool list is a TOKEN budget, not only a permission. Measured 2026-10-02
-# over 69 transcripts: this agent started every run at 45-57k tokens of
-# context with the full tool roster, against 17-20k for prod-scout with its
-# restricted list -- and every one of ~10k turns re-reads that prefix. Agent
-# is absent on purpose (NO SPAWNING is enforced here, not just stated).
-# The harness still injects the result-delivery tool for background runs.
 tools: Read, Edit, Write, Bash, Grep, Glob, Skill
 ---
 

@@ -42,7 +42,11 @@ baseline=1 expect=""
 while (( $# )); do
   case "$1" in
     --no-baseline) baseline=0; shift ;;
-    --expect) expect="${2:-}"; shift 2 ;;
+    --expect)
+      # Guarded: with no value, `shift 2` fails without shifting and the loop
+      # never advances -- an agent calling it would hang to its Bash timeout.
+      if (( $# < 2 )) || [[ -z "$2" || "$2" == "--" ]]; then echo "ERROR --expect needs a REGEX"; exit 2; fi
+      expect="$2"; shift 2 ;;
     --) break ;;
     -*) echo "ERROR unknown flag $1"; exit 2 ;;
     *) break ;;
@@ -91,7 +95,10 @@ revert() {
     applied=0
   fi
 }
-trap revert EXIT INT TERM
+# EXIT reverts; INT/TERM revert AND stop, because a run cut short has no
+# verdict -- continuing would grade an interrupted test as RED.
+trap revert EXIT
+trap 'revert; echo "ERROR interrupted -- mutation reverted, no verdict"; exit 2' INT TERM
 
 git apply "$patch" 2>>"$log" || { echo "ERROR patch failed to apply log=$log"; exit 2; }
 applied=1

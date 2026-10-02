@@ -114,6 +114,9 @@ jobs:
           bash _shared/probes/non-vacuity-selftest.sh
           bash _shared/probes/sbom-ordering-selftest.sh
           bash _shared/probes/policy-coverage.sh
+          bash _shared/probes/agents-budget-selftest.sh
+          bash _shared/probes/agents-budget.sh
+          bash _shared/probes/prove-mutation-selftest.sh
 
       # SECRET SCANNING, added 2026-08-29. Until today this repo ran NONE -- a
       # grep for gitleaks/trufflehog in this file returned zero, in the

@@ -46,7 +46,13 @@ printf 'garbage\n' > "$tmp/bad.patch"
 expect_case() { # name want_rc want_prefix -- args...
   local name="$1" want_rc="$2" want_prefix="$3"; shift 3
   local out rc
-  out="$(bash "$probe" "$@")"; rc=$?
+  # Bounded: a hang must be a FAIL, not a stuck suite. Portable watchdog --
+  # macOS ships no `timeout`.
+  bash "$probe" "$@" >"$tmp/out" 2>/dev/null & local pid=$!
+  ( sleep 20; kill "$pid" 2>/dev/null ) & local dog=$!
+  wait "$pid"; rc=$?
+  kill "$dog" 2>/dev/null; wait "$dog" 2>/dev/null
+  out="$(cat "$tmp/out")"
   CASES=$((CASES + 1))
   if [[ $rc -ne $want_rc || "$out" != "$want_prefix"* ]]; then
     echo "FAIL $name: rc=$rc (want $want_rc) out=[$out] (want prefix $want_prefix)"
@@ -65,6 +71,12 @@ expect_case survives     1 "GREEN" "$tmp/survives.patch" -- ./check.sh
 expect_case build-break  2 "ERROR" --expect 'FAIL: TestValue' "$tmp/breaks.patch" -- ./check.sh
 expect_case bad-patch    2 "ERROR" "$tmp/bad.patch" -- ./check.sh
 expect_case no-command   2 "ERROR" "$tmp/detected.patch"
+# --expect with no value used to spin forever; the timeout makes a hang a FAIL.
+expect_case expect-noval 2 "ERROR" --expect
+# Interrupted mid-run: the test command TERMs the probe itself. The run has no
+# verdict, so it must be ERROR -- before the fix the trap reverted and the
+# script carried on to grade the cut-short run as RED.
+expect_case interrupted  2 "ERROR" "$tmp/detected.patch" -- bash -c 'grep -q value=1 lib.txt || kill -TERM $PPID; sleep 1; grep -q value=1 lib.txt'
 
 # Baseline red: break the tree in a COMMITTED way, so the command fails before
 # any mutation, then restore.
@@ -74,4 +86,4 @@ git reset -q --hard HEAD~1
 
 if (( CASES == 0 )); then echo "prove-mutation-selftest: ZERO cases ran -- refusing to pass"; exit 1; fi
 if (( FAILS )); then echo "prove-mutation-selftest: $FAILS of $CASES checks failed"; exit 1; fi
-echo "prove-mutation-selftest: $CASES checks passed"
+echo "prove-mutation-selftest: ok -- $CASES case(s)"
