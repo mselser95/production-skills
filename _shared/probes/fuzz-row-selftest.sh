@@ -16,6 +16,8 @@
 #   D  only a build-tagged target            FAIL (nothing fuzzed in this lane)
 #   E  a target present only in a comment    FAIL naming it (not listed by go)
 #   F  go exits 0 without `fuzz: elapsed`    FAIL (never fuzzed)
+#   G  targets under a hidden dir, a nested module, vendor/, testdata/
+#                                            not this module's: PASS over the one real target
 #
 # It lifts the probe's real fuzz block by anchor (start AND end must be seen).
 set -uo pipefail
@@ -26,7 +28,7 @@ for c in "${here}/verify-standard.sh" "${here}/../verify-standard.sh"; do [[ -f 
 REAL_GO="$(command -v go)" || { echo "fuzz-row-selftest: FAIL -- go is required" >&2; exit 1; }
 export REAL_GO
 
-block="$(awk '/^mapfile -t fuzzes < </{on=1} on{print} on && /^else row "fuzz" FAIL "no fuzz targets"; fi$/{seen=1; exit} END{exit seen ? 0 : 1}' "$probe")" || {
+block="$(awk '/^fuzz_test_files\(\) \{/{on=1} on{print} on && /^else row "fuzz" FAIL "no fuzz targets"; fi$/{seen=1; exit} END{exit seen ? 0 : 1}' "$probe")" || {
   echo "fuzz-row-selftest: FAIL -- the fuzz block's start or end anchor is gone from $probe" >&2; exit 1; }
 grep -q 'fuzz: elapsed' <<<"$block" || { echo "fuzz-row-selftest: FAIL -- lifted block carries no elapsed check; anchor moved" >&2; exit 1; }
 
@@ -82,6 +84,16 @@ scenario "E. a target that exists only in a comment -> FAIL naming it"
 d="$work/e"; mk "$d"; mkdir "$d/a"; fz a FuzzA > "$d/a/a_test.go"
 printf '// func FuzzGone(f *testing.F) was deleted\n' >> "$d/a/a_test.go"; run "$d"
 expect "E FAIL names FuzzGone" FAIL "FuzzGone"
+
+scenario "G. targets in a hidden dir (agent worktree), a nested module, vendor/ and testdata/ are not this module's"
+d="$work/g"; mk "$d"; mkdir -p "$d/a" "$d/.claude/worktrees/w/x" "$d/sub/y" "$d/vendor/v" "$d/a/testdata/t"
+fz a FuzzA > "$d/a/a_test.go"
+mk "$d/.claude/worktrees/w"; fz x FuzzHidden > "$d/.claude/worktrees/w/x/x_test.go"
+mk "$d/sub"; fz y FuzzNested > "$d/sub/y/y_test.go"
+fz v FuzzVendored > "$d/vendor/v/v_test.go"
+fz t FuzzTestdata > "$d/a/testdata/t/t_test.go"
+run "$d"
+expect "G PASS over the root module's one target" PASS "1 target(s)"
 
 scenario "F. go exits 0 but prints no 'fuzz: elapsed' -> FAIL"
 d="$work/f"; mk "$d"; mkdir "$d/a"; fz a FuzzA > "$d/a/a_test.go"; run "$d" 1

@@ -7,15 +7,15 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: a4ba51d8fec2abcc37067172e7edacfa9f293d009d4bdbf7a99dbe3f6059f9b3
-short: a4ba51d8fec2
+digest: b6f053db278e31012e82b36ada56cd676d7fc06eac2f5a1f15c986abe6d406f4
+short: b6f053db278e
 files: 22
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
   scripts/changed-line-coverage.sh: 89438a28abea4bf522db07128e769c33c6848e059151de4f5860d2cd62ab12dd
   scripts/check-registries.sh: 4497037c9816de4cd3717b5077fd64b0954059554baadec57af423d8341b55a1
   scripts/check-template-drift.sh: f65b6d1cc649b9a2d9b46532b491f4fd7fd47502458c38414fe6126fbd2e7703
-  scripts/coverage.sh: 2b74f0c4e88cd821088a42a485fc363fb01e18845ca890bf532243dedfbe0680
+  scripts/coverage.sh: 9ca791aaa31b8ce26ea7ede20c81d2085dffac5fdca0409f971530f3c64a19cd
   scripts/error-handling-fitness.sh: cfb96953c7727fa872db162123963cfe5aca65102eeb6168cb7d08c7c9dd1327
   scripts/gate-hygiene-fitness.sh: 620bbf6eebcc4b7503643337b7852d20e59b527daf5255a6533a7eb857045e5a
   scripts/kill-durability.sh: d31b8857fcd239c0081f5560694020c015593a253eef14828b3d05da1e68e922
@@ -31,5 +31,5 @@ per_file:
   scripts/tests/probe-self-gate-selftest.sh: cee9417e48c2d910a054ca37574cc95debc2c3c52dc29e0c312aa93f9ae415c9
   scripts/tests/retry-selftest.sh: be8d6ca86f42d4753d2421fe0518da79b69fb5474721fc62a806a7d0a24315a6
   scripts/tests/sbom-ordering-selftest.sh: 9ca6a2eff6c60a007525d0d9ec5a691fa8b5c9cdacfbb2d9afef4387494e8af3
-  scripts/tests/single-suite-run-selftest.sh: d60bc19caafea5c03694fa40d93030b4d9cabbf9ddd640dfe268374804469143
-  scripts/verify-standard.sh: 3367914b22e8b4c03caee87cbb2b06aa0394231b2190d2173650ee9268371871
+  scripts/tests/single-suite-run-selftest.sh: 450da6df7af4248cf616a1961fb6132c12e76f3fdeee234fa1556b9f4ebbbb4d
+  scripts/verify-standard.sh: 4bd2fcda9583980a7f3562f33ea6e24de8478e3cae3be6c1af169adaa02ddd8f

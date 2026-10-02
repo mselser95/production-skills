@@ -560,60 +560,121 @@ else row "build" FAIL "go build ./... failed"; fi
 #
 # The probe now runs the suite ITSELF, with explicit flags on its own command
 # line: `go test ./... -race -count=1`, scope ./..., no -run, no -short, exit
-# status taken directly (no pipe). `tests` and `race` come from that run ALONE,
-# with positive evidence: exit 0 AND every package that has test files printed
-# an `ok` line. Nothing the repo's scripts do can influence those two rows.
+# status taken directly (no pipe), and GOFLAGS CLEARED for that run and for every
+# `go list` that decides what it must certify. `tests` and `race` come from runs
+# the probe makes, with positive evidence: exit 0 AND every package that has test
+# files printed an `ok` line. The repo's scripts cannot influence those two rows.
 #
-# Coverage still wants a profile. If coverage.sh opts in (it mentions
-# `--print-coverpkg` and `COVERAGE_PROFILE`), the probe asks it for its
-# -coverpkg value, adds `-coverpkg=<that> -coverprofile=<tmp>` to the SAME run,
-# and hands the profile back to coverage.sh, which evaluates floors and ratchet
-# on it without running the suite. Otherwise the race run carries no coverage
-# flags and coverage.sh runs as it always did. Either way the coverage and
-# ratchet rows mean what they always meant; coverage.sh could always misreport
-# coverage, it just can no longer touch `tests` or `race`.
+# THE ENVIRONMENT COULD, until GOFLAGS was cleared. An inherited
+# `GOFLAGS='-run=^$'`, `-skip=.` or `-short` (a Makefile export, a CI env block)
+# made the suite run nothing and print `ok ... [no tests to run]` -- an ok line
+# for every package, so tests/race PASS over a red suite. `-race=false` there was
+# already harmless (the command-line -race wins); clearing GOFLAGS covers it too.
+# What clearing gives up: a repo that NEEDS GOFLAGS (e.g. `-mod=mod`, `-tags=`)
+# for its suite to build is measured without it, and will say so by going red.
+#
+# THE RACE BUILD TAG CHANGES WHICH FILES ARE COMPILED, so a -race run alone
+# cannot stand for a plain one. The usual pattern -- `const raceEnabled` in a
+# `//go:build race` / `!race` pair, and `if raceEnabled { t.Skip() }` in an
+# AllocsPerRun or timing test -- SKIPS under -race a test that FAILS without it:
+# tests PASS over a red plain suite (reproduced by the v4 review). So `go list`
+# is asked for every package's file sets with AND without -race; each package
+# where they differ is ALSO run plain (`go test -count=1 <those>`), and `tests`
+# PASSES only when those plain runs pass too. The expected-ok sets are derived
+# per build: the race row certifies against `go list -race` (a package whose only
+# test file is `//go:build !race` has no tests there and owes no ok line), the
+# tests row against plain `go list` (so that package's tests still run, plain).
+#
+# Coverage still wants a profile. A coverage.sh OPTS IN by carrying the line
+# `# coverage-script-api: 2` AND answering `--print-coverpkg` (within a timeout)
+# with ONE line that names packages of this module. Then the probe adds
+# `-coverpkg=<that> -coverprofile=<tmp>` to the SAME run and hands the profile
+# back (COVERAGE_PROFILE), and coverage.sh evaluates floors and ratchet on it
+# without running the suite. Otherwise the race run carries no coverage flags and
+# coverage.sh runs as it always did, with any INHERITED COVERAGE_PROFILE removed
+# (an exported good profile would otherwise be evaluated over a red suite).
+#
+# WHY A DECLARATION AND NOT A CAPABILITY PROBE ALONE. A legacy script ignores
+# `--print-coverpkg` and RUNS THE WHOLE SUITE, so "try the flag and see" costs a
+# suite execution on every legacy repo and hangs until the timeout on a slow one.
+# Grepping for the two words (the previous detection) opted in a script that
+# merely mentions them in a comment. The explicit api line means a legacy script
+# is never invoked with the flag at all; validating the answer means a script
+# that declares the api but does not implement it is not trusted either; the
+# timeout bounds a script that declares it and then runs the suite anyway.
 #
 # RUN COUNTS (go test executions of the suite):
 #   green, coverage.sh opted in ........ 1   (probe's -race+cover run)
 #   green, legacy coverage.sh ........... 2   (probe's -race run + coverage.sh's own)
 #   red -race run, opted in or legacy ... 3   (race run + plain run for `tests` + coverage.sh's own)
-# The red path pays for being exact: `tests` keeps its no-detector meaning (a
-# race alone must not redden it), and coverage is measured by an unmodified run.
+# plus, on any path, one plain run of the race-tag-divergent packages if there
+# are any. The red path pays for being exact: `tests` keeps its no-detector
+# meaning (a race alone must not redden it), and coverage is measured by an
+# unmodified run.
 #
 # NOT the same measurement as a plain run: coverage under -race is taken in
 # atomic mode (measured 90.91% vs 90.79% on a real service, inside the 2-point
 # slack the per-package floors carry), and files behind a `race` build tag
 # compile differently. Those are properties of asking for the race verdict, not
 # of this design.
+gl() { env GOFLAGS= go list "$@"; }
 cov_out=""; cov_rc=0; cov_tmp_profile=""
-cov_optin=0
-if [[ -x scripts/coverage.sh ]]; then
-  if grep -q -- '--print-coverpkg' scripts/coverage.sh && grep -q 'COVERAGE_PROFILE' scripts/coverage.sh; then cov_optin=1; fi
-fi
-cov_pkgs=""
-if (( cov_optin )); then
-  # Only a script that says it understands the flag is ever called with it: a
-  # legacy one would ignore it and RUN THE WHOLE SUITE.
-  cov_pkgs=$(./scripts/coverage.sh --print-coverpkg 2>/dev/null); cov_pk_rc=$?
-  # The value goes to go test as ONE argument (`-coverpkg=<value>`), so it cannot
-  # smuggle a flag, and go never fails on an odd pattern (measured: a value of
-  # `not a package!` or `./nope/...` only prints a warning). It can only narrow
-  # what is MEASURED, which is coverage.sh's own call, so it is not validated
-  # beyond "exited 0 and said something".
-  if (( cov_pk_rc != 0 )); then cov_pkgs=""; fi
+cov_optin=0; cov_pkgs=""; cov_pk_rc=0; cov_why=""
+# The module's own packages, plain build: the vocabulary a coverpkg answer may use.
+mod_path=$(gl -m 2>/dev/null | head -1)
+mod_pkgs=$(gl ./... 2>/dev/null)
+if [[ -x scripts/coverage.sh ]] && grep -qE '^# coverage-script-api: 2[[:space:]]*$' scripts/coverage.sh; then
+  # A portable timeout (macOS ships no `timeout`) that kills the script's whole
+  # PROCESS GROUP: killing only the script would orphan a `go test` it started,
+  # which keeps the pipe open (so the probe still waits) and keeps burning CPU.
+  cov_pkgs=$(env -u COVERAGE_PROFILE GOFLAGS= perl -e '
+    my $t = shift; my $pid = fork; die "fork: $!" unless defined $pid;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 }
+    $SIG{ALRM} = sub { kill "KILL", -$pid; exit 124 }; alarm $t;
+    waitpid($pid, 0); exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)
+  ' "${PROBE_COVERPKG_TIMEOUT:-120}" ./scripts/coverage.sh --print-coverpkg 2>/dev/null); cov_pk_rc=$?
+  if (( cov_pk_rc != 0 )); then
+    cov_why="--print-coverpkg exited $cov_pk_rc"
+  elif [[ -z "$cov_pkgs" || "$cov_pkgs" == *$'\n'* ]]; then
+    cov_why="--print-coverpkg did not answer with exactly one line"
+  else
+    # Every comma-separated item must be one of this module's packages, or a
+    # `/...` pattern (`./x/...` or `<module>/x/...`) that matches at least one of
+    # them. It goes to go test as ONE argument, so it cannot smuggle a flag; this
+    # check is about whether the script implements the api at all.
+    while IFS= read -r _cp; do
+      grep -qxF -- "$_cp" <<<"$mod_pkgs" && continue
+      if [[ -n "$mod_path" && "$_cp" == */... ]]; then
+        _pre="${_cp%/...}"; [[ "$_pre" == . ]] && _pre="$mod_path"; [[ "$_pre" == ./* ]] && _pre="$mod_path/${_pre#./}"
+        awk -v p="$_pre" '$0 == p || index($0, p "/") == 1 { f = 1 } END { exit !f }' <<<"$mod_pkgs" && continue
+      fi
+      cov_why="--print-coverpkg named '$(cut -c1-60 <<<"$_cp")', not a package of this module"; break
+    done < <(tr ',' '\n' <<<"$cov_pkgs")
+  fi
+  if [[ -z "$cov_why" ]]; then cov_optin=1; else cov_pkgs=""; fi
 fi
 suite_flags=(-race -count=1)
-if [[ -n "$cov_pkgs" ]]; then
+if (( cov_optin )); then
   cov_tmp_profile=$(mktemp)
   suite_flags+=("-coverpkg=$cov_pkgs" "-coverprofile=$cov_tmp_profile")
 fi
-suite_out=$(go test ./... "${suite_flags[@]}" 2>&1); suite_rc=$?
+suite_out=$(env GOFLAGS= go test ./... "${suite_flags[@]}" 2>&1); suite_rc=$?
 
 # Positive evidence, not just an exit code: every package that HAS test files
 # must have printed `ok`. A package whose tests were filtered out, never ran or
 # printed nothing is "not certified", which is a FAIL here, never a PASS.
-suite_want=$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... 2>/dev/null); suite_list_rc=$?
-suite_missing=$(comm -23 <(sort -u <<<"$suite_want" | sed '/^$/d') <(awk '$1=="ok"{print $2}' <<<"$suite_out" | sort -u))
+_tf='{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}'
+_ff='{{.ImportPath}} {{.GoFiles}} {{.TestGoFiles}} {{.XTestGoFiles}}'
+suite_list_rc=0
+suite_want=$(gl -race -f "$_tf" ./... 2>/dev/null) || suite_list_rc=1
+plain_want=$(gl -f "$_tf" ./... 2>/dev/null) || suite_list_rc=1
+files_race=$(gl -race -f "$_ff" ./... 2>/dev/null) || suite_list_rc=1
+files_plain=$(gl -f "$_ff" ./... 2>/dev/null) || suite_list_rc=1
+# packages whose compiled files differ between the two builds, that have tests plain
+race_divergent=$(comm -3 <(sort -u <<<"$files_plain") <(sort -u <<<"$files_race") | awk 'NF {print $1}' | sort -u)
+plain_extra=$(comm -12 <(sed '/^$/d' <<<"$race_divergent") <(sed '/^$/d' <<<"$plain_want" | sort -u))
+suite_ok=$(awk '$1=="ok"{print $2}' <<<"$suite_out" | sort -u)
+suite_missing=$(comm -23 <(sort -u <<<"$suite_want" | sed '/^$/d') <(printf '%s\n' "$suite_ok"))
 suite_ok_n=$(grep -c '^ok' <<<"$suite_out")
 suite_certified=0
 if (( suite_rc == 0 && suite_list_rc == 0 )) && [[ -z "$suite_missing" ]]; then suite_certified=1; fi
@@ -645,8 +706,26 @@ race_diagnose() {
 }
 
 if (( suite_certified )); then
-  row "tests" PASS "${suite_ok_n} packages ok (probe-owned -race run)"
   row "race" PASS "race detector clean (probe-owned -race run${cov_pkgs:+, coverage profile captured})"
+  # tests: the -race run covers every package whose files are the same in both
+  # builds; the divergent ones are run plain, and must pass there too.
+  # (Packages whose files are identical in both builds are in the race build's
+  # expected set too, so the certification above already holds an ok line for
+  # each of them; only the divergent ones need a run of their own.)
+  n_extra=$(grep -c . <<<"$plain_extra"); n_extra=${n_extra:-0}
+  extra_rc=0; extra_out=""; extra_missing=""
+  if (( n_extra > 0 )); then
+    # shellcheck disable=SC2046  # one argument per package is the point
+    extra_out=$(env GOFLAGS= go test -count=1 $(printf '%s\n' "$plain_extra") 2>&1); extra_rc=$?
+    extra_missing=$(comm -23 <(printf '%s\n' "$plain_extra") <(awk '$1=="ok"{print $2}' <<<"$extra_out" | sort -u))
+  fi
+  if (( extra_rc != 0 )); then
+    row "tests" FAIL "red WITHOUT the race tag (its files differ under -race, so the -race run could not stand for it): $(race_diagnose "$extra_out")"
+  elif [[ -n "$extra_missing" ]]; then
+    row "tests" FAIL "plain run of race-tag-divergent package(s) printed no ok line: $(head -3 <<<"$extra_missing" | paste -sd' ' -)"
+  else
+    row "tests" PASS "${suite_ok_n} packages ok (probe-owned -race run)$( (( n_extra > 0 )) && printf '; %s package(s) also run without the race tag' "$n_extra")"
+  fi
 else
   if (( suite_rc == 0 )); then
     if (( suite_list_rc != 0 )); then
@@ -658,17 +737,18 @@ else
     row "race" FAIL "$(race_diagnose "$suite_out") (probe-owned -race run)"
   fi
   # `tests` keeps its no-detector meaning: a race alone must not redden it.
-  if out=$(go test ./... -count=1 2>&1); then
+  if out=$(env GOFLAGS= go test ./... -count=1 2>&1); then
     row "tests" PASS "$(grep -c '^ok' <<<"$out") packages ok"
   else row "tests" FAIL "$(grep -m1 -E 'FAIL|panic' <<<"$out")"; fi
 fi
 
 # Coverage: evaluate the profile the probe captured, only if it is trustworthy.
+# Every other path removes an inherited COVERAGE_PROFILE, so the script measures.
 if [[ -x scripts/coverage.sh ]]; then
   if (( suite_certified )) && [[ -n "$cov_tmp_profile" && -s "$cov_tmp_profile" ]]; then
-    cov_out=$(COVERAGE_PROFILE="$cov_tmp_profile" ./scripts/coverage.sh 2>&1); cov_rc=$?
+    cov_out=$(env GOFLAGS= COVERAGE_PROFILE="$cov_tmp_profile" ./scripts/coverage.sh 2>&1); cov_rc=$?
   else
-    cov_out=$(./scripts/coverage.sh 2>&1); cov_rc=$?
+    cov_out=$(env -u COVERAGE_PROFILE GOFLAGS= ./scripts/coverage.sh 2>&1); cov_rc=$?
   fi
 fi
 [[ -n "$cov_tmp_profile" ]] && rm -f "$cov_tmp_profile"
@@ -1152,7 +1232,26 @@ elif (( prop_n > 0 )); then
   row "property-tests" FAIL "$prop_n property test(s) but no generator-adequacy assertion — an inadequate generator passes vacuously"
 else row "property-tests" FAIL "no property tests found (the word 'adequacy' in a test file is not a property test)"; fi
 
-mapfile -t fuzzes < <(grep -rho 'func \(Fuzz[A-Za-z0-9_]*\)' --include='*_test.go' . 2>/dev/null | sed 's/func //' | sort -u)
+# fuzz_test_files: the *_test.go files THIS module's `go test` can see. A bare
+# `grep -r .` also read hidden directories (agent worktrees under .claude/, each
+# with its own go.mod), nested modules, vendor/ and testdata/ -- targets that
+# `go test -list` from the root never lists, so they landed in fuzz_notrun and
+# reddened the row on any checkout that had a worktree inside it. Go itself
+# ignores `.`/`_`-prefixed directories, testdata and vendor, and stops at a
+# nested go.mod; so does this.
+fuzz_test_files() {
+  local nested=() tf nm
+  mapfile -t nested < <(find . \( -name '.?*' -o -name '_*' -o -name vendor -o -name testdata \) -prune -o -name go.mod -print 2>/dev/null | grep -vx './go.mod' | sed 's|/go\.mod$||')
+  while IFS= read -r tf; do
+    for nm in "${nested[@]}"; do [[ "$tf" == "$nm"/* ]] && continue 2; done
+    printf '%s\n' "$tf"
+  done < <(find . \( -name '.?*' -o -name '_*' -o -name vendor -o -name testdata \) -prune -o -name '*_test.go' -type f -print 2>/dev/null)
+}
+mapfile -t fuzz_files < <(fuzz_test_files)
+fuzzes=()
+if ((${#fuzz_files[@]})); then
+  mapfile -t fuzzes < <(grep -ho 'func \(Fuzz[A-Za-z0-9_]*\)' "${fuzz_files[@]}" 2>/dev/null | sed 's/func //' | sort -u)
+fi
 # One entry per (package, target) PAIR. Two packages may each declare FuzzParse;
 # resolving the name to its first file (`head -1`) fuzzed one of them and
 # reported both as clean.
@@ -1160,7 +1259,7 @@ fuzz_pairs=()
 for f in "${fuzzes[@]}"; do
   while IFS= read -r pkgdir; do
     [[ -n "$pkgdir" ]] && fuzz_pairs+=("$pkgdir $f")
-  done < <(grep -rl "func $f(" --include='*_test.go' . 2>/dev/null | xargs -n1 dirname 2>/dev/null | sort -u)
+  done < <(grep -l "func $f(" "${fuzz_files[@]}" 2>/dev/null | xargs -n1 dirname 2>/dev/null | sort -u)
 done
 if ((${#fuzz_pairs[@]})); then
   bad=0; infra=0; ran=0; fuzz_notrun=(); fuzz_gated=()

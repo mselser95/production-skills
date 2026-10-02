@@ -4,6 +4,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # >>> probe-modes
+# The probe opts this script in ONLY because of the next line AND a valid
+# `--print-coverpkg` answer; without the line it is treated as a legacy script.
+# coverage-script-api: 2
 # TWO OPT-IN MODES, the contract with scripts/verify-standard.sh. The probe owns
 # the one execution of the suite (`go test ./... -race -count=1`, explicit flags
 # on its own command line) and decides the `tests` and `race` rows from THAT

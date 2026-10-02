@@ -6,9 +6,11 @@
 # THE CONTRACT UNDER TEST. The probe itself runs `go test ./... -race -count=1`
 # (explicit flags, scope ./..., exit status read directly). `tests` and `race`
 # come from that run ALONE, and only with positive evidence: exit 0 AND an `ok`
-# line for every package that has test files. Nothing the repo's coverage.sh
-# does can influence those two rows. If coverage.sh opts in (`--print-coverpkg`
-# and `COVERAGE_PROFILE`) the probe adds coverage flags to the SAME run and
+# line for every package that has test files, with GOFLAGS cleared; packages
+# whose files differ under the race tag are ALSO run plain for `tests`. Nothing
+# the repo's coverage.sh does can influence those two rows. If coverage.sh opts
+# in (`# coverage-script-api: 2` plus a valid `--print-coverpkg` answer; it then
+# also honours `COVERAGE_PROFILE`) the probe adds coverage flags to the SAME run and
 # hands the profile back, so the suite executes once; otherwise coverage.sh runs
 # as before (two executions). Earlier designs inferred the race verdict from
 # what the script chose to run and leaked a new way every round, which is why
@@ -32,6 +34,22 @@
 #   J  legacy healthy                      two executions, rows correct
 #   K  a no-test package that fails to build: ok lines alone would pass it
 #   O  race_diagnose carries non-test causes (no cgo, covermode)
+#   P  THE v4 BLOCKER: a test skipped under -race that FAILS without it
+#                                          tests FAIL, race PASS
+#   Q  a package whose only test file is //go:build !race
+#                                          race PASS, tests PASS running it plain
+#   S  inherited GOFLAGS (-run=^$, -skip=., -short) over a red suite
+#                                          tests/race FAIL, never PASS
+#   S2 an inherited GOFLAGS=-tags=... must not reach `go list` alone (the expected
+#      set would name a package the cleared run never tests)
+#   T  an inherited COVERAGE_PROFILE over a red suite: coverage FAIL
+#   U  a legacy script that only MENTIONS the opt-in words: not opted in
+#   V  an api-2 script whose --print-coverpkg exits non-zero: not opted in
+#   V2 ...or answers with two lines, a foreign package, or past the timeout;
+#      a valid `./p/...` pattern IS opted in
+#   Q2 a divergent package's plain run that prints no ok line: tests FAIL
+#   W  `go list` fails while go test exits 0: race NOT certified
+#   X  a cached green result over a now-red suite: -count=1 sees it
 #   R  BROWNFIELD ONLY: the repo's own scripts/coverage.sh is exercised for the
 #      modes it supports (`--print-coverpkg` live; `COVERAGE_PROFILE` on a
 #      profile taken from one small package, asserting it prints the
@@ -78,11 +96,19 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/shim"
 cat > "$work/shim/go" <<'SH'
 #!/usr/bin/env bash
+if [[ "${1:-}" == list && "${GO_SHIM_FAIL_LIST:-}" == 1 ]]; then
+  echo "go: simulated go list failure" >&2; exit 1
+fi
 if [[ "${1:-}" == test ]]; then
   echo "$*" >> "$GO_LOG"
   if [[ "${GO_SHIM_REJECT_RACE:-}" == 1 && ( " $* " == *" -race "* || "${GOFLAGS:-}" == *-race* ) ]]; then
     echo "go: -race requires cgo; enable cgo by setting CGO_ENABLED=1" >&2
     exit 2
+  fi
+  if [[ -n "${GO_SHIM_DROP_OK_PLAIN:-}" && " $* " != *" -race "* ]]; then
+    o=$("$REAL_GO" "$@" 2>&1); rc=$?
+    grep -vE "^ok[[:space:]]+${GO_SHIM_DROP_OK_PLAIN}[[:space:]]" <<<"$o" || true
+    exit "$rc"
   fi
   if [[ -n "${GO_SHIM_DROP_OK:-}" ]]; then
     o=$("$REAL_GO" "$@" 2>&1); rc=$?
@@ -109,6 +135,7 @@ coverage_out="${COVERAGE_OUT:-coverage.out}"
 H
   if [[ "$1" == 1 ]]; then
     cat <<'M'
+# coverage-script-api: 2
 if [[ "${1:-}" == "--print-coverpkg" ]]; then
   echo "./..."
   exit 0
@@ -171,7 +198,7 @@ fixture() {
   # q carries the defect, so a script limited to ./p/... cannot see it.
   local body='c++' qtest='_ = Count(1)'
   case "$kind" in
-    healthy|failing|buildbroken) body='_ = c' ;;
+    healthy|failing|buildbroken|raceskip|notrace|failshort|extstate|xtagonly) body='_ = c' ;;
     racy) body='c++ // unsynchronised on purpose'; qtest='_ = Count(1000)' ;;
   esac
   cat > "$d/q/q.go" <<GO
@@ -198,6 +225,34 @@ GO
   else
     printf 'package q\n\nimport "testing"\n\nfunc TestCount(t *testing.T) {\n\t%s\n}\n' "$qtest" > "$d/q/q_test.go"
   fi
+  case "$kind" in
+    raceskip)
+      # THE v4 BLOCKER: skipped under -race, red without it.
+      mkdir -p "$d/s"
+      printf 'package s\n\nfunc One() int { return 1 }\n' > "$d/s/s.go"
+      printf '//go:build race\n\npackage s\n\nconst raceEnabled = true\n' > "$d/s/race_on.go"
+      printf '//go:build !race\n\npackage s\n\nconst raceEnabled = false\n' > "$d/s/race_off.go"
+      printf 'package s\n\nimport "testing"\n\nfunc TestAllocs(t *testing.T) {\n\tif raceEnabled {\n\t\tt.Skip("allocs are meaningless under -race")\n\t}\n\tt.Fatal("red without the race tag")\n}\n' > "$d/s/s_test.go" ;;
+    notrace)
+      # a package whose ONLY test file is //go:build !race
+      mkdir -p "$d/n"
+      printf 'package n\n\nfunc Two() int { return 2 }\n' > "$d/n/n.go"
+      printf '//go:build !race\n\npackage n\n\nimport "testing"\n\nfunc TestTwo(t *testing.T) {\n\tif Two() != 2 {\n\t\tt.Fatal("x")\n\t}\n}\n' > "$d/n/n_test.go" ;;
+    xtagonly)
+      # a package whose only test file needs a tag that only an inherited GOFLAGS sets
+      mkdir -p "$d/t"
+      printf 'package t\n\nfunc Three() int { return 3 }\n' > "$d/t/t.go"
+      printf '//go:build xtag\n\npackage t\n\nimport "testing"\n\nfunc TestThree(t *testing.T) {\n\tif Three() != 3 {\n\t\tt.Fatal("x")\n\t}\n}\n' > "$d/t/t_test.go" ;;
+    failshort)
+      # red, but skipped under -short
+      printf 'package q\n\nimport "testing"\n\nfunc TestCount(t *testing.T) {\n\tif testing.Short() {\n\t\tt.Skip()\n\t}\n\tt.Fatal("red unless -short")\n}\n' > "$d/q/q_test.go" ;;
+    extstate)
+      # verdict read through exec of an ABSOLUTE path, which go's test cache does
+      # NOT track (a bare "cat" would make it record $PATH, and the shim changes
+      # PATH): a cached result survives the state turning red; only -count=1 sees it
+      printf 'green\n' > "$d/state.txt"
+      printf 'package q\n\nimport (\n\t"os/exec"\n\t"strings"\n\t"testing"\n)\n\nfunc TestCount(t *testing.T) {\n\tb, _ := exec.Command("/bin/cat", "%s").Output()\n\tif strings.TrimSpace(string(b)) != "green" {\n\t\tt.Fatal("state is red")\n\t}\n}\n' "$d/state.txt" > "$d/q/q_test.go" ;;
+  esac
   if [[ "$kind" == buildbroken ]]; then
     # a package with NO tests that does not compile: every package that has tests
     # still prints ok, so only the exit status can say the run was red
@@ -213,6 +268,26 @@ GO
         echo "single-suite-run-selftest: FAIL -- $script variant identical to its base" >&2; exit 1
       fi ;;
     legacy) emit_ref 0 > "$d/scripts/coverage.sh" ;;
+    # a LEGACY script that merely MENTIONS the opt-in words in a comment
+    commentonly) { emit_ref 0 | sed '2a\
+# (no --print-coverpkg or COVERAGE_PROFILE support here; see the template)'; } > "$d/scripts/coverage.sh" ;;
+    # declare the api, then answer badly: two lines / not a package / too slowly
+    cptwolines|cpjunk|cpslow)
+      if (( tpl_usable )); then cp "$coverage_sh" "$d/scripts/coverage.sh"; else emit_ref 1 > "$d/scripts/coverage.sh"; fi
+      case "$script" in
+        cptwolines) sed -i.bak 's|echo "\./\.\.\."|printf "./...\\n./...\\n"|' "$d/scripts/coverage.sh" ;;
+        cpjunk)     sed -i.bak 's|echo "\./\.\.\."|echo "example.com/elsewhere/pkg"|' "$d/scripts/coverage.sh" ;;
+        cpslow)     sed -i.bak 's|echo "\./\.\.\."|sleep 4; echo "./..."|' "$d/scripts/coverage.sh" ;;
+      esac
+      rm -f "$d/scripts/coverage.sh.bak"
+      if cmp -s <( [[ $tpl_usable == 1 ]] && cat "$coverage_sh" || emit_ref 1 ) "$d/scripts/coverage.sh"; then
+        echo "single-suite-run-selftest: FAIL -- $script variant identical to its base" >&2; exit 1
+      fi ;;
+    # declares the api, prints a valid-looking answer, but exits non-zero
+    cpfail)
+      if (( tpl_usable )); then cp "$coverage_sh" "$d/scripts/coverage.sh"; else emit_ref 1 > "$d/scripts/coverage.sh"; fi
+      sed -i.bak 's|^  exit 0$|  exit 3|' "$d/scripts/coverage.sh"; rm -f "$d/scripts/coverage.sh.bak"
+      grep -q '^  exit 3$' "$d/scripts/coverage.sh" || { echo "single-suite-run-selftest: FAIL -- cpfail variant did not apply" >&2; exit 1; } ;;
     *) emit_ref 0 > "$d/scripts/coverage.sh"; replace_gotest "$d/scripts/coverage.sh" "$(variant_line "$script")" ;;
   esac
   chmod +x "$d/scripts/coverage.sh"
@@ -365,12 +440,100 @@ if grep -qF "requires cgo" <<<"$got"; then ok "O cgo cause carried"; else echo "
 got="$(eval "$diag_fn"; race_diagnose $'-covermode must be "atomic", not "set", when -race is enabled')"
 if grep -qF "covermode must be" <<<"$got"; then ok "O covermode cause carried"; else echo "  FAIL O: covermode cause lost (got: $got)" >&2; failures=$((failures+1)); fi
 
+scenario "P. a test SKIPPED under -race that FAILS without it (the v4 blocker) -> tests FAIL, race PASS"
+run_case raceskip modes
+want_row "P tests FAIL, from the plain run of the divergent package" tests FAIL "red WITHOUT the race tag"
+want_row "P race PASS (the race build really is clean)" race PASS "probe-owned"
+run_case raceskip legacy
+want_row "P' legacy script: tests FAIL" tests FAIL "red WITHOUT the race tag"
+
+scenario "Q. a package whose only test file is //go:build !race -> race owes it nothing, tests run it plain"
+run_case notrace modes
+want_row "Q race PASS" race PASS "probe-owned"
+want_row "Q tests PASS, saying it ran a package plain" tests PASS "1 package(s) also run without the race tag"
+want_runs "Q race+cover run + one plain run of the divergent package" 2
+
+scenario "S. inherited GOFLAGS cannot empty the suite"
+for gf in '-run=^$' '-skip=.' '-short'; do
+  k=failing; [[ "$gf" == -short ]] && k=failshort
+  export GOFLAGS="$gf"
+  run_case "$k" modes
+  unset GOFLAGS
+  want_row "S GOFLAGS=$gf: tests FAIL over a red suite" tests FAIL
+  want_row "S GOFLAGS=$gf: race FAIL over a red suite" race FAIL
+done
+
+scenario "S2. inherited GOFLAGS cannot make the expected set disagree with the run"
+export GOFLAGS='-tags=xtag'
+run_case xtagonly modes
+unset GOFLAGS
+want_row "S2 GOFLAGS=-tags=xtag: race PASS (go list and go test both see the cleared build)" race PASS "probe-owned"
+
+scenario "T. an inherited COVERAGE_PROFILE is never evaluated over a red suite"
+good="$work/good"; fixture "$good" healthy modes
+if (cd "$good" && go test -count=1 -coverpkg=./... -coverprofile="$work/good.cov" ./... >/dev/null 2>&1) && [[ -s "$work/good.cov" ]]; then
+  export COVERAGE_PROFILE="$work/good.cov"
+  run_case failing modes
+  unset COVERAGE_PROFILE
+  want_row "T coverage FAIL (the inherited good profile was not used)" coverage FAIL
+  want_not "T ...and it did not evaluate a supplied profile" coverage "TOTAL COVERAGE"
+else
+  echo "  FAIL T: could not produce a good profile" >&2; failures=$((failures+1))
+fi
+
+scenario "U. a legacy script that only MENTIONS --print-coverpkg / COVERAGE_PROFILE is not opted in"
+run_case healthy commentonly
+want_runs "U race run + coverage.sh's own (never called with --print-coverpkg)" 2
+want_not "U no coverage profile was captured" race "coverage profile captured"
+
+scenario "V. an api-2 script whose --print-coverpkg exits non-zero is not opted in"
+run_case healthy cpfail
+want_runs "V treated as legacy: race run + coverage.sh's own" 2
+want_not "V no coverage profile was captured" race "coverage profile captured"
+
+scenario "V2. an api-2 script whose answer is malformed or too slow is not opted in"
+for v in cptwolines cpjunk cpslow; do
+  [[ "$v" == cpslow ]] && export PROBE_COVERPKG_TIMEOUT=1
+  run_case healthy "$v"
+  unset PROBE_COVERPKG_TIMEOUT
+  want_runs "V2 $v: treated as legacy" 2
+  want_row "V2 $v: race PASS from a run WITHOUT its coverpkg" race PASS "probe-owned"
+  want_not "V2 $v: ...no coverage profile captured" race "coverage profile captured"
+done
+run_case healthy cpsubset
+want_runs "V2 a valid ./p/... pattern IS opted in (one execution)" 1
+
+scenario "Q2. a divergent package's plain run must print ok for it"
+export GO_SHIM_DROP_OK_PLAIN='example.com/suitefix/n'
+run_case notrace modes
+unset GO_SHIM_DROP_OK_PLAIN
+want_row "Q2 tests FAIL: the plain run printed no ok line" tests FAIL "printed no ok line"
+
+scenario "W. go list fails while go test exits 0 -> nothing certified"
+export GO_SHIM_FAIL_LIST=1
+run_case healthy legacy
+unset GO_SHIM_FAIL_LIST
+want_row "W race FAIL: could not enumerate" race FAIL "could not enumerate"
+
+scenario "X. a CACHED green result over a suite that is now red -> -count=1 runs it"
+xd="$work/x"; fixture "$xd" extstate legacy
+if (cd "$xd" && env GOFLAGS= go test ./... -race >/dev/null 2>&1); then
+  printf 'red\n' > "$xd/state.txt"
+  export GO_LOG="$xd/go.log" ROWS_FILE="$xd/rows.txt"; : > "$GO_LOG"; : > "$ROWS_FILE"
+  ( cd "$xd" && export PATH="$work/shim:$PATH" COVERAGE_MIN=0 && eval "$block" ) >"$xd/probe.out" 2>&1
+  ROWS=$(<"$ROWS_FILE")
+  want_row "X race FAIL (not served from the cache)" race FAIL
+  want_row "X tests FAIL" tests FAIL
+else
+  echo "  FAIL X: could not warm the cache with a green run" >&2; failures=$((failures+1))
+fi
+
 # --- R. brownfield: the REPO's own coverage.sh, in the repo --------------------
 repo_root="$(cd "${here}/../.." 2>/dev/null && pwd)"
 if [[ "$coverage_sh" == "${here}/../coverage.sh" && -f "${repo_root}/go.mod" ]]; then
   scenario "R. the repo's own scripts/coverage.sh, in the repo (brownfield contract)"
   repo_cov="${repo_root}/scripts/coverage.sh"
-  if grep -q -- '--print-coverpkg' "$repo_cov" && grep -q 'COVERAGE_PROFILE' "$repo_cov"; then
+  if grep -qE '^# coverage-script-api: 2[[:space:]]*$' "$repo_cov"; then
     rcp="$(cd "$repo_root" && "$repo_cov" --print-coverpkg 2>/dev/null)"; rrc=$?
     if (( rrc == 0 )) && [[ -n "$rcp" && "$rcp" != *$'\n'* ]]; then ok "R --print-coverpkg exits 0 with one non-empty line (${#rcp} chars)"
     else echo "  FAIL R: --print-coverpkg rc=$rrc output not a single non-empty line" >&2; failures=$((failures+1)); fi
@@ -388,7 +551,7 @@ if [[ "$coverage_sh" == "${here}/../coverage.sh" && -f "${repo_root}/go.mod" ]];
       echo "  FAIL R: could not produce a sample profile to evaluate (package '${small:-none}')" >&2; failures=$((failures+1))
     fi
   else
-    echo "  note R: this repo's coverage.sh has no probe modes, so the probe runs it as a legacy script (two suite executions); nothing to contract-test" >&2
+    echo "  note R: this repo's coverage.sh does not declare '# coverage-script-api: 2', so the probe runs it as a legacy script (two suite executions); nothing to contract-test" >&2
   fi
 fi
 

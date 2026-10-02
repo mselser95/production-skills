@@ -16,7 +16,7 @@ here would be a threshold nobody derived.
 | `check-registries-selftest.sh` | 65 |
 | `coverage-ratchet-selftest.sh` | 9 |
 | `diagnostic-evidence-selftest.sh` | 4 |
-| `fuzz-row-selftest.sh` | 7 |
+| `fuzz-row-selftest.sh` | 8 |
 | `load-rows-selftest.sh` | 60 |
 | `no-unfilled-slots-selftest.sh` | 6 |
 | `non-vacuity-selftest.sh` | 57 |
@@ -24,8 +24,8 @@ here would be a threshold nobody derived.
 | `policy-coverage-selftest.sh` | 7 |
 | `probe-wiring-selftest.sh` | 12 |
 | `sbom-ordering-selftest.sh` | 10 |
-| `single-suite-run-selftest.sh` | 73 |
+| `single-suite-run-selftest.sh` | 106 |
 | `skills-static-selftest.sh` | 13 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| **total** | **370** |
+| **total** | **404** |
