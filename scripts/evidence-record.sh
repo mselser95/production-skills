@@ -36,6 +36,7 @@ GATES=(
   "ci-workflows-valid|make --no-print-directory actionlint"
   "shell-correctness|make --no-print-directory lint"
   "skills-structural|bash _shared/probes/skills-static.sh"
+  "agents-token-budget|bash _shared/probes/agents-budget.sh"
   "policy-coverage|bash _shared/probes/policy-coverage.sh"
   "row-vacuity|bash _shared/probes/row-vacuity-sweep.sh"
   "liability-registries|bash _shared/probes/check-registries.sh"
