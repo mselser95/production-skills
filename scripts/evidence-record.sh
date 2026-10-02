@@ -40,6 +40,7 @@ GATES=(
   "policy-coverage|bash _shared/probes/policy-coverage.sh"
   "row-vacuity|bash _shared/probes/row-vacuity-sweep.sh"
   "liability-registries|bash _shared/probes/check-registries.sh"
+  "gate-hygiene|bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts"
   "gates-are-driven|bash _shared/probes/probe-wiring.sh"
   "gates-are-driven-scripts|bash _shared/probes/probe-wiring.sh scripts"
   "template-version|bash scripts/template-digest.sh"
