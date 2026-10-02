@@ -37,6 +37,24 @@ run_case "the NO-POLLING rule removed fails" 1 "rule 'NO-POLLING'" "$r"
 r=$(mk author); sed -i.bak 's/APPROVED-ONLY/WHENEVER/g' "$r/agents/prod-acceptance-author.md"
 run_case "the author's APPROVED-ONLY rule removed fails" 1 "rule 'APPROVED-ONLY'" "$r"
 
+r=$(mk no-focus); sed -i.bak 's/FOCUSED-READ/SKIMMING/g' "$r/agents/prod-mechanic.md"
+run_case "the FOCUSED-READ rule removed fails" 1 "rule 'FOCUSED-READ'" "$r"
+
+r=$(mk drift); sed -i.bak 's/over 500 characters/over 5000 characters/' "$r/agents/prod-implementer.md"
+run_case "the 500-char rule drifting to 5000 fails" 1 "numeric budget literal 'over 500 characters'" "$r"
+
+r=$(mk tail400); sed -i.bak 's/tail -n 40/tail -n 400/g' "$r/agents/prod-implementer.md"
+run_case "tail -n 40 drifting to 400 fails" 1 "numeric budget literal 'tail -n 40'" "$r"
+
+r=$(mk no-bounded); sed -i.bak 's/BOUNDED-OUTPUT/UNBOUNDED/g' "$r/agents/prod-mechanic.md"
+run_case "BOUNDED-OUTPUT removed from the mechanic fails" 1 "rule 'BOUNDED-OUTPUT'" "$r"
+
+r=$(mk heading); sed -i.bak 's/\*\*BOUNDED-OUTPUT:\*\*/**BOUNDED-OUT:**/' "$r/agents/prod-mechanic.md"
+run_case "only the heading renamed (cross-refs kept) fails" 1 "heading **BOUNDED-OUTPUT:** not found" "$r"
+
+r=$(mk validator); sed -i.bak 's/\*\*READ-ONLY:\*\*/**WRITE-OK:**/' "$r/agents/prod-validator.md"
+run_case "the validator's READ-ONLY rule removed fails" 1 "rule 'READ-ONLY'" "$r"
+
 r=$(mk missing); rm "$r/agents/prod-scout.md"
 run_case "a pinned agent missing fails" 1 "no agents/prod-scout.md" "$r"
 

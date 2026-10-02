@@ -22,13 +22,14 @@ fails=0 checked=0
 fail() { printf '  FAIL  %-18s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 
 # rules every pinned execution agent must carry, and the extra ones per agent
-common_rules=("NO SPAWNING" "NO-POLLING")
+common_rules=("NO SPAWNING" "NO-POLLING" "FOCUSED-READ" "NO-REREAD" "BOUNDED-OUTPUT")
 implementer_rules=("ONE-TASK" "multi-task-dispatch" "BOUNDED-OUTPUT")
 # the acceptance author is the oracle's writer: it must refuse a pending spec,
 # stay at the boundary, and never edit the spec it is held to
+validator_rules=("READ-ONLY" "PROBE, DON'T TRUST" "NON-VACUITY")
 author_rules=("ONE-TASK" "APPROVED-ONLY" "BOUNDARY-ONLY" "NEVER-EDIT-SPEC" "FAILS-FOR-THE-RIGHT-REASON")
 
-for a in prod-implementer prod-mechanic prod-scout prod-acceptance-author; do
+for a in prod-implementer prod-mechanic prod-scout prod-acceptance-author prod-validator; do
   f="$root/agents/$a.md"
   if [[ ! -r "$f" ]]; then fail "$a" "no agents/$a.md -- a pinned agent missing is a hole"; continue; fi
   checked=$((checked + 1))
@@ -52,9 +53,21 @@ print("" if t is None else str(t))
   rules=("${common_rules[@]}")
   [[ "$a" == prod-implementer ]] && rules+=("${implementer_rules[@]}")
   [[ "$a" == prod-acceptance-author ]] && rules+=("${author_rules[@]}")
+  [[ "$a" == prod-validator ]] && rules+=("${validator_rules[@]}")
   for r in "${rules[@]}"; do
-    grep -qF -- "$r" "$f" || fail "$a" "rule '$r' is missing from the definition"
+    # The bold HEADING, not a substring: a cross-reference like "BOUNDED-OUTPUT's"
+    # survives a renamed rule and would keep this green (found by the T3 validator).
+    # Exception: `multi-task-dispatch` is a bail value, not a heading.
+    if [[ "$r" == multi-task-dispatch ]]; then
+      grep -qF -- "$r" "$f" || fail "$a" "bail value '$r' is missing from the definition"
+    else
+      grep -qF -- "**$r:**" "$f" || fail "$a" "rule '$r' is missing from the definition (heading **$r:** not found)"
+    fi
   done
+  # numbers, not prose. Anchored on the RULE phrase (a citation also says
+  # ">500 chars") and on digit boundaries (so 5000 / 400 cannot satisfy them).
+  grep -qE 'over 500 characters([^0-9]|$)' "$f" || fail "$a" "numeric budget literal 'over 500 characters' is missing from the definition"
+  grep -qE 'tail -n 40([^0-9]|$)' "$f" || fail "$a" "numeric budget literal 'tail -n 40' is missing from the definition"
 done
 
 if (( checked == 0 )); then echo "agents-budget: FAIL -- no agent definitions under $root/agents; nothing checked is not a pass" >&2; exit 2; fi

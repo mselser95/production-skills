@@ -51,6 +51,10 @@ tasks:                               # the implementable units, each bounded
     context: [<ids>]                 # ONLY the invariants, constraints and
                                      # obligations whose scope meets `files` —
                                      # the dispatch sends these, nothing else
+    focus: <one question this task must answer about the code>
+                                     # what FOCUSED-READ reads against; the
+                                     # task is dispatched with its entry
+                                     # (see dispatch.md)
     ambiguity: none|low|open         # `open` ⇒ route back to orchestrator, not
                                      # to a cheap implementer
     acceptance: [AC-ids]             # implement: the cases this task turns

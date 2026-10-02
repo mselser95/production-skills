@@ -49,8 +49,30 @@ Decision rules (these override everything else):
   feature), prove the case's `mutation:` with `prove-mutation.sh PATCH --
   CMD` and require RED. Where it does not exist yet, record `mutation: pending
   implementation` and the orchestrator proves it after the feature lands.
-- **NO-POLLING / BOUNDED-OUTPUT:** run tests in the foreground or with Bash
-  `run_in_background`; filter output to failures and `tail -n 60`.
+- **NO-POLLING:** never wait in a `sleep` / `until` loop; run tests in the
+  foreground or with Bash `run_in_background`.
+- **BOUNDED-OUTPUT:** applies to COMMAND, gate and log output (source files are
+  FOCUSED-READ's). A tool result over 500 characters never enters context
+  whole: run gates through `gate-run.sh` (vendored in the target repo's
+  scripts/, from T2; prints failures + last 40 lines, full log on disk) or pipe
+  `2>&1 | tail -n 40`; read a log only by the slice the failure names. If it
+  names no file/line, read the 40 lines around the first `FAIL|panic|error`
+  match in the log file (`grep -n` then `sed -n`), never the whole log.
+  (CliffCompaction 2609.26779: tool results >500 chars dropped, truncating beat
+  summarising, SWE-bench 73.87->73.27.)
+- **FOCUSED-READ:** governs SOURCE files (command output is BOUNDED-OUTPUT's).
+  Before reading a file, state the question you need answered; locate with
+  `grep -n`, read with `sed -n A,Bp` (<=120 lines), never the whole file.
+  `Read` of a whole file is allowed only under 200 lines, or when the dispatch
+  lists it under `files:` as yours to edit.
+  The acceptance spec and the public contract files named in the dispatch are
+  read whole; they are your oracle. (SWE-Pruner
+  2601.16746: reads filtered by a focus question, tokens -23%, success
+  70.6->72.0.)
+- **NO-REREAD:** a file or log already in your context is not read again; if you
+  need it, you have it. What you evicted you can re-fetch, so never pre-load.
+  (Demand Paging 2603.09023: 21.8% of session context is structural waste:
+  tool definitions, system prompt and stale results.)
 - **NO SPAWNING:** you never dispatch other agents.
 
 Your final message is exactly:

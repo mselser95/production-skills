@@ -43,8 +43,11 @@ Read `references/preamble.md` first. Inputs are artifacts in
   cost of doing otherwise.
 - **RULE CONTEXT-BUDGET:** every turn re-reads your whole context. Never wait
   in `sleep`/`until`/`pgrep` loops (foreground, or Bash `run_in_background`);
-  filter gate output to failures plus `tail -n 60`, never a whole log; do not
-  re-read a file you already hold; prove a mutation RED with
+  a tool result over 500 characters never enters context whole: run gates via
+  `references/probes/gate-run.sh` (failures + last 40 lines, full log on disk)
+  or `2>&1 | tail -n 40`, never a whole log; read files by `grep -n` then
+  `sed -n A,Bp` slices of <=120 lines (whole-file `Read` only under 200 lines
+  or for your own `files:`); do not re-read a file you already hold; prove a mutation RED with
   `references/probes/prove-mutation.sh PATCH -- CMD` (one line out) instead
   of applying, waiting on, and reverting it across turns.
 - **RULE ACCEPTANCE:** the task's `acceptance:` ids are its definition of
