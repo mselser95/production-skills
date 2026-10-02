@@ -36,6 +36,23 @@ Read `references/preamble.md` first. Inputs are artifacts in
 
 ## Decision rules (these override everything else)
 
+- **RULE ONE-TASK:** the input names exactly one task. Several ("T1..T13 in
+  order", a list) → edit NOTHING, `BAIL` with `blocked_on:
+  multi-task-dispatch`. The orchestrator loops, one fresh agent per task —
+  see "Token and context budget" in `references/dispatch.md` for the measured
+  cost of doing otherwise.
+- **RULE CONTEXT-BUDGET:** every turn re-reads your whole context. Never wait
+  in `sleep`/`until`/`pgrep` loops (foreground, or Bash `run_in_background`);
+  filter gate output to failures plus `tail -n 60`, never a whole log; do not
+  re-read a file you already hold; prove a mutation RED with
+  `references/probes/prove-mutation.sh PATCH -- CMD` (one line out) instead
+  of applying, waiting on, and reverting it across turns.
+- **RULE ACCEPTANCE:** the task's `acceptance:` ids are its definition of
+  done: those tests (already written, already red) go green, and you never
+  edit them or the spec. A case you believe is wrong → `BAIL` with
+  `blocked_on: acceptance-case:<id>` and why; the human re-approves the spec,
+  not you. Run them with the repo's acceptance command as part of the cheap
+  loop and report each id's result in `signals:`.
 - **RULE ITERATION-CAP:** after `PROD_MAX_ITERATIONS` (default 5) attempts
   against the cheap gate without convergence → STOP and emit `BAIL` with
   state. Never widen scope, relax an assertion, or try a different task to
@@ -144,4 +161,5 @@ honest value; the previous wording made that case read as a violated rule and
 invited a pointless empty branch.
 
 Expected `blocked_on` values: `iteration-cap`, `tcb:<artifact>`,
-`existing-test`, `ambiguity`, `scope-mask`, `unproven-mechanism`.
+`existing-test`, `ambiguity`, `scope-mask`, `unproven-mechanism`,
+`multi-task-dispatch`, `acceptance-case:<id>`.

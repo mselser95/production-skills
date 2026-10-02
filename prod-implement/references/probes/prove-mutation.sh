@@ -1,0 +1,1 @@
+../../../_shared/probes/prove-mutation.sh

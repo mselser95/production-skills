@@ -39,8 +39,11 @@ plan's task list for `prod-implement`.
   repo's spec (`PROD_SPEC_FILE` in `config.sh`, default `production.yaml`)
   plus its capability files.
 - **Output:** `resolved-context.yaml` + `change-plan.yaml` in the task
-  workspace (`PROD_CONTEXT_DIR`), in the exact formats referenced above.
-  Nothing else.
+  workspace (`PROD_CONTEXT_DIR`), in the exact formats referenced above, and
+  — for any change with observable behaviour (`changes_public_api`,
+  `introduces_external_effect`, `introduces_state`, a new or changed
+  feature) — `acceptance/<feature>.yaml` in the repo, per
+  `references/acceptance-spec.md`. Nothing else.
 
 ## Algorithm
 
@@ -134,11 +137,26 @@ plan's task list for `prod-implement`.
    Vacuous forms, named: a load baseline produced by a closed-loop driver; a
    retry budget declared in the spec and enforced by nothing; a queue whose
    only bound is its channel buffer, with no policy for what happens at it.
-6. **Write the change plan.** Decompose into bounded tasks, each tagged with
-   `ambiguity: none|low|open`. Anything `open` stays with the orchestrator
+6. **Write the change plan.** Decompose into SMALL bounded tasks (one
+   concern, ~3 files — the size rule in `references/change-plan.md`), each
+   tagged with `ambiguity: none|low|open` and carrying `context:` — the ids of
+   only the invariants/constraints/obligations its files touch, which is all
+   its dispatch will send. Anything `open` stays with the orchestrator
    tier — never hand an open design question to a cheap implementer. New
    states must each have a filled `recovery` block; new dependencies must have
    the full class checklist.
+6b. **Write the acceptance spec — this is where you think hardest.** Fill
+   EVERY row of the matrix in `references/acceptance-spec.md` for this
+   feature: for each row, ask how a client, a downstream consumer, or an
+   operator would observe this feature being wrong, and write a case per
+   distinct way — or `na:` with a reason a reviewer could dispute. Be
+   unpleasantly thorough on inputs, declared errors, authorization,
+   retries and illegal state transitions; those rows are where shipped
+   features break. Each case names its `mutation:`. Run
+   `references/probes/acceptance-coverage.sh --spec-only <spec>` until it is
+   green. Then add to the plan, BEFORE the implementation tasks, one
+   `kind: acceptance-author` task per ~8 cases (grouped by matrix row), and
+   give every implementation task the `acceptance:` ids it turns green.
 7. **Candidate invariants.** If the change implies a new guarantee, propose it
    in `candidate_invariants` with how it could be falsified. It goes to
    ratification via `prod-curate` — write the package into
@@ -155,6 +173,10 @@ plan's task list for `prod-implement`.
    If `tier == 0`, present the resolved context
    (it fits on one screen — that is the point) and wait for approval before
    any downstream skill runs. Record the approval in the artifact.
+   **The acceptance spec is ALWAYS a human moment, at every tier:** present
+   its cases (one line each) and matrix, and set `approved_by`/`approved_at`
+   only on the human's word. No acceptance-author task is dispatched against
+   a `pending` spec.
 
 **An obligation whose mechanism does not exist yet is not a waiver.** When a
 derived obligation has no implementation anywhere in the org — no script, no
