@@ -134,8 +134,11 @@ plan's task list for `prod-implement`.
    Vacuous forms, named: a load baseline produced by a closed-loop driver; a
    retry budget declared in the spec and enforced by nothing; a queue whose
    only bound is its channel buffer, with no policy for what happens at it.
-6. **Write the change plan.** Decompose into bounded tasks, each tagged with
-   `ambiguity: none|low|open`. Anything `open` stays with the orchestrator
+6. **Write the change plan.** Decompose into SMALL bounded tasks (one
+   concern, ~3 files — the size rule in `references/change-plan.md`), each
+   tagged with `ambiguity: none|low|open` and carrying `context:` — the ids of
+   only the invariants/constraints/obligations its files touch, which is all
+   its dispatch will send. Anything `open` stays with the orchestrator
    tier — never hand an open design question to a cheap implementer. New
    states must each have a filled `recovery` block; new dependencies must have
    the full class checklist.

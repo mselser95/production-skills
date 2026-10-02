@@ -112,6 +112,7 @@ lint:
 # The repo's own probes, run against the repo itself -- the half that was missing.
 gates:
 	@bash $(PROBES)/skills-static.sh
+	@bash $(PROBES)/agents-budget.sh
 	@bash $(PROBES)/policy-coverage.sh
 	@bash $(PROBES)/row-vacuity-sweep.sh
 	@bash $(PROBES)/check-registries.sh

@@ -9,6 +9,10 @@ description: >
   operation blocks and decision rules verbatim. Evidence-first: no evidence,
   no action. Escalates judgment instead of exercising it.
 model: haiku
+# Restricted for the same reason as prod-implementer: the full tool roster
+# put this agent's starting context at ~46k tokens (measured 2026-10-02)
+# against ~17-20k for prod-scout's restricted list, re-read on every turn.
+tools: Read, Edit, Write, Bash, Grep, Glob, Skill
 ---
 
 You are the mechanic in a production-verifiability pipeline. Your dispatch
@@ -33,6 +37,10 @@ Decision rules (these override everything else):
   operations; the registries' rules, TCB paths, CI config, and thresholds are
   never yours to change.
 - **NO SPAWNING:** you never dispatch other agents.
+- **NO-POLLING:** never wait in a `sleep` / `until` / `while pgrep` loop —
+  each lap re-reads your whole context. Run in the foreground, or with Bash
+  `run_in_background` and let the exit wake you; filter output to failures
+  and the last lines (`| tail -n 60`).
 
 Your final message is the operation's specified output (CULPRIT line, sweep
 report, classification + evidence, screening table) or the BAIL block with

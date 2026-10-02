@@ -45,11 +45,23 @@ candidate_invariants:                # proposals only — go to ratification, ne
 tasks:                               # the implementable units, each bounded
   - id: T1
     summary: <one sentence>
-    files: [<subset of files>]
+    files: [<subset of files>]       # small: one concern, ~3 files or fewer
+    context: [<ids>]                 # ONLY the invariants, constraints and
+                                     # obligations whose scope meets `files` —
+                                     # the dispatch sends these, nothing else
     ambiguity: none|low|open         # `open` ⇒ route back to orchestrator, not
                                      # to a cheap implementer
-    depends_on: []
+    depends_on: []                   # empty + disjoint `files` ⇒ dispatchable
+                                     # in parallel
 ```
+
+**Task size is a token and speed budget.** Each task runs in a FRESH
+implementer agent whose every turn re-reads its whole context, so cost grows
+with turns × context: a small task converges in a few cheap-gate loops, fails
+cheaply, and runs in parallel with its independent siblings. Measured
+2026-10-02 over 69 implementer runs: the multi-task runs were 64% of all
+implementer tokens, and a context reset per task cut the total by 53%. A task
+that needs more than ~3 files or two concerns is two tasks.
 
 Routing rule (from the framework): **ambiguity picks the model; tier picks the
 human.** A task with `ambiguity: none` is cheap-model work regardless of tier.

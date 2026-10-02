@@ -87,7 +87,7 @@ if (( ${#PROBES[@]} == 0 )); then
 fi
 
 # DECLARED EXCEPTIONS: probes this repo ships and deliberately does not run.
-# There is exactly one, and it is the whole reason this list exists rather than
+# There are two, each with its reason -- the reason this list exists rather than
 # a silent exclusion.
 #
 #   verify-standard.sh implements the GO toolchain and REFUSES to run here
@@ -110,6 +110,11 @@ fi
 # checked for staleness only when its own directory is the one being scanned.
 declare -A EXCEPT=(
   [_shared/probes/verify-standard.sh]="Go-only probe, refuses to run on this repo (exit 2); executed in scaffolded repos via the template Makefile"
+  # Added 2026-10-02. Not a gate: an agent TOOL the prod-implementer runs in
+  # the target repo (prod-implement/references/probes/), so it has no Makefile
+  # invoker here. Its verdicts are proven by prove-mutation-selftest.sh, which
+  # `make selftests` runs via the *-selftest.sh glob.
+  [_shared/probes/prove-mutation.sh]="agent tool run by prod-implementer in target repos; proven here by prove-mutation-selftest.sh"
 )
 for e in "${!EXCEPT[@]}"; do
   # Out of scope for this run rather than stale: an exception for another tree
