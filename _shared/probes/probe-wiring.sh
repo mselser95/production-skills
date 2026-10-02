@@ -112,7 +112,7 @@ declare -A EXCEPT=(
   [_shared/probes/verify-standard.sh]="Go-only probe, refuses to run on this repo (exit 2); executed in scaffolded repos via the template Makefile"
   [prod-new/template/scripts/changed-line-coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/check-template-drift.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
-  [prod-new/template/scripts/acceptance-coverage.sh]="executed in scaffolded repos by the template Makefile (`make acceptance`, inside check-fast); edited here, not run here"
+  [prod-new/template/scripts/acceptance-coverage.sh]="executed in scaffolded repos by the template Makefile ('make acceptance', inside check-fast); edited here, not run here"
   [prod-new/template/scripts/coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/error-handling-fitness.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/kill-durability.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
@@ -126,6 +126,16 @@ declare -A EXCEPT=(
   [_shared/probes/prove-mutation.sh]="agent tool run by prod-implementer in target repos; proven here by prove-mutation-selftest.sh"
   [_shared/probes/acceptance-coverage.sh]="gate for target repos' acceptance/<feature>.yaml (this repo has no features); run by prod-spec/prod-review there, proven here by acceptance-coverage-selftest.sh"
 )
+# A backtick inside a double-quoted reason is COMMAND SUBSTITUTION, not prose:
+# on 2026-10-02 one reason said (`make acceptance`, ...) and every load of this
+# file ran `make acceptance` in the caller's cwd, blanking the reason and
+# printing "No rule to make target" into two implementers' gate logs. The
+# source is checked, not the expanded value, because by expansion time the
+# command has already run.
+if sed -n '/^declare -A EXCEPT=(/,/^)/p' "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#' | grep -q '`'; then
+  echo "probe-wiring: a declared exception's reason contains a backtick -- that is a command, not a reason. Quote with '...'." >&2
+  exit 2
+fi
 for e in "${!EXCEPT[@]}"; do
   # Out of scope for this run rather than stale: an exception for another tree
   # is not an excuse this scan could be honouring.

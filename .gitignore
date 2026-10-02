@@ -20,3 +20,6 @@ node_modules/
 #
 # See .prod/evidence/README.md.
 .prod/evidence/*.json
+
+# session worktrees and local harness state; never part of the standard
+.claude/

@@ -151,5 +151,15 @@ else
 fi
 
 echo
+# 12. A BACKTICK IN AN EXCEPTION REASON IS A COMMAND. Found 2026-10-02: one
+#     reason read (`make acceptance`, ...) inside double quotes, so loading the
+#     probe RAN make in the caller's cwd. The source is checked, so the case
+#     mutates a copy of the probe itself.
+d=$(fixture backtick a.sh -- a.sh)
+mut="$d/probe-wiring.sh"; sed 's/^declare -A EXCEPT=(/&\n  [_shared\/probes\/zz.sh]="runs `true` here"/' "$PROBE" > "$mut"
+out=$( cd "$d" && bash "$mut" 2>&1 ); rc=$?
+if (( rc == 2 )) && grep -qF 'contains a backtick' <<<"$out"; then printf '  ok    %-58s\n' "backtick in an exception reason -> 2"; ok=$((ok+1))
+else printf '  FAIL  %-58s rc=%s\n' "backtick in an exception reason -> 2" "$rc"; printf '%s\n' "$out" | sed 's/^/          /' | head -5; failed=$((failed+1)); fi
+
 echo "$ok ok, $failed failed"
 (( failed == 0 )) || exit 1
