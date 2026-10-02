@@ -44,6 +44,8 @@ candidate_invariants:                # proposals only — go to ratification, ne
 
 tasks:                               # the implementable units, each bounded
   - id: T1
+    kind: implement | acceptance-author   # acceptance-author tasks come first,
+                                     # go to prod-acceptance-author, ~8 cases each
     summary: <one sentence>
     files: [<subset of files>]       # small: one concern, ~3 files or fewer
     context: [<ids>]                 # ONLY the invariants, constraints and
@@ -51,6 +53,9 @@ tasks:                               # the implementable units, each bounded
                                      # the dispatch sends these, nothing else
     ambiguity: none|low|open         # `open` ⇒ route back to orchestrator, not
                                      # to a cheap implementer
+    acceptance: [AC-ids]             # implement: the cases this task turns
+                                     # green · acceptance-author: the cases it
+                                     # writes · spec: acceptance/<feature>.yaml
     depends_on: []                   # empty + disjoint `files` ⇒ dispatchable
                                      # in parallel
 ```

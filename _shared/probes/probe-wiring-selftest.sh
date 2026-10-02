@@ -37,7 +37,7 @@ fixture() {
   } > "$dir/Makefile"
   for p in "${present[@]}"; do printf '#!/usr/bin/env bash\necho stub\n' > "$dir/_shared/probes/$p"; done
   # the declared exceptions must exist or the probe exits 2 by design
-  for e in verify-standard.sh prove-mutation.sh; do
+  for e in verify-standard.sh prove-mutation.sh acceptance-coverage.sh; do
     printf '#!/usr/bin/env bash\necho stub\n' > "$dir/_shared/probes/$e"
   done
   echo "$dir"
@@ -98,7 +98,7 @@ check "exception naming a missing probe -> 2" 2 "$d" "does not exist"
 
 # 7. ZERO PROBES is a refusal. "All zero probes are wired" is true and useless.
 d=$(fixture noprobes a.sh --)
-rm -f "$d/_shared/probes/verify-standard.sh" "$d/_shared/probes/prove-mutation.sh"
+rm -f "$d/_shared/probes/verify-standard.sh" "$d/_shared/probes/prove-mutation.sh" "$d/_shared/probes/acceptance-coverage.sh"
 check "zero probes -> 2, not 0" 2 "$d" "ZERO probes"
 
 # 8. ZERO SURFACES is a refusal too. With no Makefile, no workflow and no hook,

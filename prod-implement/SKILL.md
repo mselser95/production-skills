@@ -47,6 +47,12 @@ Read `references/preamble.md` first. Inputs are artifacts in
   re-read a file you already hold; prove a mutation RED with
   `references/probes/prove-mutation.sh PATCH -- CMD` (one line out) instead
   of applying, waiting on, and reverting it across turns.
+- **RULE ACCEPTANCE:** the task's `acceptance:` ids are its definition of
+  done: those tests (already written, already red) go green, and you never
+  edit them or the spec. A case you believe is wrong → `BAIL` with
+  `blocked_on: acceptance-case:<id>` and why; the human re-approves the spec,
+  not you. Run them with the repo's acceptance command as part of the cheap
+  loop and report each id's result in `signals:`.
 - **RULE ITERATION-CAP:** after `PROD_MAX_ITERATIONS` (default 5) attempts
   against the cheap gate without convergence → STOP and emit `BAIL` with
   state. Never widen scope, relax an assertion, or try a different task to
@@ -156,4 +162,4 @@ invited a pointless empty branch.
 
 Expected `blocked_on` values: `iteration-cap`, `tcb:<artifact>`,
 `existing-test`, `ambiguity`, `scope-mask`, `unproven-mechanism`,
-`multi-task-dispatch`.
+`multi-task-dispatch`, `acceptance-case:<id>`.

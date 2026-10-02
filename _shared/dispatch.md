@@ -20,6 +20,7 @@ dispatch bug.
 | Ratification packages, screening interpretation (`prod-curate` judgment) | main session | session model | inline |
 | Repo inventories, recon sweeps, full-file reading fan-outs (bootstrap phase 1, review phase 0 on large diffs) | `prod-scout` agent | **haiku** | Agent tool (pinned in frontmatter — omit `model`) |
 | One bounded change-plan task (`prod-implement`) | `prod-implementer` agent | **sonnet** (pass `model: haiku` when the task is `ambiguity: none` AND touches no T0 path) | a FRESH Agent call per task — never one agent looping over the plan, never a fork; independent tasks in parallel |
+| Acceptance tests for an APPROVED spec (`kind: acceptance-author` tasks) | `prod-acceptance-author` agent | sonnet | a fresh Agent call per ~8 cases, in parallel, BEFORE any implementation task; never the same agent that implements |
 | Candidate test generation (`prod-test-synth`) | `prod-implementer` agent | sonnet | Agent tool |
 | Bisects, reverts, flake repro, sweeps, rebases (`prod-ops`) | `prod-mechanic` agent | **haiku** | Agent tool |
 | Screening runs: refactor-corpus replays, kata runs, mutation dedup (`prod-curate` mechanics) | `prod-mechanic` agent | haiku | Agent tool |

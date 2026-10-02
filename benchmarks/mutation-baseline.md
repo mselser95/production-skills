@@ -13,7 +13,8 @@ here would be a threshold nobody derived.
 
 | selftest | cases |
 |---|---|
-| `agents-budget-selftest.sh` | 7 |
+| `acceptance-coverage-selftest.sh` | 18 |
+| `agents-budget-selftest.sh` | 8 |
 | `check-registries-selftest.sh` | 65 |
 | `coverage-ratchet-selftest.sh` | 9 |
 | `load-rows-selftest.sh` | 60 |
@@ -27,4 +28,4 @@ here would be a threshold nobody derived.
 | `skills-static-selftest.sh` | 13 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| **total** | **311** |
+| **total** | **330** |

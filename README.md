@@ -62,8 +62,10 @@ Two rules bind every skill (see the preamble for the rest):
 The economics run through `_shared/dispatch.md` (the routing table: session
 model thinks, pinned agents execute) and three agent definitions in
 `agents/`: `prod-scout` (haiku, read-only recon), `prod-implementer` (sonnet,
-one bounded task under the write-mask), `prod-mechanic` (haiku, prod-ops
-operations and curation screening). Orchestrator skills dispatch; they do not
+one bounded task under the write-mask), `prod-acceptance-author` (sonnet,
+writes the acceptance tests for an approved `acceptance/<feature>.yaml`
+before implementation), `prod-mechanic` (haiku, prod-ops operations and
+curation screening). Orchestrator skills dispatch; they do not
 do mechanical work inline. Model pins live in the agent frontmatter —
 retargeting a tier is a one-line change there, never a skill edit.
 

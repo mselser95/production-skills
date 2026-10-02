@@ -1,0 +1,1 @@
+../../_shared/formats/acceptance-spec.md

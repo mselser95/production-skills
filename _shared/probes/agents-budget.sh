@@ -24,8 +24,11 @@ fail() { printf '  FAIL  %-18s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 # rules every pinned execution agent must carry, and the extra ones per agent
 common_rules=("NO SPAWNING" "NO-POLLING")
 implementer_rules=("ONE-TASK" "multi-task-dispatch" "BOUNDED-OUTPUT")
+# the acceptance author is the oracle's writer: it must refuse a pending spec,
+# stay at the boundary, and never edit the spec it is held to
+author_rules=("ONE-TASK" "APPROVED-ONLY" "BOUNDARY-ONLY" "NEVER-EDIT-SPEC" "FAILS-FOR-THE-RIGHT-REASON")
 
-for a in prod-implementer prod-mechanic prod-scout; do
+for a in prod-implementer prod-mechanic prod-scout prod-acceptance-author; do
   f="$root/agents/$a.md"
   if [[ ! -r "$f" ]]; then fail "$a" "no agents/$a.md -- a pinned agent missing is a hole"; continue; fi
   checked=$((checked + 1))
@@ -46,6 +49,7 @@ print("" if t is None else str(t))
   [[ "$a" == prod-scout ]] && continue   # read-only and short-lived: tools only
   rules=("${common_rules[@]}")
   [[ "$a" == prod-implementer ]] && rules+=("${implementer_rules[@]}")
+  [[ "$a" == prod-acceptance-author ]] && rules+=("${author_rules[@]}")
   for r in "${rules[@]}"; do
     grep -qF -- "$r" "$f" || fail "$a" "rule '$r' is missing from the definition"
   done

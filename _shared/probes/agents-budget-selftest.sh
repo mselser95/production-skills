@@ -34,6 +34,9 @@ run_case "the ONE-TASK rule removed fails" 1 "rule 'ONE-TASK'" "$r"
 r=$(mk no-polling); sed -i.bak 's/NO-POLLING/WAITING/g' "$r/agents/prod-mechanic.md"
 run_case "the NO-POLLING rule removed fails" 1 "rule 'NO-POLLING'" "$r"
 
+r=$(mk author); sed -i.bak 's/APPROVED-ONLY/WHENEVER/g' "$r/agents/prod-acceptance-author.md"
+run_case "the author's APPROVED-ONLY rule removed fails" 1 "rule 'APPROVED-ONLY'" "$r"
+
 r=$(mk missing); rm "$r/agents/prod-scout.md"
 run_case "a pinned agent missing fails" 1 "no agents/prod-scout.md" "$r"
 

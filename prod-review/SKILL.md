@@ -133,6 +133,15 @@ For every test file in the diff:
   `pinning: true` → finding.
 - coverage theater (mock-was-called assertions, re-asserted implementation
   arithmetic) → finding even when the coverage number is fine.
+- **acceptance suite** (when the plan carries an acceptance spec): run
+  `references/probes/acceptance-coverage.sh <spec>`; any FAIL is a
+  **BLOCKER**. A test or spec case edited by an implementer task →
+  **BLOCKER** (only the author agent writes them, only against an approved
+  spec). Then judge what the probe cannot: is each matrix `na:` reason true
+  for this feature, does each test drive the declared surface and assert what
+  `observe:` names (an acceptance test calling internals is a unit test with
+  the wrong header → finding), and is every `mutation: pending
+  implementation` now proven RED.
 
 ### Phase 4 — The deep pass
 Apply every review area in `references/review-depth.md` (architecture &
