@@ -113,7 +113,7 @@ mutation-proven:
 | `_shared/probes/row-vacuity-sweep.sh` | a probe presence-check satisfied only by comments |
 | `_shared/probes/benchmark-currency.sh` | a score that no longer describes the skill it sits beside |
 | `_shared/probes/tests/probe-self-gate-selftest.sh` | the probe piping a producer into a quiet grep |
-| `load-rows`, `sbom-ordering`, `check-registries`, `non-vacuity` selftests | each row's own verdicts, on fixtures where the property is FALSE |
+| `load-rows`, `sbom-ordering`, `check-registries`, `non-vacuity`, `agent-dispatch-guard`, `memory-index-check` selftests | each row's own verdicts, on fixtures where the property is FALSE |
 | `install.sh --verify` | an installed TCB that drifted from source, or is stale against it |
 | `.githooks/pre-commit` | a commit that skips the two above |
 

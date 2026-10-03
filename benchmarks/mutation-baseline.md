@@ -13,17 +13,18 @@ here would be a threshold nobody derived.
 
 | selftest | cases |
 |---|---|
-| `acceptance-audit-selftest.sh` | 11 |
+| `acceptance-audit-selftest.sh` | 19 |
 | `acceptance-coverage-selftest.sh` | 25 |
 | `acceptance-gap-selftest.sh` | 9 |
 | `agent-dispatch-guard-selftest.sh` | 19 |
-| `agents-budget-selftest.sh` | 14 |
+| `agents-budget-selftest.sh` | 16 |
 | `check-registries-selftest.sh` | 65 |
 | `coverage-ratchet-selftest.sh` | 9 |
 | `diagnostic-evidence-selftest.sh` | 4 |
 | `fuzz-row-selftest.sh` | 8 |
 | `gate-run-selftest.sh` | 17 |
 | `load-rows-selftest.sh` | 60 |
+| `memory-index-check-selftest.sh` | 12 |
 | `no-unfilled-slots-selftest.sh` | 6 |
 | `non-vacuity-selftest.sh` | 57 |
 | `observability-provenance-selftest.sh` | 10 |
@@ -33,8 +34,8 @@ here would be a threshold nobody derived.
 | `sbom-ordering-selftest.sh` | 10 |
 | `shard-selftest.sh` | 41 |
 | `single-suite-run-selftest.sh` | 106 |
-| `skills-static-selftest.sh` | 13 |
+| `skills-static-selftest.sh` | 21 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **579** |
+| **total** | **609** |

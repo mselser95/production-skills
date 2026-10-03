@@ -47,6 +47,15 @@ plan's task list for `prod-implement`.
    hardening, not an assumption. If the repo has a context script
    (`PROD_CONTEXT_CMD`), run it and consume its JSON instead of parsing YAML
    yourself.
+1b. **Read the repo's own record before you plan.** The newest
+   `.prod/evidence/<sha>.json` (ignore `dirty-*`), `benchmarks/*-baseline.md`
+   and the last ~20 `git log` subjects are the repo's verbatim memory: which
+   gates were red last, what was measured, what the previous plan left open.
+   Anything there that touches the intent goes into `constraints` of the
+   resolved context as a quoted line with its source path — quoted, not
+   summarised (DreamBench-SWE 2608.20664: a verbatim per-repo record is what
+   moved the resolve rate; the distilled layer added one case in 180). A repo
+   with no evidence record yet is itself a finding for the plan, not a skip.
 2. **Map intent → capabilities, existing first.** The question is "which
    declared capability does this touch?", not "what new thing do I build?".
    Only when no declared capability fits, mark `declared: NEW` — that is a

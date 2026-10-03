@@ -104,6 +104,52 @@ so it can be `source`d with no parser. Each skill reads shared material through
 relative symlinks in its `references/` — install by symlinking the skill
 directory (as above) and they resolve through the repo checkout.
 
+## Harness hooks and config
+
+Two things this repo enforces through the Claude Code harness rather than through
+prose, because prose is read and then overridden by whoever is in a hurry. Both
+run from the checkout (`~/dev/personal/production-skills`), both are wired in
+every `settings.json` the user runs (`~/.claude`, `~/.claude-bloxroute`,
+`~/.claude-clc`), and both have a selftest under `_shared/probes/` that shows
+each decision RED on a fixture where it must fire.
+
+| hook | event | what it refuses / reports |
+|---|---|---|
+| `_shared/hooks/agent-dispatch-guard.sh` | `PreToolUse` on `Agent` | `general-purpose`/`fork` dispatches inside a governed repo (names the pinned agent); forks for implementation anywhere; injects the context-budget rules into research agents |
+| `_shared/hooks/memory-index-check.sh` | `SessionStart` | a `MEMORY.md` the harness would truncate (>200 lines or >25 KB, lines >160 chars), broken index links, and orphan memories no index or hub line reaches; prints one `memory-index: ok\|FAIL` line per session |
+
+Settings that go with them (`settings.json`, user scope):
+
+```json
+{
+  "autoMemoryDirectory": "~/.claude-memory",
+  "autoDreamEnabled": false,
+  "subagentPromptCacheTtl": "1h",
+  "bashOutputMaxChars": 12000,
+  "hooks": {
+    "PreToolUse":   [{ "matcher": "Agent", "hooks": [{ "type": "command", "command": "bash ~/dev/personal/production-skills/_shared/hooks/agent-dispatch-guard.sh", "timeout": 10 }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "bash ~/dev/personal/production-skills/_shared/hooks/memory-index-check.sh", "timeout": 10 }] }]
+  }
+}
+```
+
+`autoMemoryDirectory` is used by the CLI DIRECTLY as the memory directory (`~/`
+expanded, no per-project subdirectory — verified in the 2.1.289 bundle, the docs
+only say "a different location"), so one store serves every project and config
+dir without the symlink hack. `autoDreamEnabled` is in the settings schema but
+not the docs ("background memory consolidation"); it is pinned `false` because
+the index is hand-kept and gated, and consolidation belongs behind a gate
+(SkillGLoW 2609.02217), never unattended.
+
+The index itself is regenerated with `python3 scripts/memory-reindex.py [DIR]`:
+operational and standing-rule memories keep one short line each, the long tail
+is grouped into `hub-*.md` files (one index line per hub, member lines verbatim
+inside). Re-running on an unchanged store is byte-identical. The design rests on
+the harness bound (first 200 lines / 25 KB of `MEMORY.md`, nothing else loaded)
+and on DreamBench-SWE 2608.20664 (verbatim per-repo records beat summaries);
+MemoryArena 2602.16313 does NOT support "small core + retrieval" and is not cited
+for it.
+
 ## Validation
 
 Skill files are validated with
