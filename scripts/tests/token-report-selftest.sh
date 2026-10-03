@@ -112,10 +112,16 @@ check "relative root resolves correctly from parent dir" "$rc"
 [[ "$rc" == 0 && -f "$REL_PARENT/rel.md" ]] && rc=0 || rc=1
 check "relative BASELINE --write writes into the caller's dir" "$rc"
 
-# default BASELINE from another cwd is the repo's benchmarks/ file, not /token-baseline.md
-out="$(cd /tmp && env -u BASELINE bash "$REPORT" "$REL_PARENT/$REL_ROOT" 2>&1)"; rc=$?
-grep -q 'benchmarks/token-baseline.md' <<<"$out" && ! grep -qE '(^| )/token-baseline.md' <<<"$out"; grc=$?
-check "default BASELINE from another cwd names benchmarks/token-baseline.md, rc 0" "$(( rc + grc ))"
+# default BASELINE from another cwd resolves to the repo's benchmarks/ file, not the caller's cwd.
+# Independent of whether the real baseline exists: either the "baseline <path>" line or the
+# "no baseline at <path>" line names it; rc 0 or 1 (a GONE/NA alarm vs the real baseline is
+# legitimate from a fixture) is fine, rc 2 is not.
+CWD_T="$(mktemp -d)"
+out="$(cd "$CWD_T" && env -u BASELINE bash "$REPORT" "$REL_PARENT/$REL_ROOT" 2>&1)"; rc=$?
+grep -qE '(token-report: baseline|no baseline at) .*benchmarks/token-baseline\.md' <<<"$out" \
+  && ! grep -qE '(^| )/token-baseline\.md' <<<"$out" && ! grep -qF "$CWD_T" <<<"$out" && (( rc <= 1 )); grc=$?
+rmdir "$CWD_T"
+check "default BASELINE from another cwd names benchmarks/token-baseline.md, rc 0 or 1" "$grc"
 
 if (( fail )); then echo "token-report selftest: $fail FAILED of $n case(s)" >&2; exit 1; fi
 echo "token-report selftest: ok -- $n case(s)"

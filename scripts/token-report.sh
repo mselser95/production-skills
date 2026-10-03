@@ -219,6 +219,7 @@ if write:
     sys.exit(0)
 
 if os.path.isfile(baseline):
+    print("token-report: baseline %s" % baseline)
     was = {}
     for line in open(baseline):
         c = [x.strip() for x in line.strip().strip("|").split("|")]
