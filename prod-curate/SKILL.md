@@ -1,22 +1,15 @@
 ---
 name: prod-curate
 description: >
-  Curation skill (mixed tier): run the promotion pipeline that moves
-  candidate-lane tests toward the blocking lane in BATCHES — change-detector
-  screening against a corpus of real refactor commits, mutant-utility dedup
-  (kills nothing new ⇒ discard), known-bad kata checks (a suite that passes a
-  deliberately broken implementation fails regardless of scores) — and
-  assemble ratification packages for invariant candidates (statement +
-  both-direction evidence + contradiction-check + prod soak) so human
-  adjudication takes minutes, not hours. The skill prepares; the human
-  ratifies. Nothing here lands in the blocking lane without that approval.
-  TRIGGER when: a promotion batch is due ("curate the candidate lane",
-  "prepare the ratification queue", scheduled batch runs), or invariant
-  candidates have accumulated from prod-spec/prod-incident.
-  DO NOT TRIGGER when: someone wants a single test promoted ad-hoc (promotion
-  is batch-only by design), or wants the ratified set edited directly (human,
-  through the TCB flow — this skill only ever proposes).
+  Run the batch promotion pipeline for candidate-lane tests (change-detector
+  screening, mutant dedup, known-bad kata) and assemble ratification packages
+  for humans. Proposes only; the human ratifies.
 ---
+## When to use
+
+- What it is: Curation skill (mixed tier): runs the batch promotion pipeline that moves candidate-lane tests toward the blocking lane and assembles ratification packages for invariant candidates.
+- Use when: a promotion batch is due ("curate the candidate lane", "prepare the ratification queue", scheduled batch runs), or invariant candidates have accumulated from prod-spec/prod-incident.
+- Do not use when: someone wants a single test promoted ad-hoc (promotion is batch-only by design), or wants the ratified set edited directly (human, through the TCB flow — this skill only ever proposes).
 
 # prod-curate — screening and ratification packages
 

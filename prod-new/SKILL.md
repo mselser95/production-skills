@@ -1,28 +1,15 @@
 ---
 name: prod-new
 description: >
-  Greenfield: create a NEW service repo that is born at the standard instead of
-  retrofitted to it. Scaffolds the three architectural zones (pure decision
-  core / durable orchestration / shell), with tracing, metrics, an
-  observability contract, injected clock+random+IDs, invariant counters, the
-  replay corpus, liability registries with expiry enforcement, conformance kits
-  per capability class, and every GATE wired into CI and the Makefile from the
-  first commit — so the easiest code to write in the repo is already the
-  compliant code. DERIVES which architectural machinery this service actually
-  needs (event log, inbox, outbox, snapshots, reconciliation) from what it does
-  and what it owns, so a CRUD service does not inherit a journal it will never
-  replay. Derives every threshold from the org tier policy and asks ONLY the
-  handful of things it cannot: what the service does, its tier, its boundaries,
-  and what must never happen. Ends with the standard's own probe green on an
-  empty service.
-  TRIGGER when: a new service or repo is being created ("new service", "start
-  a repo for X", "bootstrap a greenfield service", "scaffold a new Go service
-  at the standard", "armemos el repo nuevo de X").
-  DO NOT TRIGGER when: the repo already exists — that is prod-bootstrap
-  (brownfield onboarding, which inventories and ratchets instead of
-  scaffolding); or the ask is a task inside an existing governed repo
-  (prod-spec).
+  Greenfield: scaffold a NEW service repo born at the standard
+  (core/orchestration/shell zones, tracing, metrics, registries, every gate
+  wired in CI and Makefile), deriving only the machinery the service needs.
 ---
+## When to use
+
+- What it is: Greenfield: creates a new service repo born at the standard instead of retrofitted to it, so the easiest code to write in the repo is already the compliant code.
+- Use when: a new service or repo is being created ("new service", "start a repo for X", "bootstrap a greenfield service", "scaffold a new Go service at the standard", "armemos el repo nuevo de X").
+- Do not use when: the repo already exists — that is prod-bootstrap (brownfield onboarding, which inventories and ratchets instead of scaffolding); or the ask is a task inside an existing governed repo (prod-spec).
 
 # prod-new — a repo born at the standard
 

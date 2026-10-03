@@ -52,23 +52,18 @@ orchestrators=" prod-spec prod-review prod-bootstrap prod-new prod-incident prod
 fails=0 checked=0
 fail() { printf '  FAIL  %-16s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 
-# NO LENGTH CHECK ON name/description, deliberately.
+# LENGTH CHECK ON description: > 400 chars FAILS.
 #
-# The first draft of this file failed any description over 1024 chars, and it
-# fired on six of the nine. The number was mine -- I asserted a loader limit I
-# had not measured. The disproof was in the same session: Claude Code's own
-# skill listing printed prod-ops's description ending "...or the ask is feature
-# work." and prod-curate's ending "...this skill only ever proposes)." Measured
-# against the files, those are chars 1075 and 1043 -- delivered whole, past the
-# bound I had invented, so nothing was being truncated.
-#
-# Six confident FAILs on healthy skills is worse than not checking length at
-# all: it is exactly the assertion that fires when nothing is wrong, and the
-# way out people take is to widen the bound until it never fires again. If a
-# real limit is ever established BY MEASUREMENT (feed a known-length
-# description in and observe where the loader cuts), add the check back with
-# that evidence cited here. Until then this probe stays silent about length,
-# because an unmeasured bound is a guess wearing a gate's clothes.
+# The first draft of this file failed any description over 1024 chars and was
+# removed because that number was an unmeasured guess. The measurement now
+# exists: 107 skills, 50,659 chars of description, about 12.6k tokens, measured
+# 2026-10-02 from the installed skill tree. That listing is sent on EVERY model
+# turn of every session and agent holding the Skill tool, and the nine prod-*
+# descriptions (818–1410 chars each (≈9.6k together), TRIGGER / DO NOT TRIGGER prose) were about
+# 10k of those chars. A description is a dictionary entry; the when/when-not
+# detail belongs in the body's `## When to use`, loaded only on invocation.
+# 400 leaves headroom over the <=300-char target the nine were rewritten to.
+DESC_MAX=400
 
 # Was an explicit root given? Against the DEFAULT root -- this repo -- the nine
 # are a fixed, known list and a missing one is a failure. Against an explicit
@@ -156,6 +151,10 @@ print("DESC %s" % ("" if s_ is None else str(s_).replace("\n", " ")))
   [[ -n "$name" ]] || fail "$s" "frontmatter has no non-empty name: -- the loader has nothing to register the skill under"
   [[ -n "$desc" ]] || fail "$s" "frontmatter has no non-empty description: -- the description is the ONLY text the model sees when deciding whether to invoke this skill, so an empty one makes the skill unreachable in practice while every structural check still passes"
 
+  if (( ${#desc} > DESC_MAX )); then
+    fail "$s" "description is ${#desc} chars, over the ${DESC_MAX}-char bound -- the skill listing is sent on every model turn, so keep it to one or two sentences and move the TRIGGER / DO NOT TRIGGER prose into the body's '## When to use' section"
+  fi
+
   if [[ -n "$name" && "$name" != "$s" ]]; then
     fail "$s" "frontmatter name '$name' does not match its directory '$s' -- invocation resolves by directory, so the two disagreeing means one of them is a lie"
   fi
@@ -197,4 +196,4 @@ fi
 # "description present and within limits" for one commit after the length check
 # had been removed -- a green verdict claiming a check that no longer existed,
 # which is the same defect this probe was written to catch, in its own output.
-echo "skills-static: ok -- ${checked} skill(s) structurally valid (SKILL.md present, frontmatter parses as YAML, name matches dir, description non-empty, no dangling symlinks; orchestrators reference dispatch-message.md). Length is NOT checked -- see the note above."
+echo "skills-static: ok -- ${checked} skill(s) structurally valid (SKILL.md present, frontmatter parses as YAML, name matches dir, description non-empty and <= ${DESC_MAX} chars, no dangling symlinks; orchestrators reference dispatch-message.md)."

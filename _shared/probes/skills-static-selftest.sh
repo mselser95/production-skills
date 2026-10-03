@@ -105,15 +105,22 @@ run_case "a dangling reference symlink fails" 1 "dangling symlink" "$r"
 mkdir -p "$tmp/empty/skills"
 run_case "a root with no skills at all is not a pass" 2 "a check with no subjects is not a pass" "$tmp/empty/skills"
 
-# --- 10. length is NOT checked ------------------------------------------------
-# The inverse assertion, and the reason it is here: the first draft failed any
-# description over 1024 chars and fired on six of the nine real skills. The
-# bound was invented, and Claude Code's own skill listing had already delivered
-# a 1075-char description whole. This case pins the removal so a future edit
-# cannot quietly reintroduce an unmeasured limit.
+# --- 10. length IS checked (description > 400 chars) --------------------------
+# This SUPERSEDES the earlier case here, "a 4000-char description does NOT fail
+# (no invented bound)", which documented the old decision: no length check,
+# because the 1024 bound was unmeasured. The measurement now exists (107 skills,
+# 50,659 chars, about 12.6k tokens per turn, 2026-10-02), so the decision is
+# reversed and that case is turned into its opposite.
 r=$(mk_root longdesc)
 { printf -- '---\nname: prod-ops\ndescription: '; head -c 4000 </dev/zero | tr '\0' 'x'; printf -- '\n---\nbody\n'; } >"$r/prod-ops/SKILL.md"
-run_case "a 4000-char description does NOT fail (no invented bound)" 0 "structurally valid" "$r"
+run_case "a 4000-char description fails (bound is measured)" 1 "over the 400-char bound" "$r"
+r=$(mk_root desc401)
+{ printf -- '---\nname: prod-ops\ndescription: '; head -c 401 </dev/zero | tr '\0' 'x'; printf -- '\n---\nbody\n'; } >"$r/prod-ops/SKILL.md"
+run_case "a 401-char description fails and names ## When to use" 1 "## When to use" "$r"
+# Boundary: exactly DESC_MAX chars is allowed; pins `>` against `>=` / DESC_MAX=399.
+r=$(mk_root desc400)
+{ printf -- '---\nname: prod-ops\ndescription: '; head -c 400 </dev/zero | tr '\0' 'x'; printf -- '\n---\nbody\n'; } >"$r/prod-ops/SKILL.md"
+run_case "an exactly-400-char description passes (boundary)" 0 "structurally valid" "$r"
 
 # --- 11/12. a skill missing ENTIRELY -------------------------------------------
 # The first version of the probe skipped a missing directory unconditionally, so

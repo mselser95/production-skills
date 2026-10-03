@@ -1,22 +1,15 @@
 ---
 name: prod-incident
 description: >
-  Orchestrator skill: convert a production incident into executable knowledge —
-  a minimized replay fixture asserting invariants (never golden state), a
-  candidate invariant package with mandatory evidence in BOTH directions plus a
-  contradiction-check against declared capability contracts, a missing-signal
-  report (what was indistinguishable in prod that shouldn't be), and a
-  gate-attribution line (would any declared gate have caught this?). This is
-  the level-5 feedback loop of the evidence ladder: reality is the one oracle
-  agents cannot game.
-  TRIGGER when: an incident is being closed out ("turn this incident into a
-  fixture", "materialize the regression for X", post-incident analysis is done
-  and its knowledge must become permanent verification).
-  DO NOT TRIGGER when: the incident is still being actively debugged (this
-  skill consumes a finished analysis, it does not page through live systems),
-  or the user wants the live investigation itself (use the org's
-  debugging/on-call skills).
+  Convert a finished production incident into executable knowledge: a
+  minimized replay fixture, a candidate invariant package with evidence in
+  both directions, a missing-signal report, and a gate-attribution line.
 ---
+## When to use
+
+- What it is: Orchestrator skill: converts a production incident into executable knowledge. It is the level-5 feedback loop of the evidence ladder: reality is the one oracle agents cannot game.
+- Use when: an incident is being closed out ("turn this incident into a fixture", "materialize the regression for X", post-incident analysis is done and its knowledge must become permanent verification).
+- Do not use when: the incident is still being actively debugged (this skill consumes a finished analysis, it does not page through live systems), or the user wants the live investigation itself (use the org's debugging/on-call skills).
 
 # prod-incident — from incident to permanent verification
 

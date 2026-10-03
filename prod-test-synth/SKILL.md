@@ -1,21 +1,15 @@
 ---
 name: prod-test-synth
 description: >
-  Implementer skill (cheap-model tier): generate CANDIDATE-lane tests, property
-  generators, and scenario cases from capability contract clauses and code
-  under test — with mandatory provenance headers and TTLs, generator adequacy
-  self-checks (state diversity, precondition rejection ceiling), and zero
-  ability to touch the blocking lane. Volume is welcome here precisely because
-  candidates cannot contaminate truth: promotion is prod-curate's job, behind
-  screening and human sampling.
-  TRIGGER when: test volume is wanted over a contract surface ("synthesize
-  candidates for the broadcaster capability", "generate property cases for the
-  settlement core", the coverage-expansion step of a prod-* pipeline).
-  DO NOT TRIGGER when: the tests must block CI now (that requires ratified or
-  derived provenance — write them via prod-implement citing real clauses, or
-  promote via prod-curate), or the ask is to fix/delete existing tests (human
-  review, always).
+  Generate CANDIDATE-lane tests, property generators and scenario cases from
+  capability contract clauses, with provenance headers, TTLs and generator
+  adequacy checks. Cannot touch the blocking lane.
 ---
+## When to use
+
+- What it is: Implementer skill (cheap-model tier): generates candidate-lane tests, property generators and scenario cases from contract clauses. Candidates cannot contaminate truth; promotion is prod-curate's job, behind screening and human sampling.
+- Use when: test volume is wanted over a contract surface ("synthesize candidates for the broadcaster capability", "generate property cases for the settlement core", the coverage-expansion step of a prod-* pipeline).
+- Do not use when: the tests must block CI now (that requires ratified or derived provenance — write them via prod-implement citing real clauses, or promote via prod-curate), or the ask is to fix/delete existing tests (human review, always).
 
 # prod-test-synth — candidates at volume, truth untouched
 

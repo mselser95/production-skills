@@ -1,24 +1,15 @@
 ---
 name: prod-review
 description: >
-  Orchestrator skill: hard senior review of a diff AGAINST ITS RESOLVED
-  CONTEXT, with a full audit engine underneath — no approval bias, full-file
-  reading, repo-idiom recon so house style is never flagged as a defect, and a
-  blocker bar injected from config. Three contract phases (recompute
-  obligations from the diff and flag divergence from what prod-spec claimed;
-  gap discovery — new dependency without failure model, new state without
-  recovery, new failure branch without a signal; provenance audit of test
-  changes) plus the deep pass over architecture, logic, data, errors,
-  observability, performance, cross-boundary contracts, tests, and
-  completeness. Emits classified findings with file:line citations; fixes
-  nothing.
-  TRIGGER when: a change produced under a resolved context needs review
-  ("review this against the contract", the post-implement step of a prod-*
-  pipeline, or a PR whose branch carries a resolved-context artifact).
-  DO NOT TRIGGER when: there is no resolved context for the change (use the
-  org's general review skill instead), or the user wants fixes applied
-  (that goes back to prod-implement with these findings as input).
+  Hard senior review of a diff against its resolved context: recompute
+  obligations, discover gaps, audit test provenance, plus a deep audit pass.
+  Emits classified findings with file:line citations; fixes nothing.
 ---
+## When to use
+
+- What it is: Orchestrator skill: hard senior review of a diff against its resolved context, with no approval bias.
+- Use when: a change produced under a resolved context needs review ("review this against the contract", the post-implement step of a prod-* pipeline, or a PR whose branch carries a resolved-context artifact).
+- Do not use when: there is no resolved context for the change (use the org's general review skill instead), or the user wants fixes applied (that goes back to prod-implement with these findings as input).
 
 # prod-review — claimed vs actual, then gaps, then the deep pass
 

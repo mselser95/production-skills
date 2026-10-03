@@ -1,18 +1,15 @@
 ---
 name: prod-implement
 description: >
-  Implementer skill (cheap-model tier): execute ONE bounded task from a change
-  plan, inside its resolved context, iterating against the cheap presubmit gate
-  with structured-feedback repair — under a write-mask that keeps the TCB, CI
-  config, and existing tests out of reach. The contract is the whole point:
-  this skill assumes the ambiguity was already resolved by prod-spec, so its
-  job is convergence, not judgment. Bounded iterations, honest bail with state.
-  TRIGGER when: a change-plan task with ambiguity none|low needs implementing
-  ("implement T2 of the plan", the execution step of a prod-* pipeline).
-  DO NOT TRIGGER when: there is no resolved context / change plan (run
-  prod-spec first), the task is marked ambiguity open (that is orchestrator
-  work), or the ask is to fix review findings on TCB artifacts (human).
+  Execute ONE bounded task from a change plan inside its resolved context,
+  iterating against the cheap presubmit gate under a write-mask. Convergence,
+  not judgment; bounded iterations, honest bail with state.
 ---
+## When to use
+
+- What it is: Implementer skill (cheap-model tier): executes ONE bounded task from a change plan inside its resolved context, iterating against the cheap presubmit gate under a write-mask.
+- Use when: a change-plan task with ambiguity none|low needs implementing ("implement T2 of the plan", the execution step of a prod-* pipeline).
+- Do not use when: there is no resolved context / change plan (run prod-spec first), the task is marked ambiguity open (that is orchestrator work), or the ask is to fix review findings on TCB artifacts (human).
 
 # prod-implement — one task, inside the contract
 

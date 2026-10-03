@@ -1,21 +1,15 @@
 ---
 name: prod-spec
 description: >
-  Orchestrator skill: turn an engineering intent ("add support for X") into a
-  resolved context (~30 lines) and a change plan, against the repo's production
-  spec — WITHOUT writing any code. Reads the service's production.yaml and
-  capability declarations, maps the intent to existing capabilities, pulls ALL
-  ratified invariants of the touched services (over-inclusion by default),
-  derives obligations from capability-class checklists, detects semantic events
-  (new dependency/state/effect/schema change), and emits the two artifacts every
-  downstream skill consumes. Stops for human approval when tier is 0.
-  TRIGGER when: a task is being started against a repo that has a production
-  spec ("prepare the context for X", "plan this change", "resolve what
-  implementing X requires", or as the first step of any prod-* pipeline).
-  DO NOT TRIGGER when: the user wants code written (that is prod-implement,
-  after this skill has run), wants a PR reviewed (prod-review), or the repo has
-  no production spec at all (bail: the spec-lite file is a prerequisite).
+  Turn an engineering intent into a resolved context plus a change plan
+  against the repo's production.yaml, without writing code. First step of
+  every prod-* task; stops for human approval at tier 0.
 ---
+## When to use
+
+- What it is: Orchestrator skill: turns an engineering intent into a resolved context (~30 lines) and a change plan against the repo's production spec, without writing any code.
+- Use when: a task is being started against a repo that has a production spec ("prepare the context for X", "plan this change", "resolve what implementing X requires", or as the first step of any prod-* pipeline).
+- Do not use when: the user wants code written (that is prod-implement, after this skill has run), wants a PR reviewed (prod-review), or the repo has no production spec at all (bail: the spec-lite file is a prerequisite).
 
 # prod-spec — from intent to contract
 

@@ -1,23 +1,15 @@
 ---
 name: prod-bootstrap
 description: >
-  Interactive onboarding skill: bring a repo "to standard" — inventory it
-  against the production-verifiability framework, ask the human the semantic
-  questions only they can answer (tier, capabilities and their classes, seed
-  invariants, source of truth, latency budget, gate commands), then scaffold
-  the spec and directories, emit an honest gap report (requirement → current
-  state → severity), and produce a RATCHET-style refactor plan in change-plan
-  format — bounded tasks routed to prod-implement, never a big-bang rewrite.
-  The human is present and answering throughout; this is the one skill in the
-  suite that is conversation-first.
-  TRIGGER when: a repo is being onboarded to the standard ("bootstrap this
-  repo", "bring X to standard", "set up production.yaml for this service",
-  "what does this repo need to comply?"), for greenfield and brownfield alike.
-  DO NOT TRIGGER when: the repo already has a production spec and the ask is a
-  task against it (prod-spec), or the context is headless (CI, cron,
-  non-interactive runs) — the Q&A requires a present human; bail instead of
-  guessing semantic answers.
+  Interactive, conversation-first onboarding of an existing repo to the
+  production standard: inventory, semantic Q&A with the human, spec scaffold,
+  honest gap report, and a ratchet refactor plan.
 ---
+## When to use
+
+- What it is: Interactive onboarding skill: brings a repo to standard by inventorying it and asking the human the semantic questions only they can answer (tier, capabilities and their classes, seed invariants, source of truth, latency budget, gate commands).
+- Use when: a repo is being onboarded to the standard ("bootstrap this repo", "bring X to standard", "set up production.yaml for this service", "what does this repo need to comply?"), for greenfield and brownfield alike.
+- Do not use when: the repo already has a production spec and the ask is a task against it (prod-spec), or the context is headless (CI, cron, non-interactive runs) — the Q&A requires a present human; bail instead of guessing semantic answers.
 
 # prod-bootstrap — bring a repo to standard
 

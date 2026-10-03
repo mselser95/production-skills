@@ -1,23 +1,15 @@
 ---
 name: prod-ops
 description: >
-  Implementer skill (cheapest-model tier, highest frequency): the mechanical
-  operations layer of a trunk-based pipeline — bisect a red trunk, author
-  revert PRs with a human veto window, classify flakes (isolated rerun +
-  changed-code intersection), manage quarantine, sweep expired liabilities
-  (flags, waivers, quarantines, contract-migration debt), and rebase PRs
-  ejected from the merge queue. Every operation is bounded, evidenced, and
-  safe to run unattended within its rules. Absolute exception: a flaky T0
-  invariant test is an INCIDENT, never a quarantine.
-  The scheduled sweep additionally computes the four delivery keys from git
-  and CI history as a TREND, never a gate.
-  TRIGGER when: trunk is red ("bisect and revert"), a test flaked ("classify
-  this flake"), registries need their sweep ("clean up expired flags"), an
-  ejected PR needs rebasing, or on schedule as the standing maintenance loop.
-  DO NOT TRIGGER when: the failure is a T0 invariant test (escalate as
-  incident), the fix requires judgment about intended behavior (orchestrator
-  work), or the ask is feature work.
+  Mechanical trunk operations: bisect a red trunk, author revert PRs, classify
+  flakes, manage quarantine, sweep expired liabilities, rebase ejected PRs. A
+  flaky T0 invariant test is an incident, never a quarantine.
 ---
+## When to use
+
+- What it is: Implementer skill (cheapest-model tier, highest frequency): the mechanical operations layer of a trunk-based pipeline; every operation is bounded, evidenced, and safe to run unattended within its rules.
+- Use when: trunk is red ("bisect and revert"), a test flaked ("classify this flake"), registries need their sweep ("clean up expired flags"), an ejected PR needs rebasing, or on schedule as the standing maintenance loop.
+- Do not use when: the failure is a T0 invariant test (escalate as incident), the fix requires judgment about intended behavior (orchestrator work), or the ask is feature work.
 
 # prod-ops — the mechanical layer
 
