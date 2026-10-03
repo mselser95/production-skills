@@ -14,6 +14,7 @@ here would be a threshold nobody derived.
 | selftest | cases |
 |---|---|
 | `acceptance-coverage-selftest.sh` | 18 |
+| `agent-dispatch-guard-selftest.sh` | 14 |
 | `agents-budget-selftest.sh` | 8 |
 | `check-registries-selftest.sh` | 65 |
 | `coverage-ratchet-selftest.sh` | 9 |
@@ -24,7 +25,7 @@ here would be a threshold nobody derived.
 | `non-vacuity-selftest.sh` | 57 |
 | `observability-provenance-selftest.sh` | 10 |
 | `policy-coverage-selftest.sh` | 7 |
-| `probe-wiring-selftest.sh` | 12 |
+| `probe-wiring-selftest.sh` | 13 |
 | `prove-mutation-selftest.sh` | 18 |
 | `sbom-ordering-selftest.sh` | 10 |
 | `shard-selftest.sh` | 41 |
@@ -32,4 +33,4 @@ here would be a threshold nobody derived.
 | `skills-static-selftest.sh` | 13 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| **total** | **489** |
+| **total** | **504** |
