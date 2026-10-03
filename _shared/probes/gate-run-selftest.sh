@@ -14,6 +14,9 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 probe="$here/gate-run.sh"
+# vendored layout: scripts/tests/<selftest> beside scripts/<probe>
+[[ -f "$probe" ]] || probe="$here/../gate-run.sh"
+[[ -f "$probe" ]] || { echo "gate-run selftest: probe not found beside or above $here"; exit 1; }
 CASES=0 FAILS=0
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/gate-run-selftest.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT

@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 91c50c672e040b8bf16c07c2ab5045af7ba0f75c470b419f6cb82e0dd068052d
-short: 91c50c672e04
+digest: 718dd4dffd03c0eee628bed1268490141a6bbb7ed525374b761f254e5e52cb5b
+short: 718dd4dffd03
 files: 29
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -26,12 +26,12 @@ per_file:
   scripts/retry.sh: cc42a3d9eaae04ecb029505c1e98d39a3019121495684a70c6319daab21dbb46
   scripts/row-vacuity-sweep.sh: 7a666802fdf34995ee308ecbb4e4a793e9bdb2c5b2b6b32967a429a61ae96a68
   scripts/stamp-template-provenance.sh: 459822369733eb95eb7998924580e5d8dd770fbb971b065815e114a5b895e76c
-  scripts/tests/acceptance-audit-selftest.sh: e59e208b08a555d0007a12e2aeaae3c5240208b1a2eb21decac00440d8229da8
+  scripts/tests/acceptance-audit-selftest.sh: 0cddbb35a1defa78d1bb8a39619aa8e4b4ea49dfb566fbc3efe50ce9495246cf
   scripts/tests/acceptance-coverage-selftest.sh: b8ddea7b8e77fdf57261413628bff90fa4cdbf9567d9250222d40ae1248e644e
   scripts/tests/acceptance-gap-selftest.sh: 0a38728f0df1887681ad5b88f6222e7fd8e2ca7af29d1f848b0ee3ef03d7e770
   scripts/tests/check-registries-selftest.sh: f3235366ca86906748d2481146606b7a7879f22985eaee5c7e51ae46bdcf541d
   scripts/tests/error-handling-fitness-selftest.sh: 37b2876aea9c242367a9df1ca7f6b544653e2a21c11ebcf354d20044d2067bbb
-  scripts/tests/gate-run-selftest.sh: 87daa29ae16306fbb32febca71470120501428a4501c54fb3632441ebf76030b
+  scripts/tests/gate-run-selftest.sh: 4ec340bb14acad3e719e105bd79176dcac4c6d42b70b8c949698a5e0811e715c
   scripts/tests/kill-durability-state-selftest.sh: 826ab6f357020d845edb3575a7da6847506e8bcbd2ac43938cbf144c274bb28e
   scripts/tests/load-rows-selftest.sh: bdf8b5e22570884769e1765c2ccbb5fd0ac5e137964a8f91c30ea00b1298b198
   scripts/tests/non-vacuity-selftest.sh: 9d26436c27bfd7bac1fb2b3000cd1297e46f3cee759864ecc303e05c4de339d0

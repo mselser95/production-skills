@@ -6,16 +6,46 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-mk="$here/../../Makefile"; [[ -f "$mk" ]] && grep -q "^acceptance-audit:" "$mk" || mk="$here/../../prod-new/template/Makefile"
+mk="$here/../../Makefile"; own=1
+if ! { [[ -f "$mk" ]] && grep -q "^acceptance-audit:" "$mk"; }; then mk="$here/../../prod-new/template/Makefile"; own=0; fi
 grep -q '^acceptance-audit:' "$mk" || { echo "acceptance-audit selftest: Makefile with the target not found"; exit 1; }
+root="$(cd "$(dirname "$mk")" && pwd)"
+# A repo may carry a customised changed-line-coverage.sh (different CLI/output) with an
+# acceptance-audit recipe adapted to it; template-format stubs cannot drive that.
+# Inside this repo (own=0) the root IS the template, so there is nothing to compare.
+if [[ "$own" = 1 ]]; then
+  tdir="${TEMPLATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/template}"
+  tcl="$tdir/scripts/changed-line-coverage.sh"
+  if [[ ! -f "$tcl" ]]; then
+    # An absent subject is a failure, never a green (0 cases run over nothing).
+    echo "acceptance-audit selftest: n/a -- template dir not resolvable ($tdir); cannot tell whether scripts/changed-line-coverage.sh is repo-customised; the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
+    exit 2
+  fi
+  # Genuine n/a: the repo customised the script, so template-format stubs cannot drive it.
+  if ! cmp -s "$root/scripts/changed-line-coverage.sh" "$tcl"; then
+    n="$(diff "$root/scripts/changed-line-coverage.sh" "$tcl" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "acceptance-audit selftest: n/a -- scripts/changed-line-coverage.sh is repo-customised ($n diff lines); the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
+    exit 0
+  fi
+fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-audit-selftest.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 pass=0 bad=0
+
+# src: the root mkrepo copies scripts/ and .github/ci-tools.txt from. It carries a
+# contract wrapper and a ci-tools file so those two copies are observable by cases.
+src="$tmp/src"; mkdir -p "$src/scripts" "$src/.github"
+[[ -d "$root/scripts" ]] && cp -R "$root/scripts/." "$src/scripts/"
+printf '#!/bin/sh\necho contract-wrapped >&2\nexec "$@"\n' > "$src/scripts/with-contract.sh"; chmod +x "$src/scripts/with-contract.sh"
+printf 'fixture-tool\nsecond\n' > "$src/.github/ci-tools.txt"
 
 # mkrepo <name> <specs 0|1> : scratch repo, base tag on the first commit
 mkrepo() {
   local r="$tmp/$1"; mkdir -p "$r/scripts" "$r/stub" "$r/acceptance"
   cp "$mk" "$r/Makefile"
+  cp -R "$src/scripts/." "$r/scripts/"
+  rm -rf "$r/scripts/tests"
+  mkdir -p "$r/.github"; cp "$src/.github/ci-tools.txt" "$r/.github/"
   printf '#!/bin/sh\n[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" in -coverprofile=*) echo "mode: atomic" > "${a#-coverprofile=}";; esac; done\nexit 0\n' > "$r/stub/go"
   printf '#!/bin/sh\necho "changed-line coverage: $STUB_OUT lines)"\n' > "$r/scripts/changed-line-coverage.sh"
   chmod +x "$r/stub/go"
@@ -65,6 +95,35 @@ r="$(mkrepo gofail 1)"
 printf '#!/bin/sh\n[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" in -coverprofile=*) echo "mode: atomic" > "${a#-coverprofile=}";; esac; done\nexit 1\n' > "$r/stub/go"
 chmod +x "$r/stub/go"
 run "failing acceptance run with a profile still fails" 2 "Error" "$r" STUB_OUT="90.0% (9/10"
+
+r="$(mkrepo wrapped 1)"; echo "package a // c" > "$r/a.go"
+{ echo 'GO := scripts/with-contract.sh go'; sed 's|^\t  go test -count=1 -tags=integration|\t  $(GO) test -count=1 -tags=integration|' "$r/Makefile"; } > "$r/Makefile.new"; mv "$r/Makefile.new" "$r/Makefile"
+grep -q '\$(GO) test' "$r/Makefile" || { echo "acceptance-audit selftest: fixture sed did not wrap go"; exit 1; }
+run "recipe through a scripts/ wrapper (scripts copied) passes" 0 "contract-wrapped" "$r" STUB_OUT="90.0% (9/10"
+
+r="$(mkrepo citools 1)"; echo "package a // c" > "$r/a.go"
+{ echo 'CI_TOOL := $(shell awk '"'"'NR==1'"'"' .github/ci-tools.txt)'; sed 's|mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; |&echo "ci-tool=$(CI_TOOL)"; |' "$r/Makefile"; } > "$r/Makefile.new"; mv "$r/Makefile.new" "$r/Makefile"
+grep -q 'ci-tool=' "$r/Makefile" || { echo "acceptance-audit selftest: fixture sed did not add ci-tool echo"; exit 1; }
+run "recipe reading .github/ci-tools.txt (copied) passes" 0 "ci-tool=fixture-tool" "$r" STUB_OUT="90.0% (9/10"
+
+# n/a branches: only drivable from a repo-shaped root (own=1); in-repo (own=0) the
+# root is the template, so build a scratch repo from it. Skipped where own=1 already.
+nested() { # nested <name> <want-rc> <want-substr> <TEMPLATE_DIR>
+  local name="$1" wrc="$2" want="$3" td="$4" out rc pid wd
+  out="$tmp/nested.out"
+  ( cd "$tmp/nrepo" && TEMPLATE_DIR="$td" bash scripts/tests/acceptance-audit-selftest.sh > "$out" 2>&1 ) & pid=$!
+  ( sleep 60; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  wait "$pid"; rc=$?; pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  if [[ "$rc" -eq "$wrc" && "$(cat "$out")" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
+  else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; sed 's/^/       /' "$out"; fi
+}
+if [[ "$own" = 0 ]]; then
+  mkdir -p "$tmp/nrepo"; cp -R "$root/." "$tmp/nrepo/"; mkdir -p "$tmp/nrepo/scripts/tests"
+  cp "${BASH_SOURCE[0]}" "$tmp/nrepo/scripts/tests/acceptance-audit-selftest.sh"
+  echo "# customised" >> "$tmp/nrepo/scripts/changed-line-coverage.sh"
+  nested "customised changed-line-coverage.sh is n/a, rc0" 0 "repo-customised" "$root"
+  nested "unresolvable template dir is rc2, not a green" 2 "template dir not resolvable" "/nonexistent"
+fi
 
 # "N case(s)" is the shape scripts/mutation-baseline.sh reads the count from;
 # "N passed, M failed" was invisible to it (found when the baseline refused).
