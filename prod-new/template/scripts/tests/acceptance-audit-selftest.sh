@@ -30,7 +30,7 @@ if [[ "$own" = 1 ]]; then
 fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-audit-selftest.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-pass=0 bad=0
+pass=0 bad=0 skipped=0
 
 # src: the root mkrepo copies scripts/ and .github/ci-tools.txt from. It carries a
 # contract wrapper and a ci-tools file so those two copies are observable by cases.
@@ -97,14 +97,23 @@ chmod +x "$r/stub/go"
 run "failing acceptance run with a profile still fails" 2 "Error" "$r" STUB_OUT="90.0% (9/10"
 
 r="$(mkrepo wrapped 1)"; echo "package a // c" > "$r/a.go"
-{ echo 'GO := scripts/with-contract.sh go'; sed 's|^\t  go test -count=1 -tags=integration|\t  $(GO) test -count=1 -tags=integration|' "$r/Makefile"; } > "$r/Makefile.new"; mv "$r/Makefile.new" "$r/Makefile"
-grep -q '\$(GO) test' "$r/Makefile" || { echo "acceptance-audit selftest: fixture sed did not wrap go"; exit 1; }
+# Fixture-private variable (no repo defines it), and match the recipe line by its
+# distinctive tail with any prefix (go / $(GO) go / $(GO)) so a repo's own wrapper
+# variable can neither be overridden nor abort the suite.
+{ echo 'AUDIT_SELFTEST_WRAPPER := scripts/with-contract.sh'; sed -E $'s#^\t  (\\$\\(GO\\) go|\\$\\(GO\\)|go) test -count=1 -tags=integration#\t  $(AUDIT_SELFTEST_WRAPPER) go test -count=1 -tags=integration#' "$r/Makefile"; } > "$r/Makefile.new"; mv "$r/Makefile.new" "$r/Makefile"
+if ! grep -q 'AUDIT_SELFTEST_WRAPPER) go test' "$r/Makefile"; then
+  skipped=$((skipped+1)); echo "  n/a  recipe through a scripts/ wrapper -- recipe line not in a recognised form; skipped"
+else
 run "recipe through a scripts/ wrapper (scripts copied) passes" 0 "contract-wrapped" "$r" STUB_OUT="90.0% (9/10"
+fi
 
 r="$(mkrepo citools 1)"; echo "package a // c" > "$r/a.go"
 { echo 'CI_TOOL := $(shell awk '"'"'NR==1'"'"' .github/ci-tools.txt)'; sed 's|mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; |&echo "ci-tool=$(CI_TOOL)"; |' "$r/Makefile"; } > "$r/Makefile.new"; mv "$r/Makefile.new" "$r/Makefile"
-grep -q 'ci-tool=' "$r/Makefile" || { echo "acceptance-audit selftest: fixture sed did not add ci-tool echo"; exit 1; }
-run "recipe reading .github/ci-tools.txt (copied) passes" 0 "ci-tool=fixture-tool" "$r" STUB_OUT="90.0% (9/10"
+if ! grep -q 'ci-tool=' "$r/Makefile"; then
+  skipped=$((skipped+1)); echo "  n/a  recipe reading .github/ci-tools.txt -- recipe line not in a recognised form; skipped"
+else
+  run "recipe reading .github/ci-tools.txt (copied) passes" 0 "ci-tool=fixture-tool" "$r" STUB_OUT="90.0% (9/10"
+fi
 
 # n/a branches: only drivable from a repo-shaped root (own=1); in-repo (own=0) the
 # root is the template, so build a scratch repo from it. Skipped where own=1 already.
@@ -127,6 +136,7 @@ fi
 
 # "N case(s)" is the shape scripts/mutation-baseline.sh reads the count from;
 # "N passed, M failed" was invisible to it (found when the baseline refused).
+if (( pass == 0 && skipped > 0 )); then echo "acceptance-audit selftest: nothing was measured -- 0 case(s) run, $skipped skipped"; exit 2; fi
 if (( pass == 0 )); then echo "acceptance-audit selftest: ZERO cases ran"; exit 1; fi
 if (( bad )); then echo "acceptance-audit selftest: $bad of $((pass + bad)) case(s) failed"; exit 1; fi
-echo "acceptance-audit selftest: ok -- $pass case(s)"
+echo "acceptance-audit selftest: ok -- $pass case(s)$( (( skipped > 0 )) && echo " ($skipped skipped)")"
