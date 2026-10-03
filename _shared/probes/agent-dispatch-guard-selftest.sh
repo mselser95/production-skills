@@ -24,8 +24,13 @@ run "fork + research only -> allow+budget"      fork            "Research only, 
 run "gp + implement, governed, no ctx -> deny"  general-purpose "Implement the endpoint and add a test"      "$tmp/governed"     deny  "prod-spec"
 run "gp + implement, governed, ctx -> deny"     general-purpose "Implement the endpoint and add a test"      "$tmp/governed-ctx" deny  "prod-implementer"
 run "gp + implement, ungoverned -> allow+budget" general-purpose "Implement the endpoint and add a test"     "$tmp/plain"        allow injected
-run "gp + read-only validator -> allow+budget"  general-purpose "READ-ONLY validator: review commit; never edit permanently" "$tmp/governed" allow injected
-run "Explore -> allow+budget"                   Explore         "Find where tokens are counted"              "$tmp/governed"     allow injected
+run "gp + read-only validator, governed -> deny" general-purpose "READ-ONLY validator: review commit; never edit permanently" "$tmp/governed" deny "prod-validator"
+run "gp + read-only validator, plain -> allow"  general-purpose "READ-ONLY validator: review commit; never edit permanently" "$tmp/plain" allow injected
+run "gp + recon, governed -> deny (scout)"       general-purpose "Inventory every adapter and list all ports" "$tmp/governed"     deny  "prod-scout"
+run "gp + anything else, governed -> deny"       general-purpose "Summarise the README"                      "$tmp/governed"     deny  "pinned agent"
+run "fork + research, governed -> deny"          fork            "Research only, no files written: map envs"  "$tmp/governed"     deny  "pinned agent"
+run "Explore, governed -> allow+budget"          Explore         "Find where tokens are counted"              "$tmp/governed"     allow injected
+run "prod-validator -> allow, untouched"         prod-validator  "Validate commit abc"                        "$tmp/governed"     allow plain
 run "prod-implementer -> allow, untouched"      prod-implementer "Implement task T1 and commit"             "$tmp/governed"     allow plain
 run "prod-scout -> allow, untouched"            prod-scout      "Inventory the repo"                         "$tmp/governed"     allow plain
 run "already injected -> not doubled"           Explore         "Find X [context budget — injected]"         "$tmp/plain"        allow plain

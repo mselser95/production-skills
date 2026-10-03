@@ -11,11 +11,13 @@
 #
 # Decisions (stdin: the hook JSON; stdout: the hook decision JSON):
 #   prod-* agents                                  -> allow, untouched (they carry their rules)
-#   fork + implementation prompt                   -> DENY (use prod-implementer)
-#   general-purpose/claude + implementation prompt
-#       in a governed repo (production.yaml found) -> DENY (prod-spec -> prod-implementer)
-#       elsewhere                                  -> allow + budget rules injected
-#   anything else (Explore, Plan, research forks)  -> allow + budget rules injected
+#   general-purpose / fork in a GOVERNED repo
+#     (production.yaml in cwd or a parent)         -> DENY, naming the pinned agent for the ask:
+#                                                     implement -> prod-implementer (prod-spec first
+#                                                     if no resolved context), review -> prod-validator,
+#                                                     recon -> prod-scout / Explore
+#   fork + implementation prompt, anywhere         -> DENY (use prod-implementer)
+#   anything else (Explore, Plan, ungoverned gp)   -> allow + budget rules injected
 #
 # "Implementation prompt" = contains an implementation verb AND does not declare
 # itself read-only. The verb list is deliberately coarse; a false deny costs one
@@ -83,28 +85,41 @@ def governed(path):
         p = n
     return None
 
+REVIEW = re.compile(r"validat\w*|review\w*|verdict|BLOCKER|audit\w*|revis\w*", re.IGNORECASE)
+RECON = re.compile(r"inventor\w*|recon\w*|list (?:every|all)|map (?:the|every)|find where|which files|where is", re.IGNORECASE)
+
+if kind in ("general-purpose", "claude", "", "fork"):
+    root = governed(cwd)
+    if root:
+        # In a governed repo EVERY dispatch goes to a pinned agent: the pinned
+        # ones start at ~20k tokens of context with their rules in place; a
+        # general-purpose or fork agent starts at 50-170k with none. The reason
+        # names the right agent for what the prompt asks.
+        name = os.path.basename(root)
+        if is_impl:
+            has_ctx = os.path.isdir(os.path.join(root, ".prod", "context")) and any(
+                "resolved-context" in f for f in os.listdir(os.path.join(root, ".prod", "context")))
+            if not has_ctx:
+                deny(f"{name} is governed by a production spec and has no resolved context under "
+                     ".prod/context/. Run `prod-spec` first (resolved context, change plan, acceptance "
+                     "spec), then dispatch `prod-implementer` per task.")
+            deny(f"{name} is governed: implementation goes to `prod-implementer` (one fresh agent per "
+                 "change-plan task), never to a general-purpose or fork agent.")
+        if REVIEW.search(prompt):
+            deny(f"{name} is governed: reviews and validations go to `prod-validator` (read-only, "
+                 "opus, restricted tools), never to a general-purpose or fork agent.")
+        if RECON.search(prompt):
+            deny(f"{name} is governed: inventories and recon sweeps go to `prod-scout` (haiku, "
+                 "read-only) or the built-in `Explore`; a general-purpose agent is not the scout.")
+        deny(f"{name} is governed: dispatch a pinned agent -- `prod-implementer` (implement), "
+             "`prod-validator` (review), `prod-acceptance-author` (acceptance tests), `prod-scout` "
+             "(recon), `prod-mechanic` (ops) -- or the built-in `Explore`/`Plan` for pure search. "
+             "general-purpose and fork are not used in governed repos.")
+
 if is_impl and kind == "fork":
     deny("Implementation never runs in a fork: it inherits the parent's whole context "
          "(median 170k tokens, measured) and re-reads it every turn. Dispatch "
-         "`prod-implementer` with the task contract (resolved context ids, ONE task, "
-         "gate commands, output format). For read-only research, say so in the prompt "
-         "('research only, no files written').")
-
-if is_impl and kind in ("general-purpose", "claude", ""):
-    root = governed(cwd)
-    if root:
-        has_ctx = False
-        ctx_dir = os.path.join(root, ".prod", "context")
-        if os.path.isdir(ctx_dir):
-            has_ctx = any("resolved-context" in f for f in os.listdir(ctx_dir))
-        if not has_ctx:
-            deny(f"{os.path.basename(root)} is governed by a production spec and has no resolved "
-                 "context under .prod/context/. Run `prod-spec` first (it writes the resolved "
-                 "context, the change plan and the acceptance spec), then dispatch "
-                 "`prod-implementer` per task. A general-purpose agent is not the implementer here.")
-        deny(f"{os.path.basename(root)} is governed: implementation tasks go to `prod-implementer` "
-             "(one fresh agent per change-plan task, tools restricted, budget rules), never to a "
-             "general-purpose agent. Read-only work: say 'read-only' in the prompt.")
+         "`prod-implementer` with the task contract. For read-only research, say so.")
 
 BUDGET = (
     "\n\n[context budget — injected by agent-dispatch-guard]\n"

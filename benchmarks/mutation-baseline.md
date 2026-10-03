@@ -14,12 +14,13 @@ here would be a threshold nobody derived.
 | selftest | cases |
 |---|---|
 | `acceptance-coverage-selftest.sh` | 18 |
-| `agent-dispatch-guard-selftest.sh` | 14 |
-| `agents-budget-selftest.sh` | 8 |
+| `agent-dispatch-guard-selftest.sh` | 19 |
+| `agents-budget-selftest.sh` | 14 |
 | `check-registries-selftest.sh` | 65 |
 | `coverage-ratchet-selftest.sh` | 9 |
 | `diagnostic-evidence-selftest.sh` | 4 |
 | `fuzz-row-selftest.sh` | 8 |
+| `gate-run-selftest.sh` | 17 |
 | `load-rows-selftest.sh` | 60 |
 | `no-unfilled-slots-selftest.sh` | 6 |
 | `non-vacuity-selftest.sh` | 57 |
@@ -33,4 +34,4 @@ here would be a threshold nobody derived.
 | `skills-static-selftest.sh` | 13 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| **total** | **504** |
+| **total** | **532** |
