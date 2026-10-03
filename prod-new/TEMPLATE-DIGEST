@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 1f0ead854cdcabdfffcb6e16f181d60f6c2ae7396b92ce5aa8f64e86dd6d3858
-short: 1f0ead854cdc
+digest: b647a730b9db77e102c6bc909f48cfc2dab2589cb85028e56f9effa4315afe28
+short: b647a730b9db
 files: 29
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -26,7 +26,7 @@ per_file:
   scripts/retry.sh: cc42a3d9eaae04ecb029505c1e98d39a3019121495684a70c6319daab21dbb46
   scripts/row-vacuity-sweep.sh: 7a666802fdf34995ee308ecbb4e4a793e9bdb2c5b2b6b32967a429a61ae96a68
   scripts/stamp-template-provenance.sh: 459822369733eb95eb7998924580e5d8dd770fbb971b065815e114a5b895e76c
-  scripts/tests/acceptance-audit-selftest.sh: ede14256cebe921415efc8041f8799ba5bdb5a0e56041b5063c119c019ed3209
+  scripts/tests/acceptance-audit-selftest.sh: a8750cfc4f3e21fd270b2ff9ce0d110c0ed1f4dcc15ca2fc409ec21958cc9215
   scripts/tests/acceptance-coverage-selftest.sh: b8ddea7b8e77fdf57261413628bff90fa4cdbf9567d9250222d40ae1248e644e
   scripts/tests/acceptance-gap-selftest.sh: 0a38728f0df1887681ad5b88f6222e7fd8e2ca7af29d1f848b0ee3ef03d7e770
   scripts/tests/check-registries-selftest.sh: f3235366ca86906748d2481146606b7a7879f22985eaee5c7e51ae46bdcf541d

@@ -56,16 +56,25 @@ src="$tmp/src"; mkdir -p "$src/scripts" "$src/.github"
 printf '#!/bin/sh\necho contract-wrapped >&2\nexec "$@"\n' > "$src/scripts/with-contract.sh"; chmod +x "$src/scripts/with-contract.sh"
 printf 'fixture-tool\nsecond\n' > "$src/.github/ci-tools.txt"
 
+# mkstub <repo> <exit-code> : the go stub lives at $r/gopath/bin/go and OWNS GOPATH. Makefiles
+# commonly do `export PATH := $(shell go env GOPATH)/bin:$(PATH)`; a stub that answered
+# nothing turned that into `/bin:...`, so on runners with /bin/go (Ubuntu) the REAL go won.
+mkstub() {
+  local r="$1"
+  mkdir -p "$r/gopath/bin"
+  printf '#!/bin/sh\nif [ "$1" = env ]; then shift; for a in "$@"; do case "$a" in GOPATH) echo "%s";; GOBIN) echo "%s/bin";; esac; done; exit 0; fi\n[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" in -coverprofile=*) echo "mode: atomic" > "${a#-coverprofile=}";; esac; done\nexit %s\n' "${STUB_GOPATH:-$r/gopath}" "${STUB_GOPATH:-$r/gopath}" "$2" > "$r/gopath/bin/go"
+  chmod +x "$r/gopath/bin/go"
+}
+
 # mkrepo <name> <specs 0|1> : scratch repo, base tag on the first commit
 mkrepo() {
-  local r="$tmp/$1"; mkdir -p "$r/scripts" "$r/stub" "$r/acceptance"
+  local r="$tmp/$1"; mkdir -p "$r/scripts" "$r/acceptance"
   cp "$mk" "$r/Makefile"
   cp -R "$src/scripts/." "$r/scripts/"
   rm -rf "$r/scripts/tests"
   mkdir -p "$r/.github"; cp "$src/.github/ci-tools.txt" "$r/.github/"
-  printf '#!/bin/sh\n[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" in -coverprofile=*) echo "mode: atomic" > "${a#-coverprofile=}";; esac; done\nexit 0\n' > "$r/stub/go"
+  mkstub "$r" 0
   printf '#!/bin/sh\necho "changed-line coverage: $STUB_OUT lines)"\n' > "$r/scripts/changed-line-coverage.sh"
-  chmod +x "$r/stub/go"
   [[ "$2" = 1 ]] && : > "$r/acceptance/x.yaml"
   echo "package a" > "$r/a.go"
   ( cd "$r" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -q -m base && git tag base )
@@ -76,7 +85,7 @@ mkrepo() {
 run() {
   local name="$1" wrc="$2" want="$3" r="$4"; shift 4
   local out rc
-  out="$(cd "$r" && env PATH="$r/stub:$PATH" CHANGED_LINE_COVERAGE_BASE=base "$@" make --no-print-directory acceptance-audit 2>&1)"; rc=$?
+  out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base "$@" make --no-print-directory acceptance-audit 2>&1)"; rc=$?
   if [[ "$rc" -eq "$wrc" && "$out" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
   else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; echo "$out" | sed 's/^/       /'; fi
 }
@@ -109,9 +118,15 @@ run "coverage script exits non-zero is graded" 2 "exited 3" "$r" STUB_OUT="90.0%
 
 r="$(mkrepo gofail 1)"
 # Override go stub to exit 1 after writing the profile
-printf '#!/bin/sh\n[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" in -coverprofile=*) echo "mode: atomic" > "${a#-coverprofile=}";; esac; done\nexit 1\n' > "$r/stub/go"
-chmod +x "$r/stub/go"
+mkstub "$r" 1
 run "failing acceptance run with a profile still fails" 2 "Error" "$r" STUB_OUT="90.0% (9/10"
+
+# CI condition: Makefile exports PATH from `go env GOPATH`, and a decoy go sits on PATH
+# where the old (GOPATH-less stub) resolution would have found it. Stub must win.
+r="$(mkrepo gopathidiom 1)"; echo "package a // c" > "$r/a.go"
+mkdir -p "$r/decoy/bin"; printf '#!/bin/sh\necho "DECOY GO RAN"\nexit 1\n' > "$r/decoy/bin/go"; chmod +x "$r/decoy/bin/go"
+{ echo 'export PATH := $(shell go env GOPATH)/bin:$(PATH)'; cat "$r/Makefile"; } > "$r/Makefile.new"; mv "$r/Makefile.new" "$r/Makefile"
+run "Makefile exporting PATH from go env GOPATH still reaches the stub, not a decoy" 0 ">= 80% floor" "$r" STUB_OUT="90.0% (9/10" PATH="$r/gopath/bin:$r/decoy/bin:$PATH"
 
 r="$(mkrepo wrapped 1)"; echo "package a // c" > "$r/a.go"
 # Fixture-private variable (no repo defines it), and match the recipe line by its
@@ -151,7 +166,7 @@ if [[ "$own" = 0 ]]; then
   # (i) stock per the stamp, template unresolvable: the cases run (13), no TEMPLATE_DIR needed.
   printf 'files:\n  - path: scripts/changed-line-coverage.sh\n    sha256: x\n    template_sha256: %s\n' \
     "$(shasum -a 256 "$nclc" | awk '{print $1}')" > "$tmp/nrepo/.prod/template-provenance.yaml"
-  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 13 case(s)" "/nonexistent"
+  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 14 case(s)" "/nonexistent"
   # (ii) one comment line added: differs from the stamped template copy -> n/a, rc0.
   echo "# customised" >> "$nclc"
   nested "stamped-customised changed-line-coverage.sh is n/a per provenance, rc0" 0 "per .prod/template-provenance.yaml" "/nonexistent"
