@@ -281,6 +281,11 @@ mirrors=(
   "prod-new/template/scripts/acceptance-coverage.sh:_shared/probes/acceptance-coverage.sh"
   "prod-new/template/scripts/tests/acceptance-coverage-selftest.sh:_shared/probes/acceptance-coverage-selftest.sh"
   "prod-new/template/scripts/tests/acceptance-audit-selftest.sh:_shared/probes/acceptance-audit-selftest.sh"
+  # Added 2026-10-02: acceptance-gap (visible vs held-out pass-rate gap, the
+  # build-to-the-test detector), vendored so scaffolded repos' orchestrators
+  # have it beside acceptance-coverage.
+  "prod-new/template/scripts/acceptance-gap.sh:_shared/probes/acceptance-gap.sh"
+  "prod-new/template/scripts/tests/acceptance-gap-selftest.sh:_shared/probes/acceptance-gap-selftest.sh"
   # ADDED WITH THE THREE ROWS IT COVERS: dimension 25's `load-baseline`, the
   # `error-handling-fitness` row, and dimension 27's advisory
   # `simulation-advisory`. It lifts `row`, `spec_field`, the three row

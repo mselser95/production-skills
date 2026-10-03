@@ -307,6 +307,7 @@ probe-selftests:
 	bash scripts/tests/single-suite-run-selftest.sh
 	bash scripts/tests/acceptance-coverage-selftest.sh
 	bash scripts/tests/acceptance-audit-selftest.sh
+	bash scripts/tests/acceptance-gap-selftest.sh
 
 # acceptance: every acceptance/<feature>.yaml is complete, approved, and traced
 # to tests both ways (_shared/formats/acceptance-spec.md in production-skills).

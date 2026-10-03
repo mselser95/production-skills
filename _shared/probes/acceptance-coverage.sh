@@ -12,6 +12,11 @@
 # test citing an id that does not exist is an assertion whose oracle nobody
 # approved.
 #
+# LANES (2026-10-02). Every case is `lane: visible | held_out`; both lanes must
+# be non-empty unless the matrix has <=3 cases and says so with a top-level
+# `held_out_waiver: <reason>`. A suite the implementer can see is a suite it can
+# satisfy without delivering the behaviour (SpecBench 2605.21384).
+#
 # What it does NOT check, said so nobody reads more into a green line: that the
 # tests PASS (the repo's own test command does), that each test goes RED under
 # its case's mutation (prove-mutation.sh does, at authoring time), or that the
@@ -43,6 +48,7 @@ ROWS = ["happy_path", "input_classes", "declared_errors", "authorization",
         "durability_restart", "compatibility", "feature_interaction", "observability"]
 FIELDS = ["given", "when", "then", "observe", "mutation"]
 OBSERVE = {"response", "event", "readback", "metric", "log"}
+LANES = {"visible", "held_out"}
 
 spec, root, spec_only = os.environ["SPEC"], os.environ["ROOT"], os.environ["SPEC_ONLY"] == "1"
 fails = []
@@ -69,6 +75,7 @@ cases = d.get("cases") or []
 if not cases:
     print("acceptance-coverage: spec has zero cases -- nothing checked is not a pass", file=sys.stderr); sys.exit(2)
 ids = []
+lanes = {"visible": 0, "held_out": 0}
 for c in cases:
     cid = str((c or {}).get("id") or "")
     if not re.fullmatch(r"AC-\d+", cid):
@@ -80,7 +87,25 @@ for c in cases:
             fail(f"{cid} has no {f}:" + (" -- a case whose breaking change is unnamed cannot be proven to have teeth" if f == "mutation" else ""))
     if c.get("observe") and str(c["observe"]) not in OBSERVE:
         fail(f"{cid} observe '{c['observe']}' is not one of {sorted(OBSERVE)}")
+    lane = str(c.get("lane") or "")
+    if lane not in LANES:
+        fail(f"{cid} lane '{lane}' is missing or not one of {sorted(LANES)}")
+    if lane in lanes:  # an invalid lane is already reported above; never count it
+        lanes[lane] += 1
 idset = set(ids)
+
+waiver = str(d.get("held_out_waiver") or "").strip()
+if lanes["held_out"] == 0 or lanes["visible"] == 0:
+    if lanes["visible"] == 0:
+        fail("no visible case -- the implementer needs a visible lane to work against")
+    elif len(cases) <= 3 and waiver:
+        pass
+    elif len(cases) <= 3:
+        fail("every case is visible -- add a held_out case, or a top-level held_out_waiver: <reason> (allowed only for <=3 cases)")
+    else:
+        fail(f"no held_out case among {len(cases)} -- the waiver exists only for matrices of <=3 cases")
+elif waiver:
+    fail("held_out_waiver is set but held_out cases exist -- drop the waiver")
 
 m = d.get("matrix") or {}
 referenced = set()
@@ -125,5 +150,5 @@ if fails:
     print(f"acceptance-coverage: {len(fails)} failure(s) in {feature or spec}", file=sys.stderr); sys.exit(1)
 na = sum(1 for r in ROWS if isinstance(m.get(r), dict))
 mode = "spec only" if spec_only else f"{len(tested)} case(s) traced to tests"
-print(f"acceptance-coverage: ok -- {feature}: {len(ids)} case(s), {len(ROWS) - na}/{len(ROWS)} matrix rows covered ({na} na), {mode}, approved_by={approved}")
+print(f"acceptance-coverage: ok -- {feature}: {len(ids)} case(s), {len(ROWS) - na}/{len(ROWS)} matrix rows covered ({na} na), lanes visible={lanes['visible']} held_out={lanes['held_out']}, {mode}, approved_by={approved}")
 PY

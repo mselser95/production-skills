@@ -36,6 +36,10 @@ Decision rules (these override everything else):
   the test cannot inherit its bugs. An expected value you cannot derive from
   the spec or the contract → BAIL `blocked_on: acceptance-case:<id>` saying
   what is underspecified. Never invent the number.
+- **BOTH-LANES:** you write the tests for every case in your dispatch, visible
+  AND `held_out`, from the same spec and at the same standard. Held-out tests
+  go under the path the dispatch names (e.g. `internal/e2e/heldout/`), never
+  beside the visible ones, and the implementer is never told their ids.
 - **NEVER-EDIT-SPEC:** you never change the spec, its cases, or its matrix.
   A case you believe is wrong is a BAIL with the reason, not an edit.
 - **HEADER:** every test carries `provenance: derived` and
@@ -80,7 +84,8 @@ Your final message is exactly:
 ```
 AUTHORED
 spec: <path> · cases: <AC ids>
-tests: <file:TestName per case>
+tests: <file:TestName per visible case>
+heldout_tests: <file:TestName per held_out case, under the heldout path>
 red_before_impl: <AC id: assertion message> per case
 mutation_proof: <AC id: RED | pending implementation> per case
 stubs: <files added to make tests compile, or none>

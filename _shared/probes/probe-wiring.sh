@@ -113,6 +113,7 @@ declare -A EXCEPT=(
   [prod-new/template/scripts/changed-line-coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/check-template-drift.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/acceptance-coverage.sh]="executed in scaffolded repos by the template Makefile ('make acceptance', inside check-fast); edited here, not run here"
+  [prod-new/template/scripts/acceptance-gap.sh]="agent tool, run by the orchestrator in scaffolded repos on supplied result files (not by the Makefile: the gap needs results only the orchestrator has); edited here, not run here"
   [prod-new/template/scripts/coverage.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/error-handling-fitness.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
   [prod-new/template/scripts/kill-durability.sh]="executed in scaffolded repos by the template Makefile or its workflows; edited here, not run here"
@@ -126,6 +127,7 @@ declare -A EXCEPT=(
   [_shared/probes/prove-mutation.sh]="agent tool run by prod-implementer in target repos; proven here by prove-mutation-selftest.sh"
   [_shared/probes/gate-run.sh]="agent tool run inside target repos by prod-implementer/mechanic/author; proven by gate-run-selftest.sh"
   [prod-new/template/scripts/gate-run.sh]="agent tool, executed in scaffolded repos by agents; edited here, not run here; proven by gate-run-selftest.sh"
+  [_shared/probes/acceptance-gap.sh]="orchestrator tool for target repos' held-out acceptance results (this repo has no features); run by prod-review there, proven here by acceptance-gap-selftest.sh"
   [_shared/probes/acceptance-coverage.sh]="gate for target repos' acceptance/<feature>.yaml (this repo has no features); run by prod-spec/prod-review there, proven here by acceptance-coverage-selftest.sh"
 )
 # A backtick inside a double-quoted reason is COMMAND SUBSTITUTION, not prose:

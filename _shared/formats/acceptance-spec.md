@@ -28,6 +28,8 @@ feature: <kebab-name>                  # the id prefix tests cite
 intent: <one sentence, the resolved-context task>
 approved_by: pending | <human>         # the human moment; tests are written
 approved_at: <date>                    #   only after this is not `pending`
+held_out_waiver: <reason>              # ONLY when the matrix has <=3 cases and
+                                       #   every case is `visible` (see Rules)
 surface:                               # the public entrypoints exercised
   - <POST /v1/transfers | grpc Ledger.Credit | event deposits.v1 | ...>
 
@@ -55,6 +57,7 @@ cases:
     when: <one action on the surface>
     then: <the observable outcome, exact enough to assert>
     observe: response | event | readback | metric | log
+    lane: visible | held_out           # who may SEE this case (see Rules)
     mutation: <the one code change that must turn this RED — e.g. "skip the
                balance check in the transfer handler">
 ```
@@ -76,5 +79,30 @@ cases:
   case wrong BAILs (`blocked_on: acceptance-case:<id>`); it never edits the
   case or its test.
 - **Exercised, not just green.** `make acceptance-audit` requires ≥80% of the feature's changed lines to be executed by the acceptance run; code the suite never reaches is a finding, because a green oracle over dead code is the documented failure mode (2606.28430; and failure on held-out tests rises 28pp per 10x code size, 2605.21384).
+- **Lanes.** Every case carries `lane: visible | held_out`. Agents saturate
+  the tests they can see and fail the ones they cannot (SpecBench 2605.21384:
+  failure rises ~28pp per 10x code size), and a suite the implementer can read
+  can be satisfied while the delivered code is dead (Building to the Test
+  2606.28430: two frontier agents scored ~perfect on a 222-test oracle over a
+  dead-code library). So:
+  - Both lanes are non-empty, unless the matrix has <=3 cases: then all
+    `visible` is allowed with a top-level `held_out_waiver: <reason>`.
+    `acceptance-coverage.sh` enforces this.
+  - Held-out cases are NEVER named in an implementer dispatch; the implementer's
+    `acceptance:` ids are the visible lane only.
+  - The author writes BOTH lanes from the same spec (held-out tests live under
+    a path the dispatch names, e.g. `internal/e2e/heldout/`), so the lanes
+    differ in visibility, never in quality. A separate test author that the
+    repair agent cannot overrule is what makes the oracle hold (ExecCritic
+    2609.09133: +11.4 points on SWE-bench Verified).
+  - The orchestrator runs `held_out` only AFTER the implementer reports
+    IMPLEMENTED, then feeds both result files to `probes/acceptance-gap.sh`
+    (`AC-NN PASS|FAIL` lines per lane).
+  - **Gap rule.** If the held-out pass-rate is below the visible pass-rate by
+    more than 1 case, or any held-out case FAILs while every visible case
+    passes, `prod-review` raises a BLOCKER. The visible-minus-held-out gap is
+    the detector for building to the test; the bar is stricter as the diff
+    grows (SpecBench 2605.21384), so a large diff gets no benefit of the
+    doubt.
 - **Size.** Author dispatches carry ~8 cases each, grouped by matrix row, so
   they run small and in parallel (`references/dispatch.md`).

@@ -141,7 +141,10 @@ For every test file in the diff:
   for this feature, does each test drive the declared surface and assert what
   `observe:` names (an acceptance test calling internals is a unit test with
   the wrong header → finding), and is every `mutation: pending
-  implementation` now proven RED.
+  implementation` now proven RED. When visible and held-out result files exist
+  (`AC-NN PASS|FAIL` lines), run `references/probes/acceptance-gap.sh <spec>
+  <visible> <held_out>`; its `verdict=BLOCKER` is a **BLOCKER**, and exit 2
+  (unmeasured) is a finding, never a pass.
 
 ### Phase 4 — The deep pass
 Apply every review area in `references/review-depth.md` (architecture &

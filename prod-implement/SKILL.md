@@ -55,7 +55,10 @@ Read `references/preamble.md` first. Inputs are artifacts in
   edit them or the spec. A case you believe is wrong → `BAIL` with
   `blocked_on: acceptance-case:<id>` and why; the human re-approves the spec,
   not you. Run them with the repo's acceptance command as part of the cheap
-  loop and report each id's result in `signals:`.
+  loop and report each id's result in `signals:`. Your `acceptance:` ids are
+  the visible lane only; held-out cases exist and run after you hand back; a
+  visible-green/held-out-red result is reviewed as a BLOCKER, so implement the
+  behaviour, not the tests.
 - **RULE ITERATION-CAP:** after `PROD_MAX_ITERATIONS` (default 5) attempts
   against the cheap gate without convergence → STOP and emit `BAIL` with
   state. Never widen scope, relax an assertion, or try a different task to

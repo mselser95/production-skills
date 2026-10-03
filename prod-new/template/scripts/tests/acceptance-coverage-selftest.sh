@@ -14,7 +14,7 @@ pass=0 bad=0
 
 ROWS="happy_path input_classes declared_errors authorization idempotency_retry state_transitions ordering_concurrency durability_restart compatibility feature_interaction"
 
-# mk <name> ; a valid repo: approved spec, 2 cases, every row filled, 2 tests
+# mk <name> ; a valid repo: approved spec, 2 cases (1 visible, 1 held_out), every row filled, 2 tests
 mk() {
   local r="$tmp/$1"; mkdir -p "$r/acceptance" "$r/tests"
   {
@@ -29,6 +29,7 @@ mk() {
     echo "cases:"
     for n in 01 02; do
       echo "  - id: AC-$n"
+      if [[ $n == 01 ]]; then echo "    lane: visible"; else echo "    lane: held_out"; fi
       echo "    given: an account with 10"
       echo "    when: POST a transfer of 5"
       echo "    then: 201 and balance 5"
@@ -97,6 +98,41 @@ run_case "an empty surface fails" 1 "surface is empty" "$(S "$r")" "$r"
 
 r=$(mk nocases);   perl -0pi -e 's/cases:\n(.|\n)*/cases: []\n/' "$(S "$r")"
 run_case "zero cases is not a pass" 2 "zero cases" "$(S "$r")" "$r"
+
+# lanes
+r=$(mk nolane);    perl -0pi -e 's/    lane: held_out\n//' "$(S "$r")"
+run_case "a case with no lane fails" 1 "AC-02 lane '' is missing" "$(S "$r")" "$r"
+
+# widen to 5 cases, all visible, no waiver
+mk5() { # name -> repo with AC-01..AC-05 all visible
+  local r; r=$(mk "$1"); local sp; sp="$(S "$r")"
+  sed -i.bak 's/lane: held_out/lane: visible/' "$sp"
+  for n in 03 04 05; do
+    { echo "  - id: AC-$n"; echo "    lane: visible"; echo "    given: g"; echo "    when: w"
+      echo "    then: t"; echo "    observe: response"; echo "    mutation: m"; } >> "$sp"
+    printf '// verifies: acceptance:transfers/AC-%s\n' "$n" > "$r/tests/t${n}_test.go"
+  done
+  sed -i.bak 's/^  happy_path: .*/  happy_path: [AC-01, AC-03, AC-04, AC-05]/' "$sp"
+  echo "$r"
+}
+r=$(mk5 allvis5)
+run_case "5 cases all visible with no waiver fails" 1 "no held_out case among 5" "$(S "$r")" "$r"
+
+r=$(mk allvis3);   sed -i.bak 's/lane: held_out/lane: visible/' "$(S "$r")"
+sed -i.bak 's/^approved_at: .*/&\nheld_out_waiver: two-case smoke feature/' "$(S "$r")"
+run_case "all visible with <=3 cases and a waiver passes" 0 "lanes visible=2 held_out=0" "$(S "$r")" "$r"
+
+r=$(mk onlyho);    sed -i.bak 's/lane: visible/lane: held_out/' "$(S "$r")"
+run_case "held_out only fails (no visible lane)" 1 "no visible case" "$(S "$r")" "$r"
+
+r=$(mk wvho);      sed -i.bak 's/^approved_at: .*/&\nheld_out_waiver: not needed/' "$(S "$r")"
+run_case "a waiver while held_out cases exist fails" 1 "drop the waiver" "$(S "$r")" "$r"
+
+r=$(mk allvis2);   sed -i.bak 's/lane: held_out/lane: visible/' "$(S "$r")"
+run_case "all visible, <=3 cases, no waiver fails" 1 "every case is visible" "$(S "$r")" "$r"
+
+r=$(mk badlane);   sed -i.bak 's/lane: held_out/lane: hidden/' "$(S "$r")"
+run_case "an invalid lane value fails naming it" 1 "lane 'hidden'" "$(S "$r")" "$r"
 
 run_case "no spec at all is not a pass" 2 "nothing checked is not a pass"
 
