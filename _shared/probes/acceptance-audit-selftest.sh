@@ -14,18 +14,35 @@ root="$(cd "$(dirname "$mk")" && pwd)"
 # acceptance-audit recipe adapted to it; template-format stubs cannot drive that.
 # Inside this repo (own=0) the root IS the template, so there is nothing to compare.
 if [[ "$own" = 1 ]]; then
-  tdir="${TEMPLATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/template}"
-  tcl="$tdir/scripts/changed-line-coverage.sh"
-  if [[ ! -f "$tcl" ]]; then
-    # An absent subject is a failure, never a green (0 cases run over nothing).
-    echo "acceptance-audit selftest: n/a -- template dir not resolvable ($tdir); cannot tell whether scripts/changed-line-coverage.sh is repo-customised; the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
-    exit 2
+  clc="$root/scripts/changed-line-coverage.sh"
+  prov="$root/.prod/template-provenance.yaml"
+  stamped=""
+  # (a) the repo's own stamp: template_sha256 is the template's copy at stamp time, so
+  # CI (where the template is not installed) can still tell stock from customised.
+  if [[ -f "$prov" ]]; then
+    stamped="$(awk '/^[[:space:]]*-[[:space:]]*path:/ { sub(/^[[:space:]]*-[[:space:]]*path:[[:space:]]*/, ""); cur=$0; next }
+      cur == "scripts/changed-line-coverage.sh" && /template_sha256:/ { sub(/.*template_sha256:[[:space:]]*/, ""); print $1; exit }' "$prov")"
   fi
-  # Genuine n/a: the repo customised the script, so template-format stubs cannot drive it.
-  if ! cmp -s "$root/scripts/changed-line-coverage.sh" "$tcl"; then
-    n="$(diff "$root/scripts/changed-line-coverage.sh" "$tcl" 2>/dev/null | wc -l | tr -d ' ')"
-    echo "acceptance-audit selftest: n/a -- scripts/changed-line-coverage.sh is repo-customised ($n diff lines); the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
-    exit 0
+  if [[ -n "$stamped" ]]; then
+    if [[ "$(shasum -a 256 "$clc" | awk '{print $1}')" != "$stamped" ]]; then
+      echo "acceptance-audit selftest: n/a -- scripts/changed-line-coverage.sh differs from the template copy recorded per .prod/template-provenance.yaml (repo-customised); the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
+      exit 0
+    fi
+  else
+    # (b) no stamp entry: compare against the installed template, if any.
+    tdir="${TEMPLATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/template}"
+    tcl="$tdir/scripts/changed-line-coverage.sh"
+    if [[ ! -f "$tcl" ]]; then
+      # (c) unknowable: an absent subject is a failure, never a green (0 cases run over nothing).
+      echo "acceptance-audit selftest: n/a -- template dir not resolvable ($tdir) and no .prod/template-provenance.yaml entry; cannot tell whether scripts/changed-line-coverage.sh is repo-customised; the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
+      exit 2
+    fi
+    # Genuine n/a: the repo customised the script, so template-format stubs cannot drive it.
+    if ! cmp -s "$clc" "$tcl"; then
+      n="$(diff "$clc" "$tcl" 2>/dev/null | wc -l | tr -d ' ')"
+      echo "acceptance-audit selftest: n/a -- scripts/changed-line-coverage.sh is repo-customised ($n diff lines); the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
+      exit 0
+    fi
   fi
 fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-audit-selftest.XXXXXX")"
@@ -120,7 +137,7 @@ fi
 nested() { # nested <name> <want-rc> <want-substr> <TEMPLATE_DIR>
   local name="$1" wrc="$2" want="$3" td="$4" out rc pid wd
   out="$tmp/nested.out"
-  ( cd "$tmp/nrepo" && TEMPLATE_DIR="$td" bash scripts/tests/acceptance-audit-selftest.sh > "$out" 2>&1 ) & pid=$!
+  ( cd "$tmp/nrepo" && TEMPLATE_DIR="$td" HOME="$tmp/nhome" bash scripts/tests/acceptance-audit-selftest.sh > "$out" 2>&1 ) & pid=$!
   ( sleep 60; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?; pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   if [[ "$rc" -eq "$wrc" && "$(cat "$out")" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
@@ -129,7 +146,19 @@ nested() { # nested <name> <want-rc> <want-substr> <TEMPLATE_DIR>
 if [[ "$own" = 0 ]]; then
   mkdir -p "$tmp/nrepo"; cp -R "$root/." "$tmp/nrepo/"; mkdir -p "$tmp/nrepo/scripts/tests"
   cp "${BASH_SOURCE[0]}" "$tmp/nrepo/scripts/tests/acceptance-audit-selftest.sh"
-  echo "# customised" >> "$tmp/nrepo/scripts/changed-line-coverage.sh"
+  mkdir -p "$tmp/nhome" "$tmp/nrepo/.prod"
+  nclc="$tmp/nrepo/scripts/changed-line-coverage.sh"
+  # (i) stock per the stamp, template unresolvable: the cases run (13), no TEMPLATE_DIR needed.
+  printf 'files:\n  - path: scripts/changed-line-coverage.sh\n    sha256: x\n    template_sha256: %s\n' \
+    "$(shasum -a 256 "$nclc" | awk '{print $1}')" > "$tmp/nrepo/.prod/template-provenance.yaml"
+  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 13 case(s)" "/nonexistent"
+  # (ii) one comment line added: differs from the stamped template copy -> n/a, rc0.
+  echo "# customised" >> "$nclc"
+  nested "stamped-customised changed-line-coverage.sh is n/a per provenance, rc0" 0 "per .prod/template-provenance.yaml" "/nonexistent"
+  # (iii) stamp present but no entry for the script, no template: unknowable -> rc2.
+  printf 'files:\n  - path: scripts/other.sh\n    sha256: x\n    template_sha256: y\n' > "$tmp/nrepo/.prod/template-provenance.yaml"
+  nested "no provenance entry and no template is rc2" 2 "no .prod/template-provenance.yaml entry" "/nonexistent"
+  rm -rf "$tmp/nrepo/.prod"
   nested "customised changed-line-coverage.sh is n/a, rc0" 0 "repo-customised" "$root"
   nested "unresolvable template dir is rc2, not a green" 2 "template dir not resolvable" "/nonexistent"
 fi
