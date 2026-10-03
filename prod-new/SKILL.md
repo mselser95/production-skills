@@ -176,6 +176,9 @@ Run the derivation FIRST (`references/mechanism-derivation.md`), then scaffold
 the set it returns. The four Phase-1 answers are its whole input; it is not a
 fifth question.
 
+Template-body builds dispatched to an agent follow the routing in
+`references/dispatch.md`. Dispatch messages follow `references/dispatch-message.md`.
+
 **How a partial scaffold is produced, in order.** Two agents following this
 must land on the same tree, so the order is fixed and each step is checkable:
 

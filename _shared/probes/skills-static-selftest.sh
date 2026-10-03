@@ -127,6 +127,53 @@ run_case "an explicit root holding a subset is fine (lenient)" 0 "structurally v
 r=$(mk_root strict)   # same tree, strict: the other eight are a hole
 run_case "the same subset under REQUIRE_ALL fails for the missing eight" 1 "the nine are a fixed list" "$r" 1
 
+# --- 13/14. orchestrator skills must reference dispatch-message.md --------------
+# The fixtures above use prod-ops (not an orchestrator). These use prod-spec.
+mk_spec() { # mk_spec <name> <with-mention 0|1> <with-link 0|1>
+  local r="$tmp/$1/skills"; mkdir -p "$r/prod-spec/references"
+  { printf -- '---\nname: prod-spec\ndescription: valid.\n---\nbody\n'
+    [[ "$2" == 1 ]] && printf 'Dispatch messages follow `references/dispatch-message.md`.\n'; } >"$r/prod-spec/SKILL.md"
+  if [[ "$3" == 1 ]]; then printf -- '# Dispatch message — fixed section order, static to dynamic\n\nValid format\n' >"$tmp/$1/dispatch-message.md"; ln -s "$tmp/$1/dispatch-message.md" "$r/prod-spec/references/dispatch-message.md"
+  else ln -s "$tmp/$1/missing.md" "$r/prod-spec/references/dispatch-message.md"; fi
+  printf '%s' "$r"
+}
+r=$(mk_spec orch_ok 1 1)
+run_case "an orchestrator with mention and symlink passes" 0 "structurally valid" "$r"
+r=$(mk_spec orch_nomention 0 1)
+run_case "an orchestrator without the dispatch-message.md mention fails" 1 "does not reference dispatch-message.md" "$r"
+# The generic dangling-symlink rule fires too; this asserts the dispatch-message
+# rule's own message so the case proves the new rule, not only the old one.
+r=$(mk_spec orch_dangling 1 0)
+run_case "an orchestrator with a dangling dispatch-message symlink fails" 1 "references/dispatch-message.md does not resolve to the dispatch-message format" "$r"
+
+# --- 16. orchestrator symlink pointing at a different file -----------------------
+# The new check in case 4 verifies both the basename and the H1. This case proves
+# that a symlink to an existing file with the WRONG name or content fails.
+mk_spec_wrong() { # mk_spec_wrong <name> - points dispatch-message.md to change-plan.md
+  local r="$tmp/$1/skills"; mkdir -p "$r/prod-spec/references"
+  printf -- '---\nname: prod-spec\ndescription: valid.\n---\nbody\nDispatch messages follow `references/dispatch-message.md`.\n' >"$r/prod-spec/SKILL.md"
+  printf -- '# Format: change-plan\n\nWrong format\n' >"$r/prod-spec/references/change-plan.md"
+  ln -s "$r/prod-spec/references/change-plan.md" "$r/prod-spec/references/dispatch-message.md"
+  printf '%s' "$r"
+}
+r=$(mk_spec_wrong orch_wrongfile)
+run_case "an orchestrator with dispatch-message.md pointing to a different file fails" 1 "references/dispatch-message.md does not resolve to the dispatch-message format" "$r"
+
+# --- 17/18. the basename check and the H1 check are each pinned ALONE ------------
+# Case 16 has both the wrong basename and the wrong H1, so removing either check
+# keeps it red. These two vary one property each.
+mk_spec_one() { # mk_spec_one <name> <target-basename> <h1 text>
+  local r="$tmp/$1/skills"; mkdir -p "$r/prod-spec/references"
+  printf -- '---\nname: prod-spec\ndescription: valid.\n---\nbody\nDispatch messages follow `references/dispatch-message.md`.\n' >"$r/prod-spec/SKILL.md"
+  printf -- '%s\n\nbody\n' "$3" >"$tmp/$1/$2"
+  ln -s "$tmp/$1/$2" "$r/prod-spec/references/dispatch-message.md"
+  printf '%s' "$r"
+}
+r=$(mk_spec_one orch_noh1 dispatch-message.md '# Something else entirely')
+run_case "a file named dispatch-message.md WITHOUT the H1 fails (pins the H1 check)" 1 "references/dispatch-message.md does not resolve to the dispatch-message format" "$r"
+r=$(mk_spec_one orch_othername other-name.md '# Dispatch message — fixed section order, static to dynamic')
+run_case "a file WITH the H1 but another name fails (pins the basename check)" 1 "references/dispatch-message.md does not resolve to the dispatch-message format" "$r"
+
 echo
 if (( fail > 0 )); then
   echo "skills-static selftest: ${fail} case(s) BAD, ${pass} ok" >&2

@@ -78,7 +78,7 @@ Three rules frame everything:
 
 Dispatch per `references/dispatch.md`: Phase 1 runs on a `prod-scout` agent
 (cheap, read-only, checklist in / facts report out); phases 2–5 stay on the
-session model with the human.
+session model with the human. Dispatch messages follow `references/dispatch-message.md`.
 
 ### Phase 1 — Inventory (read-only, no questions yet)
 Detect and record, without judging:

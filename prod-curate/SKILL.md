@@ -55,7 +55,7 @@ gap you found. A stale corpus screens nothing.
 Dispatch per `references/dispatch.md`: the mechanical runs (steps 2–4 —
 corpus replays, mutation dedup, kata runs) go to `prod-mechanic` agents;
 eligibility decisions, sampling, and ratification packages stay on the
-session model.
+session model. Dispatch messages follow `references/dispatch-message.md`.
 
 ## Algorithm — test promotion (batch)
 

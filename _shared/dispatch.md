@@ -19,7 +19,8 @@ dispatch bug.
 | Incident analysis + invariant candidates (`prod-incident` steps 2–5) | main session | session model | inline |
 | Ratification packages, screening interpretation (`prod-curate` judgment) | main session | session model | inline |
 | Repo inventories, recon sweeps, full-file reading fan-outs (bootstrap phase 1, review phase 0 on large diffs) | `prod-scout` agent | **haiku** | Agent tool (pinned in frontmatter — omit `model`) |
-| One bounded change-plan task (`prod-implement`) | `prod-implementer` agent | **sonnet** (pass `model: haiku` when the task is `ambiguity: none` AND touches no T0 path) | a FRESH Agent call per task — never one agent looping over the plan, never a fork; independent tasks in parallel |
+| One bounded change-plan task (`prod-implement`) | `prod-implementer` agent | **sonnet** — always; haiku measured 2–5× more turns and 2 of 3 NO-OK on closed-contract fixes (2026-10-02) | a FRESH Agent call per task — never one agent looping over the plan, never a fork; independent tasks in parallel |
+| Read-only review of one commit/diff after an implementer hands back | `prod-validator` agent | opus | Agent tool, a FRESH call per task |
 | Acceptance tests for an APPROVED spec (`kind: acceptance-author` tasks) | `prod-acceptance-author` agent | sonnet | a fresh Agent call per ~8 cases, in parallel, BEFORE any implementation task; never the same agent that implements |
 | Candidate test generation (`prod-test-synth`) | `prod-implementer` agent | sonnet | Agent tool |
 | Bisects, reverts, flake repro, sweeps, rebases (`prod-ops`) | `prod-mechanic` agent | **haiku** | Agent tool |
@@ -68,13 +69,10 @@ small. These rules are what that measurement bought; each names its share.
 2. **Never implement in a fork.** A fork inherits the parent's whole context
    (median start 170k tokens, against ~20k for a pinned agent with a
    restricted tool list) and re-reads it every turn.
-3. **Send only what is relevant.** The dispatch message carries: the task
-   entry; the resolved-context entries named in its `context:` ids, quoted;
-   the `do_not_touch` mask; the gate commands; the output and bail formats;
-   paths to the full artifacts in case a reference must be checked. It does
-   NOT carry the whole plan, other tasks, earlier agents' reports, review
-   history, or file contents the agent can read itself. Target under ~1.5k
-   tokens. A dispatch that needs more is a task that is too big.
+3. **Send only what is relevant.** The message follows the fixed section
+   order in `formats/dispatch-message.md` (static to dynamic, ~1.5k tokens
+   at most; a dispatch that needs more is a task that is too big). The
+   `focus:` from the change plan travels in section 2 of the message.
 4. **Small tasks, run in parallel.** A task that touches more than ~3 files
    or two concerns is split at `prod-spec` time. Tasks with empty
    `depends_on` and disjoint `files` are dispatched together, each with Agent
@@ -82,16 +80,25 @@ small. These rules are what that measurement bought; each names its share.
    faster, fails cheaper, and the wall clock is the slowest task, not the sum.
 5. **Model: omit the `model` parameter by default.** The Agent tool's `model`
    overrides the pinned frontmatter: the haiku-pinned scout and mechanic ran 6
-   times on sonnet because a dispatch passed one. Pass `model: haiku` for an
-   implementer task that is `ambiguity: none` and touches no T0 path (1 of 69
-   runs did, so its success rate is unmeasured — record BAIL rate and turns
-   per model); pass a more expensive model only with a reason in the message.
+   times on sonnet because a dispatch passed one. Do not pass `model: haiku` for implementation; `token-report` keeps BAIL
+   rate and turns per model so this can be revisited with data. Pass a more expensive model only with a reason in the message.
 6. **No waiting laps, no raw logs.** Agents run gates in the foreground or
    with Bash `run_in_background`, never in `sleep`/`until`/`pgrep` loops (7%
    of implementer Bash calls), pipe gate output through a failure filter and
    `tail`, and prove mutations with `probes/prove-mutation.sh` — one call, one
    line. The orchestrator's `verify-standard` re-verification (Rules, item 5)
    runs once after the plan's last task, not once per task.
+
+## What the evidence says NOT to add
+
+- No critic or planner agents in the loop: they add roughly nothing and cost
+  about 1.8x the calls (2609.04217, 2604.02460).
+- No learned router: the static table above is the router (2601.07206).
+- No LLM summarisation of context: truncate verbatim (CliffCompaction 2609.26779).
+- No "write tests" instruction to implementers as a score lever: acceptance
+  tests come from `prod-acceptance-author` (2602.07900).
+- No visible-oracle-only acceptance: a green gate the agent can see is not
+  evidence (2605.21384, 2606.28430).
 
 ## Escalation
 

@@ -45,6 +45,10 @@ root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 skills=(prod-spec prod-review prod-incident prod-implement prod-test-synth
         prod-ops prod-curate prod-bootstrap prod-new)
 
+# Orchestrator skills dispatch agents, so each must point at the dispatch
+# message format by filename AND carry a resolving references/ symlink to it.
+orchestrators=" prod-spec prod-review prod-bootstrap prod-new prod-incident prod-curate "
+
 fails=0 checked=0
 fail() { printf '  FAIL  %-16s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 
@@ -162,6 +166,21 @@ print("DESC %s" % ("" if s_ is None else str(s_).replace("\n", " ")))
   while IFS= read -r link; do
     [[ -e "$link" ]] || fail "$s" "dangling symlink ${link#"$root/"} -- points at a file that does not exist, and a reference resolves to nothing only when a run needs it"
   done < <(find "$dir" -type l 2>/dev/null)
+
+  if [[ "$orchestrators" == *" $s "* ]]; then
+    grep -q 'dispatch-message\.md' "$md" || fail "$s" "SKILL.md does not reference dispatch-message.md -- an orchestrator skill that dispatches agents must point at the dispatch message format"
+    link="$dir/references/dispatch-message.md"
+    if [[ -e "$link" ]]; then
+      realpath_base=$(basename "$(realpath "$link")")
+      if [[ "$realpath_base" != "dispatch-message.md" ]]; then
+        fail "$s" "references/dispatch-message.md does not resolve to the dispatch-message format"
+      elif first_line=$(head -n 1 "$(realpath "$link")"); [[ "$first_line" != '# Dispatch message'* ]]; then
+        fail "$s" "references/dispatch-message.md does not resolve to the dispatch-message format"
+      fi
+    else
+      fail "$s" "references/dispatch-message.md does not resolve to the dispatch-message format"
+    fi
+  fi
 done
 
 # Zero-inputs: a sweep whose subject list came back empty must not report clean.
@@ -178,4 +197,4 @@ fi
 # "description present and within limits" for one commit after the length check
 # had been removed -- a green verdict claiming a check that no longer existed,
 # which is the same defect this probe was written to catch, in its own output.
-echo "skills-static: ok -- ${checked} skill(s) structurally valid (SKILL.md present, frontmatter parses as YAML, name matches dir, description non-empty, no dangling symlinks). Length is NOT checked -- see the note above."
+echo "skills-static: ok -- ${checked} skill(s) structurally valid (SKILL.md present, frontmatter parses as YAML, name matches dir, description non-empty, no dangling symlinks; orchestrators reference dispatch-message.md). Length is NOT checked -- see the note above."

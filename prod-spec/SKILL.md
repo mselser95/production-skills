@@ -26,7 +26,7 @@ step 5.
 
 This skill runs on the SESSION model and dispatches per
 `references/dispatch.md`: recon sweeps go to `prod-scout` (cheap); the plan's
-tasks go to `prod-implementer`/`prod-mechanic` — you think, they execute.
+tasks go to `prod-implementer`/`prod-mechanic` — you think, they execute. Dispatch messages follow `references/dispatch-message.md`.
 
 **This skill writes no code.** Its entire value is that everything downstream
 becomes cheap because the ambiguity was resolved here, once, by the expensive
