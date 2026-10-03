@@ -42,7 +42,12 @@ mkfix "$tmp/broken"; echo '- [zz](zz.md) — gone' >> "$tmp/broken/MEMORY.md"
                                                    run "broken link -> FAIL"                  "$tmp/broken" FAIL "zz.md no existe"
 mkfix "$tmp/orphan"; printf -- '---\nname: d\n---\nD\n' > "$tmp/orphan/d.md"
                                                    run "orphan memory -> FAIL, named"         "$tmp/orphan" FAIL "d.md"
-mkfix "$tmp/viahub";                               run "member reachable only via hub -> ok"  "$tmp/viahub" ok "ok"
+mkfix "$tmp/viahub"; printf -- '# idx\n- [a](./a.md) — dot-slash\n- [b](b.md#notes) — anchor\n- [hub](hub-x.md) — hub\n' > "$tmp/viahub/MEMORY.md"
+                                                   run "./x.md and x.md#anchor links count -> ok" "$tmp/viahub" ok "4 memorias alcanzables"
+mkfix "$tmp/hubbroken"; echo '- [gone](gone.md) — missing' >> "$tmp/hubbroken/hub-x.md"
+                                                   run "broken link inside a hub -> FAIL"      "$tmp/hubbroken" FAIL "link roto en hub-x.md: gone.md"
+mkfix "$tmp/nested"; printf -- '---\nname: hub-y\n---\n- [c](c.md)\n' > "$tmp/nested/hub-y.md"; printf -- '- [hub-y](hub-y.md)\n' > "$tmp/nested/hub-x.md"
+                                                   run "member only via a nested hub -> orphan (fails safe)" "$tmp/nested" FAIL "c.md"
 mkfix "$tmp/nohub"; sed -i.bak '/hub-x/d' "$tmp/nohub/MEMORY.md"; rm -f "$tmp/nohub/MEMORY.md.bak"
                                                    run "hub unlinked -> its member is an orphan too" "$tmp/nohub" FAIL "2 memoria(s) sin línea"
 mkdir -p "$tmp/noidx";                             run "missing MEMORY.md -> FAIL"            "$tmp/noidx" FAIL "no existe"
@@ -55,6 +60,24 @@ mkdir -p "$tmp/cfg-set" "$tmp/home"; mkfix "$tmp/home/mem"
 echo '{"autoMemoryDirectory":"~/mem"}' > "$tmp/cfg-set/settings.json"
 out=$(HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/cfg-set" MEMORY_INDEX_DIR='' bash "$hook" --strict 2>&1); rc=$?
 [[ $rc -eq 0 && "$out" == *"$tmp/home/mem"* ]] && { pass=$((pass+1)); echo "  ok    autoMemoryDirectory with ~ -> resolved and checked"; } || { bad=$((bad+1)); echo "  FAIL  set setting rc=$rc: $out"; }
+
+# the hook must also run under macOS /bin/bash 3.2 (empty arrays under set -u)
+if [[ -x /bin/bash ]]; then
+  out=$(/bin/bash "$hook" --strict "$tmp/ok" 2>&1); rc=$?
+  [[ $rc -eq 0 && "$out" == "memory-index: ok"* ]] && { pass=$((pass+1)); echo "  ok    /bin/bash $(/bin/bash -c 'echo ${BASH_VERSION%%(*}') -> ok on valid store"; } || { bad=$((bad+1)); echo "  FAIL  /bin/bash rc=$rc: $out"; }
+  out=$(/bin/bash "$hook" --strict "$tmp/orphan" 2>&1); rc=$?
+  [[ $rc -eq 1 && "$out" == *"d.md"* ]] && { pass=$((pass+1)); echo "  ok    /bin/bash -> FAIL with violations listed"; } || { bad=$((bad+1)); echo "  FAIL  /bin/bash orphan rc=$rc: $out"; }
+fi
+
+# the re-index generator: output within the bound, byte-identical on re-run
+gen="$here/../../scripts/memory-reindex.py"
+if [[ -f "$gen" ]]; then
+  cp -r "$tmp/ok" "$tmp/gen"; python3 "$gen" "$tmp/gen" >/dev/null 2>&1; cp "$tmp/gen/MEMORY.md" "$tmp/gen.first"
+  python3 "$gen" "$tmp/gen" >/dev/null 2>&1
+  if cmp -s "$tmp/gen/MEMORY.md" "$tmp/gen.first" && bash "$hook" --strict "$tmp/gen" >/dev/null 2>&1; then
+    pass=$((pass+1)); echo "  ok    memory-reindex.py: idempotent and the result passes the gate"
+  else bad=$((bad+1)); echo "  FAIL  memory-reindex.py: not idempotent or result fails the gate: $(bash "$hook" --strict "$tmp/gen" 2>&1 | head -n 2 | tr '\n' '|')"; fi
+else echo "  n/a   memory-reindex.py not found beside the probes (vendored layout)"; fi
 
 # hook mode (no --strict) never exits non-zero, even on FAIL
 out=$(bash "$hook" "$tmp/lines" 2>&1); rc=$?

@@ -24,7 +24,7 @@ here would be a threshold nobody derived.
 | `fuzz-row-selftest.sh` | 8 |
 | `gate-run-selftest.sh` | 17 |
 | `load-rows-selftest.sh` | 60 |
-| `memory-index-check-selftest.sh` | 12 |
+| `memory-index-check-selftest.sh` | 17 |
 | `no-unfilled-slots-selftest.sh` | 6 |
 | `non-vacuity-selftest.sh` | 57 |
 | `observability-provenance-selftest.sh` | 10 |
@@ -38,4 +38,4 @@ here would be a threshold nobody derived.
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **609** |
+| **total** | **614** |

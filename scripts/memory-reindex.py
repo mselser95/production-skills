@@ -4,6 +4,12 @@
 Usage: python3 scripts/memory-reindex.py [DIR]   (DIR defaults to ~/.claude-memory)
 
 Existing hooks are read verbatim from the current MEMORY.md and hub-*.md files.
+
+The hub list (HUBS) and the always-direct set (DIRECT_OPS / DIRECT_BLOX / DIRECT_ACTIVE)
+are THIS user's classification of THIS store, kept in the shared repo so the gate
+(memory-index-check.sh) and its generator ship together. Another store edits those
+tables; files matching no rule are listed as UNCLASSIFIED and get a direct line under their own
+section; hub-*.md files not in HUBS keep an index line of their own.
 Long-tail lessons move into hub files (one index line per hub, member lines verbatim
 inside the hub). Operational / standing-rule memories keep a direct, short line.
 Re-runnable: regenerates hubs and MEMORY.md from the snapshot every time.
@@ -150,9 +156,18 @@ L.append('## Campañas activas')
 for f in direct_active:
     t, h, _ = title_hook(f); L.append(line(t, f, h))
 L.append('')
+if uncl:
+    L.append('## Sin clasificar (darles un hub o una regla en memory-reindex.py)')
+    for f in sorted(uncl, key=lambda x: title_hook(x)[0].lower()):
+        t, h, _ = title_hook(f); L.append(line(t, f, h))
+    L.append('')
 L.append('## Hubs por tema (abrir el que toque el trabajo)')
 for slug, title, kw, _ in HUBS:
     n = len(hub_members[slug]); L.append(line(f'Hub · {title}', f'hub-{slug}.md', f'{n} memorias: {kw}', 158))
+# hub files that exist but are not in HUBS (hand-made, or from another store): keep them reachable
+known = {f'hub-{slug}.md' for slug, _, _, _ in HUBS}
+for f in sorted(x for x in os.listdir('.') if x.startswith('hub-') and x.endswith('.md') and x not in known):
+    name, desc, _ = fm(f); L.append(line(f'Hub · {name}', f, desc or 'hub sin descripción'))
 out = '\n'.join(L) + '\n'
 open('MEMORY.md', 'w').write(out)
 print(f'index: {len(L)} lines, {len(out.encode())} bytes, max line {max(len(l) for l in L)}')

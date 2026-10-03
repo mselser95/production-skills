@@ -75,18 +75,24 @@ if (( longest > MAX_LINE )); then
   fails+=("$n línea(s) de más de $MAX_LINE chars (máx $longest): acortar el gancho, el detalle va en el archivo")
 fi
 
-# links from the index, and from the hubs the index links
-links_of() { grep -o '](\([^)]*\.md\))' "$1" 2>/dev/null | sed 's/^](//; s/)$//' | sort -u; }
+# links from the index, and from the hubs the index links. A link is
+# `](x.md)`, `](./x.md)` or `](x.md#anchor)`; `./` and the anchor are dropped.
+# Hubs are followed ONE level: a memory linked only from a hub inside another
+# hub is reported as an orphan (fails safe; put it in the hub the index names).
+links_of() { grep -o '](\([^)]*\.md\)\(#[^)]*\)\{0,1\})' "$1" 2>/dev/null | sed 's/^](//; s/)$//; s/#.*$//; s#^\./##' | sort -u; }
 index_links="$(links_of "$idx")"
-missing=0
 reach="$(mktemp "${TMPDIR:-/tmp}/memidx.XXXXXX")"; trap 'rm -f "$reach"' EXIT
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
   if [[ -f "$dir/$f" ]]; then
     echo "$f" >> "$reach"
-    links_of "$dir/$f" >> "$reach"
+    while IFS= read -r g; do
+      [[ -n "$g" ]] || continue
+      if [[ -f "$dir/$g" ]]; then echo "$g" >> "$reach"
+      else fails+=("link roto en $f: $g no existe"); fi
+    done <<< "$(links_of "$dir/$f")"
   else
-    missing=$((missing+1)); fails+=("link roto en MEMORY.md: $f no existe")
+    fails+=("link roto en MEMORY.md: $f no existe")
   fi
 done <<< "$index_links"
 orphans=()
