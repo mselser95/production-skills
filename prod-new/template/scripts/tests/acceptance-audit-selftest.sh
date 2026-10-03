@@ -66,5 +66,8 @@ printf '#!/bin/sh\n[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" i
 chmod +x "$r/stub/go"
 run "failing acceptance run with a profile still fails" 2 "Error" "$r" STUB_OUT="90.0% (9/10"
 
-echo "acceptance-audit selftest: $pass passed, $bad failed"
-[[ "$bad" -eq 0 ]]
+# "N case(s)" is the shape scripts/mutation-baseline.sh reads the count from;
+# "N passed, M failed" was invisible to it (found when the baseline refused).
+if (( pass == 0 )); then echo "acceptance-audit selftest: ZERO cases ran"; exit 1; fi
+if (( bad )); then echo "acceptance-audit selftest: $bad of $((pass + bad)) case(s) failed"; exit 1; fi
+echo "acceptance-audit selftest: ok -- $pass case(s)"
