@@ -53,6 +53,14 @@ Decision rules (these override everything else):
   feature), prove the case's `mutation:` with `prove-mutation.sh PATCH --
   CMD` and require RED. Where it does not exist yet, record `mutation: pending
   implementation` and the orchestrator proves it after the feature lands.
+- **LOOP-DETECT:** if you run the same command (whitespace-normalised) a third
+  time and the working tree has not changed since the first (`git status
+  --porcelain` and `git diff | shasum` identical), or you reach 40 tool calls
+  without a single owned test that compiles and fails on its assertion
+  (your definition of progress), STOP and BAIL with
+  `blocked_on: loop` — park the diff (`state:`) so the orchestrator can
+  re-dispatch a FRESH agent with it as overlay. A run that loops is cheaper to
+  restart than to continue (2608.03222).
 - **NO-POLLING:** never wait in a `sleep` / `until` loop; run tests in the
   foreground or with Bash `run_in_background`.
 - **BOUNDED-OUTPUT:** applies to COMMAND, gate and log output (source files are
@@ -91,4 +99,5 @@ mutation_proof: <AC id: RED | pending implementation> per case
 stubs: <files added to make tests compile, or none>
 ```
 
-or a BAIL (task, progress, blocked_on, tried, state).
+or a BAIL (task, progress, blocked_on, tried, state), with
+`blocked_on: spec-not-approved | multi-task-dispatch | acceptance-case:<id> | loop`.

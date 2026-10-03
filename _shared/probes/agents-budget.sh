@@ -23,11 +23,11 @@ fail() { printf '  FAIL  %-18s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 
 # rules every pinned execution agent must carry, and the extra ones per agent
 common_rules=("NO SPAWNING" "NO-POLLING" "FOCUSED-READ" "NO-REREAD" "BOUNDED-OUTPUT")
-implementer_rules=("ONE-TASK" "multi-task-dispatch" "BOUNDED-OUTPUT")
+implementer_rules=("ONE-TASK" "multi-task-dispatch" "BOUNDED-OUTPUT" "LOOP-DETECT")
 # the acceptance author is the oracle's writer: it must refuse a pending spec,
 # stay at the boundary, and never edit the spec it is held to
 validator_rules=("READ-ONLY" "PROBE, DON'T TRUST" "NON-VACUITY")
-author_rules=("ONE-TASK" "APPROVED-ONLY" "BOUNDARY-ONLY" "NEVER-EDIT-SPEC" "FAILS-FOR-THE-RIGHT-REASON")
+author_rules=("ONE-TASK" "APPROVED-ONLY" "BOUNDARY-ONLY" "NEVER-EDIT-SPEC" "FAILS-FOR-THE-RIGHT-REASON" "LOOP-DETECT")
 
 for a in prod-implementer prod-mechanic prod-scout prod-acceptance-author prod-validator; do
   f="$root/agents/$a.md"

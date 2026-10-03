@@ -57,6 +57,14 @@ tasks:                               # the implementable units, each bounded
                                      # (see dispatch.md)
     ambiguity: none|low|open         # `open` ⇒ route back to orchestrator, not
                                      # to a cheap implementer
+    tier: sonnet | session           # sonnet, always, for implementers (haiku measured
+                                     # 2–5× more turns, 2 of 3 NO-OK on
+                                     # closed-contract fixes, 2026-10-02);
+                                     # session only for `ambiguity: open` work
+                                     # the orchestrator keeps
+    cost_rationale: <one line: why this tier and why this task is small enough>
+                                     # forces the planner to justify its tier
+                                     # (2609.32917)
     acceptance: [AC-ids]             # implement: the cases this task turns
                                      # green · acceptance-author: the cases it
                                      # writes · spec: acceptance/<feature>.yaml

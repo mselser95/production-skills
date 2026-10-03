@@ -107,3 +107,7 @@ the session model — once. If the session model resolves it, the task is
 re-dispatched with the resolution appended to the contract. Two escalations
 on one task mean the task was mis-scoped: back to `prod-spec` to re-plan, not
 a third attempt.
+
+Loop bail: a `blocked_on: loop` BAIL is re-dispatched ONCE to a fresh agent
+with the parked diff as overlay and the loop's command named in the contract;
+a second loop on the same task goes back to `prod-spec`.

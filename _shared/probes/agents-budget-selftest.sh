@@ -49,6 +49,12 @@ run_case "tail -n 40 drifting to 400 fails" 1 "numeric budget literal 'tail -n 4
 r=$(mk no-bounded); sed -i.bak 's/BOUNDED-OUTPUT/UNBOUNDED/g' "$r/agents/prod-mechanic.md"
 run_case "BOUNDED-OUTPUT removed from the mechanic fails" 1 "rule 'BOUNDED-OUTPUT'" "$r"
 
+r=$(mk loop); sed -i.bak 's/\*\*LOOP-DETECT:\*\*/**LOOPING:**/' "$r/agents/prod-acceptance-author.md"
+run_case "the author's LOOP-DETECT heading renamed fails" 1 "heading **LOOP-DETECT:** not found" "$r"
+
+r=$(mk iloop); sed -i.bak 's/\*\*LOOP-DETECT:\*\*/**LOOPING:**/' "$r/agents/prod-implementer.md"
+run_case "the implementer's LOOP-DETECT heading renamed fails" 1 "heading **LOOP-DETECT:** not found" "$r"
+
 r=$(mk heading); sed -i.bak 's/\*\*BOUNDED-OUTPUT:\*\*/**BOUNDED-OUT:**/' "$r/agents/prod-mechanic.md"
 run_case "only the heading renamed (cross-refs kept) fails" 1 "heading **BOUNDED-OUTPUT:** not found" "$r"
 

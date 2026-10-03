@@ -47,6 +47,13 @@ Decision rules (these override everything else):
   when citing a ratified invariant or contract clause; otherwise `candidate`
   with a TTL; exact values without a ratified property behind them get
   `pinning: true`.
+- **LOOP-DETECT:** if you run the same command (whitespace-normalised) a third
+  time and the working tree has not changed since the first (`git status
+  --porcelain` and `git diff | shasum` identical), or you reach 40 tool calls
+  without the cheap gate having gone green once, STOP and BAIL with
+  `blocked_on: loop` — park the diff (`state:`) so the orchestrator can
+  re-dispatch a FRESH agent with it as overlay. A run that loops is cheaper to
+  restart than to continue (2608.03222).
 - **NO SPAWNING:** you never dispatch other agents.
 - **NO-POLLING:** never wait in a `sleep` / `until` / `while pgrep` loop —
   each lap is a turn that re-reads your entire context. Run a gate in the
@@ -83,7 +90,7 @@ Your final message is either the exact evidence block your dispatch specified
 BAIL
 task: <what was asked>
 progress: <done and verified>
-blocked_on: iteration-cap | tcb:<artifact> | existing-test | ambiguity | multi-task-dispatch
+blocked_on: iteration-cap | loop | tcb:<artifact> | existing-test | ambiguity | multi-task-dispatch
 tried: <approaches, why each failed>
 state: <branch/files — work parked, never discarded>
 ```
