@@ -654,6 +654,16 @@ code_lines_only() { # filter `grep -rn` output down to lines that are CODE
   # wired provider.
   grep -vE '^[^:]*:[0-9]+:[[:space:]]*//'
 }
+# One shared exclusion list for EVERY recursive walk of the repo tree below. A
+# bare `grep -r .` / `find .` also reads nested checkouts of OTHER branches
+# (.claude/worktrees/*), .git, vendor/ and node_modules/, so a test, golden file
+# or tracer call there could make a row PASS (or FAIL) for the wrong reason.
+# Sites that walk only a NAMED subtree (cmd/, internal/, pkg/) or a file list
+# do not need it. Layout caveat: a repo whose real code legitimately lives under
+# a directory literally named vendor/ or node_modules/ is not counted.
+PROBE_GREP_EXCLUDES=(--exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor)
+PROBE_FIND_EXCLUDES=(-not -path '*/.claude/*' -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/vendor/*')
+PROBE_FIND_PRUNE=(\( -name .claude -o -name .git -o -name node_modules -o -name vendor \) -prune -o)
 declined() { # declined <key> -> 0 if the spec ratifies this decline
   [[ -f "$SPEC" ]] && grep -qE "^[[:space:]]*-[[:space:]]*$1:" "$SPEC"
 }
@@ -1271,8 +1281,8 @@ fi   # @shard-end
 # xargs split it into pieces that are not files, and wc counts the wrong set. The
 # row is informational, never a gate, but a recorded number that is quietly wrong
 # is still wrong. Flagged SC2038, fixed 2026-08-30.
-prod=$(find . -name '*.go' -not -name '*_test.go' -not -path './.git/*' -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}')
-tst=$(find . -name '*_test.go' -not -path './.git/*' -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}')
+prod=$(find . -name '*.go' -not -name '*_test.go' "${PROBE_FIND_EXCLUDES[@]}" -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}')
+tst=$(find . -name '*_test.go' "${PROBE_FIND_EXCLUDES[@]}" -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}')
 # N/A, not PASS, when there is nothing to measure. Found by disabling the
 # language guard above and running against a C++ repo: this row printed
 # `PASS test/prod = 0.00` because it counts *.go and found none -- a PASS over
@@ -1326,7 +1336,7 @@ done
 # Fallback keyed on what a fitness test DOES -- walk the import graph -- rather
 # than on words that appear in ordinary assertions.
 if [[ -z "$fitness_dir" ]]; then
-  fitness_dir=$(grep -rlE 'go/parser|go/ast|tools/go/packages' --include='*_test.go' . 2>/dev/null \
+  fitness_dir=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" 'go/parser|go/ast|tools/go/packages' --include='*_test.go' . 2>/dev/null \
                 | xargs -I{} dirname {} 2>/dev/null | sort -u | head -1)
 fi
 if [[ -n "$fitness_dir" ]]; then
@@ -1663,9 +1673,9 @@ fi   # @shard-end
 # repo that deleted every property test but left the word "adequacy" in a
 # comment PASSED, with the evidence reading "0 property tests present". A row
 # whose own evidence says zero is a row that has stopped checking.
-prop_n=$(grep -rho 'func TestProperty[A-Za-z0-9_]*' --include='*_test.go' . 2>/dev/null | sort -u | wc -l | tr -d ' ')
+prop_n=$(grep -rho "${PROBE_GREP_EXCLUDES[@]}" 'func TestProperty[A-Za-z0-9_]*' --include='*_test.go' . 2>/dev/null | sort -u | wc -l | tr -d ' ')
 prop_n=${prop_n:-0}
-if (( prop_n > 0 )) && grep -rql 'adequacy' --include='*_test.go' . >/dev/null 2>&1; then
+if (( prop_n > 0 )) && grep -rql "${PROBE_GREP_EXCLUDES[@]}" 'adequacy' --include='*_test.go' . >/dev/null 2>&1; then
   row "property-tests" PASS "$prop_n property test(s), with generator-adequacy assertion(s)"
 elif (( prop_n > 0 )); then
   # A property test whose generator never produces the interesting shape
@@ -1833,11 +1843,11 @@ else row "scenario-matrix" FAIL "no .prod/failure-modes.md — denominator unkno
 # tests the reimplementation -- this file already learned that with
 # classify_mutation_result.
 extract_real_tag() {   # extract_real_tag [dir] -> the chosen build tag, or empty
-  grep -rhoE 'go:build [A-Za-z0-9_.]+' --include='*_test.go' "${1:-.}" 2>/dev/null | awk '{print $2}' \
+  grep -rhoE "${PROBE_GREP_EXCLUDES[@]}" 'go:build [A-Za-z0-9_.]+' --include='*_test.go' "${1:-.}" 2>/dev/null | awk '{print $2}' \
     | grep -v '^$' | grep -vE '^(candidate|ignore)$' | sort -u | head -1
 }
 real_tag=$(extract_real_tag .)
-live_gate=$(grep -rlE 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
+live_gate=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
 if shard_run dynamic; then   # @shard-begin dynamic
 if [[ -n "$real_tag" ]]; then
   # Scope the run to the packages that actually CONTAIN the tagged files, and
@@ -1849,7 +1859,7 @@ if [[ -n "$real_tag" ]]; then
   # blaming a lane that was fine. And it discarded the output, so the FAIL
   # carried no evidence at all: the one thing a finding must always do is name
   # the defect.
-  real_pkgs=$(grep -rl "go:build $real_tag" --include='*_test.go' . 2>/dev/null \
+  real_pkgs=$(grep -rl "${PROBE_GREP_EXCLUDES[@]}" "go:build $real_tag" --include='*_test.go' . 2>/dev/null \
               | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|' | tr '\n' ' ')
   [[ -n "$real_pkgs" ]] || real_pkgs=./...
   # shellcheck disable=SC2086
@@ -1893,7 +1903,7 @@ if shard_run dynamic; then   # @shard-begin dynamic
 if declined "compatibility"; then
   row "compatibility" NA "ratified decline in $SPEC -- nothing here is parsed by a reader this repo does not own"
 else
-compat_files=$(grep -rl -E 'protoreflect\.|\.golden|UnknownFields|proto\.Unmarshal' --include='*_test.go' . 2>/dev/null || true)
+compat_files=$(grep -rl "${PROBE_GREP_EXCLUDES[@]}" -E 'protoreflect\.|\.golden|UnknownFields|proto\.Unmarshal' --include='*_test.go' . 2>/dev/null || true)
 if [[ -z "$compat_files" ]]; then
   row "compatibility" FAIL "no compatibility tests: nothing in the tree calls protoreflect, compares a golden, round-trips unknown fields, or unmarshals raw proto"
 else
@@ -1925,9 +1935,9 @@ if shard_run fuzzbench; then   # @shard-begin fuzzbench
 # tags the benchmark files themselves declare, and the evidence names those
 # tags so a performance dimension parked in an advisory lane is visible rather
 # than implied.
-mapfile -t bench_files < <(grep -rl 'func Benchmark' --include='*_test.go' . 2>/dev/null | grep -v '^\./\.git/')
+mapfile -t bench_files < <(grep -rl "${PROBE_GREP_EXCLUDES[@]}" 'func Benchmark' --include='*_test.go' . 2>/dev/null | grep -v '^\./\.git/')
 if ((${#bench_files[@]})); then
-  bench_declared=$(grep -rh 'func Benchmark' --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+  bench_declared=$(grep -rh "${PROBE_GREP_EXCLUDES[@]}" 'func Benchmark' --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
   bench_tags=$(grep -h '^//go:build' "${bench_files[@]}" 2>/dev/null \
     | sed 's|^//go:build||' | tr -c 'A-Za-z0-9_' ' ' | tr ' ' '\n' \
     | sed '/^$/d' | grep -vx 'ignore' | sort -u | tr '\n' ',' | sed 's/,$//')
@@ -2039,13 +2049,13 @@ fi
 # explaining that the pprof endpoint is env-gated names `net/http/pprof` without
 # importing it, and satisfied this. `-l` gives filenames with nothing to filter,
 # so the count has to come from `-n`.
-prof_live=$([[ $(grep -rn "net/http/pprof" --include='*.go' . 2>/dev/null \
+prof_live=$([[ $(grep -rn "${PROBE_GREP_EXCLUDES[@]}" "net/http/pprof" --include='*.go' . 2>/dev/null \
   | code_lines_only | wc -l | tr -d ' ') -gt 0 ]] && echo yes || echo no)
 
 # -i on the package qualifier only: `profiling.`, `Profiling.`, `pyroscope.`.
 prof_cont_sites=$(grep -rnEi ':?=[[:space:]]*(profil|pyroscope)[A-Za-z0-9_]*\.[A-Za-z0-9_]*Start[A-Za-z0-9_]*\(' \
   --include='*.go' --exclude='*_test.go' cmd/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
-prof_cont_gauge=$(grep -rnE '"[A-Za-z0-9_]*_profiling_enabled' \
+prof_cont_gauge=$(grep -rnE "${PROBE_GREP_EXCLUDES[@]}" '"[A-Za-z0-9_]*_profiling_enabled' \
   --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only \
   | grep -oE '"[A-Za-z0-9_]*_profiling_enabled' | tr -d '"' | sort -u | head -1)
 
@@ -2054,7 +2064,7 @@ prof_cont_gauge=$(grep -rnE '"[A-Za-z0-9_]*_profiling_enabled' \
 # exists and a test reads it", and gating the same fact twice makes one repo's
 # missing file red two rows and teaches nobody anything new. Reported, so a
 # series that is emitted but undeclared is visible instead of silent.
-prof_manifest=$(find . -path ./.git -prune -o -name 'emitted-metrics.*' -print 2>/dev/null | head -1)
+prof_manifest=$(find . "${PROBE_FIND_PRUNE[@]}" -name 'emitted-metrics.*' -print 2>/dev/null | head -1)
 if [[ -z "$prof_cont_gauge" ]]; then prof_manifest_note=""
 elif [[ -z "$prof_manifest" ]]; then
   prof_manifest_note="; no emitted-metrics.* manifest exists to cross-check it against — see observability-contract-checked"
@@ -2252,7 +2262,7 @@ for k in effect_journal_outbox effect_journal_atomic reconciliation backup_resto
 
   case "$k" in
     reconciliation)
-      grep -rqi "reconcil" --include='*.go' . \
+      grep -rqi "${PROBE_GREP_EXCLUDES[@]}" "reconcil" --include='*.go' . \
         && row "$k" PASS "keyword match only (no implemented.$k in $SPEC naming a test to execute)" \
         || row "$k" FAIL "no reconciliation and no ratified decline";;
     *) row "$k" FAIL "not implemented, not declined, and no implemented.$k in $SPEC naming the test that proves it";;
@@ -2588,7 +2598,7 @@ esac
 # some test must both name it AND actually read a file, and that test package
 # must run green.
 if shard_run dynamic; then   # @shard-begin dynamic
-mapfile -t obs_manifests < <(find . -path ./.git -prune -o \
+mapfile -t obs_manifests < <(find . "${PROBE_FIND_PRUNE[@]}" \
   \( -name 'spans.yaml' -o -name 'emitted-metrics.*' \) -print 2>/dev/null)
 if ((${#obs_manifests[@]} == 0)); then
   row "observability-contract-checked" FAIL "no spans.yaml / emitted-metrics.* manifest exists at all"
@@ -2609,7 +2619,7 @@ else
       # And it must be a real Go package, asked of the toolchain rather than
       # inferred from the path.
       go list "$d" >/dev/null 2>&1 && obs_readers+="$d"$'\n'
-    done < <(grep -rl -- "$base" --include='*_test.go' . 2>/dev/null)
+    done < <(grep -rl "${PROBE_GREP_EXCLUDES[@]}" -- "$base" --include='*_test.go' . 2>/dev/null)
   done
   obs_pkgs=$(printf '%s' "$obs_readers" | sort -u | sed '/^$/d')
   # The `go test` branch below leaves its package list UNQUOTED on purpose: the
@@ -2649,7 +2659,7 @@ fi   # @shard-end
 # none, must not fail a row about slog. An absent denominator is NA, never PASS
 # -- "0 of 0 call sites are wrong" is the vacuous pass this framework exists to
 # refuse.
-if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
+if grep -rql "${PROBE_GREP_EXCLUDES[@]}" 'log/slog' --include='*.go' . 2>/dev/null; then
   # The two counts are DISJOINT: `\.Info\(` requires the paren immediately
   # after the name, so it does not match `.InfoContext(`. An earlier version
   # of this row subtracted one from the other "to remove the overlap", which
@@ -2719,7 +2729,7 @@ if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
     _n_ctx=$(grep -hE '\.(Info|Warn|Error|Debug)Context\(' "$_logf" 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '\.(Info|Warn|Error|Debug)Context\(' | wc -l | tr -d ' ')
     slog_plain=$(( slog_plain + _n_plain ))
     slog_ctx=$(( slog_ctx + _n_ctx ))
-  done < <(grep -rlE '\.(Info|Warn|Error|Debug)(Context)?\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null)
+  done < <(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" '\.(Info|Warn|Error|Debug)(Context)?\(' --include='*.go' --exclude='*_test.go' . 2>/dev/null)
   if (( slog_plain + slog_ctx == 0 )); then
     row "observability:logs_correlate" NA "slog is imported but no log call sites found"
   elif (( slog_ctx == 0 )); then
@@ -2747,7 +2757,7 @@ if grep -rql 'log/slog' --include='*.go' . 2>/dev/null; then
   #
   # -n so the output is `file:line:text` and code_lines_only can strip the
   # comment lines; -l would give filenames with nothing to filter.
-  log_handler_sites=$(grep -rnE 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' \
+  log_handler_sites=$(grep -rnE "${PROBE_GREP_EXCLUDES[@]}" 'slog\.(New(JSON|Text)Handler|NewMultiHandler|SetDefault)' \
     --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
   if (( log_handler_sites > 0 )); then
     row "observability:log_handler_installed" PASS "a slog handler is constructed in $log_handler_sites non-comment line(s), not left at the default"
@@ -2973,11 +2983,11 @@ fi
 # writes to another system and drops the context truncates the trace of
 # everything downstream of it. See mechanism-derivation.md §8's three-part
 # table, where only the middle part is derived.
-if grep -rqlE 'StartSpan|otel\.Tracer\(|TracerProvider|trace\.Tracer' \
+if grep -rqlE "${PROBE_GREP_EXCLUDES[@]}" 'StartSpan|otel\.Tracer\(|TracerProvider|trace\.Tracer' \
      --include='*.go' --exclude='*_test.go' . 2>/dev/null; then
-  egress=$(grep -rlE 'http\.NewRequest|http\.Client|\.Publish\(|PublishMsg\(|grpc\.Dial|NewClient\(' \
+  egress=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" 'http\.NewRequest|http\.Client|\.Publish\(|PublishMsg\(|grpc\.Dial|NewClient\(' \
             --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
-  prop=$(grep -rlE 'SetTextMapPropagator|propagation\.|otelhttp|otelgrpc|traceparent|\.Inject\(|\.Extract\(' \
+  prop=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" 'SetTextMapPropagator|propagation\.|otelhttp|otelgrpc|traceparent|\.Inject\(|\.Extract\(' \
             --include='*.go' --exclude='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
   if (( egress == 0 )); then
     row "observability:trace_propagation" NA "spans are emitted but this service makes no outbound calls -- nothing to propagate to"
@@ -3502,12 +3512,12 @@ fi
 if declined "write_surface_authn"; then
   row "write-surface-authn" NA "ratified decline in $SPEC naming who may reach the write surface"
 else
-  _ws=$(grep -rnE 'MethodPost|MethodPut|MethodPatch|MethodDelete|\.(Post|Put|Patch|Delete)\(' \
+  _ws=$(grep -rnE "${PROBE_GREP_EXCLUDES[@]}" 'MethodPost|MethodPut|MethodPatch|MethodDelete|\.(Post|Put|Patch|Delete)\(' \
           --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
   if (( _ws == 0 )); then
     row "write-surface-authn" NA "no write surface: nothing outside tests registers a mutating HTTP method, so there is no work to authenticate"
   else
-    _authn=$(grep -rnEi 'Authorization|Bearer |VerifyClientCert|ClientAuth|mTLS|middleware.*[Aa]uth|[Aa]uthenticat' \
+    _authn=$(grep -rnEi "${PROBE_GREP_EXCLUDES[@]}" 'Authorization|Bearer |VerifyClientCert|ClientAuth|mTLS|middleware.*[Aa]uth|[Aa]uthenticat' \
                --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
     if (( _authn > 0 )); then
       row "write-surface-authn" PASS "${_ws} mutating handler registration(s) and ${_authn} authentication site(s) in non-test code"
@@ -4025,7 +4035,7 @@ fi
 #
 # code_lines_only throughout: a comment about backoff is not a retry, and four
 # rows were fixed on 2026-08-29 for exactly that confusion.
-_ov_ingress=$(grep -rnE 'MethodPost|MethodPut|MethodPatch|MethodDelete|\.(Post|Put|Patch|Delete)\(' \
+_ov_ingress=$(grep -rnE "${PROBE_GREP_EXCLUDES[@]}" 'MethodPost|MethodPut|MethodPatch|MethodDelete|\.(Post|Put|Patch|Delete)\(' \
                 --include='*.go' --exclude='*_test.go' . 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
 if (( _ov_ingress == 0 )); then
   row "overload:ingress_shedding" NA "no ingress accepts work (nothing outside tests registers a mutating HTTP method), so there is nothing to shed and no victim to name"
@@ -4151,11 +4161,11 @@ fi
 # Both cpu AND memory are required because one alone is the common half-measure:
 # memory-only still lets a busy loop starve its neighbours, cpu-only still lets
 # a leak take the node down.
-_dep_files=$(grep -rlE '^[[:space:]]*kind:[[:space:]]*(Deployment|StatefulSet|DaemonSet|CronJob|Pod)[[:space:]]*$' \
+_dep_files=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" '^[[:space:]]*kind:[[:space:]]*(Deployment|StatefulSet|DaemonSet|CronJob|Pod)[[:space:]]*$' \
                --include='*.yaml' --include='*.yml' . 2>/dev/null \
              | grep -vE '/(\.git|node_modules|vendor)/' | sort -u)
 _compose=$(find . -maxdepth 3 \( -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' -o -name 'compose.y*ml' \) \
-             -not -path './.git/*' 2>/dev/null | sort -u)
+             "${PROBE_FIND_EXCLUDES[@]}" 2>/dev/null | sort -u)
 
 if [[ -z "$_dep_files" && -z "$_compose" ]]; then
   row "deployment-resource-limits" NA "no deployment artifacts in this repo (no k8s workload manifest, no compose file), so there is nothing to set limits on -- checked and none, not unchecked"
@@ -4505,7 +4515,7 @@ if ls verification/ratified/*_test.go >/dev/null 2>&1; then
     # that still invokes a helper reads like it does something.
     [[ -z "$rp_fn" ]] && continue
     rp_checked=$((rp_checked+1))
-    grep -rqE "func[[:space:]]+${rp_fn}\(" --include='*_test.go' . 2>/dev/null \
+    grep -rqE "${PROBE_GREP_EXCLUDES[@]}" "func[[:space:]]+${rp_fn}\(" --include='*_test.go' . 2>/dev/null \
       || rp_missing+="$(basename "$rp"):$rp_fn "
     # And it must be the SAME test the non_vacuity_check EXECUTES.
     #
@@ -4548,7 +4558,7 @@ fi
 # files elsewhere passed).
 cand_hdr='^[[:space:]]*//[[:space:]]*provenance:[[:space:]]*candidate([[:space:]]*$|[[:space:]]*[(,])'
 cand_tag='^//go:build (.*[^[:alnum:]_!])?candidate([^[:alnum:]_]|$)'
-cand_files=$(grep -rlE "$cand_hdr" --include='*_test.go' --exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor . 2>/dev/null | sort)
+cand_files=$(grep -rlE "$cand_hdr" --include='*_test.go' "${PROBE_GREP_EXCLUDES[@]}" . 2>/dev/null | sort)
 cand=0; cand_bad=0; cand_bad_list=""
 while IFS= read -r cf; do
   [[ -n "$cf" ]] || continue
