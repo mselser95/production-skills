@@ -51,6 +51,7 @@ VENDORED=(
   scripts/acceptance-coverage.sh
   scripts/tests/acceptance-coverage-selftest.sh
   scripts/tests/acceptance-audit-selftest.sh
+  scripts/tests/changed-line-coverage-selftest.sh
   scripts/acceptance-gap.sh
   scripts/tests/acceptance-gap-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh

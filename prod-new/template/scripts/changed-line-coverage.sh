@@ -12,12 +12,49 @@
 # its threshold), this script ALWAYS exits 0, no matter what it measures or
 # what goes wrong computing it. Any failure degrades to printing the metric
 # as unavailable rather than failing the calling job.
+#
+# ONE exception, and it is a refusal, not a measurement failure: the optional
+# CHANGED_LINE_EXTRA_EXCLUDES (below) exits non-zero on a malformed entry.
+#
+# CHANGED_LINE_EXTRA_EXCLUDES (optional, default unset): extra git pathspec
+# exclusions, whitespace- or newline-separated, appended to the pathspec of the
+# diff that defines the changed-line set. Every entry must start with ':!' or
+# ':(exclude'; anything else is refused (exit 2, entry named) because a bare
+# path in that position would INCLUDE instead of exclude and silently change
+# what is measured. When set and non-empty one line naming the exclusions is
+# printed before the summary; when unset or empty the output is byte-identical
+# to a run without it. It is set by `make acceptance-audit` (from
+# ACCEPTANCE_AUDIT_EXCLUDES), never by the unit-coverage signal: the audit asks
+# whether DELIVERED code is exercised by the acceptance suite, and a test double
+# or another suite's harness that is not a _test.go file is not delivered code
+# and cannot be reached by an acceptance run that uses the real implementation.
+# A tier-0 repo scaffolded from this template measured 20 of 30 changed lines
+# executed: 20 of 22 in delivered code, 0 of 8 in test-support files.
 set -u
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 0
 
 base_ref="${CHANGED_LINE_COVERAGE_BASE:-origin/main}"
 coverage_out="${COVERAGE_OUT:-coverage.out}"
+
+extra_excludes=()
+if [[ -n "${CHANGED_LINE_EXTRA_EXCLUDES:-}" ]]; then
+  set -f
+  for entry in ${CHANGED_LINE_EXTRA_EXCLUDES}; do
+    case "${entry}" in
+      ':!'*|':(exclude'*) extra_excludes+=("${entry}") ;;
+      *)
+        set +f
+        echo "changed-line coverage: refusing CHANGED_LINE_EXTRA_EXCLUDES entry '${entry}': each entry must start with ':!' or ':(exclude'" >&2
+        exit 2
+        ;;
+    esac
+  done
+  set +f
+  if (( ${#extra_excludes[@]} > 0 )); then
+    echo "changed-line coverage: excluding from the changed-line set: ${extra_excludes[*]}"
+  fi
+fi
 
 print_and_exit() {
   local pct="$1" covered="$2" total="$3"
@@ -39,7 +76,7 @@ fi
 changed_lines_file="$(mktemp)"
 trap 'rm -f "${changed_lines_file}"' EXIT
 
-git diff --unified=0 "${base_ref}...HEAD" -- '*.go' 2>/dev/null | awk '
+git diff --unified=0 "${base_ref}...HEAD" -- '*.go' "${extra_excludes[@]+"${extra_excludes[@]}"}" 2>/dev/null | awk '
   /^\+\+\+ / {
     file = $2
     sub(/^b\//, "", file)

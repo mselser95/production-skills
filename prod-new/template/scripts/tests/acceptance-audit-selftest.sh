@@ -112,6 +112,23 @@ run "0/0 with a non-test .go AND a test file changed still fails" 2 "unmeasurabl
 r="$(mkrepo testonlynobase 1)"; echo "package a // t" > "$r/a_test.go"; ( cd "$r" && git add a_test.go )
 run "0/0 test-only diff with base missing still fails closed" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0" CHANGED_LINE_COVERAGE_BASE=nosuchbase
 
+# ACCEPTANCE_AUDIT_EXCLUDES: extra pathspec exclusions for the measured set. The recipe hands
+# them to changed-line-coverage.sh as CHANGED_LINE_EXTRA_EXCLUDES, and a 0/0 whose only
+# non-test Go changes are excluded files is said, not failed; every other 0/0 still fails.
+AUD_EXC=':(exclude,glob)test/** :(exclude,glob)**/*test/**'
+r="$(mkrepo exclpass 1)"
+printf '#!/bin/sh\necho "excludes-seen=[$CHANGED_LINE_EXTRA_EXCLUDES]"\necho "changed-line coverage: $STUB_OUT lines)"\n' > "$r/scripts/changed-line-coverage.sh"
+echo "package a // c" > "$r/a.go"
+run "ACCEPTANCE_AUDIT_EXCLUDES reaches changed-line-coverage.sh as CHANGED_LINE_EXTRA_EXCLUDES" 0 "excludes-seen=[$AUD_EXC]" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+run "ACCEPTANCE_AUDIT_EXCLUDES unset passes an empty CHANGED_LINE_EXTRA_EXCLUDES" 0 "excludes-seen=[]" "$r" STUB_OUT="90.0% (9/10"
+r="$(mkrepo exclonly 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; echo "package a // t" > "$r/a_test.go"; ( cd "$r" && git add test/h.go a_test.go )
+run "0/0 with only tests and excluded files changed passes, said" 0 "only test and test-support files changed" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+run "0/0 with only an excluded file changed and NO exclusions set still fails" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0"
+r="$(mkrepo exclplusprod 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; ( cd "$r" && git add test/h.go ); echo "package a // changed" > "$r/a.go"
+run "0/0 with exclusions set but a production file also changed still fails" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+r="$(mkrepo exclnobase 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; ( cd "$r" && git add test/h.go )
+run "0/0 excluded-only diff with base missing still fails closed" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0" CHANGED_LINE_COVERAGE_BASE=nosuchbase ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+
 r="$(mkrepo low 1)"; echo "package a // c" > "$r/a.go"
 run "70 at floor 80 fails" 2 "70.0% of changed lines" "$r" STUB_OUT="70.0% (7/10"
 run "70 at floor 60 passes" 0 ">= 60% floor" "$r" STUB_OUT="70.0% (7/10" ACCEPTANCE_AUDIT_FLOOR=60
@@ -173,7 +190,7 @@ if [[ "$own" = 0 ]]; then
   # (i) stock per the stamp, template unresolvable: the cases run (13), no TEMPLATE_DIR needed.
   printf 'files:\n  - path: scripts/changed-line-coverage.sh\n    sha256: x\n    template_sha256: %s\n' \
     "$(shasum -a 256 "$nclc" | awk '{print $1}')" > "$tmp/nrepo/.prod/template-provenance.yaml"
-  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 17 case(s)" "/nonexistent"
+  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 23 case(s)" "/nonexistent"
   # (ii) one comment line added: differs from the stamped template copy -> n/a, rc0.
   echo "# customised" >> "$nclc"
   nested "stamped-customised changed-line-coverage.sh is n/a per provenance, rc0" 0 "per .prod/template-provenance.yaml" "/nonexistent"

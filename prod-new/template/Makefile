@@ -307,6 +307,7 @@ probe-selftests:
 	bash scripts/tests/single-suite-run-selftest.sh
 	bash scripts/tests/acceptance-coverage-selftest.sh
 	bash scripts/tests/acceptance-audit-selftest.sh
+	bash scripts/tests/changed-line-coverage-selftest.sh
 	bash scripts/tests/acceptance-gap-selftest.sh
 
 # acceptance: every acceptance/<feature>.yaml is complete, approved, and traced
@@ -332,16 +333,31 @@ acceptance:
 # a missing/empty profile (changed-line-coverage.sh would otherwise fall back
 # to scoring the UNIT suite into the same path) and a 0/0 result are FAILs,
 # except 0/0 over a genuinely empty Go diff, which is said and passes.
+#
+# What is measured is DELIVERED code: a test double, or another suite's harness,
+# that is not a _test.go file is not delivered code and cannot be reached by an
+# acceptance run that uses the real implementation, so counting it only drags the
+# figure down for a reason that says nothing about the feature. A repo that has
+# such files sets ACCEPTANCE_AUDIT_EXCLUDES to git pathspec exclusions, e.g.
+#   ACCEPTANCE_AUDIT_EXCLUDES := :(exclude,glob)test/** :(exclude,glob)**/*test/**
+# (passed to changed-line-coverage.sh as CHANGED_LINE_EXTRA_EXCLUDES, by this
+# target only; entries not starting with ':!' or ':(exclude' are refused). It is
+# empty here: the template has no test-support packages outside _test.go. The
+# exclusion narrows WHAT is measured; it does not lower ACCEPTANCE_AUDIT_FLOOR.
+# An excluded path must be test support, never production code, and review is
+# where that is checked. A diff whose only Go changes are tests and excluded
+# files is said ("nothing to audit"), not failed; any other 0/0 still fails.
 ACCEPTANCE_AUDIT_FLOOR ?= 80
+ACCEPTANCE_AUDIT_EXCLUDES ?=
 ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
 acceptance-audit:
-	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; n=0; \
+	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; EXCL='$(ACCEPTANCE_AUDIT_EXCLUDES)'; n=0; \
 	  for s in acceptance/*.yaml; do [ -f "$$s" ] && n=$$((n+1)); done; \
 	  if [ "$$n" -eq 0 ]; then echo "acceptance-audit: 0 specs -- nothing to audit yet"; exit 0; fi; \
 	  mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; rm -f "$$PROFILE"; \
 	  go test -count=1 -tags=integration -coverpkg=./... -coverprofile="$$PROFILE" ./internal/e2e/...; \
 	  [ -s "$$PROFILE" ] || { echo "acceptance-audit: FAIL -- acceptance run wrote no coverage profile (nothing was measured)"; exit 1; }; \
-	  rc=0; out=$$(COVERAGE_OUT="$$PROFILE" CHANGED_LINE_COVERAGE_BASE="$$BASE" bash scripts/changed-line-coverage.sh 2>&1) || rc=$$?; echo "$$out"; \
+	  rc=0; out=$$(CHANGED_LINE_EXTRA_EXCLUDES="$$EXCL" COVERAGE_OUT="$$PROFILE" CHANGED_LINE_COVERAGE_BASE="$$BASE" bash scripts/changed-line-coverage.sh 2>&1) || rc=$$?; echo "$$out"; \
 	  [ "$$rc" -eq 0 ] || { echo "acceptance-audit: FAIL -- changed-line-coverage.sh exited $$rc"; exit 1; }; \
 	  line=$$(printf '%s\n' "$$out" | grep '^changed-line coverage: [0-9.]*% ' | tail -n 1); \
 	  pct=$$(printf '%s' "$$line" | sed -E 's/^changed-line coverage: ([0-9.]+)%.*/\1/'); \
@@ -352,6 +368,8 @@ acceptance-audit:
 	      echo "acceptance-audit: 0 changed Go lines vs $$BASE -- nothing to audit"; exit 0; fi; \
 	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go'; then \
 	      echo "acceptance-audit: 0 changed non-test Go lines vs $$BASE (only test files changed) -- nothing to audit"; exit 0; fi; \
+	    if [ -n "$$(printf %s "$$EXCL" | tr -d ' \t\n')" ] && git rev-parse --verify "$$BASE" >/dev/null 2>&1 && { set -f; git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go' $$EXCL; }; then \
+	      echo "acceptance-audit: 0 changed delivered Go lines vs $$BASE (only test and test-support files changed) -- nothing to audit"; exit 0; fi; \
 	    echo "acceptance-audit: FAIL -- 0/0 changed lines but the Go diff vs $$BASE is not empty (or base missing): unmeasurable"; exit 1; fi; \
 	  if awk -v p="$$pct" -v f="$(ACCEPTANCE_AUDIT_FLOOR)" 'BEGIN{exit !(p+0>=f+0)}'; then \
 	    echo "acceptance-audit: $$pct% >= $(ACCEPTANCE_AUDIT_FLOOR)% floor over $$n spec(s)"; \
