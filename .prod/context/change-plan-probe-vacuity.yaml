@@ -1,0 +1,29 @@
+context: .prod/context/resolved-context-probe-vacuity.yaml
+semantic_events:
+- none
+files:
+- path: _shared/probes/verify-standard.sh
+  action: modify
+  zone: shell
+- path: prod-new/template/scripts/verify-standard.sh
+  action: modify
+  zone: shell
+- path: prod-new/TEMPLATE-DIGEST
+  action: modify
+  zone: shell
+- path: _shared/probes/candidate-lane-selftest.sh
+  action: create
+  zone: shell
+tasks:
+- id: P1
+  kind: implement
+  summary: Per-file candidate-lane check with a tolerant header regex and offender evidence; show failing
+    test evidence in replay-corpus and observability-contract-checked; selftest; mirror to the template;
+    regenerate the digest.
+  focus: Can a candidate-headed file without a build tag ever pass probe 19, and does every go-test-running
+    row that fails show which test failed?
+  ambiguity: none
+  tier: sonnet
+  cost_rationale: one probe block and one helper in one script plus a selftest; the mirror and digest
+    are mechanical.
+  depends_on: []
