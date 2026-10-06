@@ -4548,7 +4548,7 @@ fi
 # files elsewhere passed).
 cand_hdr='^[[:space:]]*//[[:space:]]*provenance:[[:space:]]*candidate([[:space:]]*$|[[:space:]]*[(,])'
 cand_tag='^//go:build (.*[^[:alnum:]_!])?candidate([^[:alnum:]_]|$)'
-cand_files=$(grep -rlE "$cand_hdr" --include='*_test.go' . 2>/dev/null | sort)
+cand_files=$(grep -rlE "$cand_hdr" --include='*_test.go' --exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor . 2>/dev/null | sort)
 cand=0; cand_bad=0; cand_bad_list=""
 while IFS= read -r cf; do
   [[ -n "$cf" ]] || continue

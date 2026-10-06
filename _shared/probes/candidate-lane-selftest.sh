@@ -15,6 +15,8 @@
 #   c  every candidate file tagged, several suffix forms                       PASS
 #   d  prose mentions only, untagged                                           NA
 #   e  no candidate files                                                      NA
+#   g  untagged candidate under .claude/worktrees, vendor, node_modules: ignored;
+#      the same file in the real tree FAILS
 #   f  go_fail_evidence over --- FAIL / bind / build-failed samples
 # PROBE_SRC=<file> points the selftest at another verify-standard.sh (used to
 # show it goes RED against the old probe).
@@ -69,6 +71,16 @@ o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "d: expected NA, got: $o"
 # e
 d=$(mk); w "$d/pkg/q_test.go" 'package pkg'
 o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "e: expected NA, got: $o"
+
+# g: nested checkouts and vendored trees are not THIS tree
+d=$(mk)
+for sub in .claude/worktrees/x/pkg vendor/m node_modules/m .git/x; do
+  mkdir -p "$d/$sub"; w "$d/$sub/n_test.go" '// provenance: candidate' 'package pkg'
+done
+w "$d/pkg/ok_test.go" 'package pkg'
+o=$(run "$d"); [[ "$o" == *" NA "* && "$o" != *" FAIL "* ]] || bad "g1: nested/vendored candidates must be ignored, got: $o"
+w "$d/pkg/real_test.go" '// provenance: candidate' 'package pkg'
+o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *pkg/real_test.go* && "$o" != *worktrees* && "$o" != *vendor* ]] || bad "g2: real-tree file must FAIL alone, got: $o"
 
 # f: helper
 hf="$tmp/helper.sh"
