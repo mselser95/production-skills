@@ -27,7 +27,8 @@
 #    install.sh, get.<host>, or go install/run/get with an @.
 # R2 REFUSED WHOLESALE in a SUBJECT step, one finding text each: $'..',
 #    $( )/backticks WHEN SCOPED (the line or the body holds a fetch trigger, the body is unclosed, or
-#    the captured variable is later fed to eval/sh/bash/source/./exec in the step), eval, exec, source/. <( ), <( ), sh/bash/pwsh -c, python -c, perl/ruby/node -e, a command
+#    the captured variable is later fed to eval/sh/bash/source/./exec in the step), eval, exec,
+#    source/. <( ), other <( ), sh/bash/pwsh -c, python -c, perl/ruby/node -e, a command
 #    word containing a quote, a variable adjacent to other characters, a wrapper (env command
 #    exec xargs nohup timeout sudo nice) before a fetch tool, --next, -K/--config, wget
 #    -i, more than one URL in a fetch, an output option given twice, -o - /dev/stdout
@@ -45,7 +46,8 @@
 #    b  curl -o NAME <pinned raw URL>, then echo "<64hex>  NAME" | sha256sum -c - (or echo
 #       .. > F; sha256sum -c F) before NAME is mentioned again
 #    c  curl -o NAME https://github.com/o/r/releases/download/<tag>/<asset>, same checksum
-#    d  curl -o /dev/null [-w FMT] URL | curl -I URL | wget -q --spider URL (no pipe)
+#    d  curl -o /dev/null [-w FMT] URL | curl -I URL | wget -q --spider URL (no pipe); PS-A10: a loopback http URL (host exactly
+#       127.0.0.1, localhost or [::1]) is also accepted, with --retry N and a trailing | grep -q WORD (no -w there)
 #    e  curl -X POST|PUT [-H h] [-d body|--data-binary @file] URL (no pipe, -o /dev/null only)
 #    f  curl [-H h] https://api.github.com/... | jq ... | python3 -m json.tool
 #    g  [bash scripts/retry.sh] go install|run|get module@vX.Y.Z or @<40hex>
@@ -65,7 +67,7 @@
 #
 #
 # THREAT MODEL (PS-A9). This gate guards the template's OWN workflows, authored and reviewed in this repository, against an
-# UNINTENDED fetch of a remote script from a mutable ref (a branch-named raw URL, an unpinned installer, a tool at
+# UNINTENDED fetch of a remote script from a mutable ref (a branch-named raw URL, an unpinned installer, a Go tool at
 # @latest/@main). It refuses by default and accepts only the shapes listed.
 # It is NOT a sandbox against an adversarial workflow author: an author who deliberately obfuscates a fetch (string-built
 # command names, data smuggled through expressions, a fetcher this allowlist does not know) can evade it, and the review
@@ -74,7 +76,9 @@
 # KNOWN RESIDUALS, out of scope after PS-A9: GOPROXY=direct with shape g (the module is still checksum-verified by GOSUMDB
 # unless that is switched off, which is refused, but the proxy is not pinned); an unknown fetcher binary that is not in the
 # trigger list (the pipe-into-interpreter and untracked-file rules in every step are the only net); data smuggled via a
-# non-scanned source (an expression that expands to a command, a file the checkout provides, a service the step calls).
+# non-scanned source (an expression that expands to a command, a file the checkout provides, a service the step calls);
+# package managers at mutable versions (npx x@latest, npm i -g x@latest, pipx run, uvx, pip install x, docker run image:latest,
+# brew install, go get -u) are not judged.
 #
 # PS-A9 CHANGES. (1) Shell comments in a block scalar are NOT stripped any more (the strip desynced from bash on backticks,
 # ${V:- #} and a backslash-space); a comment that spells a fetch is refused, reword it. Plain scalars still strip a
@@ -87,7 +91,6 @@
 # bodies are scanned like run text; shape f accepts gh api ... | jq and the gh release shape (sh_h) gh release download ... -O NAME + checksum.
 #
 # Usage: template-workflow-pins.sh [workflows-dir]   (default: the template's)
-# Exit: 0 clean · 1 findings · 2 no workflow files found · 3 internal error (no summary)
 # Exit: 0 clean · 1 findings · 2 no workflow files found · 3 internal error (no summary)
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -396,7 +399,7 @@ function r2(f, ln, raw, glue, k,   s, lo, nf, t, nu, u, i, n, tk, nout, v, val, 
   t = s; nu = 0
   while (match(t, /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^ ]*/)) {
     u = substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH); nu++
-    if (u !~ /^https:\/\//) nf += rep(f, ln, "URL scheme is not https", raw)
+    if (u !~ /^https:\/\// && !loopback(u)) nf += rep(f, ln, "URL scheme is not https", raw)
     if (u ~ /\.\./ || u ~ /\/\.\// || u ~ /\/\.$/) nf += rep(f, ln, "URL contains a dot segment", raw)
     if (tolower(u) ~ /%2e/) nf += rep(f, ln, "URL contains an encoded dot (%2e)", raw)
     if (u ~ /@/) nf += rep(f, ln, "URL contains @ (userinfo)", raw)
@@ -453,22 +456,33 @@ function wok(v,   r, nm) {
   }
   return 1
 }
-function sh_d(T, n,   i, t, head, dn, nurl) {
+# PS-A10: http:// accepted ONLY for a host that is exactly 127.0.0.1, localhost or [::1] (optional :port), never userinfo or a suffix
+function loopback(u) { return u ~ /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?([\/?#][^$`{}]*)?$/ }
+function sh_d(T, n,   i, t, head, dn, nurl, lb, sink, m) {
   if (T[1] == "wget") {
     for (i = 2; i <= n; i++) { t = T[i]; if (t == "-q") ; else if (t == "--spider") head = 1; else if (t ~ /^https:\/\/[^$`{}]+$/) nurl++; else return 0 }
     return (head && nurl == 1)
   }
   if (T[1] != "curl") return 0
-  for (i = 2; i <= n; i++) {
+  lb = 0; sink = 0; m = n
+  for (i = 2; i <= n; i++) if (loopback(T[i])) lb = 1
+  if (lb) {   # PS-A10: a loopback health check may end in | grep -q WORD (the only pipe accepted); nothing else after the URL
+    for (i = 2; i <= n; i++) if (T[i] == OP "|") {
+      if (T[i + 1] == "grep" && T[i + 2] ~ /^-q[iF]*$/ && T[i + 3] ~ /^[A-Za-z0-9_.-]+$/ && i + 3 == n) { sink = 1; m = i - 1 }
+      break
+    }
+  }
+  for (i = 2; i <= m; i++) {
     t = T[i]
     if (isfl(t)) continue
+    if (lb && (t == "--retry" || t == "--retry-delay" || t == "--max-time" || t == "-m" || t == "--connect-timeout") && T[i + 1] ~ /^[0-9]+$/) { i++; continue }
     if (t == "-I" || t == "--head") head = 1
     else if (t == "-o" && T[i + 1] == "/dev/null") { dn = 1; i++ }
-    else if ((t == "-w" || t == "--write-out") && i < n && !isop(T[i + 1]) && T[i + 1] !~ /[$`]/) { if (!wok(T[i + 1])) { shwhy = "write-out format is not in the allowed set"; return 0 } i++ }
-    else if (t ~ /^https:\/\/[^$`{}]+$/) nurl++
+    else if ((t == "-w" || t == "--write-out") && !lb && i < m && !isop(T[i + 1]) && T[i + 1] !~ /[$`]/) { if (!wok(T[i + 1])) { shwhy = "write-out format is not in the allowed set"; return 0 } i++ }
+    else if (t ~ /^https:\/\/[^$`{}]+$/ || loopback(t)) nurl++
     else return 0
   }
-  return (nurl == 1 && (head || dn))
+  return (nurl == 1 && (head || dn || sink || lb))
 }
 function sh_e(T, n,   i, t, meth, nurl) {
   if (T[1] != "curl") return 0

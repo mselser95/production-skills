@@ -1147,6 +1147,47 @@ a9_git() {
 }
 a9_git
 
+# PS-A10 MISSING TEST: a pre-commit hook exports GIT_INDEX_FILE (and GIT_DIR / GIT_WORK_TREE can leak in too); the tracked-file
+# check must ignore them, or a tracked script looks untracked. The gate runs git under env -u; these cases set each variable to a
+# value that breaks git if inherited and expect rc 0 findings=0, on a fixture repo that tracks a script AND on the real template.
+a10_env_case() {
+  local g="$T/a10_git" o rc v val
+  mkdir -p "$g/.github/workflows" "$g/scripts" "$T/a10_other"; echo 'echo hi' > "$g/scripts/ok.sh"
+  git -C "$g" init -q . && git -C "$g" add scripts/ok.sh && git -C "$g" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -qm t || { check "a10_env: scratch repository could not be built" 1; return; }
+  printf 'jobs:\n  j:\n    steps:\n      - run: |\n          bash scripts/ok.sh\n' > "$g/.github/workflows/w.yaml"
+  for v in GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE; do
+    case "$v" in GIT_WORK_TREE) val="$T/a10_other" ;; *) val=/nonexistent ;; esac
+    o="$(env "$v=$val" bash "$GATE" "$g/.github/workflows" 2>&1)"; rc=$?
+    [[ $rc == 0 ]] && grep -qF "findings=0" <<<"$o"; check "a10_env: fixture repo, $v=$val inherited: tracked script accepted, rc 0 findings=0" $?
+    o="$(env "$v=$val" bash "$GATE" "$REAL" 2>&1)"; rc=$?
+    [[ $rc == 0 ]] && grep -qF "findings=0" <<<"$o"; check "a10_env: real template, $v=$val inherited: rc 0 findings=0" $?
+  done
+}
+a10_env_case
+
+# PS-A10: a health check to a loopback host over plain http is shape d (discard / HEAD / grep sink); the host must be EXACTLY
+# 127.0.0.1, localhost or [::1], and the line is never piped to an interpreter nor saved to a file.
+acc a10_lb_ip    "curl -fsS http://127.0.0.1:8080/healthz"
+acc a10_lb_ip_o  "curl -fsS -o /dev/null http://127.0.0.1:8080/healthz"
+acc a10_lb_host  "curl -fsS -o /dev/null http://localhost:8080/healthz"
+acc a10_lb_v6    "curl -fsS -o /dev/null http://[::1]:8080/healthz"
+acc a10_lb_noport "curl -fsS -o /dev/null http://localhost/healthz"
+acc a10_lb_retry "curl -fsS --retry 5 --retry-delay 2 -o /dev/null http://127.0.0.1:8080/healthz"
+acc a10_lb_grep  "curl -fsS http://127.0.0.1:8080/healthz | grep -q up"
+acc a10_lb_greph "curl -fsS --retry 3 http://localhost:8080/healthz | grep -q ok"
+acc a10_lb_head  "curl -fsS -I http://localhost:8080/healthz"
+ref a10_pipe_sh   "curl -fsS http://127.0.0.1/x.sh | sh"
+ref a10_pipe_bash "curl -fsS http://localhost:8080/x.sh | bash -s"
+ref a10_save      "curl -fsS -o x.sh http://127.0.0.1/x.sh"
+ref a10_redir     "curl -fsS http://127.0.0.1/x.sh > x.sh"
+ref a10_grep_sh   "curl -fsS http://127.0.0.1/x.sh | grep -q up | sh"
+ref a10_evil_suffix "curl -fsS -o /dev/null http://127.0.0.1.evil.example/healthz"
+ref a10_evil_user   "curl -fsS -o /dev/null http://localhost@evil.example/healthz"
+ref a10_evil_user2  "curl -fsS -o /dev/null http://127.0.0.1:80@evil.example/healthz"
+ref a10_evil_prefix "curl -fsS -o /dev/null http://localhost.evil.example/healthz"
+ref a10_remote_http "curl -fsS -o /dev/null http://example.invalid/healthz"
+ref a10_https_retry "curl -fsS --retry 5 -o /dev/null https://example.invalid/healthz"
+
 # MISSING TEST 1: an awk that fails must exit 3 with the message, never green
 awk_failure_case() {
   local o rc
