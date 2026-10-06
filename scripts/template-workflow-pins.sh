@@ -1,121 +1,54 @@
 #!/usr/bin/env bash
-# template-workflow-pins.sh — the template's workflows must not fetch code (or a
-# tool) from a mutable location.
+# template-workflow-pins.sh — no template workflow may execute a remote script fetched
+# from a mutable ref.
 #
 # WHY THIS EXISTS. prod-new/template/.github/workflows/ci.yaml shipped
-# `curl .../anchore/syft/main/install.sh | sh` in its sbom job: a script from a
-# mutable branch runs whatever that branch holds on the day. It reached every repo
-# scaffolded from this template unnoticed, because nothing in THIS repo executes or
-# reads the template's workflows. This gate reads them.
+# `curl .../anchore/syft/main/install.sh | sh` in its sbom job: a script from a mutable
+# branch runs whatever that branch holds on the day. Nothing in THIS repo executes or
+# reads the template's workflows, so it went unnoticed. This gate reads them.
 #
-# THE RULE IS ABOUT WHAT IS FETCHED AND WHERE IT GOES, NOT HOW IT IS RUN. Spelling
-# lists ("| sh", "source <(...)", "sh i.sh" next line) are beaten by a new spelling, and
-# a rule that concludes "safe" from what it failed to recognise is beaten by anything
-# unusual. So each curl / wget is judged in four steps, and the DEFAULT of every step is
-# "refuse": (1) is this a fetcher invocation? (2) what URLs does it fetch? (3) where does
-# the body go? (4) look the (source class x sink class) cell up in the table below.
+# DESIGN: AN ALLOWLIST WITH WHOLESALE REFUSAL OF OBFUSCATION. Earlier rounds judged
+# curl/wget with a shell parser and each round found a new spelling that beat it (quote
+# fragments, ANSI-C quoting, escapes in YAML double-quoted scalars, captured bodies, a
+# repeated -o ...). Detecting every evasion of a hand-rolled parser does not converge, so
+# the gate now ACCEPTS only a short list of exact shapes and REFUSES the means of
+# obfuscating a command, whether or not the result would have been harmful. Over-refusal
+# is acceptable; the template has three workflows and the real ones must pass.
 #
-# (1) FETCHER. A token whose basename is curl or wget (`curl`, `/usr/bin/curl`, `\curl`,
-#   `command curl`, `sudo -E curl`, `busybox wget`, `env X=1 curl`) in command position.
-#   Command position is the default; only a command whose first word is one of
-#   echo printf apt apt-get aptitude apk yum dnf zypper pacman brew snap which type whereis
-#   hash dpkg pip pip3 npm pnpm yarn choco man, or `command -v`, makes the word a mere
-#   mention. A token that starts with `-` as first word is text, not a command.
-# (2) URLS. Options are parsed (curl and wget spellings, glued short flags such as
-#   -sSLo/tmp/x, --opt=value, quotes). Any `scheme://` (any case, any scheme: ftp, HTTPS)
-#   is a URL; a first positional that contains a dot or a slash is a scheme-less URL
-#   (`curl get.docker.com`, `curl RAW.githubusercontent.com/o/r/main/i.sh`). Hosts and
-#   keywords are compared lower-cased on a copy; the reported line is untouched. A URL or
-#   positional with `$` (or `${{ }}`) is UNRESOLVED; a fetch with no URL at all is
-#   UNRESOLVED. GitHub URLs are parsed positionally, the ref must be a 40-hex sha IN ITS
-#   OWN POSITION (a 40-hex owner, repo, file name or unrelated query value proves nothing):
-#     raw.githubusercontent.com/<o>/<r>/<ref>/...         github.com/<o>/<r>/raw|blob/<ref>/...
-#     gist.githubusercontent.com/<o>/<id>/raw/<rev>/...   github.com/<o>/<r>/archive/<ref>.tar.gz|.zip
-#     github.com/<o>/<r>/tarball|zipball/<ref>             codeload.github.com/<o>/<r>/tar.gz|zip/<ref>
-#     api.github.com/repos/<o>/<r>/tarball|zipball|commits/<ref>, .../git/trees/<ref>,
-#       .../contents/<path>?ref=<ref> (every ref= value must be a sha)
-#     github.com/<o>/<r>/releases/latest/... = always refused; releases/download/<tag>/<f> = tag
-#   `refs/heads/x`, a tag, a branch, a short sha are refused. Any other shape on a GitHub
-#   host (*.github.com, *.githubusercontent.com): "unrecognised GitHub URL shape".
-# (3) SINK, where the body goes:
-#   discard   -o /dev/null, > /dev/null, -I / --head, --spider
-#   printed   stdout to the log, or piped only into INERT commands:
-#             jq grep egrep fgrep head tail wc cat sort uniq cut tr tac nl column
-#             (no file redirect). Inside $( ) / backticks it is printed only when the
-#             substitution is the right side of a plain assignment AND the body goes
-#             through an inert pipe stage (V=$(curl .. | jq ..)). A bare capture
-#             (X=$(curl ..), $(curl ..), backticks) is NOT inert: the variable can be
-#             eval'd or piped later, so it is judged as interp (refused unless pinned).
-#   file      -o FILE -oFILE -O -sSLo/x -fsSLO --output FILE --output=FILE --remote-name
-#             --remote-name-all, wget with no -O- (a file is its default), > f, >> f, and
-#             a pipe into tee, tar, unzip, gunzip, gzip, bunzip2, xz, unxz, 7z, cpio, dd,
-#             sponge, install (unpacking code to disk is a file). -o - / -o- / -O- /
-#             --output-document=- are stdout.
-#   interp    anything else: sh bash zsh dash ksh python* perl ruby node php pwsh source . eval
-#             xargs sh -c, wrappers of those (sudo env exec time nice), a $( ) / <( ) whose
-#             value feeds another command, and every command not named above (default deny).
-# (4) VERDICT. Cell = finding unless marked ok.
-#   source class                |discard|printed          |file                 |interp
-#   ----------------------------+-------+-----------------+---------------------+--------
-#   sha-pinned GitHub (ref pos) |ok     |ok               |ok                   |ok
-#   mutable GitHub ref / shape  |ok     |ok if api.github |finding              |finding
-#                               |       |.com (JSON data) |                     |
-#   releases/latest             |ok     |finding          |finding              |finding
-#   release asset (tag)         |ok     |finding          |ok iff checksum, step|finding
-#   non-GitHub host             |ok     |ok               |ok iff checksum, step|finding
-#   unresolved / no URL         |ok     |ok               |ok iff checksum, step|finding
-#   A POST/upload (-X POST|PUT|PATCH|DELETE, -d, --data*, -F, -T, --json, --post-data)
-#   whose response is discarded or printed is SENDING, not fetching: ok. The same call
-#   piped into an interpreter or saved is judged by the table. A checksum is "in the step"
-#   when the SAME YAML list item runs `sha256sum -c|--check` (sha384/512) or
-#   `shasum -a 256 -c`; its presence is checked, not that it covers that file. A stream
-#   never touches disk, so no checksum ever covers an interp cell.
-#   One sink per curl CALL: each -o/-O pairs with ONE URL; a call with more URLs than
-#   output options (or with --next) is judged as if every URL reached stdout (the
-#   -o/-I of one URL says nothing of another). A fetch inside ( ), { }, if/while/for or a
-#   function body, whose body goes to the compound's stdout (no pipe of its own), has a
-#   sink this gate does not track (the pipe after the ENCLOSING compound, a later call of
-#   the function): refused unless every URL is pinned ("cannot verify the sink of a fetch
-#   inside a compound"). A GitHub URL whose path has a . or .. segment (or %2e) is refused:
-#   curl normalises it to another ref than the one shown. Obfuscated spellings of curl /
-#   wget / sh / bash (quote fragments c-quote-quote-url, backslash-newline splits) are refused
-#   ("obfuscated command word"). An echo/printf with a QUOTED argument that mentions
-#   curl/wget and whose own pipe sink is an interpreter is executed, not a mention
-#   (the unquoted `echo curl URL | sh` stays a mention: pinned by an existing case).
-# RULE 2 -- floating tool versions. `go install` / `go run` of <module>@<ref> where ref
-#   is not a semantic version (vX.Y.Z[-pre][+build]) or a 40-hex sha is a finding
-#   (@latest @main @master @HEAD @upgrade @patch, a branch, a short sha, @$VAR).
-# RULE 3 -- a step whose `shell:` is not bash/sh (python, pwsh, a matrix expression...)
-#   cannot be read by this gate: "unsupported shell, cannot verify" (also for
-#   `defaults: run: shell:`).
-#
-# FAIL CLOSED ON WHAT IT CANNOT READ. A workflow file in which the line parser found no
-# `run:` scalar but whose text has `steps:` (or a run key), or any `run` key the parser
-# did not read (flow/JSON style `{"run": ..}`, `- {run: ..}`, a quoted `"run":` key) is
-# refused: "could not read N run step(s) in <file>: unparsed workflow shapes are not accepted".
-#
-# SCOPE. Read: every `run:` scalar (inline, quoted, | or > block, continuations joined)
-# of the workflow files AND of every action.yml/action.yaml under the sibling `actions/`
-# directory (composite actions). A name:/if:/env: string that mentions curl is not
-# execution. Comment lines and trailing ` # ...` are not read; tabs/CRLF normalised.
-# OUT OF SCOPE, by name, each acceptable because this template has three workflows on
-# ubuntu runners, no `shell:` override and no composite actions; revisit the day that
-# stops being true, or the day a step legitimately needs one of them:
-#   - fetchers other than curl/wget (gh, aria2c, xh/http, python urllib/requests, nc,
-#     PowerShell iwr/irm): the template uses none; add the name here when it does.
-#   - a fetcher via variable or alias (`C=curl; $C ..`): basename forms ARE handled
-#     (curl, /usr/bin/curl, \curl, command curl, busybox wget); an alias is not.
-#     A container image path such as `curlimages/curl` is not a curl invocation (it
-#     runs in a container, not on the runner): out of scope, no workflow here uses one.
-#   - `-K`/`--config` files and `@file` URL lists: the URLs are not in the workflow;
-#     such a call with a body that is saved or executed is still refused as unresolved.
-#   - `uses:` refs (tags/branches are indistinguishable statically; the template pins
-#     actions by version tag), `with:`/`script:` payloads, package managers (npm, pip, apt..),
-#     `docker run`/`docker pull`, `gh` downloads, container images by tag, `git clone` of a
-#     branch, a fetch done by a script the step merely calls (`bash scripts/x.sh`), and
-#     heredoc bodies are read as ordinary lines (prose "use curl to" is refused).
+# R0 SCALAR. A run: scalar written as a YAML double-quoted string that contains a
+#    backslash is refused (escapes like \x2f are not decoded here). Single-quoted and
+#    block scalars are read literally; backslash-newline is joined as the shell does and
+#    a join that splits a word is refused.
+# R1 TRIGGER. A run: step is SUBJECT if, after joining continuations, any line (lower-cased,
+#    quotes and backslashes removed, so c''url and c\url are seen) holds curl, wget, iwr,
+#    Invoke-WebRequest/RestMethod, urlopen, http(s)://, codeload., raw.githubusercontent,
+#    install.sh, get.<host>, or go install/run/get with an @.
+# R2 REFUSED WHOLESALE in a SUBJECT step, one finding text each: $'..',
+#    $( )/backticks WHEN SCOPED (the line or the body holds a fetch trigger, the body is unclosed, or
+#    the captured variable is later fed to eval/sh/bash/source/./exec in the step), eval, exec, source/. <( ), <( ), sh/bash/pwsh -c, python -c, perl/ruby/node -e, a command
+#    word containing a quote, a variable adjacent to other characters, a wrapper (env command
+#    exec xargs nohup timeout sudo nice) before a fetch tool, --next, -K/--config, wget
+#    -i, more than one URL in a fetch, an output option given twice, -o - /dev/stdout
+#    /dev/fd/*, a URL with a dot segment, %2e, @ or a scheme other than https, a fetched
+#    file executed from ANOTHER step of the same workflow, iwr/iex/Invoke-*.
+# R3 ALLOWLIST. Every line of a SUBJECT step holding a fetch tool or URL must match exactly
+#    one shape (anything else: "fetch does not match an accepted shape"):
+#    a  curl -sSfL <pinned raw.githubusercontent.com/o/r/<40hex>/path> | sh|bash [-s -- args]
+#    b  curl -o NAME <pinned raw URL>, then echo "<64hex>  NAME" | sha256sum -c - (or echo
+#       .. > F; sha256sum -c F) before NAME is mentioned again
+#    c  curl -o NAME https://github.com/o/r/releases/download/<tag>/<asset>, same checksum
+#    d  curl -o /dev/null [-w FMT] URL | curl -I URL | wget -q --spider URL (no pipe)
+#    e  curl -X POST|PUT [-H h] [-d body|--data-binary @file] URL (no pipe, -o /dev/null only)
+#    f  curl [-H h] https://api.github.com/... | jq ... | python3 -m json.tool
+#    g  [bash scripts/retry.sh] go install|run|get module@vX.Y.Z or @<40hex>
+#    h  `uses:` lines are OUT OF SCOPE (only run: scalars are read; another gate may cover them).
+#    A mention is accepted only when the whole line is echo/printf/# with no pipe, redirect,
+#    ; & or backtick.
+# R4 FAIL CLOSED. No workflow files: exit 2. Unreadable file or awk/grep missing: exit 3.
+#    run/steps keys the line parser did not read (flow or JSON style): refused.
 #
 # Usage: template-workflow-pins.sh [workflows-dir]   (default: the template's)
+# Exit: 0 clean · 1 findings · 2 no workflow files found · 3 internal error (no summary)
 # Exit: 0 clean · 1 findings · 2 no workflow files found · 3 internal error (no summary)
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,371 +70,282 @@ fi
 
 out="$(awk -v q="'" '
 BEGIN {
-  fetchre = "(^|[^A-Za-z0-9_-])(curl|wget)([ \"" q "`;&|)<>]|$)"
-  gore = "(^|[^A-Za-z0-9_./-])go +(install|run)( |$)"
+  trig = "curl|wget|iwr|invoke-webrequest|invoke-restmethod|urlopen|http://|https://|codeload\\.|raw\\.githubusercontent|install\\.sh|get\\.[a-z0-9-]+\\.[a-z]"
+  gotrig = "(^|[^a-z0-9_./-])go +(install|run|get)( |$)"
+  new_sq = "^" q ".*" q "$"
   semre = "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
-  chk = "(^| )(-[A-Za-z]*c[A-Za-z]*|--check)( |$)"
-  assignre = "=\"?(\\$\\(|`)$"
-  wordre = "(^|[^A-Za-z0-9_-])(curl|wget|sh|bash)([^A-Za-z0-9_-]|$)"
   rawre = "(^|[^A-Za-z0-9_.-])\"?run\"? *:"
   stepsre = "(^|[^A-Za-z0-9_.-])\"?steps\"? *:"
-  longv = " output header data data-raw data-binary data-ascii data-urlencode request user user-agent referer max-time connect-timeout retry retry-delay retry-max-time write-out cookie cookie-jar upload-file form form-string proxy config range cacert cert key proto proto-redir limit-rate json url output-document directory-prefix tries timeout post-data post-file body-data body-file method password http-user http-password "
-  split("sudo env exec time nice nohup command builtin busybox then do else if while until ! { elif", a, " "); for (k in a) wrap[a[k]] = 1
-  split("echo printf apt apt-get aptitude apk yum dnf zypper pacman brew snap which type whereis hash dpkg pip pip3 npm pnpm yarn choco man", a, " "); for (k in a) notcmd[a[k]] = 1
-  split("jq grep egrep fgrep head tail wc cat sort uniq cut tr tac nl column", a, " "); for (k in a) inert[a[k]] = 1
-  split("tee tar unzip gunzip gzip bunzip2 xz unxz 7z cpio dd sponge install", a, " "); for (k in a) filecmd[a[k]] = 1
+  OP = sprintf("%c", 2)
 }
 function isha(s) { return length(s) == 40 && s ~ /^[0-9a-f]+$/ }
-function isgh(h) { return (h ~ /(^|\.)github\.com$/ || h ~ /(^|\.)githubusercontent\.com$/) }
-function hassum(t,   s) {
-  s = t
-  while (match(s, /sha(256|384|512)sum[^;&|]*/)) { if (substr(s, RSTART, RLENGTH) ~ chk) return 1; s = substr(s, RSTART + RLENGTH) }
-  s = t
-  while (match(s, /shasum[^;&|]*/)) { if (substr(s, RSTART, RLENGTH) ~ chk && substr(s, RSTART, RLENGTH) ~ /-a *(256|384|512)/) return 1; s = substr(s, RSTART + RLENGTH) }
-  return 0
-}
-function lastidx(s, pat,   i, r) { r = 0; for (i = 1; i <= length(s) - length(pat) + 1; i++) if (substr(s, i, length(pat)) == pat) r = i; return r }
-function insubst(pre,   a, b, lo, tmp) {
-  a = lastidx(pre, "$("); b = lastidx(pre, "<("); lo = (a > b) ? a : b
-  if (lo > 0 && substr(pre, lo + 2) !~ /\)/) return 1
-  tmp = pre; if (gsub(/`/, "`", tmp) % 2 == 1) return 1
-  return 0
-}
-# obfuscated spelling of a command word: quote fragments (c-quote-quote-url) or a backslash-newline
-# split (cu\<nl>rl) CREATE a curl/wget/sh/bash word that the plain text does not show.
-function nwords(s,   t) { t = s; return gsub(wordre, "&", t) }
-function obfword(w, hasq, hasu, nq, bs,   b) {
-  b = w; sub(/^.*\//, "", b)
-  if (b != "curl" && b != "wget" && b != "sh" && b != "bash") return 0
-  return ((hasq && (hasu || nq > 1)) || bs)
-}
-function obf(t,   i, n, c, qs, cont, hasq, hasu, nq, bs) {
-  n = length(t); qs = ""; cont = ""; hasq = hasu = nq = bs = 0
-  for (i = 1; i <= n + 1; i++) {
-    c = (i <= n) ? substr(t, i, 1) : " "
-    if (qs != "") { if (c == qs) qs = ""; else cont = cont c; continue }
-    if (c == "\"" || c == q) { qs = c; hasq = 1; nq++; continue }
-    if (c == "\\" && i < n) { if (cont != "" || hasq) bs = 1; i++; cont = cont substr(t, i, 1); hasu = 1; continue }
-    if (c ~ /[ ;&|()<>`]/) { if (obfword(cont, hasq, hasu, nq, bs)) return 1; cont = ""; hasq = hasu = nq = bs = 0; continue }
-    cont = cont c; hasu = 1
-  }
-  return 0
-}
-# compound tracking: g_pd ( ), g_bd { }, g_kd if/while/for/case .. fi/done/esac, g_sd $( ) <( )
-function dword(w) {
-  if (w == "") return
-  if (dfn == 2 && w == "{") g_bd++
-  if (dfn) dfn = (dfn == 1) ? 2 : 0
-  if (dcs && w == "function") dfn = 1
-  if (dcs) {
-    if (w == "{") g_bd++
-    else if (w == "if" || w == "while" || w == "until" || w == "for" || w == "select" || w == "case") g_kd++
-    else if (w == "}") { if (g_bd > 0) g_bd-- }
-    else if (w == "fi" || w == "done" || w == "esac") { if (g_kd > 0) g_kd-- }
-  }
-  dcs = (dcs && w ~ /^(then|do|else|elif|!|time|if|while|until|\{)$/) ? 1 : 0
-}
-function dscan(s,   i, c, w, qs, pc) {
-  w = ""; qs = ""; pc = ""
+function ishex(s, n) { return length(s) == n && s ~ /^[0-9a-f]+$/ }
+function report(f, ln, why, text) { printf "%s:%d: %s: %s\n", f, ln, why, text; findings++ }
+function rep(f, ln, why, text) { report(f, ln, why, text); return 1 }
+function lowq(t,   s) { s = tolower(t); gsub("[\"" q "]", "", s); gsub(/\\/, "", s); return s }
+function subject(t,   lo) { lo = lowq(t); return (lo ~ trig || (lo ~ gotrig && index(lo, "@") > 0)) }
+function hasfetchtool(lo) { return lo ~ /(^|[^a-z0-9_.-])(curl|wget)([^a-z0-9_-]|$)/ }
+# quote-aware tokenizer: quotes dropped, unquoted | ; & < > ( ) become their own tokens prefixed with \002
+function tokenize(s, T,   i, n, c, qs, cur, has) {
+  split("", T); n = 0; cur = ""; qs = ""; has = 0
   for (i = 1; i <= length(s); i++) {
     c = substr(s, i, 1)
-    if (qs != "") { if (c == qs) qs = ""; pc = c; continue }
-    if (c == "\"" || c == q) { qs = c; w = w "x"; pc = c; continue }
-    if (c == " ") { dword(w); w = ""; pc = c; continue }
-    if (c == ";" || c == "&" || c == "|") { dword(w); w = ""; dcs = 1; pc = c; continue }
-    if (c == "(") { dword(w); w = ""; if (pc == "$" || pc == "<" || pc == ">") g_sd++; else g_pd++; dcs = 1; pc = c; continue }
-    if (c == ")") { dword(w); w = ""; if (g_sd > 0) g_sd--; else if (g_pd > 0) g_pd--; dcs = 1; pc = c; continue }
-    w = w c; pc = c
+    if (qs != "") { if (c == qs) qs = ""; else cur = cur c; continue }
+    if (c == "\"" || c == q) { qs = c; has = 1; continue }
+    if (c == " ") { if (cur != "" || has) T[++n] = cur; cur = ""; has = 0; continue }
+    if (index("|;&<>()", c)) { if (cur != "" || has) T[++n] = cur; cur = ""; has = 0; T[++n] = OP c; continue }
+    cur = cur c
   }
-  dword(w)
+  if (qs != "") return -1
+  if (cur != "" || has) T[++n] = cur
+  return n
 }
-# an echo/printf stage whose own pipe sink is an interpreter: the "mention" is executed
-function mentionexec(w,   i, c, qs, st, left, nx) {
-  qs = ""; st = 1
-  for (i = 1; i <= length(w); i++) {
-    c = substr(w, i, 1)
-    if (qs != "") { if (c == qs) qs = ""; continue }
-    if (c == "\"" || c == q) { qs = c; continue }
-    if (c == ";" || c == "&") { st = i + 1; continue }
-    if (c == "|") {
-      if (substr(w, i + 1, 1) == "|") { i++; st = i + 1; continue }
-      left = substr(w, st, i - st)
-      if (left ~ /^ *(echo|printf)( |$)/ && left ~ /(curl|wget)/ && left ~ /["\x27]/ && chain(substr(w, i + 1)) == 3) return 1
-      st = i + 1
+function isop(t) { return substr(t, 1, 1) == OP }
+function isfl(t) { return t ~ /^-[sSfL]+$/ }
+function okseg(s) { return s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/ }
+function pathok(p) { return p ~ /^[A-Za-z0-9_.+\/-]+$/ && p !~ /(^|\/)\.\.?(\/|$)/ && p !~ /\/\// && p !~ /\/$/ }
+function pinraw(u,   a, n, p) {
+  n = split(u, a, "/")
+  if (n < 7 || a[1] != "https:" || a[2] != "" || a[3] != "raw.githubusercontent.com") return 0
+  if (!okseg(a[4]) || !okseg(a[5]) || !isha(a[6])) return 0
+  p = substr(u, length(a[1]) + length(a[2]) + length(a[3]) + length(a[4]) + length(a[5]) + length(a[6]) + 7)
+  return pathok(p)
+}
+function relasset(u,   a, n) {
+  n = split(u, a, "/")
+  if (n != 9 || a[1] != "https:" || a[2] != "" || a[3] != "github.com" || a[6] != "releases" || a[7] != "download") return 0
+  if (!okseg(a[4]) || !okseg(a[5]) || tolower(a[8]) == "latest") return 0
+  return (a[8] ~ /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/ && a[9] ~ /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/)
+}
+function apiok(u) { return (index(u, "https://api.github.com/") == 1 && substr(u, 24) ~ /^[A-Za-z0-9_.\/?=&%,+:-]+$/ && u !~ /\.\.|\/\.\// && tolower(u) !~ /%2e/) }
+function okname(s) { return s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/ && s != ".." }
+function esc(s) { gsub(/\./, "\\.", s); return s }
+function usesname(t, name) { return (" " t " ") ~ ("[^A-Za-z0-9_.-]" esc(name) "[^A-Za-z0-9_.-]") }
+# checksum proof for NAME after line k: returns the line index where it is verified, or 0/-1
+function needck(k, name,   j, w, nw, s, f, m) {
+  for (j = k + 1; j <= nrec; j++) {
+    s = rtext[j]; gsub("[\"" q "]", "", s); sub(/^ +/, "", s); sub(/ +$/, "", s)
+    nw = split(s, w, / +/)
+    if (nw == 7 && w[1] == "echo" && ishex(w[2], 64) && w[3] == name && w[4] == "|" && w[5] == "sha256sum" && w[6] == "-c" && w[7] == "-") return j
+    if (nw == 5 && w[1] == "echo" && ishex(w[2], 64) && w[3] == name && w[4] == ">" && w[5] ~ /^[A-Za-z0-9_.-]+$/) {
+      f = w[5]
+      for (m = j + 1; m <= nrec; m++) { s = rtext[m]; sub(/^ +/, "", s); sub(/ +$/, "", s); if (s == "sha256sum -c " f) return m; if (usesname(s, name)) return -1 }
+      return 0
     }
+    if (usesname(s, name)) return -1
   }
   return 0
 }
-function report(f, ln, why, text) { printf "%s:%d: %s: %s\n", f, ln, why, text; findings++ }
-# ---- shell-word tokenizer: tk[1..ntk], tkq[i]=1 when the token began with a quote
-function tokenize(s,   i, n, c, qs, cur, st, qd) {
-  split("", tk); split("", tkq); ntk = 0; cur = ""; st = 0; qs = ""; qd = 0; n = length(s)
-  for (i = 1; i <= n; i++) {
+function regname(name, ln) { nmN++; nmname[nmN] = name; nmstep[nmN] = stepn; nmln[nmN] = ln }
+# a word spelled with quote fragments: letters then an opening quote (c''url, b"a"sh), or a quoted
+# piece directly followed by another quote or by letters ("c""url", "c"url)
+function qword(s,   i, c, qs, cur, prevclose) {
+  qs = ""; cur = ""; prevclose = 0
+  for (i = 1; i <= length(s); i++) {
     c = substr(s, i, 1)
-    if (qs != "") { if (c == qs) qs = ""; else cur = cur c; continue }
-    if (c == "\"" || c == q) { qs = c; if (!st) { st = 1; qd = 1 }; continue }
-    if (c == " ") { if (st) { ntk++; tk[ntk] = cur; tkq[ntk] = qd; cur = ""; st = 0; qd = 0 }; continue }
-    st = 1; cur = cur c
+    if (qs != "") { if (c == qs) { qs = ""; prevclose = 1 }; continue }
+    if (c == "\"" || c == q) {
+      if (prevclose || (cur != "" && cur !~ /^-/ && cur !~ /=/)) return 1
+      qs = c; continue
+    }
+    if (index(" ;|&()<>", c)) { cur = ""; prevclose = 0; continue }
+    if (prevclose && c ~ /[A-Za-z]/) return 1
+    prevclose = 0; cur = cur c
   }
-  if (st) { ntk++; tk[ntk] = cur; tkq[ntk] = qd }
+  return 0
 }
-# (1) command position: 0 when the curl/wget word is only mentioned
-function cmdpos(pre,   i, c, k, t, n, w, j, b) {
-  k = 0
-  for (i = length(pre); i >= 1; i--) { c = substr(pre, i, 1); if (c == ";" || c == "&" || c == "|" || c == "(" || c == "`") { k = i; break } }
-  t = substr(pre, k + 1); gsub(/"/, " ", t); gsub(q, " ", t); gsub(/\\/, " ", t)
-  n = split(t, w, " ")
-  if (n >= 1 && w[1] ~ /^-/) return 0
-  if (t ~ /(^| )command +-[vV]( |$)/) return 0
-  for (j = 1; j <= n; j++) {
-    b = w[j]
-    if (b ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || b ~ /^-/ || (b in wrap)) continue
-    sub(/^.*\//, "", b)
-    return (b in notcmd) ? 0 : 1
+# does this text hold a fetch trigger (fetch tool word, URL, go install/run/get with @)?
+function fetchtrig(lo) { return (lo ~ trig || (lo ~ gotrig && index(lo, "@") > 0)) }
+# R2 scope for command substitution: refused only when (i) the line holds a fetch trigger, (ii) a $( ) / backtick body
+# (to its matching close, nesting tracked) holds one or is unterminated on the line, or (iii) the substitution is
+# assigned to a variable that a LATER line of the step feeds to eval/sh/bash/source/./exec. Returns the finding or "".
+function subwhy(k, raw, lo,   i, c, d, body, nb, st, var, j, ll) {
+  if (fetchtrig(lo)) return "command substitution on a line that holds a fetch trigger is refused"
+  nb = length(raw)
+  for (i = 1; i <= nb; i++) {
+    c = substr(raw, i, 1)
+    if (c == "$" && substr(raw, i + 1, 1) == "(") {
+      d = 1; st = i + 2
+      for (j = st; j <= nb && d > 0; j++) { c = substr(raw, j, 1); if (c == "(") d++; else if (c == ")") d-- }
+      if (d > 0) return "command substitution $( ) is not closed on its line (cannot read the body)"
+      body = substr(raw, st, j - st - 1)
+      if (fetchtrig(lowq(body))) return "command substitution body holds a fetch trigger"
+    } else if (c == "`") {
+      st = i + 1; j = index(substr(raw, st), "`")
+      if (j == 0) return "backtick is not closed on its line (cannot read the body)"
+      body = substr(raw, st, j - 1); i = st + j - 1
+      if (fetchtrig(lowq(body))) return "backtick body holds a fetch trigger"
+    }
   }
+  if (match(raw, /(^|[ ;&|(])[A-Za-z_][A-Za-z0-9_]*=[^ ]*(\$\(|`)/)) {
+    ll = substr(raw, RSTART + RLENGTH); var = substr(raw, RSTART, RLENGTH); sub(/^[ ;&|(]/, "", var); sub(/=.*$/, "", var)
+    for (j = k; j <= nrec; j++) {
+      if (j > k) ll = rtext[j]
+      body = ll; ll = lowq(ll)
+      if ((index(body, "$" var) || index(body, "${" var "}")) && ll ~ /(^|[ ;&|(])(eval|sh|bash|source|\.|exec)( |$)/) return "command substitution assigned to " var " is later executed (eval/sh/bash/source/./exec)"
+    }
+  }
+  return ""
+}
+# R2: obfuscation primitives, each refused wholesale in a SUBJECT step. Returns the number of findings.
+function r2(f, ln, raw, glue, k,   s, lo, nf, t, nu, u, i, n, tk, nout, v, val, hf, T, w) {
+  nf = 0
+  s = raw; gsub("[\"" q "]", "", s)
+  lo = lowq(raw); hf = hasfetchtool(lo)
+  if (glue) nf += rep(f, ln, "a backslash-newline splits a word (cannot read what runs)", raw)
+  if (index(raw, "$" q)) nf += rep(f, ln, "ANSI-C quoting $" q "..." q " is refused", raw)
+  if (index(raw, "`") || index(raw, "$(")) { w = subwhy(k, raw, lo); if (w != "") nf += rep(f, ln, w, raw) }
+  if (lo ~ /(^|[^a-z0-9_.-])eval([^a-z0-9_-]|$)/) nf += rep(f, ln, "eval is refused", raw)
+  if (lo ~ /(^|[^a-z0-9_.-])exec([^a-z0-9_-]|$)/) nf += rep(f, ln, "exec is refused", raw)
+  if (lo ~ /(^|[^a-z0-9_.-])(source|\.) +<\(/) nf += rep(f, ln, "source/. of a process substitution is refused", raw)
+  else if (index(raw, "<(")) nf += rep(f, ln, "process substitution <( ) is refused", raw)
+  if (lo ~ /(^|[^a-z0-9_.-])(sh|bash|zsh|dash|ksh|pwsh|powershell)( +-[a-z]+)* +-[a-z]*c([^a-z0-9_-]|$)/ || lo ~ /(^|[^a-z0-9_.-])python[0-9.]*( +-[a-z]+)* +-[a-z]*c([^a-z0-9_-]|$)/ || lo ~ /(^|[^a-z0-9_.-])(perl|ruby|node)( +-[a-z]+)* +-[a-z]*e([^a-z0-9_-]|$)/)
+    nf += rep(f, ln, "an interpreter given its program inline (sh -c, python -c, perl -e ...) is refused", raw)
+  if (qword(raw)) nf += rep(f, ln, "a command word that contains a quote is refused", raw)
+  t = s
+  while (match(t, /\$(\{\{[^}]*\}\}|\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)/)) {
+    i = (RSTART > 1) ? substr(t, RSTART - 1, 1) : " "; v = substr(t, RSTART + RLENGTH, 1); if (v == "") v = " "
+    if (i != " " || v != " ") { nf += rep(f, ln, "a variable adjacent to other characters could form a command word", raw); break }
+    t = substr(t, RSTART + RLENGTH)
+  }
+  if (lo ~ /(^|[^a-z0-9_.-])(env|command|exec|xargs|nohup|timeout|sudo|nice|busybox)( +[^|;&]*)? +(curl|wget)([^a-z0-9_-]|$)/) nf += rep(f, ln, "a wrapper around the fetch tool (env, command, xargs, nohup, timeout, sudo, nice) is refused", raw)
+  if (hf) {
+    if (s ~ /(^| )--next( |$)/) nf += rep(f, ln, "curl --next is refused", raw)
+    if (s ~ /(^| )(-[A-Za-z]*K[A-Za-z]*|--config)([ =]|$)/) nf += rep(f, ln, "-K / --config is refused", raw)
+    if (lo ~ /(^|[^a-z0-9_.-])wget([^a-z0-9_-]|$)/ && s ~ /(^| )(-[A-Za-z]*i[A-Za-z]*|--input-file)([ =]|$)/) nf += rep(f, ln, "wget -i / --input-file is refused", raw)
+  }
+  if (lo ~ /(^|[^a-z0-9_-])(iwr|iex|invoke-[a-z]+)([^a-z0-9_-]|$)/) nf += rep(f, ln, "iwr / iex / Invoke-* has no accepted shape", raw)
+  t = s; nu = 0
+  while (match(t, /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^ ]*/)) {
+    u = substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH); nu++
+    if (u !~ /^https:\/\//) nf += rep(f, ln, "URL scheme is not https", raw)
+    if (u ~ /\.\./ || u ~ /\/\.\// || u ~ /\/\.$/) nf += rep(f, ln, "URL contains a dot segment", raw)
+    if (tolower(u) ~ /%2e/) nf += rep(f, ln, "URL contains an encoded dot (%2e)", raw)
+    if (u ~ /@/) nf += rep(f, ln, "URL contains @ (userinfo)", raw)
+  }
+  if (hf && nu > 1) nf += rep(f, ln, "more than one URL in a fetch command", raw)
+  if (hf) {
+    n = tokenize(raw, T); nout = 0
+    for (i = 1; i <= n; i++) {
+      tk = T[i]; val = "\001"
+      if (tk == "--output" || tk == "--output-document") { nout++; val = T[i + 1] }
+      else if (tk ~ /^--(output|output-document)=/) { nout++; val = tk; sub(/^[^=]*=/, "", val) }
+      else if (tk == "--remote-name" || tk == "--remote-name-all") nout++
+      else if (tk ~ /^-[A-Za-z]+$/ && tk ~ /[oO]/) { nout++; if (tk ~ /[oO]$/) val = T[i + 1] }
+      else if (tk ~ /^-[A-Za-z]*[oO][^A-Za-z]/) { nout++; match(tk, /[oO]/); val = substr(tk, RSTART + 1) }
+      if (val != "\001") {
+        if (val == "-" || val == "/dev/stdout" || val ~ /^\/dev\/fd\//) nf += rep(f, ln, "output to stdout/fd (-o -, /dev/stdout, /dev/fd/*) is refused", raw)
+        else if (val != "" && val !~ /^\/dev\// && !isop(val)) regname(val, ln)
+      }
+    }
+    if (nout > 1) nf += rep(f, ln, "an output option (-o -O --output --remote-name) given more than once", raw)
+  }
+  return nf
+}
+function sh_a(T, n,   i, j, a) {
+  if (T[1] != "curl") return 0
+  for (i = 2; i <= n && isfl(T[i]); i++) ;
+  if (i + 2 > n || !pinraw(T[i]) || T[i + 1] != OP "|" || (T[i + 2] != "sh" && T[i + 2] != "bash")) return 0
+  if (n == i + 2) return 1
+  if (T[i + 3] != "-s" || T[i + 4] != "--") return 0
+  for (j = i + 5; j <= n; j++) if (isop(T[j]) || T[j] ~ /[$`;&|<>(){}]/) return 0
   return 1
 }
-# class of one pipeline stage: 1 inert, 2 file, 3 interpreter (default)
-function stagecls(stg,   i, t, cmd, cls, rd, tg) {
-  tokenize(stg); cmd = ""; cls = 0
-  for (i = 1; i <= ntk; i++) {
-    t = tk[i]
-    if (!tkq[i] && t ~ /^[0-9&]*>/) {
-      if (t ~ /^[0-9]*>&/ || t ~ /^2>/) continue
-      rd = t; sub(/^[0-9&]*>>?/, "", rd)
-      if (rd == "") { rd = tk[i + 1]; i++ }
-      if (rd != "/dev/null") cls = 2
-      continue
-    }
-    if (cmd != "") continue
-    if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || t ~ /^-/ || (t in wrap)) continue
-    cmd = t; sub(/^\\+/, "", cmd); sub(/^.*\//, "", cmd)
-  }
-  if (cmd == "") return 3
-  if (cmd in inert) return (cls > 1) ? cls : 1
-  if (cmd in filecmd) return 2
-  return 3
+function sh_bc(T, n, k, kind,   i, name, ck, j) {
+  if (T[1] != "curl") return 0
+  for (i = 2; i <= n && isfl(T[i]); i++) ;
+  if (T[i] != "-o" || n != i + 2 || !okname(T[i + 1])) return 0
+  if (kind == "b" ? !pinraw(T[i + 2]) : !relasset(T[i + 2])) return 0
+  name = T[i + 1]
+  ck = needck(k, name)
+  if (ck > 0) { okn[name] = 1; return 1 }
+  shwhy = (ck < 0) ? "the fetched file is used before its sha256 check" : "the fetched file has no sha256 check in the step"
+  return 0
 }
-function chain(t,   i, n, e, c, nx, cls, sc) {
-  cls = 1
-  while (1) {
-    n = length(t); e = n + 1
-    for (i = 1; i <= n; i++) {
-      c = substr(t, i, 1); nx = substr(t, i + 1, 1)
-      if (c == ";" || c == ")" || c == "`" || c == "|") { e = i; break }
-      if (c == "&" && (nx == "&" || nx == " " || nx == "") && substr(t, i - 1, 1) != ">") { e = i; break }
-    }
-    sc = stagecls(substr(t, 1, e - 1)); if (sc > cls) cls = sc
-    if (e > n || substr(t, e, 1) != "|" || substr(t, e + 1, 1) == "|") break
-    t = substr(t, e + 1)
+function sh_d(T, n,   i, t, head, dn, nurl) {
+  if (T[1] == "wget") {
+    for (i = 2; i <= n; i++) { t = T[i]; if (t == "-q") ; else if (t == "--spider") head = 1; else if (t ~ /^https:\/\/[^$`{}]+$/) nurl++; else return 0 }
+    return (head && nurl == 1)
   }
-  return cls
-}
-# (2) parse the options of one invocation
-function addurl(v,   i, j) {
-  i = index(v, "://")
-  if (i) { j = i; while (j > 1 && substr(v, j - 1, 1) ~ /[A-Za-z0-9+.-]/) j--; v = substr(v, j) } else v = "https://" v
-  nurl++; urlv[nurl] = v
-}
-function setout(v) { nouts++; if (v == "-") outstd = 1; else if (v == "/dev/null") outnull = 1; else outfile = 1 }
-function rdtarget(t) { if (t == "/dev/null") redirnull = 1; else redirfile = 1 }
-function optval(tool, nm, v) {
-  if (nm == "url") { addurl(v); return }
-  if (tool == "curl" && (nm == "o" || nm == "output")) { setout(v); return }
-  if (tool == "wget" && (nm == "O" || nm == "output-document")) { setout(v); return }
-  if (tool == "curl" && (nm == "d" || nm == "F" || nm == "T" || nm ~ /^(data|data-raw|data-binary|data-ascii|data-urlencode|form|form-string|upload-file|json)$/)) { sendf = 1; return }
-  if (tool == "wget" && (nm == "post-data" || nm == "post-file" || nm == "body-data" || nm == "body-file")) { sendf = 1; return }
-  if ((nm == "X" || nm == "request" || nm == "method") && toupper(v) ~ /^(POST|PUT|PATCH|DELETE)$/) sendf = 1
-}
-function parse(tool, s,   i, t, k, nm, v, eq, vs, rd, pend, pendrd) {
-  tokenize(s); outfile = outstd = outnull = sendf = headf = redirfile = redirnull = unres = nurl = 0; nouts = nnext = remall = nunres = 0; split("", urlv)
-  pend = ""; pendrd = 0
-  vs = (tool == "curl") ? "oHdXuAemwbcTFxKrCEDYyztQPU" : "OoPtTwUeiaBlQ"
-  for (i = 1; i <= ntk; i++) {
-    t = tk[i]
-    if (pendrd) { if (pendrd == 1) rdtarget(t); pendrd = 0; continue }
-    if (pend != "") { optval(tool, pend, t); pend = ""; continue }
-    if (!tkq[i] && t ~ /^[0-9&]*>/) {
-      if (t ~ /^[0-9]*>&/) continue
-      rd = t; sub(/^[0-9&]*>>?/, "", rd)
-      if (substr(t, 1, 1) == "2") { if (rd == "") pendrd = 2; continue }
-      if (rd == "") pendrd = 1; else rdtarget(rd)
-      continue
-    }
-    if (t ~ /^--/) {
-      nm = substr(t, 3); v = ""; eq = index(nm, "=")
-      if (eq) { v = substr(nm, eq + 1); nm = substr(nm, 1, eq - 1) }
-      if (nm == "next") { nnext++; continue }
-      if (nm == "remote-name-all") { outfile = 1; remall = 1; continue }
-      if (nm == "remote-name") { outfile = 1; nouts++; continue }
-      if (nm == "head" || nm == "spider") { headf = 1; continue }
-      if (index(longv, " " nm " ")) { if (eq) optval(tool, nm, v); else pend = nm }
-      continue
-    }
-    if (t ~ /^-./) {
-      for (k = 2; k <= length(t); k++) {
-        nm = substr(t, k, 1)
-        if (index(vs, nm)) { v = substr(t, k + 1); if (v == "") pend = nm; else optval(tool, nm, v); break }
-        if (tool == "curl") { if (nm == "O") { outfile = 1; nouts++ } else if (nm == "I") headf = 1 }
-      }
-      continue
-    }
-    if (t == "" || t == "-" || t ~ /^@/) continue
-    if (t ~ /\$/) { unres = 1; nunres++ }
-    else if (t ~ /[.\/]/) addurl(t)
+  if (T[1] != "curl") return 0
+  for (i = 2; i <= n; i++) {
+    t = T[i]
+    if (isfl(t)) continue
+    if (t == "-I" || t == "--head") head = 1
+    else if (t == "-o" && T[i + 1] == "/dev/null") { dn = 1; i++ }
+    else if (t == "-w" && i < n && !isop(T[i + 1]) && T[i + 1] !~ /[$`]/) i++
+    else if (t ~ /^https:\/\/[^$`{}]+$/) nurl++
+    else return 0
   }
+  return (nurl == 1 && (head || dn))
 }
-# source class of one URL: unres | other | pinned | gh_ref | gh_unk | gh_latest | gh_rel ; sets isapi
-function srcclass(u,   us, qs, p, np, host, ref, i, kv, nkv, found, allsha, kind) {
-  isapi = 0
-  if (u ~ /\$/) return "unres"
-  us = tolower(u); qs = ""
-  i = index(us, "#"); if (i) us = substr(us, 1, i - 1)
-  i = index(us, "?"); if (i) { qs = substr(us, i + 1); us = substr(us, 1, i - 1) }
-  np = split(us, p, "/")
-  host = p[3]; sub(/^[^@]*@/, "", host); sub(/:[0-9]*$/, "", host)
-  if (!isgh(host)) return "other"
-  for (i = 4; i <= np; i++) if (p[i] == "." || p[i] == ".." || index(p[i], "%2e")) return "gh_dot"
-  if (host == "raw.githubusercontent.com") { ref = p[6]; if (ref == "") return "gh_unk"; return isha(ref) ? "pinned" : "gh_ref" }
-  if (host == "gist.githubusercontent.com") { if (p[6] != "raw" || p[7] == "") return "gh_unk"; return isha(p[7]) ? "pinned" : "gh_ref" }
-  if (host == "codeload.github.com") { if (p[6] !~ /^(tar\.gz|zip|legacy\.tar\.gz|legacy\.zip)$/ || p[7] == "") return "gh_unk"; return isha(p[7]) ? "pinned" : "gh_ref" }
-  if (host == "github.com" || host == "www.github.com") {
-    kind = p[6]
-    if (kind == "raw" || kind == "blob" || kind == "tarball" || kind == "zipball") { ref = p[7] }
-    else if (kind == "archive") { ref = p[7]; sub(/\.(tar\.gz|tgz|zip)$/, "", ref) }
-    else if (kind == "releases") { if (p[7] == "latest") return "gh_latest"; if (p[7] == "download") return "gh_rel"; return "gh_unk" }
-    else return "gh_unk"
-    if (ref == "") return "gh_unk"
-    return isha(ref) ? "pinned" : "gh_ref"
+function sh_e(T, n,   i, t, meth, nurl) {
+  if (T[1] != "curl") return 0
+  for (i = 2; i <= n; i++) {
+    t = T[i]
+    if (isfl(t)) continue
+    if (t == "-X" && (T[i + 1] == "POST" || T[i + 1] == "PUT")) { meth = 1; i++ }
+    else if ((t == "-H" || t == "-d" || t == "--data" || t == "--data-raw") && i < n && !isop(T[i + 1]) && T[i + 1] !~ /`/) i++
+    else if (t == "--data-binary" && T[i + 1] ~ /^@[A-Za-z0-9_.\/-]+$/) i++
+    else if (t == "-o" && T[i + 1] == "/dev/null") i++
+    else if (t ~ /^https:\/\/[^$`{}]+$/ || t ~ /^\$[A-Za-z_][A-Za-z0-9_]*$/ || t ~ /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/) nurl++
+    else return 0
   }
-  if (host == "api.github.com") {
-    isapi = 1
-    if (p[4] != "repos") return "gh_unk"
-    kind = p[7]
-    if (kind == "tarball" || kind == "zipball" || kind == "commits") ref = p[8]
-    else if (kind == "git" && p[8] == "trees") ref = p[9]
-    else if (kind == "contents") {
-      nkv = split(qs, kv, "&"); found = 0; allsha = 1
-      for (i = 1; i <= nkv; i++) if (kv[i] ~ /^ref=/) { found++; if (!isha(substr(kv[i], 5))) allsha = 0 }
-      return (found > 0 && allsha) ? "pinned" : "gh_ref"
-    }
-    else return "gh_unk"
-    if (kind == "tarball" || kind == "zipball") { if (ref == "") return "gh_ref" }
-    else if (ref == "") return "gh_unk"
-    return isha(ref) ? "pinned" : "gh_ref"
-  }
-  return "gh_unk"
+  return (meth && nurl == 1)
 }
-function judgeunres(sk, sum) {
-  if (sk == "discard" || sk == "printed") return ""
-  if (sk == "file" && sum) return ""
-  return "cannot verify what is fetched (URL not literal / not found) and no checksum verification in the step"
+function sh_f(T, n,   i, t, j) {
+  if (T[1] != "curl") return 0
+  for (i = 2; i <= n; i++) {
+    t = T[i]
+    if (isfl(t)) continue
+    if (t == "-H" && i < n && !isop(T[i + 1]) && T[i + 1] !~ /`/) { i++; continue }
+    break
+  }
+  if (i + 2 > n || !apiok(T[i]) || T[i + 1] != OP "|") return 0
+  if (T[i + 2] == "python3") return (i + 4 == n && T[i + 3] == "-m" && T[n] == "json.tool")
+  if (T[i + 2] != "jq") return 0
+  for (j = i + 3; j <= n; j++) if (isop(T[j]) || T[j] ~ /`/) return 0
+  return 1
 }
-# (4) the verdict table: "" = ok, else the finding
-function judge(u, sk, sum,   c) {
-  c = srcclass(u)
-  if (c == "gh_dot") return (sk == "discard") ? "" : "dot-segment (a . or .. segment, or %2e) in a GitHub URL path: curl normalises it to a different ref than the one shown"
-  if (c == "pinned") return ""
-  if (c == "unres") return judgeunres(sk, sum)
-  if (sk == "discard") return ""
-  if (c == "other") {
-    if (sk == "printed") return ""
-    if (sk == "file") return sum ? "" : "non-GitHub download to a file with no checksum verification in the step"
-    return "non-GitHub fetch consumed in-stream (a checksum cannot cover a stream)"
+function sh_g(T, n,   i, j, t, nat, at, ref) {
+  i = 1; if (T[1] == "bash" && T[2] == "scripts/retry.sh") i = 3
+  if (T[i] != "go" || (T[i + 1] != "install" && T[i + 1] != "run" && T[i + 1] != "get")) return 0
+  for (j = i + 2; j <= n; j++) {
+    t = T[j]
+    if (isop(t)) return 0
+    at = index(t, "@")
+    if (at) {
+      ref = substr(t, at + 1)
+      if (substr(t, 1, at - 1) !~ /^[A-Za-z0-9_.\/~-]+$/ || !(isha(ref) || ref ~ semre)) return 0
+      nat++
+    } else if (t !~ /^[A-Za-z0-9_.\/=:,-]+$/) return 0
   }
-  if (c == "gh_latest") return "releases/latest always moves"
-  if (c == "gh_rel") {
-    if (sk == "interp") return "GitHub release asset consumed in-stream (a tag is mutable; a checksum cannot cover a stream)"
-    if (sk != "file" || !sum) return "GitHub release asset (a tag is mutable) with no checksum verification of the downloaded file in the step"
-    return ""
-  }
-  if (isapi && sk == "printed") return ""
-  return (c == "gh_unk") ? "unrecognised GitHub URL shape: cannot tell what ref is fetched" : "mutable GitHub ref (not a 40-hex commit sha)"
+  if (nat < 1) return 0
+  gocount += nat
+  return 1
 }
-function analyse(f, ln, text, sum, glue,   incomp, multi, o1, o2, o3, o4, ment, rest, base, m, p, abs, pre, tail, n, i, c, endc, seg, tool, w, k, tp, dest, sk, cl, why, j, u, tpre, rec, toks, tok, at, ref, nres) {
-  if (glue || obf(text)) { checked++; report(f, ln, "obfuscated command word (quote-fragment or backslash-split spelling of curl/wget/sh/bash: cannot read what runs)", text) }
-  w = text
-  while ((i = index(w, "${{")) > 0) { j = index(substr(w, i), "}}"); if (j == 0) break; w = substr(w, 1, i - 1) "$EXPR" substr(w, i + j + 1) }
-  rest = w; base = 0
-  while (match(rest, fetchre)) {
-    m = substr(rest, RSTART, RLENGTH); tool = "curl"; p = index(m, "curl"); if (!p) { tool = "wget"; p = index(m, "wget") }
-    abs = base + RSTART + p - 1
-    base = abs + 3; rest = substr(w, base + 1)
-    pre = substr(w, 1, abs - 1)
-    k = abs - 1; while (k >= 1 && substr(w, k, 1) !~ /[ ;&|(`"<>]/ && substr(w, k, 1) != q) k--
-    tp = substr(w, k + 1, abs - 1 - k)
-    if (tp != "" && tp !~ /^(\\|\/|\.\/|\.\.\/|~\/)/) continue
-    if (!cmdpos(substr(w, 1, k))) {
-      if (!ment && mentionexec(w)) { ment = 1; checked++; report(f, ln, "echo/printf output piped into an interpreter: the curl/wget text is executed, not a mention", text) }
-      continue
-    }
-    tail = substr(w, abs); n = length(tail); endc = ""; i = 5
-    for (; i <= n; i++) {
-      c = substr(tail, i, 1)
-      if (c == ";" || c == ")" || c == "`") { endc = c; break }
-      if (c == "&" && substr(tail, i + 1, 1) == "&") { endc = "&&"; break }
-      if (c == "|") { endc = (substr(tail, i + 1, 1) == "|") ? "||" : "|"; break }
-    }
-    seg = substr(tail, 1, i - 1)
-    parse(tool, substr(seg, 5))
-    # more URLs than output options (or --next): the surplus URLs reach stdout, so the
-    # whole call is judged as if every URL did (-o/-I of one URL says nothing of another)
-    multi = (tool == "curl" && (nnext > 0 || (nouts > 0 && !remall && nurl + nunres > nouts)))
-    if (multi) {
-      if (redirfile) dest = "file"
-      else if (redirnull) dest = "discard"
-      else dest = "stdout"
-    }
-    else if (outfile || redirfile) dest = "file"
-    else if (outnull || redirnull || headf) dest = "discard"
-    else if (tool == "wget" && !outstd) dest = "file"
-    else dest = "stdout"
-    o1 = g_pd; o2 = g_bd; o3 = g_kd; o4 = g_sd; dcs = 1; dscan(substr(w, 1, abs - 1))
-    incomp = (g_pd + g_bd + g_kd > 0); g_pd = o1; g_bd = o2; g_kd = o3; g_sd = o4
-    sk = dest
-    if (dest == "stdout") {
-      sk = "printed"
-      if (endc == "|") { cl = chain(substr(tail, i + 1)); sk = (cl == 1) ? "printed" : ((cl == 2) ? "file" : "interp") }
-      # a captured body ($(curl ..), backticks, V=$(curl ..)) is data in a variable that can
-      # be evaluated or piped later: not inert. Only an inert pipe stage inside a plain assignment is.
-      if (sk == "printed" && insubst(pre) && !(pre ~ assignre && endc == "|")) sk = "interp"
-      if (multi && sk == "printed" && outfile) sk = "file"
-    }
-    checked++
-    why = ""
-    if (!(sendf && (sk == "discard" || sk == "printed"))) {
-      for (j = 1; j <= nurl && why == ""; j++) why = judge(urlv[j], sk, sum)
-      if (why == "" && (unres || nurl == 0)) why = judgeunres(sk, sum)
-    }
-    # a stdout fetch inside ( ) { } if/while or a function body: the sink is the pipe/redirect after
-    # the ENCLOSING compound (or a later call of the function), which is not tracked: refuse unless pinned
-    if (why == "" && incomp && dest == "stdout" && endc != "|") {
-      for (j = 1; j <= nurl && why == ""; j++) if (srcclass(urlv[j]) != "pinned") why = "cannot verify the sink of a fetch inside a compound (subshell, group, if/while, function body)"
-      if (why == "" && (unres || nurl == 0)) why = "cannot verify the sink of a fetch inside a compound (subshell, group, if/while, function body)"
-    }
-    if (why != "") report(f, ln, why, text)
+# R3: every line of a SUBJECT step that holds a fetch tool or a URL must match exactly one accepted shape
+function shape(k,   raw, t, n, T, m, j, lo, wd) {
+  raw = rtext[k]; lo = lowq(raw)
+  if (!(lo ~ trig || (lo ~ gotrig && index(lo, "@") > 0))) return ""
+  t = raw; sub(/^ +/, "", t); sub(/ +$/, "", t)
+  if ((t ~ /^(echo|printf)( |$)/ || t ~ /^#/) && t !~ /[|><;&`]/ && !index(t, "$(")) return ""
+  n = tokenize(t, T)
+  if (n < 1) return "fetch does not match an accepted shape"
+  if (!hasfetchtool(lo) && index(raw, "://") == 0) {
+    for (j = 1; j <= n; j++) if ((T[j] in okn) && n <= 4 && (T[1] ~ /^(sh|bash|chmod|source|\.\/.*|\.)$/ || T[1] == "./" T[j])) return ""
   }
-  # ---- rule 2: go install / go run at a floating version ----
-  rest = text
-  while (match(rest, gore)) {
-    tail = substr(rest, RSTART + RLENGTH); rest = tail
-    for (i = 1; i <= length(tail); i++) { c = substr(tail, i, 1); if (c == ";" || c == ")" || c == "`" || c == "|" || c == "&") break }
-    seg = substr(tail, 1, i - 1); gsub("[\"" q "]", " ", seg)
-    n = split(seg, toks, " ")
-    for (k = 1; k <= n; k++) {
-      tok = toks[k]; if (tok ~ /^-/) continue
-      at = index(tok, "@"); if (!at) continue
-      ref = substr(tok, at + 1); gocount++
-      if (ref ~ /\$/ || ref == "") report(f, ln, "cannot verify go tool version (ref not literal)", text)
-      else if (!isha(ref) && ref !~ semre) report(f, ln, "floating tool version (not vX.Y.Z or a 40-hex sha)", text)
-    }
-  }
+  shwhy = ""; m = 0
+  m += sh_a(T, n); m += sh_bc(T, n, k, "b"); m += sh_bc(T, n, k, "c"); m += sh_d(T, n); m += sh_e(T, n); m += sh_f(T, n); m += sh_g(T, n)
+  if (m == 1) return ""
+  if (shwhy != "") return "fetch does not match an accepted shape (" shwhy ")"
+  return "fetch does not match an accepted shape"
 }
-function push(ln, txt,   a, b) {
+function push(ln, txt,   a) {
   nrec++; rline[nrec] = ln; rfile[nrec] = lastfile; rglue[nrec] = 0
   if (index(txt, "\001")) {
-    a = txt; gsub(/\001/, "", a); b = txt; gsub(/\001/, "@", b)
-    rglue[nrec] = (nwords(a) > nwords(b)); txt = a
+    a = txt; gsub(/\001/, "", a)
+    rglue[nrec] = 1; txt = a
   }
   rtext[nrec] = txt
 }
@@ -514,6 +358,7 @@ function addlit(ln, s) {
   push(curln, cur s); cur = ""
 }
 function content(ln, s) {
+  if (dq && index(s, "\\")) dqesc = 1
   if (mode == "lit") addlit(ln, s)
   else { sub(/^ +/, "", s); sub(/ *\\$/, "", s); acc = (acc == "" ? "" : acc " ") s; accn++ }
 }
@@ -523,21 +368,45 @@ function finish_run() {
     if (accn == 1) sub(/ #.*$/, "", acc)
     push(runln, acc)
   }
+  if (dqesc) report(lastfile, runln, "cannot judge a double-quoted run scalar with escapes", "run: (double-quoted scalar containing a backslash)")
+  dq = dqesc = 0
   inrun = 0; acc = ""; accn = 0; runs++
 }
 function okshell(v) { sub(/ +#.*$/, "", v); gsub(/"/, "", v); gsub(q, "", v); return (v ~ /^(bash|sh)( |$)/) }
-function flush(   k, sum) {
+function flush(   k, subj, nf, w, st) {
   if (stepshell != "" && nrec > 0 && !okshell(stepshell)) { checked++; report(rfile[1], rline[1], "unsupported shell, cannot verify", "shell: " stepshell) }
   stepshell = ""
-  sum = 0
-  for (k = 1; k <= nrec; k++) if (hassum(rtext[k])) sum = 1
-  g_pd = g_bd = g_kd = g_sd = 0
-  for (k = 1; k <= nrec; k++) { analyse(rfile[k], rline[k], rtext[k], sum, rglue[k]); dcs = 1; dscan(rtext[k]) }
+  stepn++; split("", okn)
+  subj = 0
+  for (k = 1; k <= nrec; k++) if (subject(rtext[k])) subj = 1
+  if (subj) {
+    checked++
+    for (k = 1; k <= nrec; k++) {
+      nf = r2(rfile[k], rline[k], rtext[k], rglue[k], k)
+      if (nf == 0) { w = shape(k); if (w != "") report(rfile[k], rline[k], w, rtext[k]) }
+    }
+  }
+  for (k = 1; k <= nrec; k++) { fmax++; ftext[fmax] = rtext[k]; fstep[fmax] = stepn }
   nrec = 0
+}
+# R2: a fetched file named by -o <name> must not be executed from ANOTHER step of the same workflow file
+function xstep(   a, b, t, nm) {
+  for (a = 1; a <= nmN; a++) {
+    nm = esc(nmname[a])
+    for (b = 1; b <= fmax; b++) {
+      if (fstep[b] == nmstep[a]) continue
+      t = " " ftext[b]; gsub("[\"" q "]", "", t)
+      if (t ~ ("[ ;&|(](sh|bash|zsh|dash|source|\\.|python[0-9.]*|perl|ruby|node|chmod[^;&|]*) +(\\./)?" nm "([ ;&|)]|$)") || t ~ ("[ ;&|(]\\./" nm "([ ;&|)]|$)")) {
+        report(lastfile, nmln[a], "a fetched file is executed from another step of the workflow", ftext[b]); break
+      }
+    }
+  }
+  nmN = 0; fmax = 0
 }
 # fail closed: a file whose run steps the line parser could not read is not "clean"
 function filecheck() {
   if (lastfile == "") return
+  xstep()
   if (un > 0 || (pr == 0 && hassteps)) report(lastfile, unln ? unln : 1, "could not read " (un > 0 ? un : 1) " run step(s) in " lastfile ": unparsed workflow shapes are not accepted", "(flow/JSON style or a run key the line parser did not read)")
   un = pr = hassteps = unln = 0
 }
@@ -561,9 +430,14 @@ FNR == 1 { if (inrun) finish_run(); flush(); filecheck(); files_seen++ }
   if (match(line, /^ *(- +)?run:( |$)/)) {
     pfx = line; sub(/run:.*$/, "", pfx); runind = length(pfx)
     val = substr(line, runind + 5); sub(/^ +/, "", val); sub(/ +$/, "", val)
-    pr++; inrun = 1; runln = FNR; acc = ""; accn = 0; cur = ""; runempty = (val == "")
+    pr++; inrun = 1; runln = FNR; acc = ""; accn = 0; cur = ""; runempty = (val == ""); dq = dqesc = 0
     if (val ~ /^[|>][-+0-9]*( +#.*)?$/) mode = (substr(val, 1, 1) == "|") ? "lit" : "fold"
-    else { mode = "inl"; if (val != "") content(FNR, val) }
+    else {
+      mode = "inl"; dq = (substr(val, 1, 1) == "\"")
+      if (val ~ /^".*"$/ && length(val) > 1) { if (index(val, "\\")) dqesc = 1; val = substr(val, 2, length(val) - 2) }
+      else if (val ~ new_sq && length(val) > 1) { val = substr(val, 2, length(val) - 2); gsub(q q, q, val) }
+      if (val != "") content(FNR, val)
+    }
   }
 }
 END {
