@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 607724d5a39d38e878ad912c2b1e53230cb7e8c6fb93d3b48cf3bd99c62d8743
-short: 607724d5a39d
+digest: c75c4754955eae62d9b67b49465501fb2037a76ef243174c1189dda5d199ddff
+short: c75c4754955e
 files: 36
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -39,7 +39,7 @@ per_file:
   scripts/tests/check-template-drift-selftest.sh: d8d91cfbf8492d17e70d08e05250f94de170b22b86ba12eee36a4ebae40c5a49
   scripts/tests/error-handling-fitness-selftest.sh: 37b2876aea9c242367a9df1ca7f6b544653e2a21c11ebcf354d20044d2067bbb
   scripts/tests/gate-run-selftest.sh: 4ec340bb14acad3e719e105bd79176dcac4c6d42b70b8c949698a5e0811e715c
-  scripts/tests/kill-durability-state-selftest.sh: 9fcc3795aebfe3ab0ef48291b7e14611870e867fdd7b7df22bc7480b96c5876b
+  scripts/tests/kill-durability-state-selftest.sh: 343085114bbc19aa84bb7c64b1ecfbd44eae156386f05908ae59b17e7963cb41
   scripts/tests/load-rows-selftest.sh: bdf8b5e22570884769e1765c2ccbb5fd0ac5e137964a8f91c30ea00b1298b198
   scripts/tests/non-vacuity-selftest.sh: 9d26436c27bfd7bac1fb2b3000cd1297e46f3cee759864ecc303e05c4de339d0
   scripts/tests/probe-self-gate-selftest.sh: cee9417e48c2d910a054ca37574cc95debc2c3c52dc29e0c312aa93f9ae415c9

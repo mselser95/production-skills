@@ -196,24 +196,50 @@ curl() {
   printf '%s' "$FAKE_HEALTHZ_BODY"
 }
 
-# cap_ok <label> <body> <extra-key-or-empty> <extra-value>: the capture carries the
-# REQUIRED keys with the body's values, and an extra key (e.g. balance) with the
-# body's value when the function emits it; a body that lacks that key needs none.
-cap_ok() {
-  local label="$1" out
+# cap_verdict <fn> <body> <extra-key-or-empty> <extra-value>: the capture carries the
+# REQUIRED keys with the body's values. An extra key (e.g. balance) is optional ONLY
+# when the body has no such key; when the body carries it, a capture that drops it
+# (or changes its value) is a failure naming the key. Prints the reason on failure.
+cap_verdict() {
+  local fn="$1" out
   FAKE_HEALTHZ_BODY="$2"
-  if ! out="$("$cap_fn" 2>/dev/null)"; then
-    printf '  FAIL  %-46s returned non-zero on a valid body\n' "$label"; fails=$((fails + 1)); return
+  if ! out="$("$fn" 2>/dev/null)"; then echo "returned non-zero on a valid body"; return 1; fi
+  if ! { grep -qx 'known=true' <<<"$out" && grep -qx 'applied_count=3' <<<"$out" && grep -qx 'applied_digest=0123456789ab' <<<"$out"; }; then
+    printf 'required key missing or wrong in %q\n' "$out"; return 1
   fi
-  if grep -qx 'known=true' <<<"$out" && grep -qx 'applied_count=3' <<<"$out" && grep -qx 'applied_digest=0123456789ab' <<<"$out" \
-     && { [[ -z "$3" ]] || ! grep -q "^$3=." <<<"$out" || grep -qx "$3=$4" <<<"$out"; }; then
-    printf '  ok    %-46s %s\n' "$label" PASS; ok=$((ok + 1))
+  if [[ -n "$3" ]] && grep -q "\"$3\"" <<<"$2" && ! grep -qx "$3=$4" <<<"$out"; then
+    printf 'capture dropped the key %s that the body carries (got %q)\n' "$3" "$out"; return 1
+  fi
+}
+cap_ok() { # cap_ok <label> <body> <extra-key-or-empty> <extra-value>
+  local why
+  if why="$(cap_verdict "$cap_fn" "$2" "$3" "$4")"; then
+    printf '  ok    %-46s %s\n' "$1" PASS; ok=$((ok + 1))
   else
-    printf '  FAIL  %-46s parsed %q\n' "$label" "$out"; fails=$((fails + 1))
+    printf '  FAIL  %-46s %s\n' "$1" "$why"; fails=$((fails + 1))
   fi
 }
 cap_ok "parses a real /healthz body" '{"status":"ok","pod_id":"p1","config":{"digest":"abc"},"state":{"known":true,"balance":"7","applied_count":3,"applied_digest":"0123456789ab"}}' balance 7
 cap_ok "parses a body with no conserved-quantity key" '{"status":"ok","pod_id":"p1","state":{"known":true,"applied_count":3,"applied_digest":"0123456789ab"}}' "" ""
+
+# The check above must be able to go red: a capture function that drops a key the
+# body carries (balance) is refused, naming the key; one that drops a key the body
+# does not carry is accepted.
+_drop_bal() { printf 'known=true\napplied_count=3\napplied_digest=0123456789ab\n'; }
+_body_bal='{"status":"ok","state":{"known":true,"balance":"7","applied_count":3,"applied_digest":"0123456789ab"}}'
+_body_nob='{"status":"ok","state":{"known":true,"applied_count":3,"applied_digest":"0123456789ab"}}'
+if why="$(cap_verdict _drop_bal "$_body_bal" balance 7)"; then
+  printf '  FAIL  %-46s a capture dropping balance was accepted\n' "capture drops a key the body carries"; fails=$((fails + 1))
+elif grep -q 'dropped the key balance' <<<"$why"; then
+  printf '  ok    %-46s %s\n' "capture drops a key the body carries" FAIL; ok=$((ok + 1))
+else
+  printf '  FAIL  %-46s wrong reason: %s\n' "capture drops a key the body carries" "$why"; fails=$((fails + 1))
+fi
+if cap_verdict _drop_bal "$_body_nob" balance 7 >/dev/null; then
+  printf '  ok    %-46s %s\n' "capture without balance, body without balance" PASS; ok=$((ok + 1))
+else
+  printf '  FAIL  %-46s refused\n' "capture without balance, body without balance"; fails=$((fails + 1))
+fi
 
 # A body with no `state` key at all -- the shape a renamed or deleted field
 # produces. ledger_state must FAIL rather than print an empty capture: an
