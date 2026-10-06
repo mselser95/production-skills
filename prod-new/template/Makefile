@@ -350,6 +350,8 @@ acceptance-audit:
 	  if [ "$$tot" = "0" ]; then \
 	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go'; then \
 	      echo "acceptance-audit: 0 changed Go lines vs $$BASE -- nothing to audit"; exit 0; fi; \
+	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go'; then \
+	      echo "acceptance-audit: 0 changed non-test Go lines vs $$BASE (only test files changed) -- nothing to audit"; exit 0; fi; \
 	    echo "acceptance-audit: FAIL -- 0/0 changed lines but the Go diff vs $$BASE is not empty (or base missing): unmeasurable"; exit 1; fi; \
 	  if awk -v p="$$pct" -v f="$(ACCEPTANCE_AUDIT_FLOOR)" 'BEGIN{exit !(p+0>=f+0)}'; then \
 	    echo "acceptance-audit: $$pct% >= $(ACCEPTANCE_AUDIT_FLOOR)% floor over $$n spec(s)"; \
