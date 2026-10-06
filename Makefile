@@ -147,6 +147,11 @@ gates:
 # nobody had updated, and one of them hid a genuinely open item. The numbers are
 # derived from the tables now and compared to what the prose claims.
 	@bash scripts/gap-report-consistency.sh
+# Nothing in this repo executed the template's workflows -- not actionlint, not the
+# scaffold job's check-fast -- so an installer piped from a mutable branch shipped
+# to every scaffold unnoticed. This reads them: remote scripts must be pinned to a
+# commit (or checksummed) and tools must not install at @latest/@main.
+	@bash scripts/template-workflow-pins.sh
 
 # ---- the full gate --------------------------------------------------------
 verify: check-fast selftests invariants tcb mutation

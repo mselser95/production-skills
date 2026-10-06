@@ -145,8 +145,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # A script from a mutable branch, piped to a shell, runs whatever that branch
+      # holds on the day. So the installer is fetched from the release tag's COMMIT
+      # (the one that was read) and the version is passed explicitly (so the SBOM
+      # tool does not change under the build). Bump both together: the commit is
+      # `gh api repos/anchore/syft/git/ref/tags/<version>` (dereference an annotated
+      # tag with `gh api repos/anchore/syft/git/tags/<sha> --jq .object.sha`).
       - name: Install syft
-        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/b254e6d92f28c3868a755f62fb3ca8f26e9fee76/install.sh | sh -s -- -b /usr/local/bin v1.54.1
       - run: syft dir:. -o cyclonedx-json=sbom.cdx.json -o spdx-json=sbom.spdx.json
       - uses: actions/upload-artifact@v4
         with:
