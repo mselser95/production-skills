@@ -74,6 +74,26 @@ r="$(mkr rc3owner 3)"
 printf 'entries:\n  - id: wrong-field\n    owner: scripts/changed-line-coverage.sh\n    created: 2026-10-01\n    expires: 2027-01-01\n    evidence: "x"\n' > "$r/registries/contract-debt.yaml"
 run "rc 3 with the script named only in the owner field fails" 2 "$NOENTRY" "$r"
 
+r="$(mkr rc3unrelated 3)"
+printf 'entries:\n  - id: first-debt\n    owner: o\n    summary: "see scripts/changed-line-coverage.sh"\n    evidence: "x"\n  - id: unrelated-debt\n    owner: o\n    evidence: "y"\n' > "$r/registries/contract-debt.yaml"
+run "rc 3 with the script mentioned only in an unrelated entry's other field fails" 2 "$NOENTRY" "$r"
+
+r="$(mkr rc3notes 3)"
+printf 'entries:\n  - id: notes-debt\n    owner: o\n    notes: |\n      evidence: scripts/changed-line-coverage.sh\n      path: scripts/changed-line-coverage.sh\n    evidence: "x"\n' > "$r/registries/contract-debt.yaml"
+run "rc 3 with evidence: inside a notes block scalar fails" 2 "$NOENTRY" "$r"
+
+r="$(mkr rc3bak 3)"
+printf 'entries:\n  - id: bak-debt\n    owner: o\n    evidence: "scripts/changed-line-coverage.sh.bak"\n    path: scripts/changed-line-coverage.sh.bak\n' > "$r/registries/contract-debt.yaml"
+run "rc 3 with a .bak path fails" 2 "$NOENTRY" "$r"
+
+r="$(mkr rc3id2 3)"
+printf 'entries:\n  - owner: o\n    id: second-key-id\n    created: 2026-10-01\n    evidence: "scripts/changed-line-coverage.sh"\n  - id: later\n    evidence: "x"\n' > "$r/registries/contract-debt.yaml"
+run "rc 3 with id as the second key names that entry's id" 0 "$SKIPPED second-key-id" "$r"
+
+r="$(mkr rc3incomment 3)"
+printf 'entries:\n  - id: commented\n    owner: o\n    # evidence: scripts/changed-line-coverage.sh\n    evidence: "x"\n      # evidence: scripts/changed-line-coverage.sh\n' > "$r/registries/contract-debt.yaml"
+run "rc 3 with the script named only in an in-entry comment fails" 2 "$NOENTRY" "$r"
+
 for code in 1 2; do
   r="$(mkr "rc$code" "$code")"
   printf 'entries:\n  - id: customised-clc\n    owner: o\n    created: 2026-10-01\n    expires: 2027-01-01\n    evidence: "scripts/changed-line-coverage.sh"\n' > "$r/registries/contract-debt.yaml"

@@ -322,11 +322,19 @@ acceptance-audit-selftest-run:
 	@rc=0; bash "$(ACCEPTANCE_AUDIT_SELFTEST)" || rc=$$?; \
 	  [ "$$rc" -ne 0 ] || exit 0; \
 	  if [ "$$rc" -ne 3 ]; then echo "probe-selftests: FAIL -- acceptance-audit selftest exited $$rc"; exit 1; fi; \
-	  id=""; [ ! -f registries/contract-debt.yaml ] || id=$$(awk 'function flush() { if (!done && hit && eid != "") { done = 1; print eid; exit } } \
-	    /^[[:space:]]*#/ { next } \
-	    /^[[:space:]]*-[[:space:]]+id:/ { flush(); hit = 0; key = ""; eid = $$0; sub(/^[^:]*:[[:space:]]*/, "", eid); gsub(/["\047[:space:]]/, "", eid); next } \
-	    /^[[:space:]]+(-[[:space:]]+)?[A-Za-z_]+:/ { key = $$0; sub(/^[[:space:]]+(-[[:space:]]+)?/, "", key); sub(/:.*/, "", key) } \
-	    (key == "evidence" || key == "path") && index($$0, "scripts/changed-line-coverage.sh") { hit = 1 } \
+	  id=""; [ ! -f registries/contract-debt.yaml ] || id=$$(awk 'function flush() { if (!done && inent && hit && eid != "") { done = 1; print eid; exit } } \
+	    function tok(s,   p, off, rest, b, a) { off = 0; rest = s; while ((p = index(rest, P)) > 0) { b = (off + p > 1) ? substr(s, off + p - 1, 1) : " "; a = substr(s, off + p + length(P), 1); \
+	      if (index(" \"\047[,", b) > 0 && (a == "" || index(" \"\047],", a) > 0)) return 1; off += p; rest = substr(s, off + 1) } return 0 } \
+	    function field(body,   val) { if (body ~ /^[A-Za-z_][A-Za-z0-9_-]*:/) { key = body; sub(/:.*/, "", key); val = body; sub(/^[^:]*:[ ]*/, "", val); \
+	      if (key == "id") { eid = val; gsub(/["\047 ]/, "", eid) } else if ((key == "evidence" || key == "path") && tok(val)) hit = 1 } else key = "" } \
+	    BEGIN { P = "scripts/changed-line-coverage.sh" } \
+	    /^[ ]*#/ || /^[ ]*$$/ { next } \
+	    { match($$0, /[^ ]/); ind = RSTART - 1 } \
+	    /^[ ]*-([ ]|$$)/ && (!inent || ind <= d) { flush(); inent = 1; d = ind; hit = 0; eid = ""; key = ""; match($$0, /-[ ]*/); kind = ind + RLENGTH; field(substr($$0, kind + 1)); next } \
+	    !inent { next } \
+	    ind <= d { flush(); inent = 0; next } \
+	    ind == kind && $$0 !~ /^[ ]*-([ ]|$$)/ { field(substr($$0, kind + 1)); next } \
+	    (key == "evidence" || key == "path") && tok($$0) { hit = 1 } \
 	    END { flush() }' registries/contract-debt.yaml); \
 	  if [ -n "$$id" ]; then echo "probe-selftests: acceptance-audit selftest SKIPPED, honoured by contract-debt entry $$id"; exit 0; fi; \
 	  echo "probe-selftests: FAIL -- acceptance-audit selftest skipped (customised scripts/changed-line-coverage.sh) and registries/contract-debt.yaml does not record it"; exit 1
