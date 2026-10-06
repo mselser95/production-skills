@@ -566,6 +566,23 @@ shard_order_key() {
 }
 
 # --- helpers -----------------------------------------------------------------
+# go_fail_evidence <captured go test output>: up to 3 lines of WHY a go test run
+# was red, joined with " | ". Every `--- FAIL: <name>` (first 3) each followed by
+# its first `_test.go:N:` assertion line; with no `--- FAIL`, the notable markers
+# instead. Prints nothing when it finds none (the caller keeps its own wording).
+go_fail_evidence() {
+  local out="$1" ev
+  ev=$(awk '
+    /--- FAIL:/ { if (nf < 3) { nf++; printf "%s\n", $0; want = 1 } else want = 0; next }
+    want && /_test\.go:[0-9]+:/ { printf "%s\n", $0; want = 0 }
+  ' <<<"$out" | sed 's/^[[:space:]]*//' | head -n 3)
+  if [[ -z "$ev" ]]; then
+    ev=$(grep -E 'panic:|bind: address already in use|race detected|\[setup failed\]|build failed' <<<"$out" | sed 's/^[[:space:]]*//' | head -n 3)
+  fi
+  [[ -n "$ev" ]] && printf '%s' "$ev" | tr '\n' '|' | sed 's/|/ | /g; s/ | $//'
+  return 0
+}
+
 row() { # row <dimension> <verdict> <evidence>
   # In a group run, a row OWNED by another group is dropped here, so the ungated
   # code that runs in every shard cannot leak its rows into each of them. An id
@@ -2085,9 +2102,9 @@ fi   # @shard-end
 if shard_run dynamic; then   # @shard-begin dynamic
 if ls regressions/*/events.json >/dev/null 2>&1; then
   n=$(ls -d regressions/*/ 2>/dev/null | wc -l | tr -d ' ')
-  if go test ./... -run 'Replay|Regression' -count=1 >/dev/null 2>&1; then
+  if rc_out=$(go test ./... -run 'Replay|Regression' -count=1 2>&1); then
     row "replay-corpus" PASS "$n fixtures, harness green"
-  else row "replay-corpus" FAIL "$n fixtures but the harness did not run"; fi
+  else rc_ev=$(go_fail_evidence "$rc_out"); row "replay-corpus" FAIL "$n fixtures but the harness did not run${rc_ev:+: $rc_ev}"; fi
 else
   # NOT excusable by declining event_sourcing, which this row used to allow.
   # The two are different things: the event LOG is derived from whether the
@@ -2615,7 +2632,8 @@ else
     obs_why=$(grep -m1 -E '^[^[:space:]]+\.go:[0-9]+:' <<<"$obs_out" \
       || grep -m1 -E 'no Go files|cannot find|^FAIL|build failed' <<<"$obs_out" \
       || printf '%s' "$(tail -n1 <<<"$obs_out")")
-    row "observability-contract-checked" FAIL "the test(s) that read the manifest are RED: ${obs_why:-unknown}"
+    obs_ev=$(go_fail_evidence "$obs_out")
+    row "observability-contract-checked" FAIL "the test(s) that read the manifest are RED: ${obs_why:-unknown}${obs_ev:+ | $obs_ev}"
   fi
 fi
 fi   # @shard-end
@@ -4523,11 +4541,26 @@ fi
 # blocking-lane file an untagged candidate. Same shape as a citation being
 # indistinguishable from a tombstone: a checker that reads prose cannot tell a
 # declaration from a discussion of one.
-cand=$(grep -rlE '^[[:space:]]*//[[:space:]]*provenance:[[:space:]]*candidate[[:space:]]*$' --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
-tagged=$(grep -rl "go:build candidate" --include='*_test.go' . 2>/dev/null | wc -l | tr -d ' ')
+# The header may carry a suffix that starts with `(` or `,` (`candidate (TTL: 90d)`,
+# `candidate, ttl 2027-04-01`) or end the line; a prose word after it does not count.
+# Tagging is checked PER FILE: comparing the count of tagged files with the count of
+# candidate files compared two unrelated sets (one untagged candidate plus two tagged
+# files elsewhere passed).
+cand_hdr='^[[:space:]]*//[[:space:]]*provenance:[[:space:]]*candidate([[:space:]]*$|[[:space:]]*[(,])'
+cand_tag='^//go:build (.*[^[:alnum:]_!])?candidate([^[:alnum:]_]|$)'
+cand_files=$(grep -rlE "$cand_hdr" --include='*_test.go' --exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor . 2>/dev/null | sort)
+cand=0; cand_bad=0; cand_bad_list=""
+while IFS= read -r cf; do
+  [[ -n "$cf" ]] || continue
+  cand=$((cand+1))
+  if ! grep -qE "$cand_tag" "$cf" 2>/dev/null; then
+    cand_bad=$((cand_bad+1))
+    (( cand_bad <= 5 )) && cand_bad_list+="${cand_bad_list:+, }$cf"
+  fi
+done <<<"$cand_files"
 if (( cand == 0 )); then row "candidate-lane-segregated" NA "no candidate tests"
-elif (( tagged >= cand )); then row "candidate-lane-segregated" PASS "$cand candidate files, all build-tagged"
-else row "candidate-lane-segregated" FAIL "$((cand-tagged)) of $cand candidate files run in the BLOCKING lane"; fi
+elif (( cand_bad == 0 )); then row "candidate-lane-segregated" PASS "$cand candidate files, all build-tagged"
+else row "candidate-lane-segregated" FAIL "$cand_bad of $cand candidate files run in the BLOCKING lane: $cand_bad_list"; fi
 
 # --- 20. provenance headers on every ADDED test func ------------------------
 # Only functions the diff ADDS are in scope: pre-existing tests in a touched

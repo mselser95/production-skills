@@ -105,6 +105,13 @@ run "0/0 with non-empty diff fails" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0"
 r="$(mkrepo empty 1)"
 run "0/0 with empty diff passes, said" 0 "0 changed Go lines" "$r" STUB_OUT="100% (0/0"
 
+r="$(mkrepo testonly 1)"; echo "package a // t" > "$r/a_test.go"; ( cd "$r" && git add a_test.go )
+run "0/0 with only a _test.go changed passes, said" 0 "only test files changed" "$r" STUB_OUT="0% (0/0"
+r="$(mkrepo testplusprod 1)"; echo "package a // t" > "$r/a_test.go"; ( cd "$r" && git add a_test.go ); echo "package a // changed" > "$r/a.go"
+run "0/0 with a non-test .go AND a test file changed still fails" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0"
+r="$(mkrepo testonlynobase 1)"; echo "package a // t" > "$r/a_test.go"; ( cd "$r" && git add a_test.go )
+run "0/0 test-only diff with base missing still fails closed" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0" CHANGED_LINE_COVERAGE_BASE=nosuchbase
+
 r="$(mkrepo low 1)"; echo "package a // c" > "$r/a.go"
 run "70 at floor 80 fails" 2 "70.0% of changed lines" "$r" STUB_OUT="70.0% (7/10"
 run "70 at floor 60 passes" 0 ">= 60% floor" "$r" STUB_OUT="70.0% (7/10" ACCEPTANCE_AUDIT_FLOOR=60
@@ -166,7 +173,7 @@ if [[ "$own" = 0 ]]; then
   # (i) stock per the stamp, template unresolvable: the cases run (13), no TEMPLATE_DIR needed.
   printf 'files:\n  - path: scripts/changed-line-coverage.sh\n    sha256: x\n    template_sha256: %s\n' \
     "$(shasum -a 256 "$nclc" | awk '{print $1}')" > "$tmp/nrepo/.prod/template-provenance.yaml"
-  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 14 case(s)" "/nonexistent"
+  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 17 case(s)" "/nonexistent"
   # (ii) one comment line added: differs from the stamped template copy -> n/a, rc0.
   echo "# customised" >> "$nclc"
   nested "stamped-customised changed-line-coverage.sh is n/a per provenance, rc0" 0 "per .prod/template-provenance.yaml" "/nonexistent"
