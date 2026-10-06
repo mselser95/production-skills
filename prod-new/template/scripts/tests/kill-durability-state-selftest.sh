@@ -59,8 +59,21 @@ if [[ "${KILL_DURABILITY_LIB_LOADED:-}" != "1" ]]; then
   exit 1
 fi
 
-if ! declare -f assert_state_identical >/dev/null || ! declare -f ledger_state >/dev/null; then
-  printf 'selftest: the library seam did not define the state helpers -- nothing under test.\n' >&2
+# The capture function is `service_state` (neutral) or `ledger_state` (the name
+# the example service uses and downstream scripts already define): either is
+# accepted, service_state preferred; neither defined is a FAIL. The captured
+# state object is "every key it carries": `known`, `applied_count` and
+# `applied_digest` are REQUIRED, any further key (a conserved quantity such as
+# `balance`) is compared when present and need not exist -- a service with no
+# conserved quantity must not invent one to pass. The two denominators
+# (known not true, applied_count 0) and a missing `state` object still FAIL.
+resolve_cap_fn() {
+  if declare -f service_state >/dev/null; then echo service_state
+  elif declare -f ledger_state >/dev/null; then echo ledger_state
+  else return 1; fi
+}
+if ! declare -f assert_state_identical >/dev/null || ! cap_fn="$(resolve_cap_fn)"; then
+  printf 'selftest: the library seam defined no assert_state_identical or no capture function (service_state / ledger_state) -- nothing under test.\n' >&2
   exit 1
 fi
 
@@ -77,6 +90,11 @@ capture() { # capture <file> <known> <balance> <count> <digest>
     printf 'applied_count=%s\n' "$4"
     printf 'applied_digest=%s\n' "$5"
   } >"${WORK}/$1"
+}
+
+capture_nb() { # capture_nb <file> <known> <count> <digest> [extra key=value ...] : a service with no conserved quantity
+  local f="$1" k="$2" c="$3" d="$4"; shift 4
+  { printf 'known=%s\napplied_count=%s\napplied_digest=%s\n' "$k" "$c" "$d"; (($#)) && printf '%s\n' "$@"; } >"${WORK}/$f"
 }
 
 expect() { # expect <label> <before-file> <after-file> <PASS|FAIL>
@@ -126,6 +144,40 @@ expect "two identical EMPTY applied sets" zero-before zero-after FAIL
 capture nok-before "" 12 12 aabbccddeeff
 capture nok-after  "" 12 12 aabbccddeeff
 expect "populated captures with no known field" nok-before nok-after FAIL
+# A service with NO conserved quantity: no balance key at all.
+capture_nb nb-before true 12 aabbccddeeff
+capture_nb nb-after  true 12 aabbccddeeff
+expect "no conserved-quantity key, identical populated" nb-before nb-after PASS
+capture_nb nb-moved  true 12 aabbccddeeff
+capture_nb nb-moved2 true 11 aabbccddeeff
+expect "no conserved-quantity key, applied count moved" nb-moved nb-moved2 FAIL
+capture_nb nbu-before false 0 ""
+capture_nb nbu-after  false 0 ""
+expect "no conserved-quantity key, two UNKNOWN captures" nbu-before nbu-after FAIL
+capture_nb nbz-before true 0 000000000000
+capture_nb nbz-after  true 0 000000000000
+expect "no conserved-quantity key, two EMPTY applied sets" nbz-before nbz-after FAIL
+# any additional key is compared when present (a service's own vocabulary, e.g. threads)
+capture_nb ex-before true 12 aabbccddeeff threads=4
+capture_nb ex-after  true 12 aabbccddeeff threads=3
+expect "an extra key present and moved" ex-before ex-after FAIL
+
+# Both capture-function names are accepted; neither defined is a FAIL. Each
+# case runs the real resolver in a subshell with the other name removed/added.
+fn_case() { # fn_case <label> <want-name|NONE> <setup>
+  local got
+  got="$( ( eval "$3"; resolve_cap_fn ) 2>/dev/null)"; local rc=$?
+  if [[ "$2" == NONE ]]; then
+    if ((rc != 0)) && [[ -z "$got" ]]; then printf '  ok    %-46s %s\n' "$1" FAIL; ok=$((ok + 1)); else printf '  FAIL  %-46s resolved %s\n' "$1" "$got"; fails=$((fails + 1)); fi
+  elif ((rc == 0)) && [[ "$got" == "$2" ]]; then printf '  ok    %-46s %s\n' "$1" "$got"; ok=$((ok + 1))
+  else printf '  FAIL  %-46s got %q rc=%s, want %s\n' "$1" "$got" "$rc" "$2"; fails=$((fails + 1)); fi
+}
+_body="$(declare -f "$cap_fn" | sed 1d)"
+fn_case "only ledger_state defined is accepted" ledger_state "unset -f service_state; eval \"ledger_state() \$_body\""
+fn_case "only service_state defined is accepted" service_state "unset -f ledger_state; eval \"service_state() \$_body\""
+fn_case "both defined: service_state preferred" service_state "eval \"service_state() \$_body; ledger_state() \$_body\""
+fn_case "neither defined" NONE "unset -f service_state ledger_state"
+
 # --- the capture side ------------------------------------------------------
 # ledger_state's transport is `curl -sf`, so the double is a shell function
 # named curl, which shadows the binary for the duration of the call. A LOCAL
@@ -144,20 +196,24 @@ curl() {
   printf '%s' "$FAKE_HEALTHZ_BODY"
 }
 
-FAKE_HEALTHZ_BODY='{"status":"ok","pod_id":"p1","config":{"digest":"abc"},"state":{"known":true,"balance":"7","applied_count":3,"applied_digest":"0123456789ab"}}'
-if out="$(ledger_state 2>/dev/null)"; then
-  want=$'known=true\nbalance=7\napplied_count=3\napplied_digest=0123456789ab'
-  if [[ "$out" == "$want" ]]; then
-    printf '  ok    %-46s %s\n' "parses a real /healthz body" PASS
-    ok=$((ok + 1))
-  else
-    printf '  FAIL  %-46s parsed %q, want %q\n' "parses a real /healthz body" "$out" "$want"
-    fails=$((fails + 1))
+# cap_ok <label> <body> <extra-key-or-empty> <extra-value>: the capture carries the
+# REQUIRED keys with the body's values, and an extra key (e.g. balance) with the
+# body's value when the function emits it; a body that lacks that key needs none.
+cap_ok() {
+  local label="$1" out
+  FAKE_HEALTHZ_BODY="$2"
+  if ! out="$("$cap_fn" 2>/dev/null)"; then
+    printf '  FAIL  %-46s returned non-zero on a valid body\n' "$label"; fails=$((fails + 1)); return
   fi
-else
-  printf '  FAIL  %-46s returned non-zero on a valid body\n' "parses a real /healthz body"
-  fails=$((fails + 1))
-fi
+  if grep -qx 'known=true' <<<"$out" && grep -qx 'applied_count=3' <<<"$out" && grep -qx 'applied_digest=0123456789ab' <<<"$out" \
+     && { [[ -z "$3" ]] || ! grep -q "^$3=." <<<"$out" || grep -qx "$3=$4" <<<"$out"; }; then
+    printf '  ok    %-46s %s\n' "$label" PASS; ok=$((ok + 1))
+  else
+    printf '  FAIL  %-46s parsed %q\n' "$label" "$out"; fails=$((fails + 1))
+  fi
+}
+cap_ok "parses a real /healthz body" '{"status":"ok","pod_id":"p1","config":{"digest":"abc"},"state":{"known":true,"balance":"7","applied_count":3,"applied_digest":"0123456789ab"}}' balance 7
+cap_ok "parses a body with no conserved-quantity key" '{"status":"ok","pod_id":"p1","state":{"known":true,"applied_count":3,"applied_digest":"0123456789ab"}}' "" ""
 
 # A body with no `state` key at all -- the shape a renamed or deleted field
 # produces. ledger_state must FAIL rather than print an empty capture: an
@@ -165,7 +221,7 @@ fi
 # path by which a field rename would switch the whole assertion off while
 # leaving the scenario green.
 FAKE_HEALTHZ_BODY='{"status":"ok","pod_id":"p1","config":{"digest":"abc"}}'
-if ledger_state >/dev/null 2>&1; then
+if "$cap_fn" >/dev/null 2>&1; then
   printf '  FAIL  %-46s a body with no state key produced a capture\n' "refuses a renamed/removed state field"
   fails=$((fails + 1))
 else
@@ -176,7 +232,7 @@ fi
 # The transport itself failing (container gone, port closed) must also be a
 # non-zero return and not an empty capture, for the same reason.
 FAKE_HEALTHZ_BODY=''
-if ledger_state >/dev/null 2>&1; then
+if "$cap_fn" >/dev/null 2>&1; then
   printf '  FAIL  %-46s a failed request produced a capture\n' "refuses an unreachable endpoint"
   fails=$((fails + 1))
 else

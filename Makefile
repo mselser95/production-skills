@@ -200,10 +200,10 @@ mutation:
 # HERE, with the guard closing the hole the workflow names.
 # The template's own selftest that has no _shared/probes source (the others are mirrors of
 # ones the glob above already runs): run from the framework tree so it is not first run downstream.
-TEMPLATE_SELFTESTS = prod-new/template/scripts/tests/changed-line-coverage-selftest.sh
+TEMPLATE_SELFTESTS = prod-new/template/scripts/tests/changed-line-coverage-selftest.sh prod-new/template/scripts/tests/check-template-drift-selftest.sh
 selftests:
 	@set -e; n=0; \
-	  [ -f $(TEMPLATE_SELFTESTS) ] || { echo "selftests: $(TEMPLATE_SELFTESTS) is missing: a vendored selftest nothing runs here is first exercised in someone else's CI" >&2; exit 2; }; \
+	  for ts in $(TEMPLATE_SELFTESTS); do [ -f "$$ts" ] || { echo "selftests: $$ts is missing: a vendored selftest nothing runs here is first exercised in someone else's CI" >&2; exit 2; }; done; \
 	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
 	    [ -f "$$t" ] || continue; \
 	    printf '  %-52s ' "$$(basename $$t)"; \

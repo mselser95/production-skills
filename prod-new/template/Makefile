@@ -309,6 +309,7 @@ probe-selftests:
 	bash scripts/tests/acceptance-audit-selftest.sh
 	bash scripts/tests/changed-line-coverage-selftest.sh
 	bash scripts/tests/acceptance-gap-selftest.sh
+	bash scripts/tests/check-template-drift-selftest.sh
 
 # acceptance: every acceptance/<feature>.yaml is complete, approved, and traced
 # to tests both ways (_shared/formats/acceptance-spec.md in production-skills).
@@ -347,6 +348,11 @@ acceptance:
 # An excluded path must be test support, never production code, and review is
 # where that is checked. A diff whose only Go changes are tests and excluded
 # files is said ("nothing to audit"), not failed; any other 0/0 still fails.
+# The "removed N file(s)" count is over the range the measurement uses (BASE...HEAD, the
+# merge-base, committed changes) plus what is staged or modified on top of HEAD (a base that is
+# not an ancestor no longer inflates it with files only the base side changed); a 0/0 pass needs the diff empty under BOTH that range and
+# the working tree, so uncommitted Go changes (not measured) and a diverged base fail closed.
+# An exclusion entry that matches no changed file is printed (stale), not failed.
 ACCEPTANCE_AUDIT_FLOOR ?= 80
 ACCEPTANCE_AUDIT_EXCLUDES ?=
 ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
@@ -377,16 +383,20 @@ acceptance-audit:
 	  [ -n "$$pct" ] && [ -n "$$tot" ] || { echo "acceptance-audit: FAIL -- no changed-line coverage figure produced"; exit 1; }; \
 	  have_excl=0; [ -z "$$(printf %s "$$EXCL" | tr -d ' \t\n')" ] || have_excl=1; \
 	  excl_line=$$(printf %s "$$EXCL" | tr '\n\t' '  ' | tr -s ' ' | sed -e 's/^ //' -e 's/ $$//'); \
-	  nprod() { git diff --name-only "$$BASE" -- '*.go' ':(exclude)*_test.go' "$$@" | wc -l | tr -d ' '; }; \
-	  removed="unknown (base missing)"; \
-	  if [ "$$have_excl" = 1 ] && git rev-parse --verify "$$BASE" >/dev/null 2>&1; then \
-	    all=$$(nprod); set -f; kept=$$(nprod $$EXCL); set +f; removed=$$((all-kept)); fi; \
+	  RANGE="$$BASE...HEAD"; \
+	  nprod() { { git diff --name-only "$$RANGE" -- '*.go' ':(exclude)*_test.go' "$$@"; git diff --name-only HEAD -- '*.go' ':(exclude)*_test.go' "$$@"; } | sort -u | wc -l | tr -d ' '; }; \
+	  quiet() { git diff --quiet "$$BASE" -- "$$@" && git diff --quiet "$$RANGE" -- "$$@"; }; \
+	  removed="unknown (base missing or no merge base)"; have_range=0; \
+	  if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git merge-base "$$BASE" HEAD >/dev/null 2>&1; then have_range=1; fi; \
+	  if [ "$$have_excl" = 1 ] && [ "$$have_range" = 1 ]; then \
+	    all=$$(nprod); set -f; kept=$$(nprod $$EXCL); removed=$$((all-kept)); \
+	    for e in $$EXCL; do [ "$$(nprod "$$e")" != "$$all" ] || echo "acceptance-audit: exclusion '$$e' matched no changed file (a stale entry? nothing it names changed in $$RANGE)"; done; set +f; fi; \
 	  if [ "$$tot" = "0" ]; then \
-	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go'; then \
+	    if [ "$$have_range" = 1 ] && quiet '*.go'; then \
 	      echo "acceptance-audit: 0 changed Go lines vs $$BASE -- nothing to audit"; exit 0; fi; \
-	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go'; then \
+	    if [ "$$have_range" = 1 ] && quiet '*.go' ':(exclude)*_test.go'; then \
 	      echo "acceptance-audit: 0 changed non-test Go lines vs $$BASE (only test files changed) -- nothing to audit"; exit 0; fi; \
-	    if [ "$$have_excl" = 1 ] && git rev-parse --verify "$$BASE" >/dev/null 2>&1 && { set -f; git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go' $$EXCL; }; then \
+	    if [ "$$have_excl" = 1 ] && [ "$$have_range" = 1 ] && { set -f; quiet '*.go' ':(exclude)*_test.go' $$EXCL; }; then \
 	      echo "acceptance-audit: 0 changed delivered Go lines vs $$BASE -- only test files and files excluded by ACCEPTANCE_AUDIT_EXCLUDES changed; exclusions [$$excl_line] removed $$removed changed non-test Go file(s) from the audit -- nothing to audit"; exit 0; fi; \
 	    echo "acceptance-audit: FAIL -- 0/0 changed lines but the Go diff vs $$BASE is not empty (or base missing): unmeasurable"; exit 1; fi; \
 	  if [ "$$have_excl" = 1 ]; then echo "acceptance-audit: exclusions [$$excl_line] removed $$removed changed non-test Go file(s) from the audit"; fi; \

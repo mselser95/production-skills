@@ -13,35 +13,45 @@ root="$(cd "$(dirname "$mk")" && pwd)"
 # A repo may carry a customised changed-line-coverage.sh (different CLI/output) with an
 # acceptance-audit recipe adapted to it; template-format stubs cannot drive that.
 # Inside this repo (own=0) the root IS the template, so there is nothing to compare.
+#
+# EXIT CONTRACT (a pass over nothing is never reported as a pass):
+#   0  the cases ran and all passed ("ok -- N case(s)")
+#   1  a case failed, or no case ran
+#   2  UNDECIDABLE, nothing run: no reference to tell stock from customised (unstamped repo and
+#      no installed template, or an installed template of unknown age that differs)
+#   3  SKIPPED, nothing run: the repo's scripts/changed-line-coverage.sh differs from the template
+#      copy it was STAMPED from, so it is repo-customised and template-format stubs cannot drive it.
+# Callers (the template's `probe-selftests`, this repo's `make selftests`) run `bash <this>` and
+# treat any non-zero exit as not-passed; they do not count 3 as a pass.
+# The thing under test is always the repo's OWN Makefile and script; the reference it is compared
+# with is the template version the repo was stamped from (provenance), never "whatever is installed".
 if [[ "$own" = 1 ]]; then
   clc="$root/scripts/changed-line-coverage.sh"
   prov="$root/.prod/template-provenance.yaml"
-  stamped=""
-  # (a) the repo's own stamp: template_sha256 is the template's copy at stamp time, so
-  # CI (where the template is not installed) can still tell stock from customised.
+  stamped=""; stamp_from=""
   if [[ -f "$prov" ]]; then
+    stamp_from="$(awk '/^stamped_from:/ { print $2; exit }' "$prov")"
     stamped="$(awk '/^[[:space:]]*-[[:space:]]*path:/ { sub(/^[[:space:]]*-[[:space:]]*path:[[:space:]]*/, ""); cur=$0; next }
       cur == "scripts/changed-line-coverage.sh" && /template_sha256:/ { sub(/.*template_sha256:[[:space:]]*/, ""); print $1; exit }' "$prov")"
   fi
   if [[ -n "$stamped" ]]; then
+    # the reference is the template copy recorded at stamp time (CI has no template installed)
     if [[ "$(shasum -a 256 "$clc" | awk '{print $1}')" != "$stamped" ]]; then
-      echo "acceptance-audit selftest: n/a -- scripts/changed-line-coverage.sh differs from the template copy recorded per .prod/template-provenance.yaml (repo-customised); the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
-      exit 0
+      echo "acceptance-audit selftest: SKIPPED (NOT RUN, 0 case(s)) -- scripts/changed-line-coverage.sh differs from the template copy it was stamped from (${stamp_from:-unknown digest}); it is repo-customised and the recipe is exercised by make acceptance-audit itself"
+      exit 3
     fi
   else
-    # (b) no stamp entry: compare against the installed template, if any.
+    # no stamp entry: the only reference is an installed template of UNKNOWN age
     tdir="${TEMPLATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/template}"
     tcl="$tdir/scripts/changed-line-coverage.sh"
     if [[ ! -f "$tcl" ]]; then
-      # (c) unknowable: an absent subject is a failure, never a green (0 cases run over nothing).
-      echo "acceptance-audit selftest: n/a -- template dir not resolvable ($tdir) and no .prod/template-provenance.yaml entry; cannot tell whether scripts/changed-line-coverage.sh is repo-customised; the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
+      echo "acceptance-audit selftest: UNDECIDABLE (NOT RUN, 0 case(s)) -- no reference is available: no .prod/template-provenance.yaml entry for scripts/changed-line-coverage.sh and no template at $tdir"
       exit 2
     fi
-    # Genuine n/a: the repo customised the script, so template-format stubs cannot drive it.
     if ! cmp -s "$clc" "$tcl"; then
       n="$(diff "$clc" "$tcl" 2>/dev/null | wc -l | tr -d ' ')"
-      echo "acceptance-audit selftest: n/a -- scripts/changed-line-coverage.sh is repo-customised ($n diff lines); the recipe is exercised by make acceptance-audit itself, 0 case(s) run"
-      exit 0
+      echo "acceptance-audit selftest: UNDECIDABLE (NOT RUN, 0 case(s)) -- no reference is available: this repo records no stamp for scripts/changed-line-coverage.sh and the installed template at $tdir (age unknown) differs by $n diff lines, which is either a customised script or an older/newer template; stamp the repo (scripts/stamp-template-provenance.sh) to say which"
+      exit 2
     fi
   fi
 fi
@@ -86,6 +96,15 @@ run() {
   local name="$1" wrc="$2" want="$3" r="$4"; shift 4
   local out rc
   out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base "$@" make --no-print-directory acceptance-audit 2>&1)"; rc=$?
+  if [[ "$rc" -eq "$wrc" && "$out" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
+  else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; echo "$out" | sed 's/^/       /'; fi
+}
+
+# runmk <name> <want-rc> <want-substr> <repo> [make-arg ...] : as run, with make command-line assignments
+runmk() {
+  local name="$1" wrc="$2" want="$3" r="$4"; shift 4
+  local out rc
+  out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base STUB_OUT="90.0% (9/10" make --no-print-directory acceptance-audit "$@" 2>&1)"; rc=$?
   if [[ "$rc" -eq "$wrc" && "$out" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
   else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; echo "$out" | sed 's/^/       /'; fi
 }
@@ -209,6 +228,37 @@ else
   run "recipe reading .github/ci-tools.txt (copied) passes" 0 "ci-tool=fixture-tool" "$r" STUB_OUT="90.0% (9/10"
 fi
 
+# The documented ways to set ACCEPTANCE_AUDIT_EXCLUDES are a line in the downstream Makefile and
+# a make command-line assignment, NOT the environment every case above uses. Both must reach
+# changed-line-coverage.sh (dropping the variable from the Makefile's `export` left every
+# environment-driven case green).
+SEEN='#!/bin/sh\necho "excludes-seen=[$CHANGED_LINE_EXTRA_EXCLUDES]"\necho "changed-line coverage: $STUB_OUT lines)"\n'
+r="$(mkrepo exclmk 1)"; printf "$SEEN" > "$r/scripts/changed-line-coverage.sh"; echo "package a // c" > "$r/a.go"
+printf 'ACCEPTANCE_AUDIT_EXCLUDES := %s\n' "$AUD_EXC" >> "$r/Makefile"
+run "ACCEPTANCE_AUDIT_EXCLUDES set by a line in the Makefile reaches the measurement" 0 "excludes-seen=[$AUD_EXC]" "$r" STUB_OUT="90.0% (9/10"
+r="$(mkrepo exclcli 1)"; printf "$SEEN" > "$r/scripts/changed-line-coverage.sh"; echo "package a // c" > "$r/a.go"
+runmk "ACCEPTANCE_AUDIT_EXCLUDES set on the make command line reaches the measurement" 0 "excludes-seen=[$AUD_EXC]" "$r" "ACCEPTANCE_AUDIT_EXCLUDES=$AUD_EXC"
+r="$(mkrepo exclmkz 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; ( cd "$r" && git add test/h.go )
+printf 'ACCEPTANCE_AUDIT_EXCLUDES := %s\n' "$AUD_EXC" >> "$r/Makefile"
+run "a Makefile-line exclusion lets a 0/0 with only excluded files pass, said" 0 "excluded by ACCEPTANCE_AUDIT_EXCLUDES" "$r" STUB_OUT="0% (0/0"
+
+# The removed-file count is over the range the measurement uses (BASE...HEAD, merge-base), so a
+# base that is NOT an ancestor does not inflate it with files only the base side changed: here the
+# true number is 1 (test/h.go); a working-tree two-dot diff against `div` counted 3.
+r="$(mkrepo diverged 1)"; printf "$SEEN" > "$r/scripts/changed-line-coverage.sh"
+( cd "$r" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m stub && git tag base0 && main="$(git branch --show-current)" \
+  && git checkout -q -b other && mkdir -p test && echo "package y" > test/y1.go && echo "package y" > test/y2.go && git add -A \
+  && git -c user.email=t@t -c user.name=t commit -q -m other && git tag div && git checkout -q "$main" \
+  && mkdir -p test && echo "package h" > test/h.go && git add -A && git -c user.email=t@t -c user.name=t commit -q -m head )
+run "diverged base: exclusions removed count is over the merge-base range" 0 "removed 1 changed non-test Go file(s)" "$r" STUB_OUT="90.0% (9/10" CHANGED_LINE_COVERAGE_BASE=div ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+# a stale entry (matches no changed file) is named, not failed
+r="$(mkrepo stale-excl 1)"; printf "$SEEN" > "$r/scripts/changed-line-coverage.sh"; echo "package a // c" > "$r/a.go"; ( cd "$r" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m c )
+run "a stale exclusion entry is named and does not fail" 0 "exclusion ':(exclude,glob)x/**' matched no changed file" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)x/**'
+run "a stale exclusion alongside a live one: the live one is still counted" 0 "removed 1 changed non-test Go file(s)" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)x/** :(exclude,glob)a.go'
+# uncommitted Go changes are NOT in the measured range: a 0/0 over them stays a failure
+r="$(mkrepo dirty00 1)"; echo "package a // dirty" > "$r/a.go"
+run "0/0 with only UNCOMMITTED non-test Go changes still fails closed" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0"
+
 # n/a branches: only drivable from a repo-shaped root (own=1); in-repo (own=0) the
 # root is the template, so build a scratch repo from it. Skipped where own=1 already.
 nested() { # nested <name> <want-rc> <want-substr> <TEMPLATE_DIR>
@@ -221,23 +271,30 @@ nested() { # nested <name> <want-rc> <want-substr> <TEMPLATE_DIR>
   else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; sed 's/^/       /' "$out"; fi
 }
 if [[ "$own" = 0 ]]; then
+  ncases=$pass   # the nested copy runs exactly the cases above (it skips this block)
   mkdir -p "$tmp/nrepo"; cp -R "$root/." "$tmp/nrepo/"; mkdir -p "$tmp/nrepo/scripts/tests"
   cp "${BASH_SOURCE[0]}" "$tmp/nrepo/scripts/tests/acceptance-audit-selftest.sh"
   mkdir -p "$tmp/nhome" "$tmp/nrepo/.prod"
   nclc="$tmp/nrepo/scripts/changed-line-coverage.sh"
-  # (i) stock per the stamp, template unresolvable: the cases run (43), no TEMPLATE_DIR needed.
-  printf 'files:\n  - path: scripts/changed-line-coverage.sh\n    sha256: x\n    template_sha256: %s\n' \
+  # (i) stock per the stamp, template unresolvable: the cases run, no TEMPLATE_DIR needed.
+  printf 'stamped_from: production-skills@abc123def456\nfiles:\n  - path: scripts/changed-line-coverage.sh\n    sha256: x\n    template_sha256: %s\n' \
     "$(shasum -a 256 "$nclc" | awk '{print $1}')" > "$tmp/nrepo/.prod/template-provenance.yaml"
-  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 43 case(s)" "/nonexistent"
-  # (ii) one comment line added: differs from the stamped template copy -> n/a, rc0.
+  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- $ncases case(s)" "/nonexistent"
+  # (i-b) stamped stock, an installed template that DIFFERS (older/newer): the stamp is the reference, the cases still run.
+  mkdir -p "$tmp/oldtpl/scripts"; echo "# an older template" > "$tmp/oldtpl/scripts/changed-line-coverage.sh"
+  nested "stamped-stock wins over an installed template of a different age: cases run" 0 "ok -- $ncases case(s)" "$tmp/oldtpl"
+  # (ii) one comment line added: differs from the stamped template copy -> SKIPPED (not a pass), rc3, names the stamp.
   echo "# customised" >> "$nclc"
-  nested "stamped-customised changed-line-coverage.sh is n/a per provenance, rc0" 0 "per .prod/template-provenance.yaml" "/nonexistent"
-  # (iii) stamp present but no entry for the script, no template: unknowable -> rc2.
+  nested "stamped-customised changed-line-coverage.sh is SKIPPED (not run), rc3, naming the stamp" 3 "SKIPPED (NOT RUN, 0 case(s)) -- scripts/changed-line-coverage.sh differs from the template copy it was stamped from (production-skills@abc123def456)" "/nonexistent"
+  # (iii) stamp present but no entry for the script, no template: undecidable -> rc2.
   printf 'files:\n  - path: scripts/other.sh\n    sha256: x\n    template_sha256: y\n' > "$tmp/nrepo/.prod/template-provenance.yaml"
-  nested "no provenance entry and no template is rc2" 2 "no .prod/template-provenance.yaml entry" "/nonexistent"
+  nested "no provenance entry and no template is rc2, no reference" 2 "no reference is available" "/nonexistent"
   rm -rf "$tmp/nrepo/.prod"
-  nested "customised changed-line-coverage.sh is n/a, rc0" 0 "repo-customised" "$root"
-  nested "unresolvable template dir is rc2, not a green" 2 "template dir not resolvable" "/nonexistent"
+  nested "unstamped + customised against an installed template is rc2, not a pass" 2 "installed template at $root (age unknown) differs" "$root"
+  nested "unstamped + older installed template that differs is rc2, not a pass" 2 "no reference is available" "$tmp/oldtpl"
+  nested "unstamped scaffold, TEMPLATE_DIR unset, nothing installed: rc2, not a silent pass" 2 "UNDECIDABLE (NOT RUN, 0 case(s))" ""
+  cp "$root/scripts/changed-line-coverage.sh" "$nclc"
+  nested "unstamped + stock matching the installed template: the cases run" 0 "ok -- $ncases case(s)" "$root"
 fi
 
 # "N case(s)" is the shape scripts/mutation-baseline.sh reads the count from;
