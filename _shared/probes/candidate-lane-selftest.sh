@@ -97,6 +97,16 @@ if [[ ! -s "$hf" ]]; then bad "f: go_fail_evidence not defined in $probe"; else
   s3=$'# pkg\n./x.go:3:1: syntax error\nFAIL\tpkg [build failed]'
   n=$((n+1)); o=$(go_fail_evidence "$s3"); [[ "$o" == *"build failed"* ]] || bad "f3: build failed: $o"
   n=$((n+1)); o=$(go_fail_evidence "ok pkg 0.1s"); [[ -z "$o" ]] || bad "f4: nothing to say should print nothing: $o"
+  # f6: the CI case -- a t.Logf diagnostic precedes the t.Fatalf; the evidence must carry the FAILING line
+  s6=$'=== RUN   TestX\n--- FAIL: TestX (50.44s)\n    x_test.go:406: stalled socket: 293 frames read, close code 0, err i/o timeout\n    x_test.go:409: still waiting\n    x_test.go:412: the stalled subscription ended with code 0, want 4001 or 1006\nFAIL'
+  n=$((n+1)); o=$(go_fail_evidence "$s6"); [[ "$o" == *"x_test.go:412: the stalled subscription ended with code 0, want 4001 or 1006"* && "$o" == *"TestX"* ]] || bad "f6: last assertion missing: $o"
+  n=$((n+1)); [[ "$o" == *"x_test.go:406"* ]] || bad "f6b: first line should ride along as context: $o"
+  s7=$'--- FAIL: TestY (0.00s)\n    y_test.go:5: only one\nFAIL'
+  n=$((n+1)); o=$(go_fail_evidence "$s7"); [[ "$o" == *"y_test.go:5: only one" && "$(grep -o 'y_test.go:5' <<<"$o" | wc -l | tr -d ' ')" == 1 ]] || bad "f7: single line must appear once: $o"
+  s8=$'--- FAIL: TestA (0s)\n    a_test.go:1: log\n    a_test.go:2: fatal A\n--- FAIL: TestB (0s)\n    b_test.go:3: fatal B\nFAIL'
+  n=$((n+1)); o=$(go_fail_evidence "$s8"); [[ "$o" == *"a_test.go:2: fatal A"* && "$o" == *"b_test.go:3: fatal B"* ]] || bad "f8: each test needs its own last assertion: $o"
+  s9=$'panic: runtime error: boom\ngoroutine 1 [running]:\nFAIL\tpkg\t0.1s'
+  n=$((n+1)); o=$(go_fail_evidence "$s9"); [[ "$o" == *"panic: runtime error: boom"* ]] || bad "f9: panic with no --- FAIL: $o"
   # f5: replay-corpus FAIL row must not end in a dangling ': ' when evidence is empty
   n=$((n+1)); grep -q 'rc_ev=\$(go_fail_evidence' "$probe" && grep -qF '${rc_ev:+: $rc_ev}' "$probe" || bad "f5: replay-corpus FAIL row lacks rc_ev conditional-suffix form"
   rc_ev=""; msg="3 fixtures but the harness did not run${rc_ev:+: $rc_ev}"
