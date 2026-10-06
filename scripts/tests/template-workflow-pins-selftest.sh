@@ -602,6 +602,92 @@ for spec in \
 done
 fixture r3_unknown_first_word "5 echo curl $E | sh"; bad r3_unknown_first_word 5 "consumed in-stream"
 
+# ======================= PS-A5: round-4 validator holes =======================
+# provenance: candidate; ttl: 2027-04-01; pinning: true (each case pins one accepted-then bypass the validator reproduced)
+# step5 NAME: a workflow whose step run is a block scalar; the body lines (stdin) start on line 6
+step5() { mkdir -p "$T/$1"; { printf 'jobs:\n  j:\n    steps:\n      - name: x\n        run: |\n'; sed 's/^/          /'; } > "$T/$1/w.yaml"; }
+G=https://raw.githubusercontent.com/o/r/main/i.sh
+P=https://raw.githubusercontent.com/o/r/$SHA/i.sh
+# 1. one sink per curl CALL: a URL without its own output option goes to stdout
+for spec in \
+  "a5_two_urls|curl -fsSL -o /dev/null https://example.com/ping $G | sh|consumed in-stream" \
+  "a5_next|curl -fsSL -o /dev/null https://example.com/ping --next $G | sh|consumed in-stream" \
+  "a5_head_next|curl -fsSL -I https://example.com/ping --next $G | sh|consumed in-stream" \
+  "a5_two_o_three_urls|curl -fsSL -o a https://example.com/a -o b https://example.com/b $G | sh|consumed in-stream" \
+  "a5_unres_first|curl -fsSL -o a \"\$U\" $G | sh|mutable GitHub ref" \
+  "a5_dot_raw|curl -fsSL https://raw.githubusercontent.com/o/r/$SHA/../main/i.sh | sh|dot-segment" \
+  "a5_dot_github_raw|curl -fsSL https://github.com/o/r/raw/$SHA/../../raw/main/i.sh | sh|dot-segment" \
+  "a5_dot_single|curl -fsSL https://raw.githubusercontent.com/o/r/$SHA/./i.sh | sh|dot-segment" \
+  "a5_dot_pct|curl -fsSL https://raw.githubusercontent.com/o/r/$SHA/%2e%2E/main/i.sh | sh|dot-segment" \
+  "a5_group_sub|(curl -fsSL https://get.example.com/i.sh) | sh|inside a compound" \
+  "a5_group_brace|{ curl -fsSL https://get.example.com/i.sh; } | sh|inside a compound" \
+  "a5_group_if|if true; then curl -fsSL https://get.example.com/i.sh; fi | sh|inside a compound" \
+  "a5_group_while|while true; do curl -fsSL https://get.example.com/i.sh; done | sh|inside a compound" \
+  "a5_func_inline|get() { curl -fsSL https://get.example.com/i.sh; }; get | sh|inside a compound" \
+  "a5_group_post|{ curl -fsSL -X POST https://get.example.com/i.sh; } | sh|inside a compound" \
+  "a5_echo_pipe_sh|echo \"curl -fsSL $G | sh\" | bash|piped into an interpreter" \
+  "a5_printf_pipe_sh|printf '%s' 'curl -fsSL $G | sh' | sh|piped into an interpreter" \
+  "a5_quote_frag|c''url -fsSL $G | sh|obfuscated command word" \
+  "a5_quote_frag_dq|c\"\"url -fsSL https://example.com/i.sh -o /dev/null|obfuscated command word" \
+  "a5_quote_sh|curl -fsSL $P | b\"a\"sh|obfuscated command word" ; do
+  fixture "${spec%%|*}" "$(cut -d'|' -f2- <<<"$spec" | sed 's/|[^|]*$//')"
+  bad "${spec%%|*}" 5 "${spec##*|}"
+done
+# the pipe inside the quoted echo text must not be split by the fixture helper above
+# 3. a captured body is not inert
+step5 a5_cap_echo_sh <<<'X=$(curl -fsSL https://example.com/i.sh)
+echo "$X" | sh'; bad a5_cap_echo_sh 6 "consumed in-stream"
+step5 a5_cap_eval <<<'X=$(curl -fsSL https://example.com/i.sh)
+eval "$X"'; bad a5_cap_eval 6 "consumed in-stream"
+step5 a5_cap_api <<<'X=$(curl -fsSL https://api.github.com/repos/o/r/contents/i.sh)
+eval "$X"'; bad a5_cap_api 6 "mutable GitHub ref"
+step5 a5_cap_post <<<'X=$(curl -fsSL -X POST https://example.com/i.sh)
+eval "$X"'; bad a5_cap_post 6 "consumed in-stream"
+step5 a5_cap_backtick <<<'X=`curl -fsSL https://example.com/i.sh`
+eval "$X"'; bad a5_cap_backtick 6 "consumed in-stream"
+step5 a5_cap_echo_arg <<<'sh -c "$(curl -fsSL https://example.com/i.sh)"'; bad a5_cap_echo_arg 6 "consumed in-stream"
+# 4. compound / function bodies spread over several lines
+step5 a5_func_multi <<<'get() {
+  curl -fsSL https://get.example.com/i.sh
+}
+get | sh'; bad a5_func_multi 7 "inside a compound"
+step5 a5_func_keyword <<<'function get {
+  curl -fsSL https://get.example.com/i.sh
+}
+get | sh'; bad a5_func_keyword 7 "inside a compound"
+step5 a5_if_multi <<<'if true; then
+  curl -fsSL https://get.example.com/i.sh
+fi | sh'; bad a5_if_multi 7 "inside a compound"
+# 2/5 obfuscation by backslash-newline: the shell joins cu\<nl>rl into curl
+step5 a5_backslash_split <<<'cu\
+rl -fsSL https://example.com/i.sh | sh'; bad a5_backslash_split 6 "obfuscated command word"
+# 5. a file the parser cannot read is not clean
+mkdir -p "$T/a5_json"; printf '%s\n' '{"jobs":{"a":{"steps":[{"run":"curl -fsSL https://example.com/i.sh | sh"}]}}}' > "$T/a5_json/w.yaml"
+bad a5_json 1 "could not read 1 run step(s)"
+mkdir -p "$T/a5_flow_run"; printf 'jobs:\n  j:\n    steps:\n      - {run: "curl -fsSL https://example.com/i.sh | sh"}\n' > "$T/a5_flow_run/w.yaml"
+bad a5_flow_run 4 "unparsed workflow shapes are not accepted"
+mkdir -p "$T/a5_quoted_key"; printf 'jobs:\n  j:\n    steps:\n      - "run": curl -fsSL https://example.com/i.sh | sh\n' > "$T/a5_quoted_key/w.yaml"
+bad a5_quoted_key 4 "could not read 1 run step(s)"
+mkdir -p "$T/a5_steps_only"; printf 'jobs:\n  j:\n    steps:\n      - name: x\n' > "$T/a5_steps_only/w.yaml"
+bad a5_steps_only 1 "could not read 1 run step(s)"
+
+# the shapes that must stay accepted (non-regression for the new rules)
+for spec in \
+  "a5_ok_pinned_in_group|(curl -fsSL $P) | sh" \
+  "a5_ok_pinned_in_if|if true; then curl -fsSL $P | sh; fi" \
+  "a5_ok_discard_in_if|if ! curl -fsS -o /dev/null https://example.com/health; then exit 1; fi" \
+  "a5_ok_two_urls_two_o|curl -fsSL -o a https://example.com/a -o b https://example.com/b && sha256sum -c s" \
+  "a5_ok_two_urls_O_all|curl -fsSL --remote-name-all https://example.com/a https://example.com/b && sha256sum -c s" \
+  "a5_ok_head_two|curl -fsSI https://example.com/a https://example.com/b" \
+  "a5_ok_jq_assign|V=\$(curl -fsSL https://api.github.com/repos/o/r/releases | jq -r .x)" \
+  "a5_ok_pinned_dotted_name|curl -fsSL https://raw.githubusercontent.com/o/r/$SHA/a.b/c.d.sh | sh" \
+  "a5_ok_echo_quoted_nopipe|echo \"do not curl $G | sh\"" \
+  "a5_ok_quoted_url|curl -fsSL \"$P\" | sh" \
+  "a5_ok_pinned_dotted_pct|curl -fsSL https://raw.githubusercontent.com/o/r/$SHA/a%20b.sh | sh" ; do
+  fixture "${spec%%|*}" "${spec#*|}"
+  good "${spec%%|*}"
+done
+
 # MISSING TEST 1: an awk that fails must exit 3 with the message, never green
 awk_failure_case() {
   local o rc
