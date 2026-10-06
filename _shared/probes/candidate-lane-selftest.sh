@@ -28,7 +28,7 @@ if [[ -z "$probe" ]]; then
 fi
 [[ -f "$probe" ]] || { echo "candidate-lane-selftest: FAIL -- cannot locate verify-standard.sh" >&2; exit 1; }
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-fails=0
+fails=0; n=0   # n = checks actually executed
 bad() { echo "candidate-lane-selftest: FAIL -- $*" >&2; fails=$((fails+1)); }
 
 blk="$tmp/block.sh"
@@ -45,32 +45,32 @@ d=$(mk)
 w "$d/pkg/cand_test.go" '// provenance: candidate (TTL: 90d)' 'package pkg'
 w "$d/pkg/t1_test.go" '//go:build candidate' 'package pkg'
 w "$d/pkg/t2_test.go" '//go:build candidate' 'package pkg'
-o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *cand_test.go* ]] || bad "a: expected FAIL naming cand_test.go, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *cand_test.go* ]] || bad "a: expected FAIL naming cand_test.go, got: $o"
 # a2: same count-vacuity with the bare header (the old probe counted this one)
 d=$(mk)
 w "$d/pkg/bare_test.go" '// provenance: candidate' 'package pkg'
 w "$d/pkg/t1_test.go" '//go:build candidate' 'package pkg'
 w "$d/pkg/t2_test.go" '//go:build candidate' 'package pkg'
-o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *bare_test.go* ]] || bad "a2: expected FAIL naming bare_test.go, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *bare_test.go* ]] || bad "a2: expected FAIL naming bare_test.go, got: $o"
 # b
 d=$(mk); w "$d/pkg/x_test.go" '// provenance: candidate, ttl 2027-04-01' 'package pkg'
-o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *x_test.go* ]] || bad "b: expected FAIL, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *x_test.go* ]] || bad "b: expected FAIL, got: $o"
 # c
 d=$(mk)
 w "$d/pkg/a_test.go" '// provenance: candidate' '//go:build candidate' 'package pkg'
 w "$d/pkg/b_test.go" '//go:build integration && candidate' '// provenance: candidate (TTL: 90d), pinning: true' 'package pkg'
 w "$d/pkg/c_test.go" '//go:build candidate' '// provenance: candidate, ttl 2027-04-01' 'package pkg'
-o=$(run "$d"); [[ "$o" == *" PASS "* ]] || bad "c: expected PASS, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" PASS "* ]] || bad "c: expected PASS, got: $o"
 # c2: a negated tag does not segregate
 d=$(mk); w "$d/pkg/n_test.go" '//go:build !candidate' '// provenance: candidate' 'package pkg'
-o=$(run "$d"); [[ "$o" == *" FAIL "* ]] || bad "c2: !candidate must not count as tagged, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* ]] || bad "c2: !candidate must not count as tagged, got: $o"
 # d
 d=$(mk)
 w "$d/pkg/p_test.go" '// the provenance: candidate convention says ttl' '// provenance: candidate files carry a ttl' 'package pkg'
-o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "d: expected NA, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "d: expected NA, got: $o"
 # e
 d=$(mk); w "$d/pkg/q_test.go" 'package pkg'
-o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "e: expected NA, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "e: expected NA, got: $o"
 
 # g: nested checkouts and vendored trees are not THIS tree
 d=$(mk)
@@ -78,29 +78,30 @@ for sub in .claude/worktrees/x/pkg vendor/m node_modules/m .git/x; do
   mkdir -p "$d/$sub"; w "$d/$sub/n_test.go" '// provenance: candidate' 'package pkg'
 done
 w "$d/pkg/ok_test.go" 'package pkg'
-o=$(run "$d"); [[ "$o" == *" NA "* && "$o" != *" FAIL "* ]] || bad "g1: nested/vendored candidates must be ignored, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* && "$o" != *" FAIL "* ]] || bad "g1: nested/vendored candidates must be ignored, got: $o"
 w "$d/pkg/real_test.go" '// provenance: candidate' 'package pkg'
-o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *pkg/real_test.go* && "$o" != *worktrees* && "$o" != *vendor* ]] || bad "g2: real-tree file must FAIL alone, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *pkg/real_test.go* && "$o" != *worktrees* && "$o" != *vendor* ]] || bad "g2: real-tree file must FAIL alone, got: $o"
 
 # f: helper
 hf="$tmp/helper.sh"
 sed -n '/^go_fail_evidence() {/,/^}/p' "$probe" >"$hf"
+n=$((n+1))
 if [[ ! -s "$hf" ]]; then bad "f: go_fail_evidence not defined in $probe"; else
   # shellcheck source=/dev/null
   source "$hf"
   s1=$'2026/01/01 log noise\n--- FAIL: TestFoo (0.00s)\n    foo_test.go:12: want 1 got 2\n--- FAIL: TestBar (0.00s)\n    bar_test.go:7: boom\nFAIL'
-  o=$(go_fail_evidence "$s1"); [[ "$o" == *"--- FAIL: TestFoo"* && "$o" == *"foo_test.go:12"* ]] || bad "f1: --- FAIL evidence: $o"
-  [[ $(grep -o -- '--- FAIL' <<<"$o" | wc -l) -le 2 ]] || bad "f1b: too many lines: $o"
+  n=$((n+1)); o=$(go_fail_evidence "$s1"); [[ "$o" == *"--- FAIL: TestFoo"* && "$o" == *"foo_test.go:12"* ]] || bad "f1: --- FAIL evidence: $o"
+  n=$((n+1)); [[ $(grep -o -- '--- FAIL' <<<"$o" | wc -l) -le 2 ]] || bad "f1b: too many lines: $o"
   s2=$'listen tcp 127.0.0.1:8080: bind: address already in use\nFAIL\tpkg\t0.1s'
-  o=$(go_fail_evidence "$s2"); [[ "$o" == *"bind: address already in use"* ]] || bad "f2: bind: $o"
+  n=$((n+1)); o=$(go_fail_evidence "$s2"); [[ "$o" == *"bind: address already in use"* ]] || bad "f2: bind: $o"
   s3=$'# pkg\n./x.go:3:1: syntax error\nFAIL\tpkg [build failed]'
-  o=$(go_fail_evidence "$s3"); [[ "$o" == *"build failed"* ]] || bad "f3: build failed: $o"
-  o=$(go_fail_evidence "ok pkg 0.1s"); [[ -z "$o" ]] || bad "f4: nothing to say should print nothing: $o"
+  n=$((n+1)); o=$(go_fail_evidence "$s3"); [[ "$o" == *"build failed"* ]] || bad "f3: build failed: $o"
+  n=$((n+1)); o=$(go_fail_evidence "ok pkg 0.1s"); [[ -z "$o" ]] || bad "f4: nothing to say should print nothing: $o"
   # f5: replay-corpus FAIL row must not end in a dangling ': ' when evidence is empty
-  grep -q 'rc_ev=\$(go_fail_evidence' "$probe" && grep -qF '${rc_ev:+: $rc_ev}' "$probe" || bad "f5: replay-corpus FAIL row lacks rc_ev conditional-suffix form"
+  n=$((n+1)); grep -q 'rc_ev=\$(go_fail_evidence' "$probe" && grep -qF '${rc_ev:+: $rc_ev}' "$probe" || bad "f5: replay-corpus FAIL row lacks rc_ev conditional-suffix form"
   rc_ev=""; msg="3 fixtures but the harness did not run${rc_ev:+: $rc_ev}"
-  [[ "$msg" != *": " && "$msg" != *":" ]] || bad "f5b: dangling colon with empty evidence: '$msg'"
+  n=$((n+1)); [[ "$msg" != *": " && "$msg" != *":" ]] || bad "f5b: dangling colon with empty evidence: '$msg'"
 fi
 
 if (( fails )); then echo "candidate-lane-selftest: $fails FAIL" >&2; exit 1; fi
-echo "candidate-lane-selftest: ok"
+echo "candidate-lane-selftest: ok -- $n case(s)"
