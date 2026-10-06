@@ -17,7 +17,7 @@ if [[ -z "$probe" ]]; then
 fi
 [[ -f "$probe" ]] || { echo "probe-excludes-selftest: FAIL -- cannot locate verify-standard.sh" >&2; exit 1; }
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-fails=0
+fails=0; n=0   # n = checks actually executed
 bad() { echo "probe-excludes-selftest: FAIL -- $*" >&2; fails=$((fails+1)); }
 
 # count <line-prefix> <var> <fixture> -> value of <var> after running that line
@@ -34,10 +34,10 @@ check() { # check <name> <line-prefix> <var> <content-line> <filename> <countkin
   d=$(fx); printf '%s\n%s\n' 'package pkg' "$4" >"$d/.claude/worktrees/x/pkg/$5"
   cp "$d/.claude/worktrees/x/pkg/$5" "$d/vendor/v/$5"
   o=$(count "$2" "$3" "$d")
-  [[ -z "$(echo "$o" | tr -d '[:space:]')" || "$o" == 0 ]] || bad "$1: nested-only file was counted (got '$o')"
+  n=$((n+1)); [[ -z "$(echo "$o" | tr -d '[:space:]')" || "$o" == 0 ]] || bad "$1: nested-only file was counted (got '$o')"
   d=$(fx); printf '%s\n%s\n' 'package pkg' "$4" >"$d/pkg/$5"
   o=$(count "$2" "$3" "$d")
-  [[ -n "$(echo "$o" | tr -d '[:space:]')" && "$o" != 0 ]] || bad "$1: real-tree file was NOT counted (got '$o')"
+  n=$((n+1)); [[ -n "$(echo "$o" | tr -d '[:space:]')" && "$o" != 0 ]] || bad "$1: real-tree file was NOT counted (got '$o')"
 }
 
 check property 'prop_n=$(grep -rho' prop_n 'func TestPropertyFoo(t *testing.T) {}' p_test.go
@@ -45,4 +45,4 @@ check benchmark 'bench_declared=$(grep -rh' bench_declared 'func BenchmarkFoo(b 
 check compat 'compat_files=$(grep -rl' compat_files '// uses x.golden' c_test.go
 
 if (( fails )); then echo "probe-excludes-selftest: FAIL ($fails)" >&2; exit 1; fi
-echo "probe-excludes-selftest: OK"
+echo "probe-excludes-selftest: OK -- $n case(s)"
