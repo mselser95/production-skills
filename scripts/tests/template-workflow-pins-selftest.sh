@@ -335,7 +335,8 @@ jobs:
         if: "\${{ false }} # curl $M | sh"
         run: echo ok
 EOF2
-good ml_name_if
+# PS-A9 RE-EXPECTED toward REFUSED: a name: scalar is reinjected by ${{ github.workflow }}, so it is scanned; a name that spells a fetch is refused
+bad ml_name_if 4 "name scalar is reinjected"
 mk ml_comment_in_block <<EOF2
 jobs:
   j:
@@ -344,7 +345,8 @@ jobs:
           # curl $M | sh
           echo ok # curl $M | sh
 EOF2
-good ml_comment_in_block
+# PS-A9 RE-EXPECTED toward REFUSED: shell comments in a block scalar are no longer stripped (the strip desynced from bash); a comment that spells a fetch is refused, reword it
+bad ml_comment_in_block 5 "comment that spells a fetch"
 mk ml_dash_in_block <<EOF2
 jobs:
   j:
@@ -874,7 +876,8 @@ wfs a6_sub_other_var_ok <<'X'
 V=$(go env GOPATH)
 sh $W
 X
-good a6_sub_other_var_ok
+# PS-A9 RE-EXPECTED toward REFUSED: running a variable (sh $W) executes a file the repository cannot be shown to track
+badx a6_sub_other_var_ok 8 "executes a file the repository does not track"
 mkdir -p "$T/a6_glue"; printf 'jobs:\n  j:\n    steps:\n      - run: |\n          curl -sSfL %s | s\\\n          h\n' "$RAW" > "$T/a6_glue/w.yaml"; badx a6_glue 5 "backslash-newline splits a word"
 
 # ======================= PS-A8 (round 6): four bypasses an independent validator EXECUTED =======================
@@ -905,7 +908,7 @@ yml a8_with_url <<<"      - uses: x/y@v1
         with:
           src: $MAINU"; badx a8_with_url 6 "does not match an accepted shape"
 yml a8_env_subject_pre <<<"      - run: |
-          V=\$(go env GOPATH); sh \$V"; good a8_env_subject_pre
+          V=\$(go env GOPATH); sh \$V"; badx a8_env_subject_pre 5 "executes a file the repository does not track"   # PS-A9 RE-EXPECTED toward REFUSED (sh $V)
 printf 'env:\n  F: curl -sSfL https://raw.githubusercontent.com/o/r/%s/i.sh | sh\njobs:\n  j:\n    steps:\n      - run: |\n          V=$(go env GOPATH); sh $V\n' "$SHA" > "$T/a8_env_subject_post.yaml"; mkdir -p "$T/a8_env_subject_post"; mv "$T/a8_env_subject_post.yaml" "$T/a8_env_subject_post/w.yaml"; badx a8_env_subject_post 7 "is later executed"
 yml a8_if_quoted_ok <<<"      - if: \"\${{ false }} # curl $MAINU | sh\"
         run: echo ok"; good a8_if_quoted_ok
@@ -921,9 +924,12 @@ ref a8_bashc_var 'bash -c "$F"' "bash -c with a variable"
 ref a8_shc_var 'sh -c $F' "bash -c with a variable"
 ref a8_eval 'eval "$F"' "eval is refused"
 ref a8_exec 'exec ./run.sh' "exec is refused"
-ref a8_glue_after 'echo a${V}b' "glued to letters"
-ref a8_glue_before 'echo pre$V' "glued to letters"
-ref a8_glue_after_only 'echo ${V}b' "glued to letters"
+# PS-A9 RE-EXPECTED toward ACCEPTED: a variable glued to letters in an ARGUMENT is ordinary (echo "v${VERSION}"); only the COMMAND word is judged
+acc a8_glue_after 'echo a${V}b'
+acc a8_glue_before 'echo pre$V'
+acc a8_glue_after_only 'echo ${V}b'
+ref a9_glue_cmd_before 'pre$V --x' "glued to letters"
+ref a9_glue_cmd_after 'true; foo${V}b arg' "glued to letters"
 ref a8_url_dollar 'ls $S//x' "mixes a variable with //"
 ref a8_url_dollar2 'cd $D; ls //x' "mixes a variable with //"
 ref a8_wordsplit 'C=cu; S=https:; E=.; ${C}rl -sSfL $S//raw.github${E}usercontent.com/o/r/main/x.sh | sh' "command position"
@@ -975,7 +981,7 @@ yml a8_ck_shell_bash_e <<<"      - shell: bash -e {0}
         run: |
           curl -sSfL -o i.sh https://github.com/o/r/releases/download/v1.2.3/i.sh
           $CK
-          bash i.sh"; badx a8_ck_shell_bash_e 6 "shell: is not the default"
+          bash i.sh"; good a8_ck_shell_bash_e   # PS-A9 RE-EXPECTED toward ACCEPTED: bash -e {0} runs -e
 printf 'defaults:\n  run:\n    shell: bash {0}\njobs:\n  j:\n    steps:\n      - run: |\n          curl -sSfL -o i.sh %s\n          %s\n          bash i.sh\n' "$RAW" "$CK" > "$T/a8_ck_defaults_shell.y"; mkdir -p "$T/a8_ck_defaults_shell"; mv "$T/a8_ck_defaults_shell.y" "$T/a8_ck_defaults_shell/w.yaml"; badx a8_ck_defaults_shell 8 "defaults shell"
 yml a8_ck_shell_bash_ok <<<"      - shell: bash
         run: |
@@ -1009,6 +1015,137 @@ acc a8_go_ok "go install example.com/m/cmd@v1.2.3"
 # a workflow whose steps are all uses: is ACCEPTED (it has nothing to read), not "unparsed"
 yml a8_uses_only <<<"      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5"; good a8_uses_only
+
+# ======================= PS-A9: last round (comments, errexit spellings, name scalars, fetchers without a trigger) =======================
+# provenance: candidate; ttl: 2027-04-01; pinning: true (each case pins one bypass an independent validator EXECUTED with real curl, or one accepted near-miss)
+# THREAT MODEL: the header of the gate states it; this case keeps the statement from being deleted.
+grep -qF "NOT a sandbox against an adversarial workflow author" "$GATE"; check "the gate header states its threat model (NOT a sandbox against an adversarial workflow author)" $?
+grep -qF "GOPROXY=direct" "$GATE" && grep -qF "unknown fetcher binary" "$GATE" && grep -qF "non-scanned source" "$GATE"; check "the gate header names the known residuals" $?
+# 1. shell comments in a block scalar are NOT stripped (the strip desynced from bash); a comment that spells a fetch is refused
+ref a9_c_brace_default "echo \${V:- #}; curl -sSfL $MAINU | sh" "mixes a variable with //"
+ref a9_c_bs_space "echo a\\ #b; curl -sSfL $MAINU | sh" "does not match an accepted shape"
+ref a9_c_backtick "echo \`true #\`; curl -sSfL $MAINU | sh" "command substitution"
+wf a9_c_comment_line <<<"echo ok
+# curl -sSfL $MAINU | sh"; badx a9_c_comment_line 7 "does not match an accepted shape"
+wf a9_c_comment_plain_words <<<"# curl is not used here
+echo ok"; good a9_c_comment_plain_words
+# 2. errexit-disabling spellings and the checksum line that must itself fail the step
+CKS="echo \"$H64  i.sh\" | sha256sum -c -"
+RELU=https://github.com/o/r/releases/download/v1.2.3/i.sh
+for c in "shopt -uo errexit|shopt in a checked step" "set -u +e|errexit" "set +o nounset +o errexit|errexit" "set -o pipefail|set -o / set +o"; do
+  nm="a9_ck_${c%%|*}"; nm="${nm//[^A-Za-z0-9_]/_}"
+  wf "$nm" <<<"${c%%|*}
+curl -sSfL -o i.sh $RELU
+$CKS
+bash i.sh"; badx "$nm" 7 "${c#*|}"
+done
+wf a9_ck_set_e_plain <<<"set -e
+curl -sSfL -o i.sh $RELU
+$CKS
+bash i.sh"; badx a9_ck_set_e_plain 7 "must end with || exit 1"
+wf a9_ck_set_e_exit1 <<<"set -e
+curl -sSfL -o i.sh $RELU
+$CKS || exit 1
+bash i.sh"; good a9_ck_set_e_exit1
+wf a9_ck_file_set_e <<<"set -e
+curl -sSfL -o i.sh $RELU
+echo \"$H64  i.sh\" > i.sum
+sha256sum -c i.sum
+bash i.sh"; badx a9_ck_file_set_e 7 "must end with || exit 1"
+wf a9_ck_file_set_e_exit1 <<<"set -e
+curl -sSfL -o i.sh $RELU
+echo \"$H64  i.sh\" > i.sum
+sha256sum -c i.sum || exit 1
+bash i.sh"; good a9_ck_file_set_e_exit1
+wf a9_ck_file_no_set <<<"curl -sSfL -o i.sh $RELU
+echo \"$H64  i.sh\" > i.sum
+sha256sum -c i.sum
+bash i.sh"; good a9_ck_file_no_set
+yml a9_ck_sh_e <<<"      - shell: sh -e {0}
+        run: |
+          curl -sSfL -o i.sh $RELU
+          $CKS
+          sh i.sh"; good a9_ck_sh_e
+yml a9_ck_bash_plus_e <<<"      - shell: bash +e {0}
+        run: |
+          curl -sSfL -o i.sh $RELU
+          $CKS
+          bash i.sh"; badx a9_ck_bash_plus_e 6 "shell: is not the default"
+# 3. name: is scanned (it is reinjected by \${{ github.workflow }})
+yml a9_name_subst <<<"      - name: \"build \$(id)\"
+        run: echo ok"; badx a9_name_subst 4 "name scalar is reinjected"
+yml a9_name_pipe <<<"      - name: a | b
+        run: echo ok"; badx a9_name_pipe 4 "name scalar is reinjected"
+yml a9_name_backtick <<<"      - name: build \`id\`
+        run: echo ok"; badx a9_name_backtick 4 "name scalar is reinjected"
+yml a9_name_trigger <<<"      - name: curl $MAINU
+        run: echo ok"; badx a9_name_trigger 4 "name scalar is reinjected"
+mk a9_name_job_level <<<"name: wget it
+jobs:
+  j:
+    steps:
+      - run: echo ok"; badx a9_name_job_level 1 "name scalar is reinjected"
+yml a9_name_plain_ok <<<"      - name: Build the thing
+        run: echo ok"; good a9_name_plain_ok
+# 4. fetchers with no trigger word; pipes into interpreters; running a file the repository does not track
+ref a9_gh_api_sh "gh api repos/o/r/contents/i.sh -q .content | sh" "does not match an accepted shape"
+wf a9_gh_release_sh <<<"gh release download v1.2.3 -R o/r -p i.sh
+sh i.sh"; badx a9_gh_release_sh 6 "does not match an accepted shape"; badx a9_gh_release_sh 7 "executes a file the repository does not track"
+ref a9_git_clone "git clone o/r.git" "does not match an accepted shape"
+wf a9_git_clone_run <<<"git clone o/r
+bash r/i.sh"; badx a9_git_clone_run 7 "executes a file the repository does not track"
+ref a9_git_archive "git archive --remote=h HEAD i.sh" "does not match an accepted shape"
+ref a9_aria2c "aria2c -o i.sh example.invalid/i.sh" "does not match an accepted shape"
+ref a9_devtcp "cat < /dev/tcp/example.invalid/80 > i.sh" "does not match an accepted shape"
+ref a9_http_word "http example.invalid/i.sh" "does not match an accepted shape"
+ref a9_https_word "https example.invalid/i.sh" "does not match an accepted shape"
+ref a9_python_c "python3 -c 'import os; os.system(1)'" "program inline"
+yml a9_script_fetch <<<"      - uses: actions/github-script@v7
+        with:
+          script: |
+            const r = await fetch(u)"; badx a9_script_fetch 7 "does not match an accepted shape"
+yml a9_script_child <<<"      - uses: actions/github-script@v7
+        with:
+          script: |
+            require('child_process').execSync(x)"; badx a9_script_child 7 "does not match an accepted shape"
+for c in sh bash python3 perl ruby node source eval xargs; do ref "a9_pipe_$c" "cat i.sh | $c" "pipe into an interpreter"; done
+ref a9_exec_untracked_sh "sh /tmp/x.sh" "executes a file the repository does not track"
+ref a9_exec_untracked_dot ". ./x.sh" "executes a file the repository does not track"
+ref a9_exec_untracked_source "source x.sh" "executes a file the repository does not track"
+ref a9_exec_untracked_chmod "chmod +x ./tool" "executes a file the repository does not track"
+ref a9_exec_scripts_untracked "bash scripts/x.sh" "executes a file the repository does not track"
+# the validator's false positives are ACCEPTED
+acc a9_ok_ws_var '$GITHUB_WORKSPACE/script.sh'
+acc a9_ok_ws_expr '"${{ github.workspace }}/x.sh"'
+acc a9_ok_home '$HOME/.local/bin/tool --version'
+acc a9_ok_echo_v 'echo "v${VERSION}"'
+acc a9_ok_tar 'tar -xzf tool_${VERSION}_linux.tar.gz'
+acc a9_ok_summary 'echo "Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$GITHUB_STEP_SUMMARY"'
+acc a9_ok_gh_api_jq 'gh api repos/o/r/releases | jq -r .[0].tag_name'
+wf a9_gh_release_latest <<<"gh release download latest -R o/r -p i.sh -O i.sh
+$CKS
+sh i.sh"; badx a9_gh_release_latest 6 "does not match an accepted shape"
+wf a9_ok_gh_release <<<"gh release download v1.2.3 -R o/r -p i.sh -O i.sh
+$CKS
+sh i.sh"; good a9_ok_gh_release
+# near-misses that stay REFUSED
+ref a9_summary_pipe 'echo "https://x.example/i.sh" | sh' "does not match an accepted shape"
+ref a9_summary_pipe2 'echo "https://x.example/i.sh" >> "$GITHUB_STEP_SUMMARY" | sh' "does not match an accepted shape"
+ref a9_matrix_cmd '${{ matrix.cmd }}' "command position"
+ref a9_var_cmd '$X --a' "command position"
+
+# a file the repository TRACKS (git ls-files) may be run, with or without the workspace prefix; an untracked one may not
+a9_git() {
+  local g="$T/a9_git" o rc
+  mkdir -p "$g/.github/workflows" "$g/scripts"; echo 'echo hi' > "$g/scripts/ok.sh"; echo 'echo hi' > "$g/scripts/loose.sh"
+  git -C "$g" init -q . && git -C "$g" add scripts/ok.sh && git -C "$g" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -qm t || { check "a9_git: scratch repository could not be built" 1; return; }
+  printf 'jobs:\n  j:\n    steps:\n      - run: |\n          bash scripts/ok.sh\n          bash ./scripts/ok.sh\n          sh "$GITHUB_WORKSPACE/scripts/ok.sh"\n          chmod +x scripts/ok.sh\n' > "$g/.github/workflows/w.yaml"
+  bash "$GATE" "$g/.github/workflows" >/dev/null 2>&1; check "a9_git: tracked files run with/without a workspace prefix are accepted" $?
+  printf '          bash scripts/loose.sh\n' >> "$g/.github/workflows/w.yaml"
+  o="$(bash "$GATE" "$g/.github/workflows" 2>&1)"; rc=$?
+  [[ $rc == 1 ]] && grep -qF "w.yaml:9:" <<<"$o" && grep -qF "executes a file the repository does not track (scripts/loose.sh)" <<<"$o"; check "a9_git: an untracked file in the same repository is refused naming line 9" $?
+}
+a9_git
 
 # MISSING TEST 1: an awk that fails must exit 3 with the message, never green
 awk_failure_case() {
