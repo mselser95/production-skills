@@ -1,4 +1,4 @@
-.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness help template-drift acceptance acceptance-audit probe-selftests crash-only-selftest sim load soak
+.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness help template-drift acceptance acceptance-audit probe-selftests acceptance-audit-selftest-run crash-only-selftest sim load soak
 SHELL := /usr/bin/env bash
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
@@ -306,10 +306,30 @@ probe-selftests:
 	bash scripts/tests/coverage-ratchet-selftest.sh
 	bash scripts/tests/single-suite-run-selftest.sh
 	bash scripts/tests/acceptance-coverage-selftest.sh
-	bash scripts/tests/acceptance-audit-selftest.sh
+	@$(MAKE) --no-print-directory acceptance-audit-selftest-run
 	bash scripts/tests/changed-line-coverage-selftest.sh
 	bash scripts/tests/acceptance-gap-selftest.sh
 	bash scripts/tests/check-template-drift-selftest.sh
+	bash scripts/tests/probe-selftests-skip-selftest.sh
+
+# The acceptance-audit selftest exits 3 (SKIPPED, nothing run) when scripts/changed-line-coverage.sh was
+# customised: template-format stubs cannot drive it. 0 passes; 1 and 2 fail; 3 passes ONLY when
+# registries/contract-debt.yaml records the customisation -- an entry whose evidence (or path) field
+# names scripts/changed-line-coverage.sh -- so a skip is a dated, owned, expiring liability
+# (check-registries.sh enforces the expiry), never a silent pass.
+ACCEPTANCE_AUDIT_SELFTEST ?= scripts/tests/acceptance-audit-selftest.sh
+acceptance-audit-selftest-run:
+	@rc=0; bash "$(ACCEPTANCE_AUDIT_SELFTEST)" || rc=$$?; \
+	  [ "$$rc" -ne 0 ] || exit 0; \
+	  if [ "$$rc" -ne 3 ]; then echo "probe-selftests: FAIL -- acceptance-audit selftest exited $$rc"; exit 1; fi; \
+	  id=""; [ ! -f registries/contract-debt.yaml ] || id=$$(awk 'function flush() { if (!done && hit && eid != "") { done = 1; print eid; exit } } \
+	    /^[[:space:]]*#/ { next } \
+	    /^[[:space:]]*-[[:space:]]+id:/ { flush(); hit = 0; key = ""; eid = $$0; sub(/^[^:]*:[[:space:]]*/, "", eid); gsub(/["\047[:space:]]/, "", eid); next } \
+	    /^[[:space:]]+(-[[:space:]]+)?[A-Za-z_]+:/ { key = $$0; sub(/^[[:space:]]+(-[[:space:]]+)?/, "", key); sub(/:.*/, "", key) } \
+	    (key == "evidence" || key == "path") && index($$0, "scripts/changed-line-coverage.sh") { hit = 1 } \
+	    END { flush() }' registries/contract-debt.yaml); \
+	  if [ -n "$$id" ]; then echo "probe-selftests: acceptance-audit selftest SKIPPED, honoured by contract-debt entry $$id"; exit 0; fi; \
+	  echo "probe-selftests: FAIL -- acceptance-audit selftest skipped (customised scripts/changed-line-coverage.sh) and registries/contract-debt.yaml does not record it"; exit 1
 
 # acceptance: every acceptance/<feature>.yaml is complete, approved, and traced
 # to tests both ways (_shared/formats/acceptance-spec.md in production-skills).
@@ -399,6 +419,11 @@ acceptance-audit:
 	  case "$$TMO" in '') ;; *[!0-9smh]*|[!0-9]*|*[smh]?*|*[0-9]) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_TIMEOUT is not a duration like 30m"; exit 1;; esac; \
 	  for s in acceptance/*.yaml; do [ -f "$$s" ] && n=$$((n+1)); done; \
 	  if [ "$$n" -eq 0 ]; then echo "acceptance-audit: 0 specs -- nothing to audit yet"; exit 0; fi; \
+	  set -f; for e in $$EXCL; do case "$$e" in \
+	      :*) case "$$e" in :/*) p="";; :\(*\)*) p="$${e#*\)}";; :[\!^]*) p="$${e#:?}";; *) p="$${e#:}";; esac; \
+	        case "$$p" in /*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES entry is an absolute path"; exit 1;; esac;; \
+	    esac; done; \
+	  set +f; \
 	  mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; rm -f "$$PROFILE"; \
 	  set --; [ -z "$$TMO" ] || set -- -timeout "$$TMO"; \
 	  if [ -n "$$BENV" ]; then \

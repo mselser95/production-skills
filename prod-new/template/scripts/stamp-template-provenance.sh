@@ -65,6 +65,7 @@ VENDORED=(
   scripts/tests/error-handling-fitness-selftest.sh
   scripts/tests/kill-durability-state-selftest.sh
   scripts/tests/check-template-drift-selftest.sh
+  scripts/tests/probe-selftests-skip-selftest.sh
   benchmarks/load/loadgen.go
 )
 

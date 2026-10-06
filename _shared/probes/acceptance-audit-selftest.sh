@@ -204,6 +204,15 @@ run "a glob in a value is not expanded against the working tree" 0 'excludes-see
 r="$(mkrepo injnl 1)"; cp "$root/scripts/changed-line-coverage.sh" "$r/scripts/changed-line-coverage.sh"
 run "newline between two valid entries: both applied" 0 "excluding from the changed-line set: :!a :!b" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\n:!b'
 run "newline then a non-pathspec: refused, fails closed" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry 'notapathspec'" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\nnotapathspec'
+# An absolute path in an exclusion is refused before anything is measured: a pathspec is
+# repo-relative, so /abs/x never matches and the entry silently excludes nothing.
+ABSMSG="acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES entry is an absolute path"
+r="$(mkrepo excabs 1)"; echo "package a // c" > "$r/a.go"
+run "absolute path after :! is refused, fails closed" 2 "$ABSMSG" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!/abs/x.go'
+run "absolute path after :(exclude,glob) magic is refused, fails closed" 2 "$ABSMSG" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)/abs/**'
+run "absolute path as the second of two entries is refused" 2 "$ABSMSG" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=$':!ok/x\n:^/abs/y'
+run "a repo-relative entry is not mistaken for an absolute path" 0 ">= 80% floor" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)internal/**'
+run "the top-of-tree magic :/x is a relative pathspec, not refused" 0 ">= 80% floor" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':/x'
 r="$(mkrepo injfloor 1)"; echo "package a // c" > "$r/a.go"
 run "quote-breaking floor is refused, fails closed" 2 "ACCEPTANCE_AUDIT_FLOOR is not a plain number" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_FLOOR="80\";touch $r/F1;\""
 nomarker "quote-breaking floor executed nothing" "$r/F1"
