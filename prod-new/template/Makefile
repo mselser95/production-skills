@@ -350,8 +350,20 @@ acceptance:
 ACCEPTANCE_AUDIT_FLOOR ?= 80
 ACCEPTANCE_AUDIT_EXCLUDES ?=
 ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
+# These values reach the recipe as DATA, never as shell text. FLOOR and EXCLUDES are
+# exported and read in the recipe only as "$$ACCEPTANCE_AUDIT_FLOOR" and
+# "$$ACCEPTANCE_AUDIT_EXCLUDES", so a quote, $(...), backtick or newline in them is
+# inert (a pasted $(ACCEPTANCE_AUDIT_EXCLUDES) inside quotes let `x';touch f;'` run a
+# command). COVER_DIR is a path used in two commands; it stays a make expansion, but a
+# value containing a quote, $, backtick or backslash is replaced by a marker the recipe
+# refuses, so it cannot reach the shell. FLOOR must be a plain number or the recipe fails.
+_aa_unsafe = $(or $(findstring ",$(1)),$(findstring ',$(1)),$(findstring $$,$(1)),$(findstring `,$(1)),$(findstring \,$(1)))
+export ACCEPTANCE_AUDIT_FLOOR ACCEPTANCE_AUDIT_EXCLUDES
+acceptance-audit: override ACCEPTANCE_AUDIT_COVER_DIR := $(if $(call _aa_unsafe,$(ACCEPTANCE_AUDIT_COVER_DIR)),__unsafe_cover_dir__,$(ACCEPTANCE_AUDIT_COVER_DIR))
 acceptance-audit:
-	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; EXCL='$(ACCEPTANCE_AUDIT_EXCLUDES)'; n=0; \
+	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; EXCL="$$ACCEPTANCE_AUDIT_EXCLUDES"; FLOOR="$$ACCEPTANCE_AUDIT_FLOOR"; n=0; \
+	  [ "$(ACCEPTANCE_AUDIT_COVER_DIR)" != "__unsafe_cover_dir__" ] || { echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_COVER_DIR contains a quote, \$$, backtick or backslash: refused"; exit 1; }; \
+	  case "$$FLOOR" in ''|*[!0-9.]*|*.*.*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_FLOOR is not a plain number"; exit 1;; esac; \
 	  for s in acceptance/*.yaml; do [ -f "$$s" ] && n=$$((n+1)); done; \
 	  if [ "$$n" -eq 0 ]; then echo "acceptance-audit: 0 specs -- nothing to audit yet"; exit 0; fi; \
 	  mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; rm -f "$$PROFILE"; \
@@ -363,18 +375,25 @@ acceptance-audit:
 	  pct=$$(printf '%s' "$$line" | sed -E 's/^changed-line coverage: ([0-9.]+)%.*/\1/'); \
 	  tot=$$(printf '%s' "$$line" | sed -E 's/.*\/([0-9]+) lines\).*/\1/'); \
 	  [ -n "$$pct" ] && [ -n "$$tot" ] || { echo "acceptance-audit: FAIL -- no changed-line coverage figure produced"; exit 1; }; \
+	  have_excl=0; [ -z "$$(printf %s "$$EXCL" | tr -d ' \t\n')" ] || have_excl=1; \
+	  excl_line=$$(printf %s "$$EXCL" | tr '\n\t' '  ' | tr -s ' ' | sed -e 's/^ //' -e 's/ $$//'); \
+	  nprod() { git diff --name-only "$$BASE" -- '*.go' ':(exclude)*_test.go' "$$@" | wc -l | tr -d ' '; }; \
+	  removed="unknown (base missing)"; \
+	  if [ "$$have_excl" = 1 ] && git rev-parse --verify "$$BASE" >/dev/null 2>&1; then \
+	    all=$$(nprod); set -f; kept=$$(nprod $$EXCL); set +f; removed=$$((all-kept)); fi; \
 	  if [ "$$tot" = "0" ]; then \
 	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go'; then \
 	      echo "acceptance-audit: 0 changed Go lines vs $$BASE -- nothing to audit"; exit 0; fi; \
 	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go'; then \
 	      echo "acceptance-audit: 0 changed non-test Go lines vs $$BASE (only test files changed) -- nothing to audit"; exit 0; fi; \
-	    if [ -n "$$(printf %s "$$EXCL" | tr -d ' \t\n')" ] && git rev-parse --verify "$$BASE" >/dev/null 2>&1 && { set -f; git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go' $$EXCL; }; then \
-	      echo "acceptance-audit: 0 changed delivered Go lines vs $$BASE (only test and test-support files changed) -- nothing to audit"; exit 0; fi; \
+	    if [ "$$have_excl" = 1 ] && git rev-parse --verify "$$BASE" >/dev/null 2>&1 && { set -f; git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go' $$EXCL; }; then \
+	      echo "acceptance-audit: 0 changed delivered Go lines vs $$BASE -- only test files and files excluded by ACCEPTANCE_AUDIT_EXCLUDES changed; exclusions [$$excl_line] removed $$removed changed non-test Go file(s) from the audit -- nothing to audit"; exit 0; fi; \
 	    echo "acceptance-audit: FAIL -- 0/0 changed lines but the Go diff vs $$BASE is not empty (or base missing): unmeasurable"; exit 1; fi; \
-	  if awk -v p="$$pct" -v f="$(ACCEPTANCE_AUDIT_FLOOR)" 'BEGIN{exit !(p+0>=f+0)}'; then \
-	    echo "acceptance-audit: $$pct% >= $(ACCEPTANCE_AUDIT_FLOOR)% floor over $$n spec(s)"; \
-	  else echo "acceptance-audit: FAIL -- $$pct% of changed lines executed by the acceptance run < $(ACCEPTANCE_AUDIT_FLOOR)% floor"; exit 1; fi
+	  if [ "$$have_excl" = 1 ]; then echo "acceptance-audit: exclusions [$$excl_line] removed $$removed changed non-test Go file(s) from the audit"; fi; \
+	  if awk -v p="$$pct" -v f="$$FLOOR" 'BEGIN{exit !(p+0>=f+0)}'; then \
+	    echo "acceptance-audit: $$pct% >= $$FLOOR% floor over $$n spec(s)"; \
+	  else echo "acceptance-audit: FAIL -- $$pct% of changed lines executed by the acceptance run < $$FLOOR% floor"; exit 1; fi
 
 help:
 	@echo "acceptance        every acceptance/<feature>.yaml complete, approved, traced to tests (in check-fast)"
-	@echo "acceptance-audit  >= ACCEPTANCE_AUDIT_FLOOR (default $(ACCEPTANCE_AUDIT_FLOOR))% of changed lines executed by the acceptance run (in verify)"
+	@echo "acceptance-audit  >= ACCEPTANCE_AUDIT_FLOOR (default 80)% of changed lines executed by the acceptance run (in verify)"

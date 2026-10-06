@@ -1,0 +1,3 @@
+rc=0
+changed-line coverage: base ref 'nosuchbase' not found (no fetch in this environment, or this is the first commit) -- reporting 0/0
+changed-line coverage: 0% (0/0 lines)

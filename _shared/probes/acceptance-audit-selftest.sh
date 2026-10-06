@@ -122,12 +122,50 @@ echo "package a // c" > "$r/a.go"
 run "ACCEPTANCE_AUDIT_EXCLUDES reaches changed-line-coverage.sh as CHANGED_LINE_EXTRA_EXCLUDES" 0 "excludes-seen=[$AUD_EXC]" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
 run "ACCEPTANCE_AUDIT_EXCLUDES unset passes an empty CHANGED_LINE_EXTRA_EXCLUDES" 0 "excludes-seen=[]" "$r" STUB_OUT="90.0% (9/10"
 r="$(mkrepo exclonly 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; echo "package a // t" > "$r/a_test.go"; ( cd "$r" && git add test/h.go a_test.go )
-run "0/0 with only tests and excluded files changed passes, said" 0 "only test and test-support files changed" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+run "0/0 with only tests and excluded files changed passes, said" 0 "only test files and files excluded by ACCEPTANCE_AUDIT_EXCLUDES changed" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+run "...and says how many non-test Go files the exclusions removed (1)" 0 "removed 1 changed non-test Go file(s) from the audit" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
 run "0/0 with only an excluded file changed and NO exclusions set still fails" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0"
 r="$(mkrepo exclplusprod 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; ( cd "$r" && git add test/h.go ); echo "package a // changed" > "$r/a.go"
 run "0/0 with exclusions set but a production file also changed still fails" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
 r="$(mkrepo exclnobase 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; ( cd "$r" && git add test/h.go )
 run "0/0 excluded-only diff with base missing still fails closed" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0" CHANGED_LINE_COVERAGE_BASE=nosuchbase ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+
+# W2: an exclusion that eats production code must be visible in the audit's own output. The
+# sentence names the exclusions and how many changed non-test Go files they removed.
+r="$(mkrepo exclall 1)"; echo "package a // c" > "$r/a.go"; echo "package b" > "$r/b.go"; ( cd "$r" && git add b.go )
+run "0/0 where *.go swallows 2 production files says exactly that, not 'only test-support'" 0 "exclusions [:(exclude)*.go] removed 2 changed non-test Go file(s) from the audit" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES=":(exclude)*.go"
+r="$(mkrepo excldrop 1)"; mkdir -p "$r/internal"; echo "package i" > "$r/internal/x.go"; ( cd "$r" && git add internal/x.go )
+run "nonzero denominator with exclusions prints the removed-file count line" 0 "exclusions [:(exclude,glob)internal/**] removed 1 changed non-test Go file(s) from the audit" "$r" STUB_OUT="100.0% (3/3" ACCEPTANCE_AUDIT_EXCLUDES=":(exclude,glob)internal/**"
+r="$(mkrepo exclnone 1)"; echo "package a // c" > "$r/a.go"
+run "no exclusions set: no removed-file line" 0 ">= 80% floor" "$r" STUB_OUT="90.0% (9/10"
+# M2: exclusions set and the audit still falls below the floor (dead production code not excluded)
+r="$(mkrepo excllow 1)"; mkdir -p "$r/test"; echo "package h" > "$r/test/h.go"; ( cd "$r" && git add test/h.go ); echo "package a // c" > "$r/a.go"
+run "exclusions set, delivered code still below the floor fails" 2 "50.0% of changed lines executed by the acceptance run < 80% floor" "$r" STUB_OUT="50.0% (5/10" ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
+
+# W1: the values are DATA. A marker file must never appear whatever the value holds.
+nomarker() { # nomarker <name> <marker>
+  if [[ ! -e "$2" ]]; then pass=$((pass+1)); echo "  ok   $1"; else bad=$((bad+1)); echo "  FAIL $1 (marker file was created: shell ran the value)"; rm -f "$2"; fi
+}
+r="$(mkrepo inject 1)"; cp "$root/scripts/changed-line-coverage.sh" "$r/scripts/changed-line-coverage.sh"; echo "package a // c" > "$r/a.go"
+run "quote-breaking exclusion value is refused, fails closed" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry" "$r" ACCEPTANCE_AUDIT_EXCLUDES=":!x';touch $r/PWNED;'"
+nomarker "quote-breaking exclusion value executed nothing" "$r/PWNED"
+r="$(mkrepo injstub 1)"; echo "package a // c" > "$r/a.go"
+printf '#!/bin/sh\necho "excludes-seen=[$CHANGED_LINE_EXTRA_EXCLUDES]"\necho "changed-line coverage: $STUB_OUT lines)"\n' > "$r/scripts/changed-line-coverage.sh"
+run '$(...) in a value reaches the script literally' 0 'excludes-seen=[:!$(touch '"$r"'/M1)]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!$(touch '"$r"'/M1)'
+nomarker '$(...) in a value executed nothing' "$r/M1"
+run "backtick in a value reaches the script literally" 0 'excludes-seen=[:!`touch '"$r"'/M2`]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!`touch '"$r"'/M2`'
+nomarker "backtick in a value executed nothing" "$r/M2"
+run '$HOME in a value is not expanded' 0 'excludes-seen=[:!$HOME/x]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!$HOME/x'
+run "a glob in a value is not expanded against the working tree" 0 'excludes-seen=[:(exclude,glob)*.go]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)*.go'
+r="$(mkrepo injnl 1)"; cp "$root/scripts/changed-line-coverage.sh" "$r/scripts/changed-line-coverage.sh"
+run "newline between two valid entries: both applied" 0 "excluding from the changed-line set: :!a :!b" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\n:!b'
+run "newline then a non-pathspec: refused, fails closed" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry 'notapathspec'" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\nnotapathspec'
+r="$(mkrepo injfloor 1)"; echo "package a // c" > "$r/a.go"
+run "quote-breaking floor is refused, fails closed" 2 "ACCEPTANCE_AUDIT_FLOOR is not a plain number" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_FLOOR="80\";touch $r/F1;\""
+nomarker "quote-breaking floor executed nothing" "$r/F1"
+run "non-numeric floor is refused (a text floor would compare as 0 and always pass)" 2 "ACCEPTANCE_AUDIT_FLOOR is not a plain number" "$r" STUB_OUT="1.0% (1/100" ACCEPTANCE_AUDIT_FLOOR="high"
+run "quote-breaking cover dir is refused, fails closed" 2 "ACCEPTANCE_AUDIT_COVER_DIR contains" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_COVER_DIR="x\";touch $r/C1;\""
+nomarker "quote-breaking cover dir executed nothing" "$r/C1"
 
 r="$(mkrepo low 1)"; echo "package a // c" > "$r/a.go"
 run "70 at floor 80 fails" 2 "70.0% of changed lines" "$r" STUB_OUT="70.0% (7/10"
@@ -187,10 +225,10 @@ if [[ "$own" = 0 ]]; then
   cp "${BASH_SOURCE[0]}" "$tmp/nrepo/scripts/tests/acceptance-audit-selftest.sh"
   mkdir -p "$tmp/nhome" "$tmp/nrepo/.prod"
   nclc="$tmp/nrepo/scripts/changed-line-coverage.sh"
-  # (i) stock per the stamp, template unresolvable: the cases run (13), no TEMPLATE_DIR needed.
+  # (i) stock per the stamp, template unresolvable: the cases run (43), no TEMPLATE_DIR needed.
   printf 'files:\n  - path: scripts/changed-line-coverage.sh\n    sha256: x\n    template_sha256: %s\n' \
     "$(shasum -a 256 "$nclc" | awk '{print $1}')" > "$tmp/nrepo/.prod/template-provenance.yaml"
-  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 23 case(s)" "/nonexistent"
+  nested "stamped-stock changed-line-coverage.sh runs the cases without a template" 0 "ok -- 43 case(s)" "/nonexistent"
   # (ii) one comment line added: differs from the stamped template copy -> n/a, rc0.
   echo "# customised" >> "$nclc"
   nested "stamped-customised changed-line-coverage.sh is n/a per provenance, rc0" 0 "per .prod/template-provenance.yaml" "/nonexistent"

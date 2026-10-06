@@ -52,6 +52,11 @@ VENDORED=(
   scripts/tests/acceptance-coverage-selftest.sh
   scripts/tests/acceptance-audit-selftest.sh
   scripts/tests/changed-line-coverage-selftest.sh
+  scripts/tests/changed-line-coverage-golden/base-missing.golden
+  scripts/tests/changed-line-coverage-golden/empty-diff.golden
+  scripts/tests/changed-line-coverage-golden/empty-variable.golden
+  scripts/tests/changed-line-coverage-golden/normal.golden
+  scripts/tests/changed-line-coverage-golden/profile-missing.golden
   scripts/acceptance-gap.sh
   scripts/tests/acceptance-gap-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh

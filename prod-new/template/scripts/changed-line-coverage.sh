@@ -14,14 +14,20 @@
 # as unavailable rather than failing the calling job.
 #
 # ONE exception, and it is a refusal, not a measurement failure: the optional
-# CHANGED_LINE_EXTRA_EXCLUDES (below) exits non-zero on a malformed entry.
+# CHANGED_LINE_EXTRA_EXCLUDES (below) exits non-zero on a malformed entry, and
+# when it is set a git failure computing the diff is a refusal too, never a
+# percentage.
 #
 # CHANGED_LINE_EXTRA_EXCLUDES (optional, default unset): extra git pathspec
 # exclusions, whitespace- or newline-separated, appended to the pathspec of the
 # diff that defines the changed-line set. Every entry must start with ':!' or
 # ':(exclude'; anything else is refused (exit 2, entry named) because a bare
 # path in that position would INCLUDE instead of exclude and silently change
-# what is measured. When set and non-empty one line naming the exclusions is
+# what is measured. An entry that passes that check is then handed to git itself
+# (`git ls-files -- '*.go' <entries>`): git exits 128 with a 'fatal:' message on
+# a pathspec it rejects (checked on git 2.53.0 only: ':!'q' = unimplemented
+# magic, ':(exclude,foo)x' = invalid magic, ':(exclude' = missing ')'), and any
+# non-zero status there is refused (exit 2, git's message printed). When set and non-empty one line naming the exclusions is
 # printed before the summary; when unset or empty the output is byte-identical
 # to a run without it. It is set by `make acceptance-audit` (from
 # ACCEPTANCE_AUDIT_EXCLUDES), never by the unit-coverage signal: the audit asks
@@ -52,6 +58,10 @@ if [[ -n "${CHANGED_LINE_EXTRA_EXCLUDES:-}" ]]; then
   done
   set +f
   if (( ${#extra_excludes[@]} > 0 )); then
+    if ! git_err="$(git ls-files -- '*.go' "${extra_excludes[@]}" 2>&1 >/dev/null)"; then
+      echo "changed-line coverage: refusing CHANGED_LINE_EXTRA_EXCLUDES: git rejected the pathspec: ${git_err}" >&2
+      exit 2
+    fi
     echo "changed-line coverage: excluding from the changed-line set: ${extra_excludes[*]}"
   fi
 fi
@@ -76,7 +86,7 @@ fi
 changed_lines_file="$(mktemp)"
 trap 'rm -f "${changed_lines_file}"' EXIT
 
-git diff --unified=0 "${base_ref}...HEAD" -- '*.go' "${extra_excludes[@]+"${extra_excludes[@]}"}" 2>/dev/null | awk '
+awk_prog='
   /^\+\+\+ / {
     file = $2
     sub(/^b\//, "", file)
@@ -93,7 +103,21 @@ git diff --unified=0 "${base_ref}...HEAD" -- '*.go' "${extra_excludes[@]+"${extr
     newline++
     next
   }
-' > "${changed_lines_file}"
+'
+
+if (( ${#extra_excludes[@]} == 0 )); then
+  git diff --unified=0 "${base_ref}...HEAD" -- '*.go' 2>/dev/null | awk "${awk_prog}" > "${changed_lines_file}"
+else
+  # Exclusions set: a git failure here is a refusal, never a percentage.
+  diff_err="$(mktemp)"
+  if ! diff_out="$(git diff --unified=0 "${base_ref}...HEAD" -- '*.go' "${extra_excludes[@]}" 2>"${diff_err}")"; then
+    echo "changed-line coverage: refusing: git diff failed with CHANGED_LINE_EXTRA_EXCLUDES set: $(cat "${diff_err}")" >&2
+    rm -f "${diff_err}"
+    exit 2
+  fi
+  rm -f "${diff_err}"
+  printf '%s\n' "${diff_out}" | awk "${awk_prog}" > "${changed_lines_file}"
+fi
 
 if [[ ! -s "${changed_lines_file}" ]]; then
   print_and_exit "100" "0" "0"
