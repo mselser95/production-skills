@@ -96,6 +96,10 @@ if [[ ! -s "$hf" ]]; then bad "f: go_fail_evidence not defined in $probe"; else
   s3=$'# pkg\n./x.go:3:1: syntax error\nFAIL\tpkg [build failed]'
   o=$(go_fail_evidence "$s3"); [[ "$o" == *"build failed"* ]] || bad "f3: build failed: $o"
   o=$(go_fail_evidence "ok pkg 0.1s"); [[ -z "$o" ]] || bad "f4: nothing to say should print nothing: $o"
+  # f5: replay-corpus FAIL row must not end in a dangling ': ' when evidence is empty
+  grep -q 'rc_ev=\$(go_fail_evidence' "$probe" && grep -qF '${rc_ev:+: $rc_ev}' "$probe" || bad "f5: replay-corpus FAIL row lacks rc_ev conditional-suffix form"
+  rc_ev=""; msg="3 fixtures but the harness did not run${rc_ev:+: $rc_ev}"
+  [[ "$msg" != *": " && "$msg" != *":" ]] || bad "f5b: dangling colon with empty evidence: '$msg'"
 fi
 
 if (( fails )); then echo "candidate-lane-selftest: $fails FAIL" >&2; exit 1; fi

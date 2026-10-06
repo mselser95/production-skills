@@ -2104,7 +2104,7 @@ if ls regressions/*/events.json >/dev/null 2>&1; then
   n=$(ls -d regressions/*/ 2>/dev/null | wc -l | tr -d ' ')
   if rc_out=$(go test ./... -run 'Replay|Regression' -count=1 2>&1); then
     row "replay-corpus" PASS "$n fixtures, harness green"
-  else row "replay-corpus" FAIL "$n fixtures but the harness did not run: $(go_fail_evidence "$rc_out")"; fi
+  else rc_ev=$(go_fail_evidence "$rc_out"); row "replay-corpus" FAIL "$n fixtures but the harness did not run${rc_ev:+: $rc_ev}"; fi
 else
   # NOT excusable by declining event_sourcing, which this row used to allow.
   # The two are different things: the event LOG is derived from whether the
