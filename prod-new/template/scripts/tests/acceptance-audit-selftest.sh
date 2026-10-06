@@ -72,7 +72,32 @@ printf 'fixture-tool\nsecond\n' > "$src/.github/ci-tools.txt"
 mkstub() {
   local r="$1"
   mkdir -p "$r/gopath/bin"
-  printf '#!/bin/sh\nif [ "$1" = env ]; then shift; for a in "$@"; do case "$a" in GOPATH) echo "%s";; GOBIN) echo "%s/bin";; esac; done; exit 0; fi\n[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" in -coverprofile=*) echo "mode: atomic" > "${a#-coverprofile=}";; esac; done\nexit %s\n' "${STUB_GOPATH:-$r/gopath}" "${STUB_GOPATH:-$r/gopath}" "$2" > "$r/gopath/bin/go"
+  {
+    printf '#!/bin/sh\nif [ "$1" = env ]; then shift; for a in "$@"; do case "$a" in GOPATH) echo "%s";; GOBIN) echo "%s/bin";; esac; done; exit 0; fi\n' "${STUB_GOPATH:-$r/gopath}" "${STUB_GOPATH:-$r/gopath}"
+    # The cases below can ask the stub to record its argv (STUB_LOG), to behave like an
+    # instrumented-binary acceptance run (STUB_COUNTERS=1 writes a covcounters file into the
+    # directory held by the variable STUB_ENVNAME names), to fail that run (STUB_TEST_RC), and to
+    # answer `go tool covdata textfmt` (STUB_COVDATA_RC, STUB_COVDATA_PROFILE). Unset, the stub is
+    # what it always was: it writes a profile for -coverprofile and exits 0.
+    cat <<'EOS'
+[ -z "${STUB_LOG:-}" ] || echo "go $*" >> "$STUB_LOG"
+if [ "$1" = tool ] && [ "$2" = covdata ]; then
+  for a in "$@"; do case "$a" in -i=*) in_dir="${a#-i=}";; -o=*) out="${a#-o=}";; esac; done
+  [ -z "${STUB_LOG:-}" ] || echo "covdata-in $in_dir" >> "$STUB_LOG"
+  [ "${STUB_COVDATA_RC:-0}" = 0 ] || exit "$STUB_COVDATA_RC"
+  printf '%b' "${STUB_COVDATA_PROFILE-mode: set\n}" > "$out"
+  exit 0
+fi
+if [ "$1" = test ] && [ -n "${STUB_ENVNAME:-}" ]; then
+  d="$(printenv "$STUB_ENVNAME")"
+  [ -z "${STUB_LOG:-}" ] || echo "env $STUB_ENVNAME=$d" >> "$STUB_LOG"
+  if [ "${STUB_COUNTERS:-0}" = 1 ] && [ -d "$d" ]; then : > "$d/covcounters.stub.1.1"; fi
+fi
+[ "${STUB_PROFILE:-1}" = 1 ] && for a in "$@"; do case "$a" in -coverprofile=*) echo "mode: atomic" > "${a#-coverprofile=}";; esac; done
+[ -z "${STUB_TEST_RC:-}" ] || exit "$STUB_TEST_RC"
+EOS
+    printf 'exit %s\n' "$2"
+  } > "$r/gopath/bin/go"
   chmod +x "$r/gopath/bin/go"
 }
 
@@ -258,6 +283,59 @@ run "a stale exclusion alongside a live one: the live one is still counted" 0 "r
 # uncommitted Go changes are NOT in the measured range: a 0/0 over them stays a failure
 r="$(mkrepo dirty00 1)"; echo "package a // dirty" > "$r/a.go"
 run "0/0 with only UNCOMMITTED non-test Go changes still fails closed" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0"
+
+# BINARY COVERAGE MODE (ACCEPTANCE_AUDIT_BINARY_COVER_ENV) and ACCEPTANCE_AUDIT_TIMEOUT. The stub
+# records its argv in $r/stub.log; chk <name> <rc> asserts on what it recorded.
+chk() { if [[ "$2" -eq 0 ]]; then pass=$((pass+1)); echo "  ok   $1"; else bad=$((bad+1)); echo "  FAIL $1"; fi; }
+BPROF='mode: set\nexample.test/svc/cmd/svc/main.go:3.1,5.2 2 1\nexample.test/svc/internal/e2e/h.go:3.1,5.2 2 1\n'
+BENVS=(ACCEPTANCE_AUDIT_BINARY_COVER_ENV=SVC_COVDIR STUB_ENVNAME=SVC_COVDIR)
+r="$(mkrepo bin-ok 1)"; echo "package a // c" > "$r/a.go"
+run "binary mode: counters + a service file in the profile passes with the floor line" 0 "acceptance-audit: 90.0% >= 80% floor over 1 spec(s)" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_COUNTERS=1 STUB_COVDATA_PROFILE="$BPROF" STUB_OUT="90.0% (9/10"
+grep -qE '^go test .*-tags=integration .*\./internal/e2e/\.\.\.$' "$r/stub.log" && [[ "$(grep -E '^go test ' "$r/stub.log")" != *-coverprofile* && "$(grep -E '^go test ' "$r/stub.log")" != *-coverpkg* ]]; crc=$?; chk "binary mode: go test got no -coverprofile and no -coverpkg" "$crc"
+d="$(sed -n 's/^env SVC_COVDIR=//p' "$r/stub.log")"; crc=1; [[ "$d" == /*/.prod/coverage/binary ]] && crc=0; chk "binary mode: the env var held an absolute path under the cover dir" "$crc"
+grep -qx "covdata-in $d" "$r/stub.log"; crc=$?; chk "binary mode: covdata read the directory the env var named" "$crc"
+r="$(mkrepo bin-nocnt 1)"; echo "package a // c" > "$r/a.go"
+run "binary mode: no counters written fails, naming the cause" 2 "no coverage counters were written: the service binary was not instrumented" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_COVDATA_PROFILE="$BPROF" STUB_OUT="90.0% (9/10"
+grep -q covdata "$r/stub.log"; crc=$?; chk "binary mode: no counters means covdata is not even run" $((crc == 0))
+r="$(mkrepo bin-covdata 1)"; echo "package a // c" > "$r/a.go"
+run "binary mode: covdata exiting non-zero fails, naming covdata" 2 "go tool covdata textfmt exited non-zero" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_COUNTERS=1 STUB_COVDATA_RC=1 STUB_COVDATA_PROFILE="$BPROF" STUB_OUT="90.0% (9/10"
+r="$(mkrepo bin-harness 1)"; echo "package a // c" > "$r/a.go"
+run "binary mode: a profile naming only test-support files fails: the service was not measured" 2 "the profile names no file outside the test-support packages: the service was not measured" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_COUNTERS=1 STUB_OUT="90.0% (9/10" STUB_COVDATA_PROFILE='mode: set\nexample.test/svc/internal/e2e/h.go:1.1,2.2 1 1\nexample.test/svc/internal/e2etest/k.go:1.1,2.2 1 1\nexample.test/svc/x/y_test.go:1.1,2.2 1 1\nexample.test/svc/x/testdata/z.go:1.1,2.2 1 1\n'
+run "binary mode: an empty covdata profile still hits the existing no-profile failure" 2 "wrote no coverage profile" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_COUNTERS=1 STUB_OUT="90.0% (9/10" STUB_COVDATA_PROFILE=''
+r="$(mkrepo bin-rcfail 1)"; echo "package a // c" > "$r/a.go"
+run "binary mode: a failing acceptance run fails the target though counters exist" 2 "Error 7" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_COUNTERS=1 STUB_TEST_RC=7 STUB_COVDATA_PROFILE="$BPROF" STUB_OUT="90.0% (9/10"
+r="$(mkrepo bin-0spec 0)"
+run "binary mode: 0 specs still says so" 0 "0 specs -- nothing to audit yet" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_OUT="0% (0/0"
+r="$(mkrepo bin-stale 1)"; echo "package a // c" > "$r/a.go"; mkdir -p "$r/.prod/coverage/binary"; : > "$r/.prod/coverage/binary/covcounters.old.1.1"
+run "binary mode: counters left by an earlier run do not satisfy it" 2 "no coverage counters were written" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10"
+nm=0
+for bad_name in 'A B' 'A;touch pwned' '$(touch pwned)' 'A=B' '1A' 'A`touch pwned`' 'A"B'; do
+  nm=$((nm+1)); r="$(mkrepo bin-badname-$nm 1)"
+  run "invalid ACCEPTANCE_AUDIT_BINARY_COVER_ENV [$bad_name] is refused, value not echoed" 2 "ACCEPTANCE_AUDIT_BINARY_COVER_ENV is not a plain environment variable name" "$r" ACCEPTANCE_AUDIT_BINARY_COVER_ENV="$bad_name" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10"
+  crc=1; [[ ! -e "$r/pwned" && ! -e "$r/B" ]] && crc=0; chk "invalid env name [$bad_name]: nothing was executed" "$crc"
+  echoed="$( cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" ACCEPTANCE_AUDIT_BINARY_COVER_ENV="$bad_name" make --no-print-directory acceptance-audit 2>&1 )"
+  crc=1; [[ "$echoed" != *"$bad_name"* ]] && crc=0; chk "invalid env name [$bad_name]: the value is not echoed" "$crc"
+done
+r="$(mkrepo bin-nl 1)"
+run "a newline in ACCEPTANCE_AUDIT_BINARY_COVER_ENV is refused" 2 "is not a plain environment variable name" "$r" ACCEPTANCE_AUDIT_BINARY_COVER_ENV="$(printf 'A\ntouch pwned')"
+for bad_t in '30' '30m; touch pwned' '30mm' 'm' '30x' '$(touch pwned)' '-5m'; do
+  nm=$((nm+1)); r="$(mkrepo tmo-bad-$nm 1)"
+  run "invalid ACCEPTANCE_AUDIT_TIMEOUT [$bad_t] is refused" 2 "ACCEPTANCE_AUDIT_TIMEOUT is not a duration like 30m" "$r" ACCEPTANCE_AUDIT_TIMEOUT="$bad_t" STUB_OUT="90.0% (9/10"
+  crc=1; [[ ! -e "$r/pwned" ]] && crc=0; chk "invalid timeout [$bad_t]: nothing was executed" "$crc"
+done
+r="$(mkrepo tmo-bin 1)"; echo "package a // c" > "$r/a.go"
+run "valid timeout in binary mode passes" 0 "floor over 1 spec(s)" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" ACCEPTANCE_AUDIT_TIMEOUT=30m STUB_COUNTERS=1 STUB_COVDATA_PROFILE="$BPROF" STUB_OUT="90.0% (9/10"
+grep -qE '^go test -count=1 -tags=integration -timeout 30m \./internal/e2e/\.\.\.$' "$r/stub.log"; crc=$?; chk "binary mode: ACCEPTANCE_AUDIT_TIMEOUT=30m reaches go test as -timeout 30m" "$crc"
+r="$(mkrepo tmo-inproc 1)"; echo "package a // c" > "$r/a.go"
+run "valid timeout in the default mode passes" 0 "floor over 1 spec(s)" "$r" ACCEPTANCE_AUDIT_TIMEOUT=2h STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10"
+grep -qxF 'go test -count=1 -tags=integration -timeout 2h -coverpkg=./... -coverprofile=.prod/coverage/acceptance.out ./internal/e2e/...' "$r/stub.log"; crc=$?; chk "default mode: ACCEPTANCE_AUDIT_TIMEOUT=2h reaches go test as -timeout 2h" "$crc"
+# the unset path is what it was before binary mode existed: this argv is the one the previous
+# recipe produced (recorded from it before the change), and covdata is never called
+r="$(mkrepo unset-argv 1)"; echo "package a // c" > "$r/a.go"
+run "default mode, nothing set: passes" 0 "floor over 1 spec(s)" "$r" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10"
+grep -qxF 'go test -count=1 -tags=integration -coverpkg=./... -coverprofile=.prod/coverage/acceptance.out ./internal/e2e/...' "$r/stub.log"; crc=$?; chk "default mode: the go test argv is exactly the previous one" "$crc"
+grep -q covdata "$r/stub.log"; crc=$?; chk "default mode: go tool covdata is never called" $((crc == 0))
+crc=1; [[ ! -e "$r/.prod/coverage/binary" ]] && crc=0; chk "default mode: no binary coverage directory is created" "$crc"
 
 # n/a branches: only drivable from a repo-shaped root (own=1); in-repo (own=0) the
 # root is the template, so build a scratch repo from it. Skipped where own=1 already.

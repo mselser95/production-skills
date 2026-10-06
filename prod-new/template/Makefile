@@ -356,6 +356,30 @@ acceptance:
 ACCEPTANCE_AUDIT_FLOOR ?= 80
 ACCEPTANCE_AUDIT_EXCLUDES ?=
 ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
+#
+# BINARY COVERAGE MODE (opt-in). The default measurement above is the coverage of
+# the code the test BINARY imports. A service whose acceptance suite BUILDS the
+# service and runs it as a separate PROCESS is not measured that way: the profile
+# then covers the test harness, and the audit would gate on a number about the
+# harness. Such a repo sets ACCEPTANCE_AUDIT_BINARY_COVER_ENV to the NAME of an
+# environment variable its acceptance harness reads (a plain name, [A-Za-z_][A-Za-z0-9_]*).
+# The target then runs the suite with that variable set to an absolute directory
+# (<ACCEPTANCE_AUDIT_COVER_DIR>/binary, emptied each run), WITHOUT -coverpkg and
+# -coverprofile, converts the counters the instrumented processes wrote with
+# `go tool covdata textfmt`, and feeds that profile to the same changed-line
+# tail below. It fails if no counters were written, if covdata fails, or if the
+# profile names no file outside _test.go, testdata/ and internal/e2e*/ (the
+# service was not measured). HARNESS CONTRACT, owed by the repo that sets the
+# variable: when the named variable is set the harness builds the service with
+#   go build -cover -coverpkg=./... -covermode=set
+# starts every service process with GOCOVERDIR=<that directory>, and stops each
+# process with SIGTERM and waits for it (a SIGKILLed process writes no counters).
+# The template's own example suite runs in-process, so it leaves the variable
+# empty. Needs Go 1.20 or later.
+# ACCEPTANCE_AUDIT_TIMEOUT (empty: no -timeout flag) is a go test -timeout such as
+# 30m, for a suite that builds and starts binaries; it applies in both modes.
+ACCEPTANCE_AUDIT_BINARY_COVER_ENV ?=
+ACCEPTANCE_AUDIT_TIMEOUT ?=
 # These values reach the recipe as DATA, never as shell text. FLOOR and EXCLUDES are
 # exported and read in the recipe only as "$$ACCEPTANCE_AUDIT_FLOOR" and
 # "$$ACCEPTANCE_AUDIT_EXCLUDES", so a quote, $(...), backtick or newline in them is
@@ -364,17 +388,32 @@ ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
 # value containing a quote, $, backtick or backslash is replaced by a marker the recipe
 # refuses, so it cannot reach the shell. FLOOR must be a plain number or the recipe fails.
 _aa_unsafe = $(or $(findstring ",$(1)),$(findstring ',$(1)),$(findstring $$,$(1)),$(findstring `,$(1)),$(findstring \,$(1)))
-export ACCEPTANCE_AUDIT_FLOOR ACCEPTANCE_AUDIT_EXCLUDES
+export ACCEPTANCE_AUDIT_FLOOR ACCEPTANCE_AUDIT_EXCLUDES ACCEPTANCE_AUDIT_BINARY_COVER_ENV ACCEPTANCE_AUDIT_TIMEOUT
 acceptance-audit: override ACCEPTANCE_AUDIT_COVER_DIR := $(if $(call _aa_unsafe,$(ACCEPTANCE_AUDIT_COVER_DIR)),__unsafe_cover_dir__,$(ACCEPTANCE_AUDIT_COVER_DIR))
 acceptance-audit:
 	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; EXCL="$$ACCEPTANCE_AUDIT_EXCLUDES"; FLOOR="$$ACCEPTANCE_AUDIT_FLOOR"; n=0; \
 	  [ "$(ACCEPTANCE_AUDIT_COVER_DIR)" != "__unsafe_cover_dir__" ] || { echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_COVER_DIR contains a quote, \$$, backtick or backslash: refused"; exit 1; }; \
 	  case "$$FLOOR" in ''|*[!0-9.]*|*.*.*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_FLOOR is not a plain number"; exit 1;; esac; \
+	  BENV="$$ACCEPTANCE_AUDIT_BINARY_COVER_ENV"; TMO="$$ACCEPTANCE_AUDIT_TIMEOUT"; \
+	  case "$$BENV" in '') ;; [!A-Za-z_]*|*[!A-Za-z0-9_]*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_BINARY_COVER_ENV is not a plain environment variable name"; exit 1;; esac; \
+	  case "$$TMO" in '') ;; *[!0-9smh]*|[!0-9]*|*[smh]?*|*[0-9]) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_TIMEOUT is not a duration like 30m"; exit 1;; esac; \
 	  for s in acceptance/*.yaml; do [ -f "$$s" ] && n=$$((n+1)); done; \
 	  if [ "$$n" -eq 0 ]; then echo "acceptance-audit: 0 specs -- nothing to audit yet"; exit 0; fi; \
 	  mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; rm -f "$$PROFILE"; \
-	  go test -count=1 -tags=integration -coverpkg=./... -coverprofile="$$PROFILE" ./internal/e2e/...; \
+	  set --; [ -z "$$TMO" ] || set -- -timeout "$$TMO"; \
+	  if [ -n "$$BENV" ]; then \
+	    case "$(ACCEPTANCE_AUDIT_COVER_DIR)" in /*) COVDIR="$(ACCEPTANCE_AUDIT_COVER_DIR)/binary";; *) COVDIR="$$(pwd)/$(ACCEPTANCE_AUDIT_COVER_DIR)/binary";; esac; \
+	    rm -rf "$$COVDIR"; mkdir -p "$$COVDIR"; \
+	    env "$$BENV=$$COVDIR" go test -count=1 -tags=integration "$$@" ./internal/e2e/...; \
+	    [ -n "$$(find "$$COVDIR" -type f -name 'covcounters.*' | head -n 1)" ] || { echo "acceptance-audit: FAIL -- no coverage counters were written: the service binary was not instrumented (or no process exited normally)"; exit 1; }; \
+	    go tool covdata textfmt -i="$$COVDIR" -o="$$PROFILE" || { echo "acceptance-audit: FAIL -- go tool covdata textfmt exited non-zero: the binary coverage counters could not be converted"; exit 1; }; \
+	  fi; \
+	  [ -n "$$BENV" ] || \
+	  go test -count=1 -tags=integration "$$@" -coverpkg=./... -coverprofile="$$PROFILE" ./internal/e2e/...; \
 	  [ -s "$$PROFILE" ] || { echo "acceptance-audit: FAIL -- acceptance run wrote no coverage profile (nothing was measured)"; exit 1; }; \
+	  if [ -n "$$BENV" ]; then \
+	    if ! grep -v '^mode:' "$$PROFILE" | cut -d: -f1 | grep -Ev '_test\.go$$|/testdata/|/internal/e2e[^/]*/' | grep -q .; then \
+	      echo "acceptance-audit: FAIL -- the profile names no file outside the test-support packages: the service was not measured"; exit 1; fi; fi; \
 	  rc=0; out=$$(CHANGED_LINE_EXTRA_EXCLUDES="$$EXCL" COVERAGE_OUT="$$PROFILE" CHANGED_LINE_COVERAGE_BASE="$$BASE" bash scripts/changed-line-coverage.sh 2>&1) || rc=$$?; echo "$$out"; \
 	  [ "$$rc" -eq 0 ] || { echo "acceptance-audit: FAIL -- changed-line-coverage.sh exited $$rc"; exit 1; }; \
 	  line=$$(printf '%s\n' "$$out" | grep '^changed-line coverage: [0-9.]*% ' | tail -n 1); \
