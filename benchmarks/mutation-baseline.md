@@ -18,7 +18,7 @@ here would be a threshold nobody derived.
 | `acceptance-gap-selftest.sh` | 9 |
 | `agent-dispatch-guard-selftest.sh` | 19 |
 | `agents-budget-selftest.sh` | 16 |
-| `candidate-lane-selftest.sh` | 17 |
+| `candidate-lane-selftest.sh` | 22 |
 | `check-registries-selftest.sh` | 65 |
 | `coverage-ratchet-selftest.sh` | 9 |
 | `diagnostic-evidence-selftest.sh` | 4 |
@@ -40,4 +40,4 @@ here would be a threshold nobody derived.
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **640** |
+| **total** | **645** |

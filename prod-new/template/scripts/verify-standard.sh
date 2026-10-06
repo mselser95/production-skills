@@ -566,16 +566,30 @@ shard_order_key() {
 }
 
 # --- helpers -----------------------------------------------------------------
-# go_fail_evidence <captured go test output>: up to 3 lines of WHY a go test run
-# was red, joined with " | ". Every `--- FAIL: <name>` (first 3) each followed by
-# its first `_test.go:N:` assertion line; with no `--- FAIL`, the notable markers
-# instead. Prints nothing when it finds none (the caller keeps its own wording).
+# go_fail_evidence <captured go test output>: WHY a go test run was red, joined
+# with " | ". Every `--- FAIL: <name>` (first 3) followed by the LAST
+# `_test.go:N:` line of its output block: go prints log and failure lines in call
+# order, so the failing assertion (t.Fatalf) is the last one and anything before
+# it is a t.Logf diagnostic. (Measured: a red race row quoted a stalled-socket
+# t.Logf and dropped the t.Fatalf six lines later.) With exactly one failing
+# test whose block has several such lines, the FIRST is appended as context when
+# it differs. With no `--- FAIL`, the notable markers instead. Prints nothing
+# when it finds none (the caller keeps its own wording).
 go_fail_evidence() {
   local out="$1" ev
   ev=$(awk '
-    /--- FAIL:/ { if (nf < 3) { nf++; printf "%s\n", $0; want = 1 } else want = 0; next }
-    want && /_test\.go:[0-9]+:/ { printf "%s\n", $0; want = 0 }
-  ' <<<"$out" | sed 's/^[[:space:]]*//' | head -n 3)
+    function flush() { if (name != "") { names[++k] = name; lasts[k] = last; firsts[k] = first } name = ""; first = ""; last = "" }
+    /--- FAIL:/ { flush(); if (k < 3) name = $0; next }
+    name != "" && /_test\.go:[0-9]+:/ { if (first == "") first = $0; last = $0 }
+    END {
+      flush()
+      for (i = 1; i <= k; i++) {
+        printf "%s\n", names[i]
+        if (lasts[i] != "") printf "%s\n", lasts[i]
+        if (k == 1 && firsts[i] != "" && firsts[i] != lasts[i]) printf "%s\n", firsts[i]
+      }
+    }
+  ' <<<"$out" | sed 's/^[[:space:]]*//' | cut -c1-200)
   if [[ -z "$ev" ]]; then
     ev=$(grep -E 'panic:|bind: address already in use|race detected|\[setup failed\]|build failed' <<<"$out" | sed 's/^[[:space:]]*//' | head -n 3)
   fi
@@ -1126,7 +1140,7 @@ if (( suite_rc == 0 && suite_list_rc == 0 )) && [[ -z "$suite_missing" ]]; then 
 # the suite themselves, and an INTERMITTENT failure may not reproduce on that
 # re-run. Evidence you have to regenerate is evidence you may not get.
 race_diagnose() {
-  local o="$1" race_name race_assert race_why race_pkg race_cause
+  local o="$1" race_ev race_name race_assert race_why race_pkg race_cause
   # The test NAME and the ASSERTION, not one or the other. Reporting only
   # `--- FAIL: TestX` sends the reader to re-run it for the message -- and for
   # an intermittent failure that re-run may come back clean, which is the whole
@@ -1136,6 +1150,10 @@ race_diagnose() {
   race_name=$(grep -m1 -E '^--- FAIL: [A-Za-z0-9_/]+' <<<"$o")
   race_assert=$(grep -m1 -E '^[[:space:]]+[^[:space:]]+\.go:[0-9]+:' <<<"$o")
   race_why=$(grep -m1 -E '^[[:space:]]*(WARNING: DATA RACE)' <<<"$o")
+  # name + the LAST assertion of the block (the t.Fatalf, not a leading t.Logf)
+  # come from the one shared helper; the first-match pick above is the fallback.
+  race_ev=$(go_fail_evidence "$o")
+  [[ -z "$race_why" && "$race_ev" == *"--- FAIL:"* ]] && race_why="$race_ev"
   [[ -z "$race_why" ]] && race_why="$(printf '%s%s' "${race_name}" "${race_assert:+ -- $(printf '%s' "$race_assert" | sed 's/^[[:space:]]*//')}")"
   # A failure that is not a test failure at all names its cause on a line of
   # its own ("go: -race requires cgo", "-covermode must be atomic ... -race").
@@ -1867,7 +1885,7 @@ if [[ -n "$real_tag" ]]; then
     extra=""; [[ -n "$live_gate" ]] && extra=" + env-gated live lane"
     row "integration-real-lane" PASS "lane '-tags=$real_tag' runs green in $(wc -w <<<"$real_pkgs" | tr -d ' ') pkg(s)$extra"
   else
-    row "integration-real-lane" FAIL "lane '-tags=$real_tag': $(grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$rl_out" | cut -c1-120)"
+    row "integration-real-lane" FAIL "lane '-tags=$real_tag': $(go_fail_evidence "$rl_out" | grep . || grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$rl_out" | cut -c1-120)"
   fi
 elif [[ -n "$live_gate" ]]; then
   row "integration-real-lane" PASS "env-gated live lane only ($live_gate)"
@@ -1917,7 +1935,7 @@ else
     if compat_out=$(go test -count=1 -run "^(${compat_re})\$" $compat_pkgs 2>&1); then
       row "compatibility" PASS "$compat_n wire/contract test(s) RAN green: $(printf '%s' "$compat_re" | cut -c1-90)"
     else
-      row "compatibility" FAIL "compatibility tests red: $(grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$compat_out" | cut -c1-120)"
+      row "compatibility" FAIL "compatibility tests red: $(go_fail_evidence "$compat_out" | grep . || grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$compat_out" | cut -c1-120)"
     fi
   fi
 fi
