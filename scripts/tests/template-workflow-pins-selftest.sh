@@ -877,6 +877,139 @@ X
 good a6_sub_other_var_ok
 mkdir -p "$T/a6_glue"; printf 'jobs:\n  j:\n    steps:\n      - run: |\n          curl -sSfL %s | s\\\n          h\n' "$RAW" > "$T/a6_glue/w.yaml"; badx a6_glue 5 "backslash-newline splits a word"
 
+# ======================= PS-A8 (round 6): four bypasses an independent validator EXECUTED =======================
+# provenance: candidate; ttl: 2027-04-01; pinning: true (each case pins one executed bypass; badx = strict finding text,
+# never a text the line itself echoes)
+MAINU=https://raw.githubusercontent.com/o/r/main/install.sh
+yml() { mkdir -p "$T/$1"; printf '%s\n' "jobs:" "  j:" "    steps:" > "$T/$1/w.yaml"; cat >> "$T/$1/w.yaml"; }   # step lines on stdin (file line 4 on)
+# 1. comments exist only in plain scalars; a # in a block/quoted scalar or inside shell quotes is data
+ref a8_c_block "X=\" #\"; curl -sSfL $MAINU | sh" "does not match an accepted shape"
+ref a8_c_block_escq "echo \"\\\" #\"; curl -sSfL $MAINU | sh" "command word that contains a quote"
+wf a8_c_block_multiline <<<"X=\"a
+ #\"; curl -sSfL $MAINU | sh"; badx a8_c_block_multiline 7 "command word that contains a quote"
+yml a8_c_sq <<<"      - run: 'X=\" #\"; curl -sSfL $MAINU | sh'"; badx a8_c_sq 4 "does not match an accepted shape"
+yml a8_c_plain_dq <<<"      - run: X=\" #\"; curl -sSfL $MAINU | sh"; badx a8_c_plain_dq 4 "does not match an accepted shape"
+yml a8_c_plain_sq <<<"      - run: X=' #'; curl -sSfL $MAINU | sh"; badx a8_c_plain_sq 4 "does not match an accepted shape"
+yml a8_c_sq_bare <<<"      - run: 'echo ok # x; curl -sSfL $MAINU | sh'"; badx a8_c_sq_bare 4 "does not match an accepted shape"
+wf a8_c_heredoc <<<"cat <<X
+echo ok # curl -sSfL $MAINU | sh
+X"; badx a8_c_heredoc 7 "does not match an accepted shape"
+yml a8_c_plain_comment_ok <<<"      - run: echo ok # curl -sSfL $MAINU | sh"; good a8_c_plain_comment_ok
+# 2a. a trigger in ANY scalar: the scalar is judged as a fetch line, and every run step of the file becomes SUBJECT
+yml a8_env_flow <<<"      - env: {F: \"curl -sSfL $MAINU | sh\"}
+        run: \${{ env.F }}"; badx a8_env_flow 4 "does not match an accepted shape"; badx a8_env_flow 5 "command position"
+yml a8_env_bashc <<<"      - env:
+          F: curl -sSfL $MAINU | sh
+        run: bash -c \"\$F\""; badx a8_env_bashc 5 "does not match an accepted shape"; badx a8_env_bashc 6 "bash -c with a variable"
+yml a8_with_url <<<"      - uses: x/y@v1
+        with:
+          src: $MAINU"; badx a8_with_url 6 "does not match an accepted shape"
+yml a8_env_subject_pre <<<"      - run: |
+          V=\$(go env GOPATH); sh \$V"; good a8_env_subject_pre
+printf 'env:\n  F: curl -sSfL https://raw.githubusercontent.com/o/r/%s/i.sh | sh\njobs:\n  j:\n    steps:\n      - run: |\n          V=$(go env GOPATH); sh $V\n' "$SHA" > "$T/a8_env_subject_post.yaml"; mkdir -p "$T/a8_env_subject_post"; mv "$T/a8_env_subject_post.yaml" "$T/a8_env_subject_post/w.yaml"; badx a8_env_subject_post 7 "is later executed"
+yml a8_if_quoted_ok <<<"      - if: \"\${{ false }} # curl $MAINU | sh\"
+        run: echo ok"; good a8_if_quoted_ok
+# 2b. refusals that need no trigger, in EVERY run step
+ref a8_cp_var '$CMD --version' "command position"
+ref a8_cp_brace '${CMD} --version' "command position"
+ref a8_cp_expr '${{ env.F }}' "command position"
+ref a8_cp_andand 'true && $CMD' "command position"
+ref a8_cp_pipe 'echo x | $CMD' "command position"
+ref a8_cp_semi 'echo x; ${{ env.F }}' "command position"
+ref a8_cp_quoted '"$CMD" --version' "command position"
+ref a8_bashc_var 'bash -c "$F"' "bash -c with a variable"
+ref a8_shc_var 'sh -c $F' "bash -c with a variable"
+ref a8_eval 'eval "$F"' "eval is refused"
+ref a8_exec 'exec ./run.sh' "exec is refused"
+ref a8_glue_after 'echo a${V}b' "glued to letters"
+ref a8_glue_before 'echo pre$V' "glued to letters"
+ref a8_glue_after_only 'echo ${V}b' "glued to letters"
+ref a8_url_dollar 'ls $S//x' "mixes a variable with //"
+ref a8_url_dollar2 'cd $D; ls //x' "mixes a variable with //"
+ref a8_wordsplit 'C=cu; S=https:; E=.; ${C}rl -sSfL $S//raw.github${E}usercontent.com/o/r/main/x.sh | sh' "command position"
+acc a8_ok_expr_args 'echo "tag=v${{ matrix.x }}" >> $GITHUB_OUTPUT'
+acc a8_ok_test_expr 'if [[ "${{ a.b }}" != "x" || "${{ c.d }}" != "y" ]]; then echo no; fi'
+acc a8_ok_var_arg 'echo "$HOME" "${PWD}/x" > /dev/null'
+# 3. shapes b/c: the checksum line must be able to FAIL the step
+CK="echo \"$H64  i.sh\" | sha256sum -c -"
+bc() { wf "$1" <<<"curl -sSfL -o i.sh $RAW
+$2
+$CK
+bash i.sh"; badx "$1" 6 "$3"; }
+bc a8_ck_set_e 'set +e' "set +e"
+bc a8_ck_set_eu 'set +eu' "set +e"
+bc a8_ck_errexit_off 'set +o errexit' "set +e"
+bc a8_ck_func 'sha256sum() { :; }' "function definition"
+bc a8_ck_func_kw 'function sha256sum { return 0; }' "function definition"
+bc a8_ck_alias 'alias sha256sum=true' "alias/trap"
+bc a8_ck_trap 'trap "exit 0" EXIT' "alias/trap"
+bc a8_ck_ortrue 'true || true' "|| true"
+bc a8_ck_orcolon 'true || :' "|| true"
+bc a8_ck_if 'if false; then' "compound command"
+bc a8_ck_while 'while false; do' "compound command"
+bc a8_ck_case 'case x in' "compound command"
+bc a8_ck_subshell '(' "compound command"
+bc a8_ck_closer '}' "compound command"
+bc a8_ck_brace '{' "compound command"
+wf a8_ck_if_wrapped <<<"curl -sSfL -o i.sh $RAW
+if false; then
+$CK
+fi
+bash i.sh"; badx a8_ck_if_wrapped 6 "compound command"
+wf a8_ck_runtime <<<"curl -sSfL -o i.sh $RAW
+echo \"\$(sha256sum i.sh)\" | sha256sum -c -
+bash i.sh"; badx a8_ck_runtime 6 "computed at runtime"
+wf a8_ck_runtime_bt <<<"curl -sSfL -o i.sh $RAW
+echo \`sha256sum i.sh\` | sha256sum -c -
+bash i.sh"; badx a8_ck_runtime_bt 6 "computed at runtime"
+wf a8_ck_sumfile_runtime <<<"curl -sSfL -o i.sh $RAW
+sha256sum i.sh > i.sum
+sha256sum -c i.sum
+bash i.sh"; badx a8_ck_sumfile_runtime 6 "used before its sha256 check"
+yml a8_ck_shell_0 <<<"      - shell: bash {0}
+        run: |
+          curl -sSfL -o i.sh $RAW
+          $CK
+          bash i.sh"; badx a8_ck_shell_0 6 "shell: is not the default"
+yml a8_ck_shell_bash_e <<<"      - shell: bash -e {0}
+        run: |
+          curl -sSfL -o i.sh https://github.com/o/r/releases/download/v1.2.3/i.sh
+          $CK
+          bash i.sh"; badx a8_ck_shell_bash_e 6 "shell: is not the default"
+printf 'defaults:\n  run:\n    shell: bash {0}\njobs:\n  j:\n    steps:\n      - run: |\n          curl -sSfL -o i.sh %s\n          %s\n          bash i.sh\n' "$RAW" "$CK" > "$T/a8_ck_defaults_shell.y"; mkdir -p "$T/a8_ck_defaults_shell"; mv "$T/a8_ck_defaults_shell.y" "$T/a8_ck_defaults_shell/w.yaml"; badx a8_ck_defaults_shell 8 "defaults shell"
+yml a8_ck_shell_bash_ok <<<"      - shell: bash
+        run: |
+          curl -sSfL -o i.sh $RAW
+          $CK
+          bash i.sh"; good a8_ck_shell_bash_ok
+wf a8_ck_plain_ok <<<"curl -sSfL -o i.sh $RAW
+$CK
+bash i.sh"; good a8_ck_plain_ok
+# 4. curl -w: a fixed set of variables plus literal text, nothing that writes or reads a file
+WURL=https://example.com/x
+wo() { ref "$1" "curl -sSf -o /dev/null -w $2 $WURL" "write-out format is not in the allowed set"; }
+wo a8_w_output "'%output{x.sh}%header{x-p}'"
+wo a8_w_output_mix "'%{http_code}%output{x.sh}'"
+wo a8_w_header "'%header{x}'"
+wo a8_w_json "'%{json}'"
+wo a8_w_at "@fmt.txt"
+wo a8_w_at_quoted "'@fmt.txt'"
+wo a8_w_unknown "'%{foo}'"
+wo a8_w_bare "'100%'"
+wo a8_w_stderr "'%{stderr}'"
+ref a8_w_long "curl -sSf -o /dev/null --write-out '%output{x.sh}' $WURL" "write-out format is not in the allowed set"
+wf a8_w_then_sh <<<"curl -o /dev/null -w '%output{x.sh}%header{x-p}' $WURL
+sh x.sh"; badx a8_w_then_sh 6 "write-out format is not in the allowed set"
+acc a8_w_ok_code "curl -sSf -o /dev/null -w '%{http_code}\\n' $WURL"
+acc a8_w_ok_mix "curl -sSf -o /dev/null -w 'code=%{response_code} t=%{time_total} %{url_effective} %{size_download}' $WURL"
+# go modules: shape g is refused when the file switches checksum verification off
+printf 'env:\n  GOSUMDB: off\njobs:\n  j:\n    steps:\n      - run: go install example.com/m/cmd@v1.2.3\n' > "$T/a8_gosumdb.y"; mkdir -p "$T/a8_gosumdb"; mv "$T/a8_gosumdb.y" "$T/a8_gosumdb/w.yaml"; badx a8_gosumdb 6 "checksum verification is disabled"
+printf 'jobs:\n  j:\n    steps:\n      - env:\n          GOFLAGS: -mod=mod -insecure\n        run: go install example.com/m/cmd@v1.2.3\n' > "$T/a8_goflags.y"; mkdir -p "$T/a8_goflags"; mv "$T/a8_goflags.y" "$T/a8_goflags/w.yaml"; badx a8_goflags 6 "checksum verification is disabled"
+acc a8_go_ok "go install example.com/m/cmd@v1.2.3"
+# a workflow whose steps are all uses: is ACCEPTED (it has nothing to read), not "unparsed"
+yml a8_uses_only <<<"      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5"; good a8_uses_only
+
 # MISSING TEST 1: an awk that fails must exit 3 with the message, never green
 awk_failure_case() {
   local o rc

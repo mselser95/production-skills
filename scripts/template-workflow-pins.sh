@@ -19,6 +19,10 @@
 #    backslash is refused (escapes like \x2f are not decoded here). Single-quoted and
 #    block scalars are read literally; backslash-newline is joined as the shell does and
 #    a join that splits a word is refused.
+#    COMMENTS (PS-A8): YAML comments exist only in PLAIN scalars. A block (| >) or quoted scalar is data and is
+#    never stripped as YAML; a block keeps its SHELL comments, stripped with the shell quote rules (quote state
+#    carried across lines, a backslash escapes, a # inside quotes is data), and not at all when the block holds a
+#    heredoc (<<) or $'..'. X=" #"; curl ... | sh was a bypass when the strip ignored quotes.
 # R1 TRIGGER. A run: step is SUBJECT if, after joining continuations, any line (lower-cased,
 #    quotes and backslashes removed, so c''url and c\url are seen) holds curl, wget, iwr,
 #    Invoke-WebRequest/RestMethod, urlopen, http(s)://, codeload., raw.githubusercontent,
@@ -31,6 +35,12 @@
 #    -i, more than one URL in a fetch, an output option given twice, -o - /dev/stdout
 #    /dev/fd/*, a URL with a dot segment, %2e, @ or a scheme other than https, a fetched
 #    file executed from ANOTHER step of the same workflow, iwr/iex/Invoke-*.
+# R2a EVERY SCALAR (PS-A8). A trigger in ANY non-run scalar of a file (env at any level, with:, defaults, list items;
+#    name/description/uses/if excluded) makes every run step of that FILE subject, and the scalar is itself judged as a
+#    fetch line (R2 + R3), so env: {F: curl ... | sh} is refused.
+# R2b NO TRIGGER NEEDED, every run step (PS-A8): a ${{ }} expression or bare variable in COMMAND position (first word
+#    or after ; && || | ( then do else), sh/bash -c with a variable, eval, exec, a shell variable glued to letters
+#    (${C}rl, pre$V), a line mixing a variable with // (an assembled URL). [ ] / [[ ]] tests are not command position.
 # R3 ALLOWLIST. Every line of a SUBJECT step holding a fetch tool or URL must match exactly
 #    one shape (anything else: "fetch does not match an accepted shape"):
 #    a  curl -sSfL <pinned raw.githubusercontent.com/o/r/<40hex>/path> | sh|bash [-s -- args]
@@ -41,11 +51,19 @@
 #    e  curl -X POST|PUT [-H h] [-d body|--data-binary @file] URL (no pipe, -o /dev/null only)
 #    f  curl [-H h] https://api.github.com/... | jq ... | python3 -m json.tool
 #    g  [bash scripts/retry.sh] go install|run|get module@vX.Y.Z or @<40hex>
+#    Shapes b/c also need the check to be able to FAIL the step (PS-A8): refused when the step holds set +e, set +o
+#    errexit, a function definition, alias, trap, || true / || :, any compound (if/then/fi, while, case, for, ( ), { }),
+#    a shell: other than unset/bash/sh (bash {0} does not run -e) or a defaults shell likewise; the sum must be a
+#    literal 64-hex (echo "$(sha256sum f)" is "computed at runtime").
+#    Shape d: -w/--write-out takes only %{http_code} %{url_effective} %{time_total} %{response_code} %{size_download}
+#    and literal text (no %output, %header, @file, %{json}, other %).
+#    Shape g is refused when the file sets GOSUMDB=off or GOFLAGS with -insecure (GOPROXY=direct is NOT refused: known gap).
 #    h  `uses:` lines are OUT OF SCOPE (only run: scalars are read; another gate may cover them).
 #    A mention is accepted only when the whole line is echo/printf/# with no pipe, redirect,
 #    ; & or backtick.
 # R4 FAIL CLOSED. No workflow files: exit 2. Unreadable file or awk/grep missing: exit 3.
-#    run/steps keys the line parser did not read (flow or JSON style): refused.
+#    run/steps keys the line parser did not read (flow or JSON style): refused. A workflow whose steps are all
+#    `uses:` is accepted (uses steps count as read steps).
 #
 # Usage: template-workflow-pins.sh [workflows-dir]   (default: the template's)
 # Exit: 0 clean · 1 findings · 2 no workflow files found · 3 internal error (no summary)
@@ -122,9 +140,26 @@ function okname(s) { return s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/ && s != ".." }
 function esc(s) { gsub(/\./, "\\.", s); return s }
 function usesname(t, name) { return (" " t " ") ~ ("[^A-Za-z0-9_.-]" esc(name) "[^A-Za-z0-9_.-]") }
 # checksum proof for NAME after line k: returns the line index where it is verified, or 0/-1
-function needck(k, name,   j, w, nw, s, f, m) {
+function stepbad(   j, s, lo) {
+  if (curshell != "" && curshell !~ /^(bash|sh)$/) return "the step shell: is not the default/bash/sh (bash {0} does not run -e, so a failed check cannot fail the step)"
+  if (filebadshell) return "a defaults shell: other than bash/sh is set (a failed check may not fail the step)"
+  for (j = 1; j <= nrec; j++) {
+    s = rtext[j]; lo = " " lowq(s)
+    if (lo ~ /[ ;&|(]set +[-+][a-z]*\+e/ || lo ~ /[ ;&|(]set +\+o +errexit/ || lo ~ /[ ;&|(]set +\+[a-z]*e/) return "set +e in a checked step: a failed checksum could not fail the step"
+    if (lo ~ /[A-Za-z0-9_.:-]+ *\(\) *(\{|$)/ || lo ~ /[ ;&|(]function +[a-z_]/) return "a shell function definition in a checked step could shadow the checksum tool"
+    if (lo ~ /[ ;&|(](alias|trap)( |$)/) return "alias/trap in a checked step could neutralise the checksum"
+    if (lo ~ /\|\| *(true|:|exit 0)( |;|$)/) return "|| true / || : in a checked step swallows a failed checksum"
+    if (lo ~ /(^|[ ;&|(])(if|then|elif|else|fi|while|until|do|done|case|esac|for|select)([ ;]|$)/ || lo ~ /(^ *|[;&|] *)[({]( |$)/ || lo ~ /(^| )[)}]( |;|$)/) return "a compound command (if/then/fi, while, case, ( ), { }) in a checked step could skip the checksum"
+  }
+  return ""
+}
+function needck(k, name,   j, w, nw, s, f, m, sw) {
+  ckwhy = sw = stepbad()
+  if (sw != "") return 0
   for (j = k + 1; j <= nrec; j++) {
-    s = rtext[j]; gsub("[\"" q "]", "", s); sub(/^ +/, "", s); sub(/ +$/, "", s)
+    s = rtext[j]
+    if (s ~ /sha256sum/ && (index(s, "$(") || index(s, "`"))) { ckwhy = "the checksum is computed at runtime (a literal 64-hex is required)"; return 0 }
+    gsub("[\"" q "]", "", s); sub(/^ +/, "", s); sub(/ +$/, "", s)
     nw = split(s, w, / +/)
     if (nw == 7 && w[1] == "echo" && ishex(w[2], 64) && w[3] == name && w[4] == "|" && w[5] == "sha256sum" && w[6] == "-c" && w[7] == "-") return j
     if (nw == 5 && w[1] == "echo" && ishex(w[2], 64) && w[3] == name && w[4] == ">" && w[5] ~ /^[A-Za-z0-9_.-]+$/) {
@@ -135,6 +170,59 @@ function needck(k, name,   j, w, nw, s, f, m) {
     if (usesname(s, name)) return -1
   }
   return 0
+}
+# the value of a scalar that is NOT a run: scalar (env, with:, defaults, list items), "" for keys that cannot execute
+function nrval(l,   v) {
+  if (l ~ /^ *(#|$)/ || l ~ /^ *(- +)?(name|description|uses|run|if):/) return ""
+  v = l
+  if (!sub(/^ *(- +)?[A-Za-z_][A-Za-z0-9_.-]*: */, "", v)) sub(/^ *- +/, "", v)
+  if (v !~ /^["]/ && v !~ ("^" q)) { bqs = ""; v = stripcmt(v) }
+  if ((v ~ /^".*"$/ || v ~ new_sq) && length(v) > 1) v = substr(v, 2, length(v) - 2)
+  return v
+}
+# whole-file pre-read: a trigger in any non-run scalar makes every run step SUBJECT; GOSUMDB=off / GOFLAGS -insecure disables shape g
+function prescan(fn,   l, pin, pind, pf, v, lo) {
+  filetrig = gounsafe = filebadshell = 0; pin = 0
+  while ((getline l < fn) > 0) {
+    sub(/\r$/, "", l); gsub(/\t/, " ", l); lo = tolower(l)
+    if (l !~ /^ *#/ && (lo ~ ("gosumdb *[=:] *[\"" q "]?off") || (lo ~ /goflags/ && lo ~ /-insecure/))) gounsafe = 1
+    if (pin) { if (l ~ /^ *$/ || (match(l, /[^ ]/) - 1) > pind) continue; pin = 0 }
+    if (match(l, /^ *(- +)?run:( |$)/)) { pf = l; sub(/run:.*$/, "", pf); pind = length(pf); pin = 1; continue }
+    v = nrval(l)
+    if (v != "" && subject(v)) filetrig = 1
+  }
+  close(fn)
+}
+# a pseudo run line for a trigger found in a non-run scalar: judged exactly like a fetch line (R2 + R3)
+function judgeline(f, ln, txt,   save, k, nf, w) {
+  save = nrec; k = nrec + 1; nrec = k; rtext[k] = txt; rline[k] = ln; rfile[k] = f
+  nf = r2(f, ln, txt, 0, k)
+  if (nf == 0) { w = shape(k); if (w != "") report(f, ln, w, txt) }
+  nrec = save
+}
+# R2b: refusals that need no trigger, applied to EVERY run step: a command whose word is a variable or ${{ }} expression,
+# a program fed inline from a variable, eval/exec, a shell variable glued to letters, a URL assembled with a variable
+function r2b(f, ln, raw,   lo, t, nf, v, a, b, pre, post) {
+  nf = 0
+  if (raw ~ /^ *#/) return 0
+  lo = lowq(raw)
+  t = raw
+  while (match(t, /\[\[ [^\]]* \]\]/) || match(t, /\[ [^\]]* \]/)) t = substr(t, 1, RSTART - 1) " TEST " substr(t, RSTART + RLENGTH)
+  if (match(t, "(^ *|[;&|(] *|(then|do|else|elif|[{]) +)[\"" q "]*\\$(\\{\\{|\\{|[A-Za-z_])"))
+    nf += rep(f, ln, "a variable or expression in command position cannot be judged", raw)
+  if (index(raw, "$") && (lo ~ /(^|[^a-z0-9_.-])(sh|bash|zsh|dash|ksh) +(-[a-z]+ +)*-[a-z]*c([^a-z0-9_-]|$)/))
+    nf += rep(f, ln, "sh -c / bash -c with a variable cannot be judged", raw)
+  if (lo ~ /(^|[^a-z0-9_.-])eval([^a-z0-9_-]|$)/) nf += rep(f, ln, "eval is refused", raw)
+  if (lo ~ /(^|[^a-z0-9_.-])exec([^a-z0-9_-]|$)/) nf += rep(f, ln, "exec is refused", raw)
+  t = raw
+  while (match(t, /\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/)) {
+    pre = (RSTART > 1) ? substr(t, RSTART - 1, 1) : " "; post = substr(t, RSTART + RLENGTH, 1)
+    if (pre ~ /[A-Za-z0-9_]/ || (substr(t, RSTART + 1, 1) == "{" && post ~ /[A-Za-z]/)) { nf += rep(f, ln, "a shell variable glued to letters could form a command word", raw); break }
+    t = substr(t, RSTART + RLENGTH)
+  }
+  if (index(raw, "$") && index(raw, "//") && !((raw ~ /^ *(echo|printf)( |$)/) && raw !~ /[|><;&`]/))
+    nf += rep(f, ln, "a line that mixes a variable with // cannot be verified as a URL", raw)
+  return nf
 }
 function regname(name, ln) { nmN++; nmname[nmN] = name; nmstep[nmN] = stepn; nmln[nmN] = ln }
 # a word spelled with quote fragments: letters then an opening quote (c''url, b"a"sh), or a quoted
@@ -260,7 +348,20 @@ function sh_bc(T, n, k, kind,   i, name, ck, j) {
   ck = needck(k, name)
   if (ck > 0) { okn[name] = 1; return 1 }
   shwhy = (ck < 0) ? "the fetched file is used before its sha256 check" : "the fetched file has no sha256 check in the step"
+  if (ckwhy != "") shwhy = ckwhy
   return 0
+}
+# curl -w: only a fixed set of variables plus literal text; %output, %header, @file, %{json}, any other % is refused
+function wok(v,   r, nm) {
+  if (index(v, "@")) return 0
+  r = v
+  while (index(r, "%")) {
+    if (!match(r, /%\{[a-z_]+\}/) || RSTART != index(r, "%")) return 0
+    nm = substr(r, RSTART + 2, RLENGTH - 3)
+    if (nm != "http_code" && nm != "url_effective" && nm != "time_total" && nm != "response_code" && nm != "size_download") return 0
+    r = substr(r, RSTART + RLENGTH)
+  }
+  return 1
 }
 function sh_d(T, n,   i, t, head, dn, nurl) {
   if (T[1] == "wget") {
@@ -273,7 +374,7 @@ function sh_d(T, n,   i, t, head, dn, nurl) {
     if (isfl(t)) continue
     if (t == "-I" || t == "--head") head = 1
     else if (t == "-o" && T[i + 1] == "/dev/null") { dn = 1; i++ }
-    else if (t == "-w" && i < n && !isop(T[i + 1]) && T[i + 1] !~ /[$`]/) i++
+    else if ((t == "-w" || t == "--write-out") && i < n && !isop(T[i + 1]) && T[i + 1] !~ /[$`]/) { if (!wok(T[i + 1])) { shwhy = "write-out format is not in the allowed set"; return 0 } i++ }
     else if (t ~ /^https:\/\/[^$`{}]+$/) nurl++
     else return 0
   }
@@ -310,6 +411,7 @@ function sh_f(T, n,   i, t, j) {
 function sh_g(T, n,   i, j, t, nat, at, ref) {
   i = 1; if (T[1] == "bash" && T[2] == "scripts/retry.sh") i = 3
   if (T[i] != "go" || (T[i + 1] != "install" && T[i + 1] != "run" && T[i + 1] != "get")) return 0
+  if (gounsafe) { shwhy = "go module checksum verification is disabled in this file (GOSUMDB=off or GOFLAGS -insecure)"; return 0 }
   for (j = i + 2; j <= n; j++) {
     t = T[j]
     if (isop(t)) return 0
@@ -350,12 +452,33 @@ function push(ln, txt,   a) {
   rtext[nrec] = txt
 }
 function addlit(ln, s) {
-  sub(/ #.*$/, "", s)
   if (cur == "") curln = ln
   if (cur ~ /\001$/) sub(/^ +/, "", s)
   if (s ~ /[^ ]\\$/) { sub(/\\$/, "", s); cur = cur s "\001"; return }
   if (s ~ / *\\$/) { sub(/ *\\$/, "", s); cur = cur s " "; return }
   push(curln, cur s); cur = ""
+}
+# COMMENTS. YAML has comments only in PLAIN scalars; a block (| >) or quoted scalar is data. A shell, however, does treat
+# an unquoted ` #` as a comment, so a block keeps its own trailing comments, stripped with the SHELL quote rules: quote
+# state is tracked (and carried across lines of a block), a backslash escapes the next character, and a # inside quotes
+# is data. Hiding a fetch behind X=" #"; ... was a bypass when the strip ignored quotes. A block holding a heredoc (<<)
+# or $'..' is not stripped at all (what a heredoc body is cannot be told here).
+function stripcmt(s,   i, c, out, n) {
+  n = length(s)
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (bqs == q) { if (c == q) bqs = ""; continue }
+    if (c == "\\") { i++; continue }
+    if (bqs == "\"") { if (c == "\"") bqs = ""; continue }
+    if (c == "\"" || c == q) { bqs = c; continue }
+    if (c == "#" && (i == 1 || substr(s, i - 1, 1) == " ")) return (i == 1) ? "" : substr(s, 1, i - 2)
+  }
+  return s
+}
+function blockstrip(r0,   j) {
+  for (j = r0 + 1; j <= nrec; j++) if (index(rtext[j], "<<") || index(rtext[j], "$" q)) return
+  bqs = ""
+  for (j = r0 + 1; j <= nrec; j++) rtext[j] = stripcmt(rtext[j])
 }
 function content(ln, s) {
   if (dq && index(s, "\\")) dqesc = 1
@@ -364,8 +487,9 @@ function content(ln, s) {
 }
 function finish_run() {
   if (cur != "") { push(curln, cur); cur = "" }
+  if (mode == "lit") blockstrip(runrec0)
   if (mode != "lit" && acc != "") {
-    if (accn == 1) sub(/ #.*$/, "", acc)
+    if (accn == 1 && mode == "inl" && !qwhole) { bqs = ""; acc = stripcmt(acc) }
     push(runln, acc)
   }
   if (dqesc) report(lastfile, runln, "cannot judge a double-quoted run scalar with escapes", "run: (double-quoted scalar containing a backslash)")
@@ -374,11 +498,13 @@ function finish_run() {
 }
 function okshell(v) { sub(/ +#.*$/, "", v); gsub(/"/, "", v); gsub(q, "", v); return (v ~ /^(bash|sh)( |$)/) }
 function flush(   k, subj, nf, w, st) {
+  curshell = stepshell; sub(/ +#.*$/, "", curshell); gsub(/["]/, "", curshell); gsub(q, "", curshell); sub(/ +$/, "", curshell)
   if (stepshell != "" && nrec > 0 && !okshell(stepshell)) { checked++; report(rfile[1], rline[1], "unsupported shell, cannot verify", "shell: " stepshell) }
   stepshell = ""
   stepn++; split("", okn)
-  subj = 0
+  subj = filetrig
   for (k = 1; k <= nrec; k++) if (subject(rtext[k])) subj = 1
+  for (k = 1; k <= nrec; k++) r2b(rfile[k], rline[k], rtext[k])
   if (subj) {
     checked++
     for (k = 1; k <= nrec; k++) {
@@ -407,21 +533,24 @@ function xstep(   a, b, t, nm) {
 function filecheck() {
   if (lastfile == "") return
   xstep()
-  if (un > 0 || (pr == 0 && hassteps)) report(lastfile, unln ? unln : 1, "could not read " (un > 0 ? un : 1) " run step(s) in " lastfile ": unparsed workflow shapes are not accepted", "(flow/JSON style or a run key the line parser did not read)")
-  un = pr = hassteps = unln = 0
+  if (un > 0 || (pr + pu == 0 && hassteps)) report(lastfile, unln ? unln : 1, "could not read " (un > 0 ? un : 1) " run step(s) in " lastfile ": unparsed workflow shapes are not accepted", "(flow/JSON style or a run key the line parser did not read)")
+  un = pr = pu = hassteps = unln = 0
 }
-FNR == 1 { if (inrun) finish_run(); flush(); filecheck(); files_seen++ }
+FNR == 1 { if (inrun) finish_run(); flush(); filecheck(); files_seen++; prescan(FILENAME) }
 {
   lastfile = FILENAME
   line = $0; sub(/\r$/, "", line); gsub(/\t/, " ", line)
   if (inrun) {
     if (line ~ /^ *$/) next
-    if (mode == "inl" && runempty && line ~ /^ *shell: *[^ #]/) { v2 = line; sub(/^ *shell: */, "", v2); if (!okshell(v2)) { checked++; report(FILENAME, FNR, "unsupported shell, cannot verify", "defaults shell: " v2) } }
+    if (mode == "inl" && runempty && line ~ /^ *shell: *[^ #]/) { v2 = line; sub(/^ *shell: */, "", v2); if (v2 !~ /^[\"]?(bash|sh)[\"]? *(#.*)?$/) filebadshell = 1; if (!okshell(v2)) { checked++; report(FILENAME, FNR, "unsupported shell, cannot verify", "defaults shell: " v2) } }
     ind = match(line, /[^ ]/) - 1
     if (ind > runind) { content(FNR, line); next }
     finish_run()
   }
   if (line ~ /^ *-( |$)/) flush()
+  nv = nrval(line)
+  if (nv != "" && subject(nv)) judgeline(FILENAME, FNR, nv)
+  if (line ~ /^ *(- +)?uses:/) pu++
   if (line !~ /^ *#/) {
     if (line !~ /^ *(- +)?run:( |$)/ && line ~ rawre) { un++; if (!unln) unln = FNR }
     if (line ~ stepsre) hassteps = 1
@@ -430,12 +559,12 @@ FNR == 1 { if (inrun) finish_run(); flush(); filecheck(); files_seen++ }
   if (match(line, /^ *(- +)?run:( |$)/)) {
     pfx = line; sub(/run:.*$/, "", pfx); runind = length(pfx)
     val = substr(line, runind + 5); sub(/^ +/, "", val); sub(/ +$/, "", val)
-    pr++; inrun = 1; runln = FNR; acc = ""; accn = 0; cur = ""; runempty = (val == ""); dq = dqesc = 0
+    runrec0 = nrec; pr++; inrun = 1; runln = FNR; acc = ""; accn = 0; cur = ""; runempty = (val == ""); dq = dqesc = 0
     if (val ~ /^[|>][-+0-9]*( +#.*)?$/) mode = (substr(val, 1, 1) == "|") ? "lit" : "fold"
     else {
-      mode = "inl"; dq = (substr(val, 1, 1) == "\"")
-      if (val ~ /^".*"$/ && length(val) > 1) { if (index(val, "\\")) dqesc = 1; val = substr(val, 2, length(val) - 2) }
-      else if (val ~ new_sq && length(val) > 1) { val = substr(val, 2, length(val) - 2); gsub(q q, q, val) }
+      mode = "inl"; dq = (substr(val, 1, 1) == "\""); qwhole = 0
+      if (val ~ /^".*"$/ && length(val) > 1) { qwhole = 1; if (index(val, "\\")) dqesc = 1; val = substr(val, 2, length(val) - 2) }
+      else if (val ~ new_sq && length(val) > 1) { qwhole = 1; val = substr(val, 2, length(val) - 2); gsub(q q, q, val) }
       if (val != "") content(FNR, val)
     }
   }
