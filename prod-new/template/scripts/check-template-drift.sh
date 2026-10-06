@@ -42,7 +42,8 @@
 # stops "we will update it later" from becoming the permanent state.
 #
 #   check-template-drift.sh              both checks, template auto-located
-#   check-template-drift.sh --local      local drift only (the CI-safe half)
+#   check-template-drift.sh --local      local drift only (the CI-safe half; needs no template,
+#                                        and says nothing about files the template added/retired)
 #   TEMPLATE_DIR=/path check-template-drift.sh   explicit template location
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
@@ -65,7 +66,8 @@ fi
 TEMPLATE_DIR="${TEMPLATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/template}"
 
 recorded=0; local_drift=0; upstream_drift=0; unknown=0
-declare -a L_LINES=() U_LINES=() UNK_LINES=()
+declare -a L_LINES=() U_LINES=() UNK_LINES=() PROV_PATHS=() M_LINES=() R_LINES=()
+missing_upstream=0; retired_upstream=0
 
 while IFS= read -r line; do
   [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -82,6 +84,7 @@ while IFS= read -r line; do
   want_tpl=""
   [[ "$tshaline" =~ template_sha256:[[:space:]]*([0-9a-f]{64}) ]] && want_tpl="${BASH_REMATCH[1]}"
   recorded=$((recorded+1))
+  PROV_PATHS+=("$path")
 
   if [[ -f "$path" ]]; then
     have="$(shasum -a 256 "$path" | awk '{print $1}')"
@@ -110,6 +113,52 @@ while IFS= read -r line; do
   fi
 done < "$PROV"
 
+# THE LIST ITSELF MOVES. The loop above only visits files this repo's own stamp
+# records, so a repo stamped from an older template was told "N behind" for the
+# files it has and never told about vendored files the newer template has and it
+# LACKS. Compare the template's CURRENT vendored list -- read from the template's
+# own stamp script, the same list the stamp uses, not a copy kept here -- with the
+# stamp's paths. Both directions are upstream-currency facts, so --local (which
+# must not need the template) skips them, and neither fails the run (the same
+# class as "behind upstream"). Without a readable list the answer is "could not
+# compare", never "0 missing".
+if (( ! local_only )); then
+  tstamp="$TEMPLATE_DIR/scripts/stamp-template-provenance.sh"
+  declare -a T_LIST=()
+  if [[ -f "$tstamp" ]]; then
+    in_list=0
+    while IFS= read -r l; do
+      if (( ! in_list )); then [[ "$l" =~ ^VENDORED=\( ]] && in_list=1; continue; fi
+      [[ "$l" =~ ^[[:space:]]*\) ]] && break
+      [[ "$l" =~ ^[[:space:]]*# ]] && continue
+      l="${l//[[:space:]]/}"; [[ -n "$l" ]] && T_LIST+=("$l")
+    done < "$tstamp"
+  fi
+  if (( ${#T_LIST[@]} == 0 )); then
+    unknown=$((unknown+1))
+    UNK_LINES+=("  (vendored-file list) -- could not read the template's list from $tstamp, so files the template vends that this repo lacks, and files it retired, were NOT compared")
+  else
+    for t in "${T_LIST[@]}"; do
+      found=0; for p in "${PROV_PATHS[@]}"; do [[ "$p" == "$t" ]] && { found=1; break; }; done
+      if (( ! found )); then
+        missing_upstream=$((missing_upstream+1))
+        M_LINES+=("  $t -- vended by the template, absent from this repo's provenance (stamped from an older template, or never adopted)")
+      fi
+    done
+    for p in "${PROV_PATHS[@]}"; do
+      found=0; for t in "${T_LIST[@]}"; do [[ "$p" == "$t" ]] && { found=1; break; }; done
+      if (( ! found )); then
+        retired_upstream=$((retired_upstream+1))
+        R_LINES+=("  $p -- recorded in this repo's provenance, no longer vended by the template (retired or renamed upstream)")
+        # the loop above filed it as "uncomparable"; the list says why, so it is retired, not unknown
+        declare -a KEEP=(); for u in "${UNK_LINES[@]}"; do
+          if [[ "$u" == "  $p -- not present in "* ]]; then unknown=$((unknown-1)); else KEEP+=("$u"); fi
+        done; UNK_LINES=("${KEEP[@]+"${KEEP[@]}"}")
+      fi
+    done
+  fi
+fi
+
 # ZERO RECORDED FILES IS A FAILURE. A provenance file that lists nothing
 # compares nothing and would otherwise print the same clean line as a repo in
 # perfect step -- this framework's oldest defect shape, and the reason every
@@ -131,6 +180,15 @@ if (( upstream_drift )); then
   printf '%s\n' "${U_LINES[@]}"
   printf '  Land the update through review (prod-spec -> prod-implement), then re-stamp %s.\n' "$PROV"
 fi
+if (( missing_upstream )); then
+  printf '\nMISSING UPSTREAM FILE (%d) -- the template vends these and this repo'"'"'s provenance lacks them:\n' "$missing_upstream"
+  printf '%s\n' "${M_LINES[@]}"
+  printf '  Adopt them through review, then re-stamp %s.\n' "$PROV"
+fi
+if (( retired_upstream )); then
+  printf '\nRETIRED UPSTREAM (%d) -- recorded here, no longer vended by the template (reported, not failing):\n' "$retired_upstream"
+  printf '%s\n' "${R_LINES[@]}"
+fi
 if (( unknown )); then
   printf '\nUNKNOWN (%d) -- could not be compared, which is NOT the same as in step:\n' "$unknown"
   printf '%s\n' "${UNK_LINES[@]}"
@@ -141,8 +199,8 @@ fi
 # framework this morning, but a repo whose own copy of a gate was edited has
 # changed what it enforces and that is this repo's own doing.
 if (( local_drift )); then exit 1; fi
-if (( upstream_drift || unknown )); then
-  printf '\ntemplate-drift: no local edits; %d behind upstream, %d uncomparable (reported, not failing).\n' "$upstream_drift" "$unknown"
+if (( upstream_drift || unknown || missing_upstream || retired_upstream )); then
+  printf '\ntemplate-drift: no local edits; %d behind upstream, %d MISSING UPSTREAM FILE(s), %d retired upstream, %d uncomparable (reported, not failing).\n' "$upstream_drift" "$missing_upstream" "$retired_upstream" "$unknown"
   exit 0
 fi
 printf 'template-drift: in step with the standard -- %d vendored file(s), no local edits, none behind.\n' "$recorded"

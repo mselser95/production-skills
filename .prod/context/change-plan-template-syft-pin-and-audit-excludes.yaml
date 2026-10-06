@@ -1,0 +1,70 @@
+context: ".prod/context/resolved-context-template-syft-pin-and-audit-excludes.yaml"
+semantic_events:
+  - none        # no dependency, state, effect, retry or queue; two gate/tooling changes in the template
+files:
+  - { path: "Makefile", action: modify, zone: shell }   # this branch: the TEMPLATE_SELFTESTS list and its comment; the PS-A gate line is in the separate pull request
+  - { path: "prod-new/template/scripts/changed-line-coverage.sh", action: modify, zone: shell }
+  - { path: "prod-new/template/Makefile", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/tests/changed-line-coverage-selftest.sh", action: create, zone: shell }
+  - { path: "_shared/probes/acceptance-audit-selftest.sh", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/stamp-template-provenance.sh", action: modify, zone: shell }
+  - { path: "prod-new/TEMPLATE-DIGEST", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/tests/acceptance-audit-selftest.sh", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/tests/changed-line-coverage-golden/base-missing.golden", action: create, zone: shell }
+  - { path: "prod-new/template/scripts/tests/changed-line-coverage-golden/empty-diff.golden", action: create, zone: shell }
+  - { path: "prod-new/template/scripts/tests/changed-line-coverage-golden/empty-variable.golden", action: create, zone: shell }
+  - { path: "prod-new/template/scripts/tests/changed-line-coverage-golden/normal.golden", action: create, zone: shell }
+  - { path: "prod-new/template/scripts/tests/changed-line-coverage-golden/profile-missing.golden", action: create, zone: shell }
+  - { path: "_shared/probes/row-vacuity-sweep.sh", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/row-vacuity-sweep.sh", action: modify, zone: shell }
+  - { path: "_shared/probes/row-vacuity-sweep-selftest.sh", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/check-template-drift.sh", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/tests/check-template-drift-selftest.sh", action: create, zone: shell }
+  - { path: "prod-new/template/scripts/tests/kill-durability-state-selftest.sh", action: modify, zone: shell }
+  - { path: "prod-new/template/scripts/tests/probe-selftests-skip-selftest.sh", action: create, zone: shell }
+files_other_pr:
+  - { path: "prod-new/template/.github/workflows/ci.yaml", action: modify, zone: shell, delivery: "Ships in a separate pull request (PS-A); not part of this branch." }
+  - { path: "scripts/template-workflow-pins.sh", action: create, zone: shell, delivery: "Ships in a separate pull request (PS-A); not part of this branch." }
+  - { path: "scripts/tests/template-workflow-pins-selftest.sh", action: create, zone: shell, delivery: "Ships in a separate pull request (PS-A); not part of this branch." }
+new_states: []
+new_effects: []
+new_dependencies: []
+recovery: []
+observability:
+  - "changed-line-coverage.sh prints which extra exclusions it applied, so an audit's scope is visible in its output"
+compatibility:
+  schema: unchanged
+  api: additive
+candidate_invariants:
+  - statement: "no template workflow executes a remote script fetched from a mutable ref"
+    evidence: "falsified by any template workflow line that pipes curl or wget to a shell from a branch name, or installs a tool at @latest / @main / @master (scripts/template-workflow-pins.sh is the executable form)"
+tasks:
+  - id: PS-A
+    kind: implement
+    summary: "pin the template's syft install by commit and version, and gate template workflows against unpinned remote scripts"
+    files: ["prod-new/template/.github/workflows/ci.yaml", "scripts/template-workflow-pins.sh", "scripts/tests/template-workflow-pins-selftest.sh", "Makefile"]
+    context: ["template_vending", "a-gate-never-reports-green-over-something-it-did-not-measure", "constraint:public-repo", "constraint:syft-pin"]
+    focus: "how are this repo's gates declared in the Makefile's gates target and its selftests discovered, so a new gate over the template's workflows is wired the same way and proven able to fail?"
+    delivery: "Ships in a separate pull request and is not part of this branch (the template syft pin, scripts/template-workflow-pins.sh with its selftest, and the gate line in the Makefile)."
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: "one workflow step, one small gate script with its selftest, one Makefile line"
+    acceptance: []
+    depends_on: []
+  - id: PS-B
+    kind: implement
+    summary: "acceptance-audit can leave test-support code out of its changed-line set, through an optional variable of changed-line-coverage.sh"
+    files: ["prod-new/template/scripts/changed-line-coverage.sh", "prod-new/template/Makefile", "prod-new/template/scripts/tests/changed-line-coverage-selftest.sh", "_shared/probes/acceptance-audit-selftest.sh", "prod-new/template/scripts/stamp-template-provenance.sh", "prod-new/TEMPLATE-DIGEST"]
+    context: ["template_vending", "a-gate-never-reports-green-over-something-it-did-not-measure", "the-installed-tcb-never-diverges-from-source-silently", "constraint:unchanged-when-unset", "constraint:fails-closed", "constraint:floor", "constraint:public-repo"]
+    focus: "where does the script build its changed-line set and where does the recipe decide the 0/0 cases, so the same exclusions reach both and the unset path stays byte-identical?"
+    ambiguity: low
+    tier: sonnet
+    cost_rationale: "one script, one recipe, two selftests; the mirrored selftest copy and the digest are mechanical"
+    acceptance: []
+    depends_on: []
+  - { id: PS-A2, kind: implement, summary: "template-workflow-pins: the rule is about what is fetched, not how it is run; every rule has a fixture that fails without it", files: ["scripts/template-workflow-pins.sh", "scripts/tests/template-workflow-pins-selftest.sh"], ambiguity: none, tier: sonnet, acceptance: [], depends_on: [PS-A], delivery: "Ships in a separate pull request with PS-A; not part of this branch." }
+  - { id: PS-B2, kind: implement, summary: "acceptance-audit exclusions are read as data never as shell, validated by git itself, and the audit says how many files they removed", files: ["prod-new/template/Makefile", "_shared/probes/acceptance-audit-selftest.sh", "prod-new/template/scripts/tests/acceptance-audit-selftest.sh", "prod-new/template/scripts/changed-line-coverage.sh", "prod-new/template/scripts/tests/changed-line-coverage-selftest.sh", "prod-new/TEMPLATE-DIGEST"], ambiguity: none, tier: sonnet, acceptance: [], depends_on: [PS-B] }
+  - { id: PS-C, kind: implement, summary: "row-vacuity-sweep judges a pattern in the files its probe row searches, and a build constraint is not a comment", files: ["_shared/probes/row-vacuity-sweep.sh", "prod-new/template/scripts/row-vacuity-sweep.sh", "_shared/probes/row-vacuity-sweep-selftest.sh", "prod-new/TEMPLATE-DIGEST"], ambiguity: none, tier: sonnet, acceptance: [], depends_on: [] }
+  - { id: PS-A3, kind: implement, summary: "template-workflow-pins and its selftest: round-2 review fixes", files: ["scripts/template-workflow-pins.sh", "scripts/tests/template-workflow-pins-selftest.sh"], ambiguity: none, tier: sonnet, acceptance: [], depends_on: [PS-A2], delivery: "Ships in a separate pull request with PS-A; not part of this branch." }
+  - { id: PS-B3, kind: implement, summary: "template gates tell a downstream repo the truth: the drift check names vendored files a repo lacks, the audit counts over the range it measures and covers the documented ways to set exclusions, and two selftests stop passing over nothing or over an example's vocabulary", files: ["prod-new/template/Makefile", "prod-new/template/scripts/check-template-drift.sh", "prod-new/template/scripts/tests/check-template-drift-selftest.sh", "_shared/probes/acceptance-audit-selftest.sh", "prod-new/template/scripts/tests/acceptance-audit-selftest.sh", "prod-new/template/scripts/tests/kill-durability-state-selftest.sh", "prod-new/template/scripts/stamp-template-provenance.sh", "Makefile", "prod-new/TEMPLATE-DIGEST"], ambiguity: none, tier: sonnet, acceptance: [], depends_on: [PS-B2] }
+  - { id: PS-D, kind: implement, summary: "acceptance-audit offers an opt-in binary coverage mode for a service whose acceptance suite starts the built binary as a separate process: ACCEPTANCE_AUDIT_BINARY_COVER_ENV names the environment variable the harness reads, the recipe measures the instrumented binary through go tool covdata and fails closed when no counters were written or the profile names only test-support files; ACCEPTANCE_AUDIT_TIMEOUT sets the go test timeout; both are validated as data and the unset path is byte-identical", files: ["prod-new/template/Makefile", "_shared/probes/acceptance-audit-selftest.sh", "prod-new/template/scripts/tests/acceptance-audit-selftest.sh", "prod-new/TEMPLATE-DIGEST"], ambiguity: none, tier: sonnet, acceptance: [], depends_on: [PS-B3] }

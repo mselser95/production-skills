@@ -198,9 +198,21 @@ mutation:
 # this repo has actually suffered -- sbom-ordering and check-registries sat RED
 # for weeks because nothing invoked them -- so the glob is the safer default
 # HERE, with the guard closing the hole the workflow names.
+# Template selftests, by origin (checked with cmp against _shared/probes and _shared/probes/tests):
+#   byte-identical MIRRORS of a _shared source, which the glob above already runs:
+#     acceptance-audit, acceptance-coverage, acceptance-gap, check-registries, coverage-ratchet,
+#     gate-run, load-rows, non-vacuity, observability-provenance, probe-self-gate,
+#     sbom-ordering, single-suite-run
+#   TEMPLATE-ONLY, no _shared source (the glob cannot see them):
+#     changed-line-coverage, check-template-drift, probe-selftests-skip   -- run here, listed below
+#     error-handling-fitness, kill-durability-state, retry   -- NOT run by this target; they run
+#                                                               only in a generated repo
+# The listed ones run from the framework tree so they are not first run downstream.
+TEMPLATE_SELFTESTS = prod-new/template/scripts/tests/changed-line-coverage-selftest.sh prod-new/template/scripts/tests/check-template-drift-selftest.sh prod-new/template/scripts/tests/probe-selftests-skip-selftest.sh
 selftests:
 	@set -e; n=0; \
-	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh; do \
+	  for ts in $(TEMPLATE_SELFTESTS); do [ -f "$$ts" ] || { echo "selftests: $$ts is missing: a vendored selftest nothing runs here is first exercised in someone else's CI" >&2; exit 2; }; done; \
+	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
 	    [ -f "$$t" ] || continue; \
 	    printf '  %-52s ' "$$(basename $$t)"; \
 	    if bash "$$t" >/dev/null 2>&1; then echo "ok"; else echo "FAIL"; bash "$$t" 2>&1 | tail -20; exit 1; fi; \

@@ -1,0 +1,3 @@
+rc=0
+changed-line coverage: no coverage profile at 'nosuchprofile.out' and one could not be generated -- reporting 0/0
+changed-line coverage: 0% (0/0 lines)

@@ -1,0 +1,41 @@
+task: "Two template fixes found while scaffolding and running a service from prod-new on 2026-10-06. (A) prod-new/template/.github/workflows/ci.yaml installs syft with a script fetched from a mutable branch and piped to a shell, at whatever version is latest; pin the installer by commit and the tool by version, and add a gate so no template workflow can regress to an unpinned remote script. (B) the template's make acceptance-audit counts test-support code that is not _test.go (hand-written doubles, harness packages) in its changed-line set, which the acceptance suite can never execute; give scripts/changed-line-coverage.sh an optional CHANGED_LINE_EXTRA_EXCLUDES and have acceptance-audit pass ACCEPTANCE_AUDIT_EXCLUDES, scoped to that target only, with the 0/0 handling honouring the same exclusions."
+tier: 1
+services:
+  - production-skills
+capabilities:
+  touched:
+    - id: template_vending
+      class: source_of_truth
+      declared: existing
+  obligations:
+    - consistency_semantics: "the template is the single source for the two files changed in (B); TEMPLATE-DIGEST moves in the same commit as any file in the vendored list"
+    - recovery: "unchanged"
+    - backup: "unchanged"
+    - reconciliation: "downstream repos pick the change up through a reviewed template update and a re-stamp; scripts/check-template-drift.sh reports them behind until they do"
+invariants:
+  - a-gate-never-reports-green-over-something-it-did-not-measure
+  - the-installed-tcb-never-diverges-from-source-silently
+  - no-tier-policy-key-goes-unscored
+required_evidence:
+  gates:
+    - make check-fast
+    - make selftests
+    - make verify
+  signals:
+    - "(A) the new gate is RED on the pre-fix ci.yaml and GREEN after; a selftest drives it over fixtures (curl piped to sh from /main/, @latest, @main) and each is caught"
+    - "(B) a selftest runs the REAL changed-line-coverage.sh in a throwaway git repo: unset variable reproduces today's output byte for byte; a valid exclusion removes exactly the excluded files' lines and says which exclusions applied; a malformed entry is refused with a non-zero exit"
+    - "(B) the acceptance-audit selftest gains cases: exclusions passed through; a diff whose only changed non-test lines are excluded is 'nothing to audit', not unmeasurable; dead production code still fails the floor"
+    - "TEMPLATE-DIGEST regenerated in the same commit as (B)"
+constraints:
+  - "AGENTS.md: never modify or delete an existing test to make a change pass; new tests carry provenance headers."
+  - "This repository is PUBLIC: no organisation name, repository name, hostname or person other than the owner appears in code, comments, specs or commit messages; the downstream evidence is described generically."
+  - "scripts/changed-line-coverage.sh today always exits 0 and prints 'changed-line coverage: P% (c/t lines)'; with the variable unset that behaviour and output must not change, because make coverage's signal and downstream parsers read that line."
+  - "The acceptance-audit recipe fails closed: a missing or empty profile and a 0/0 result are FAILs, except 0/0 over a genuinely empty Go diff or a test-only diff. The new exclusions must not open a third way to pass: the only-excluded-files case is said explicitly."
+  - "ACCEPTANCE_AUDIT_FLOOR stays 80. The exclusion narrows WHAT is measured to delivered code; it does not lower the bar."
+  - "The template Makefile and ci.yaml are not in the vendored list, so neither the digest nor downstream drift tracking covers them; say so in the commit so downstream repos know to copy them by hand."
+  - "The syft pin: installer fetched from the release tag's COMMIT sha, version passed explicitly, both bumped together; verify-standard's SBOM row recognises the job by its -o cyclonedx / spdx flags and must keep recognising it."
+do_not_touch:
+  - "verification/ratified/**"
+  - "registries/**"
+  - ".github/workflows/** of THIS repo (the template's workflows under prod-new/template/.github are the subject of (A))"
+  - "_shared/probes/verify-standard.sh and its vendored copies"

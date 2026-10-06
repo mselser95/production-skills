@@ -1,4 +1,4 @@
-.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness help template-drift acceptance acceptance-audit probe-selftests crash-only-selftest sim load soak
+.PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness help template-drift acceptance acceptance-audit probe-selftests acceptance-audit-selftest-run crash-only-selftest sim load soak
 SHELL := /usr/bin/env bash
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
@@ -306,8 +306,38 @@ probe-selftests:
 	bash scripts/tests/coverage-ratchet-selftest.sh
 	bash scripts/tests/single-suite-run-selftest.sh
 	bash scripts/tests/acceptance-coverage-selftest.sh
-	bash scripts/tests/acceptance-audit-selftest.sh
+	@$(MAKE) --no-print-directory acceptance-audit-selftest-run
+	bash scripts/tests/changed-line-coverage-selftest.sh
 	bash scripts/tests/acceptance-gap-selftest.sh
+	bash scripts/tests/check-template-drift-selftest.sh
+	bash scripts/tests/probe-selftests-skip-selftest.sh
+
+# The acceptance-audit selftest exits 3 (SKIPPED, nothing run) when scripts/changed-line-coverage.sh was
+# customised: template-format stubs cannot drive it. 0 passes; 1 and 2 fail; 3 passes ONLY when
+# registries/contract-debt.yaml records the customisation -- an entry whose evidence (or path) field
+# names scripts/changed-line-coverage.sh -- so a skip is a dated, owned, expiring liability
+# (check-registries.sh enforces the expiry), never a silent pass.
+ACCEPTANCE_AUDIT_SELFTEST ?= scripts/tests/acceptance-audit-selftest.sh
+acceptance-audit-selftest-run:
+	@rc=0; bash "$(ACCEPTANCE_AUDIT_SELFTEST)" || rc=$$?; \
+	  [ "$$rc" -ne 0 ] || exit 0; \
+	  if [ "$$rc" -ne 3 ]; then echo "probe-selftests: FAIL -- acceptance-audit selftest exited $$rc"; exit 1; fi; \
+	  id=""; [ ! -f registries/contract-debt.yaml ] || id=$$(awk 'function flush() { if (!done && inent && hit && eid != "") { done = 1; print eid; exit } } \
+	    function tok(s,   p, off, rest, b, a) { off = 0; rest = s; while ((p = index(rest, P)) > 0) { b = (off + p > 1) ? substr(s, off + p - 1, 1) : " "; a = substr(s, off + p + length(P), 1); \
+	      if (index(" \"\047[,", b) > 0 && (a == "" || index(" \"\047],", a) > 0)) return 1; off += p; rest = substr(s, off + 1) } return 0 } \
+	    function field(body,   val) { if (body ~ /^[A-Za-z_][A-Za-z0-9_-]*:/) { key = body; sub(/:.*/, "", key); val = body; sub(/^[^:]*:[ ]*/, "", val); \
+	      if (key == "id") { eid = val; gsub(/["\047 ]/, "", eid) } else if ((key == "evidence" || key == "path") && tok(val)) hit = 1 } else key = "" } \
+	    BEGIN { P = "scripts/changed-line-coverage.sh" } \
+	    /^[ ]*#/ || /^[ ]*$$/ { next } \
+	    { match($$0, /[^ ]/); ind = RSTART - 1 } \
+	    /^[ ]*-([ ]|$$)/ && (!inent || ind <= d) { flush(); inent = 1; d = ind; hit = 0; eid = ""; key = ""; match($$0, /-[ ]*/); kind = ind + RLENGTH; field(substr($$0, kind + 1)); next } \
+	    !inent { next } \
+	    ind <= d { flush(); inent = 0; next } \
+	    ind == kind && $$0 !~ /^[ ]*-([ ]|$$)/ { field(substr($$0, kind + 1)); next } \
+	    (key == "evidence" || key == "path") && tok($$0) { hit = 1 } \
+	    END { flush() }' registries/contract-debt.yaml); \
+	  if [ -n "$$id" ]; then echo "probe-selftests: acceptance-audit selftest SKIPPED, honoured by contract-debt entry $$id"; exit 0; fi; \
+	  echo "probe-selftests: FAIL -- acceptance-audit selftest skipped (customised scripts/changed-line-coverage.sh) and registries/contract-debt.yaml does not record it"; exit 1
 
 # acceptance: every acceptance/<feature>.yaml is complete, approved, and traced
 # to tests both ways (_shared/formats/acceptance-spec.md in production-skills).
@@ -332,31 +362,128 @@ acceptance:
 # a missing/empty profile (changed-line-coverage.sh would otherwise fall back
 # to scoring the UNIT suite into the same path) and a 0/0 result are FAILs,
 # except 0/0 over a genuinely empty Go diff, which is said and passes.
+#
+# What is measured is DELIVERED code: a test double, or another suite's harness,
+# that is not a _test.go file is not delivered code and cannot be reached by an
+# acceptance run that uses the real implementation, so counting it only drags the
+# figure down for a reason that says nothing about the feature. A repo that has
+# such files sets ACCEPTANCE_AUDIT_EXCLUDES to git pathspec exclusions, e.g.
+#   ACCEPTANCE_AUDIT_EXCLUDES := :(exclude,glob)test/** :(exclude,glob)**/*test/**
+# (passed to changed-line-coverage.sh as CHANGED_LINE_EXTRA_EXCLUDES, by this
+# target only; entries not starting with ':!' or ':(exclude' are refused). It is
+# empty here: the template has no test-support packages outside _test.go. The
+# exclusion narrows WHAT is measured; it does not lower ACCEPTANCE_AUDIT_FLOOR.
+# An excluded path must be test support, never production code, and review is
+# where that is checked. A diff whose only Go changes are tests and excluded
+# files is said ("nothing to audit"), not failed; any other 0/0 still fails.
+# The "removed N file(s)" count is over the range the measurement uses (BASE...HEAD, the
+# merge-base, committed changes) plus what is staged or modified on top of HEAD (a base that is
+# not an ancestor no longer inflates it with files only the base side changed); a 0/0 pass needs the diff empty under BOTH that range and
+# the working tree, so uncommitted Go changes (not measured) and a diverged base fail closed.
+# An exclusion entry that matches no changed file is printed (stale), not failed.
 ACCEPTANCE_AUDIT_FLOOR ?= 80
+ACCEPTANCE_AUDIT_EXCLUDES ?=
 ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
+#
+# BINARY COVERAGE MODE (opt-in). The default measurement above is the coverage of
+# the code the test BINARY imports. A service whose acceptance suite BUILDS the
+# service and runs it as a separate PROCESS is not measured that way: the profile
+# then covers the test harness, and the audit would gate on a number about the
+# harness. Such a repo sets ACCEPTANCE_AUDIT_BINARY_COVER_ENV to the NAME of an
+# environment variable its acceptance harness reads (a plain name, [A-Za-z_][A-Za-z0-9_]*).
+# The target then runs the suite with that variable set to an absolute directory
+# (<ACCEPTANCE_AUDIT_COVER_DIR>/binary, emptied each run), WITHOUT -coverpkg and
+# -coverprofile, converts the counters the instrumented processes wrote with
+# `go tool covdata textfmt`, and feeds that profile to the same changed-line
+# tail below. It fails if no counters were written, if covdata fails, or if the
+# profile names no file outside _test.go, testdata/ and internal/e2e*/ (the
+# service was not measured). HARNESS CONTRACT, owed by the repo that sets the
+# variable: when the named variable is set the harness builds the service with
+#   go build -cover -coverpkg=./... -covermode=set
+# starts every service process with GOCOVERDIR=<that directory>, and stops each
+# process with SIGTERM and waits for it (a SIGKILLed process writes no counters).
+# The template's own example suite runs in-process, so it leaves the variable
+# empty. Needs Go 1.20 or later.
+# A repo adopts the mode by setting the variable in this Makefile (`ACCEPTANCE_AUDIT_BINARY_COVER_ENV :=
+# <NAME>` is fine, so is `?=`) or on the make command line. The vendored acceptance-audit selftest
+# drives both modes explicitly on the make command line, which beats `:=`, so it passes for a repo
+# that adopts the mode and for one that leaves it empty.
+# ACCEPTANCE_AUDIT_TIMEOUT (empty: no -timeout flag) is a go test -timeout such as
+# 30m, for a suite that builds and starts binaries; it applies in both modes.
+ACCEPTANCE_AUDIT_BINARY_COVER_ENV ?=
+ACCEPTANCE_AUDIT_TIMEOUT ?=
+# These values reach the recipe as DATA, never as shell text. FLOOR and EXCLUDES are
+# exported and read in the recipe only as "$$ACCEPTANCE_AUDIT_FLOOR" and
+# "$$ACCEPTANCE_AUDIT_EXCLUDES", so a quote, $(...), backtick or newline in them is
+# inert (a pasted $(ACCEPTANCE_AUDIT_EXCLUDES) inside quotes let `x';touch f;'` run a
+# command). COVER_DIR is a path used in two commands; it stays a make expansion, but a
+# value containing a quote, $, backtick or backslash is replaced by a marker the recipe
+# refuses, so it cannot reach the shell. FLOOR must be a plain number or the recipe fails.
+_aa_unsafe = $(or $(findstring ",$(1)),$(findstring ',$(1)),$(findstring $$,$(1)),$(findstring `,$(1)),$(findstring \,$(1)))
+export ACCEPTANCE_AUDIT_FLOOR ACCEPTANCE_AUDIT_EXCLUDES ACCEPTANCE_AUDIT_BINARY_COVER_ENV ACCEPTANCE_AUDIT_TIMEOUT
+acceptance-audit: override ACCEPTANCE_AUDIT_COVER_DIR := $(if $(call _aa_unsafe,$(ACCEPTANCE_AUDIT_COVER_DIR)),__unsafe_cover_dir__,$(ACCEPTANCE_AUDIT_COVER_DIR))
 acceptance-audit:
-	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; n=0; \
+	@set -e; PROFILE="$(ACCEPTANCE_AUDIT_COVER_DIR)/acceptance.out"; BASE="$${CHANGED_LINE_COVERAGE_BASE:-origin/main}"; EXCL="$$ACCEPTANCE_AUDIT_EXCLUDES"; FLOOR="$$ACCEPTANCE_AUDIT_FLOOR"; n=0; \
+	  [ "$(ACCEPTANCE_AUDIT_COVER_DIR)" != "__unsafe_cover_dir__" ] || { echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_COVER_DIR contains a quote, \$$, backtick or backslash: refused"; exit 1; }; \
+	  case "$$FLOOR" in ''|*[!0-9.]*|*.*.*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_FLOOR is not a plain number"; exit 1;; esac; \
+	  BENV="$$ACCEPTANCE_AUDIT_BINARY_COVER_ENV"; TMO="$$ACCEPTANCE_AUDIT_TIMEOUT"; \
+	  case "$$BENV" in '') ;; [!A-Za-z_]*|*[!A-Za-z0-9_]*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_BINARY_COVER_ENV is not a plain environment variable name"; exit 1;; esac; \
+	  case "$$TMO" in '') ;; *[!0-9smh]*|[!0-9]*|*[smh]?*|*[0-9]) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_TIMEOUT is not a duration like 30m"; exit 1;; esac; \
 	  for s in acceptance/*.yaml; do [ -f "$$s" ] && n=$$((n+1)); done; \
 	  if [ "$$n" -eq 0 ]; then echo "acceptance-audit: 0 specs -- nothing to audit yet"; exit 0; fi; \
+	  set -f; set --; for e in $$EXCL; do case "$$e" in \
+	      :*) case "$$e" in :/*) p="";; :\(*\)*) p="$${e#*\)}";; :[\!^]*) p="$${e#:?}";; *) p="$${e#:}";; esac; \
+	        case "$$p" in /*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES entry is an absolute path"; exit 1;; esac; set -- "$$@" "$$e";; \
+	    esac; done; \
+	  if [ "$$#" -gt 0 ]; then \
+	    all_go=$$(git ls-files -- '*.go' ':(exclude)*_test.go' | head -n 1); \
+	    if [ -n "$$all_go" ] && kept_go=$$(git ls-files -- '*.go' ':(exclude)*_test.go' "$$@" 2>/dev/null) && [ -z "$$kept_go" ]; then \
+	      echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured"; exit 1; fi; fi; \
+	  set +f; \
 	  mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; rm -f "$$PROFILE"; \
-	  go test -count=1 -tags=integration -coverpkg=./... -coverprofile="$$PROFILE" ./internal/e2e/...; \
+	  set --; [ -z "$$TMO" ] || set -- -timeout "$$TMO"; \
+	  if [ -n "$$BENV" ]; then \
+	    case "$(ACCEPTANCE_AUDIT_COVER_DIR)" in /*) COVDIR="$(ACCEPTANCE_AUDIT_COVER_DIR)/binary";; *) COVDIR="$$(pwd)/$(ACCEPTANCE_AUDIT_COVER_DIR)/binary";; esac; \
+	    rm -rf "$$COVDIR"; mkdir -p "$$COVDIR"; \
+	    env "$$BENV=$$COVDIR" go test -count=1 -tags=integration "$$@" ./internal/e2e/...; \
+	    [ -n "$$(find "$$COVDIR" -type f -name 'covcounters.*' | head -n 1)" ] || { echo "acceptance-audit: FAIL -- no coverage counters were written: the service binary was not instrumented (or no process exited normally)"; exit 1; }; \
+	    go tool covdata textfmt -i="$$COVDIR" -o="$$PROFILE" || { echo "acceptance-audit: FAIL -- go tool covdata textfmt exited non-zero: the binary coverage counters could not be converted"; exit 1; }; \
+	  fi; \
+	  [ -n "$$BENV" ] || \
+	  go test -count=1 -tags=integration "$$@" -coverpkg=./... -coverprofile="$$PROFILE" ./internal/e2e/...; \
 	  [ -s "$$PROFILE" ] || { echo "acceptance-audit: FAIL -- acceptance run wrote no coverage profile (nothing was measured)"; exit 1; }; \
-	  rc=0; out=$$(COVERAGE_OUT="$$PROFILE" CHANGED_LINE_COVERAGE_BASE="$$BASE" bash scripts/changed-line-coverage.sh 2>&1) || rc=$$?; echo "$$out"; \
+	  if [ -n "$$BENV" ]; then \
+	    if ! grep -v '^mode:' "$$PROFILE" | cut -d: -f1 | grep -Ev '_test\.go$$|/testdata/|/internal/e2e[^/]*/' | grep -q .; then \
+	      echo "acceptance-audit: FAIL -- the profile names no file outside the test-support packages: the service was not measured"; exit 1; fi; fi; \
+	  rc=0; out=$$(CHANGED_LINE_EXTRA_EXCLUDES="$$EXCL" COVERAGE_OUT="$$PROFILE" CHANGED_LINE_COVERAGE_BASE="$$BASE" bash scripts/changed-line-coverage.sh 2>&1) || rc=$$?; echo "$$out"; \
 	  [ "$$rc" -eq 0 ] || { echo "acceptance-audit: FAIL -- changed-line-coverage.sh exited $$rc"; exit 1; }; \
 	  line=$$(printf '%s\n' "$$out" | grep '^changed-line coverage: [0-9.]*% ' | tail -n 1); \
 	  pct=$$(printf '%s' "$$line" | sed -E 's/^changed-line coverage: ([0-9.]+)%.*/\1/'); \
 	  tot=$$(printf '%s' "$$line" | sed -E 's/.*\/([0-9]+) lines\).*/\1/'); \
 	  [ -n "$$pct" ] && [ -n "$$tot" ] || { echo "acceptance-audit: FAIL -- no changed-line coverage figure produced"; exit 1; }; \
+	  have_excl=0; [ -z "$$(printf %s "$$EXCL" | tr -d ' \t\n')" ] || have_excl=1; \
+	  excl_line=$$(printf %s "$$EXCL" | tr '\n\t' '  ' | tr -s ' ' | sed -e 's/^ //' -e 's/ $$//'); \
+	  RANGE="$$BASE...HEAD"; \
+	  nprod() { { git diff --name-only "$$RANGE" -- '*.go' ':(exclude)*_test.go' "$$@"; git diff --name-only HEAD -- '*.go' ':(exclude)*_test.go' "$$@"; } | sort -u | wc -l | tr -d ' '; }; \
+	  quiet() { git diff --quiet "$$BASE" -- "$$@" && git diff --quiet "$$RANGE" -- "$$@"; }; \
+	  removed="unknown (base missing or no merge base)"; have_range=0; \
+	  if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git merge-base "$$BASE" HEAD >/dev/null 2>&1; then have_range=1; fi; \
+	  if [ "$$have_excl" = 1 ] && [ "$$have_range" = 1 ]; then \
+	    all=$$(nprod); set -f; kept=$$(nprod $$EXCL); removed=$$((all-kept)); \
+	    for e in $$EXCL; do [ "$$(nprod "$$e")" != "$$all" ] || echo "acceptance-audit: exclusion '$$e' matched no changed file (a stale entry? nothing it names changed in $$RANGE)"; done; set +f; fi; \
 	  if [ "$$tot" = "0" ]; then \
-	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go'; then \
+	    if [ "$$have_range" = 1 ] && quiet '*.go'; then \
 	      echo "acceptance-audit: 0 changed Go lines vs $$BASE -- nothing to audit"; exit 0; fi; \
-	    if git rev-parse --verify "$$BASE" >/dev/null 2>&1 && git diff --quiet "$$BASE" -- '*.go' ':(exclude)*_test.go'; then \
+	    if [ "$$have_range" = 1 ] && quiet '*.go' ':(exclude)*_test.go'; then \
 	      echo "acceptance-audit: 0 changed non-test Go lines vs $$BASE (only test files changed) -- nothing to audit"; exit 0; fi; \
+	    if [ "$$have_excl" = 1 ] && [ "$$have_range" = 1 ] && { set -f; quiet '*.go' ':(exclude)*_test.go' $$EXCL; }; then \
+	      echo "acceptance-audit: 0 changed delivered Go lines vs $$BASE -- only test files and files excluded by ACCEPTANCE_AUDIT_EXCLUDES changed; exclusions [$$excl_line] removed $$removed changed non-test Go file(s) from the audit -- nothing to audit"; exit 0; fi; \
 	    echo "acceptance-audit: FAIL -- 0/0 changed lines but the Go diff vs $$BASE is not empty (or base missing): unmeasurable"; exit 1; fi; \
-	  if awk -v p="$$pct" -v f="$(ACCEPTANCE_AUDIT_FLOOR)" 'BEGIN{exit !(p+0>=f+0)}'; then \
-	    echo "acceptance-audit: $$pct% >= $(ACCEPTANCE_AUDIT_FLOOR)% floor over $$n spec(s)"; \
-	  else echo "acceptance-audit: FAIL -- $$pct% of changed lines executed by the acceptance run < $(ACCEPTANCE_AUDIT_FLOOR)% floor"; exit 1; fi
+	  if [ "$$have_excl" = 1 ]; then echo "acceptance-audit: exclusions [$$excl_line] removed $$removed changed non-test Go file(s) from the audit"; fi; \
+	  if awk -v p="$$pct" -v f="$$FLOOR" 'BEGIN{exit !(p+0>=f+0)}'; then \
+	    echo "acceptance-audit: $$pct% >= $$FLOOR% floor over $$n spec(s)"; \
+	  else echo "acceptance-audit: FAIL -- $$pct% of changed lines executed by the acceptance run < $$FLOOR% floor"; exit 1; fi
 
 help:
 	@echo "acceptance        every acceptance/<feature>.yaml complete, approved, traced to tests (in check-fast)"
-	@echo "acceptance-audit  >= ACCEPTANCE_AUDIT_FLOOR (default $(ACCEPTANCE_AUDIT_FLOOR))% of changed lines executed by the acceptance run (in verify)"
+	@echo "acceptance-audit  >= ACCEPTANCE_AUDIT_FLOOR (default 80)% of changed lines executed by the acceptance run (in verify)"

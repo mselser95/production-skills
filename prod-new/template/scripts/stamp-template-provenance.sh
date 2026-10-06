@@ -51,6 +51,12 @@ VENDORED=(
   scripts/acceptance-coverage.sh
   scripts/tests/acceptance-coverage-selftest.sh
   scripts/tests/acceptance-audit-selftest.sh
+  scripts/tests/changed-line-coverage-selftest.sh
+  scripts/tests/changed-line-coverage-golden/base-missing.golden
+  scripts/tests/changed-line-coverage-golden/empty-diff.golden
+  scripts/tests/changed-line-coverage-golden/empty-variable.golden
+  scripts/tests/changed-line-coverage-golden/normal.golden
+  scripts/tests/changed-line-coverage-golden/profile-missing.golden
   scripts/acceptance-gap.sh
   scripts/tests/acceptance-gap-selftest.sh
   scripts/tests/probe-self-gate-selftest.sh
@@ -58,6 +64,8 @@ VENDORED=(
   scripts/tests/check-registries-selftest.sh
   scripts/tests/error-handling-fitness-selftest.sh
   scripts/tests/kill-durability-state-selftest.sh
+  scripts/tests/check-template-drift-selftest.sh
+  scripts/tests/probe-selftests-skip-selftest.sh
   benchmarks/load/loadgen.go
 )
 
