@@ -177,7 +177,7 @@ run "0/0 excluded-only diff with base missing still fails closed" 2 "unmeasurabl
 # W2: an exclusion that eats production code must be visible in the audit's own output. The
 # sentence names the exclusions and how many changed non-test Go files they removed.
 r="$(mkrepo exclall 1)"; echo "package a // c" > "$r/a.go"; echo "package b" > "$r/b.go"; ( cd "$r" && git add b.go )
-run "0/0 where *.go swallows 2 production files says exactly that, not 'only test-support'" 0 "exclusions [:(exclude)*.go] removed 2 changed non-test Go file(s) from the audit" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES=":(exclude)*.go"
+run "an exclusion where *.go swallows every production file is refused as a catch-all (was: 0/0 said, rc 0)" 2 "ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured" "$r" STUB_OUT="0% (0/0" ACCEPTANCE_AUDIT_EXCLUDES=":(exclude)*.go"
 r="$(mkrepo excldrop 1)"; mkdir -p "$r/internal"; echo "package i" > "$r/internal/x.go"; ( cd "$r" && git add internal/x.go )
 run "nonzero denominator with exclusions prints the removed-file count line" 0 "exclusions [:(exclude,glob)internal/**] removed 1 changed non-test Go file(s) from the audit" "$r" STUB_OUT="100.0% (3/3" ACCEPTANCE_AUDIT_EXCLUDES=":(exclude,glob)internal/**"
 r="$(mkrepo exclnone 1)"; echo "package a // c" > "$r/a.go"
@@ -200,7 +200,7 @@ nomarker '$(...) in a value executed nothing' "$r/M1"
 run "backtick in a value reaches the script literally" 0 'excludes-seen=[:!`touch '"$r"'/M2`]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!`touch '"$r"'/M2`'
 nomarker "backtick in a value executed nothing" "$r/M2"
 run '$HOME in a value is not expanded' 0 'excludes-seen=[:!$HOME/x]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!$HOME/x'
-run "a glob in a value is not expanded against the working tree" 0 'excludes-seen=[:(exclude,glob)*.go]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)*.go'
+run "a glob in a value is not shell-expanded: the literal *.go reached git as a pathspec and swallowed everything (catch-all refusal)" 2 "ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)*.go'
 r="$(mkrepo injnl 1)"; cp "$root/scripts/changed-line-coverage.sh" "$r/scripts/changed-line-coverage.sh"
 run "newline between two valid entries: both applied" 0 "excluding from the changed-line set: :!a :!b" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\n:!b'
 run "newline then a non-pathspec: refused, fails closed" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry 'notapathspec'" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\nnotapathspec'
@@ -286,9 +286,20 @@ r="$(mkrepo diverged 1)"; printf "$SEEN" > "$r/scripts/changed-line-coverage.sh"
   && mkdir -p test && echo "package h" > test/h.go && git add -A && git -c user.email=t@t -c user.name=t commit -q -m head )
 run "diverged base: exclusions removed count is over the merge-base range" 0 "removed 1 changed non-test Go file(s)" "$r" STUB_OUT="90.0% (9/10" CHANGED_LINE_COVERAGE_BASE=div ACCEPTANCE_AUDIT_EXCLUDES="$AUD_EXC"
 # a stale entry (matches no changed file) is named, not failed
-r="$(mkrepo stale-excl 1)"; printf "$SEEN" > "$r/scripts/changed-line-coverage.sh"; echo "package a // c" > "$r/a.go"; ( cd "$r" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m c )
+r="$(mkrepo stale-excl 1)"; printf "$SEEN" > "$r/scripts/changed-line-coverage.sh"; echo "package b" > "$r/b.go"
+( cd "$r" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m addb && git tag -f base >/dev/null )
+echo "package a // c" > "$r/a.go"; echo "package b // c" > "$r/b.go"; ( cd "$r" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m c )
 run "a stale exclusion entry is named and does not fail" 0 "exclusion ':(exclude,glob)x/**' matched no changed file" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)x/**'
 run "a stale exclusion alongside a live one: the live one is still counted" 0 "removed 1 changed non-test Go file(s)" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)x/** :(exclude,glob)a.go'
+run "...and the stale entry is printed" 0 "exclusion ':(exclude,glob)x/**' matched no changed file" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)x/** :(exclude,glob)a.go'
+run "...and the audit figure line is reached" 0 "acceptance-audit: 90.0%" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)x/** :(exclude,glob)a.go'
+# catch-all guard: an exclusion set that removes EVERY tracked non-test .go file is refused
+run ":!* catch-all is refused" 2 "ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!*'
+run "(exclude,glob)**/*.go catch-all is refused" 2 "ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)**/*.go'
+run "boundary: exclusions leaving exactly one delivered file pass" 0 "removed 1 changed non-test Go file(s)" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)b.go'
+r="$(mkrepo nogo 1)"; ( cd "$r" && git rm -q a.go && git -c user.email=t@t -c user.name=t commit -q -m nogo )
+out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base STUB_OUT="100% (0/0" ACCEPTANCE_AUDIT_EXCLUDES=':!*' make --no-print-directory acceptance-audit 2>&1)"
+if [[ "$out" != *"excludes every delivered Go file"* ]]; then pass=$((pass+1)); echo "  ok   zero tracked non-test .go files: exclusions are not the catch-all"; else bad=$((bad+1)); echo "  FAIL zero tracked non-test .go files: exclusions are not the catch-all"; fi
 # uncommitted Go changes are NOT in the measured range: a 0/0 over them stays a failure
 r="$(mkrepo dirty00 1)"; echo "package a // dirty" > "$r/a.go"
 run "0/0 with only UNCOMMITTED non-test Go changes still fails closed" 2 "unmeasurable" "$r" STUB_OUT="0% (0/0"

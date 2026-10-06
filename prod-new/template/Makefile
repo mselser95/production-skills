@@ -419,10 +419,14 @@ acceptance-audit:
 	  case "$$TMO" in '') ;; *[!0-9smh]*|[!0-9]*|*[smh]?*|*[0-9]) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_TIMEOUT is not a duration like 30m"; exit 1;; esac; \
 	  for s in acceptance/*.yaml; do [ -f "$$s" ] && n=$$((n+1)); done; \
 	  if [ "$$n" -eq 0 ]; then echo "acceptance-audit: 0 specs -- nothing to audit yet"; exit 0; fi; \
-	  set -f; for e in $$EXCL; do case "$$e" in \
+	  set -f; set --; for e in $$EXCL; do case "$$e" in \
 	      :*) case "$$e" in :/*) p="";; :\(*\)*) p="$${e#*\)}";; :[\!^]*) p="$${e#:?}";; *) p="$${e#:}";; esac; \
-	        case "$$p" in /*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES entry is an absolute path"; exit 1;; esac;; \
+	        case "$$p" in /*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES entry is an absolute path"; exit 1;; esac; set -- "$$@" "$$e";; \
 	    esac; done; \
+	  if [ "$$#" -gt 0 ]; then \
+	    all_go=$$(git ls-files -- '*.go' ':(exclude)*_test.go' | head -n 1); \
+	    if [ -n "$$all_go" ] && kept_go=$$(git ls-files -- '*.go' ':(exclude)*_test.go' "$$@" 2>/dev/null) && [ -z "$$kept_go" ]; then \
+	      echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured"; exit 1; fi; fi; \
 	  set +f; \
 	  mkdir -p "$(ACCEPTANCE_AUDIT_COVER_DIR)"; rm -f "$$PROFILE"; \
 	  set --; [ -z "$$TMO" ] || set -- -timeout "$$TMO"; \
