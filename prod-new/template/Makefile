@@ -396,6 +396,10 @@ ACCEPTANCE_AUDIT_COVER_DIR ?= .prod/coverage
 # process with SIGTERM and waits for it (a SIGKILLed process writes no counters).
 # The template's own example suite runs in-process, so it leaves the variable
 # empty. Needs Go 1.20 or later.
+# A repo adopts the mode by setting the variable in this Makefile (`ACCEPTANCE_AUDIT_BINARY_COVER_ENV :=
+# <NAME>` is fine, so is `?=`) or on the make command line. The vendored acceptance-audit selftest
+# drives both modes explicitly on the make command line, which beats `:=`, so it passes for a repo
+# that adopts the mode and for one that leaves it empty.
 # ACCEPTANCE_AUDIT_TIMEOUT (empty: no -timeout flag) is a go test -timeout such as
 # 30m, for a suite that builds and starts binaries; it applies in both modes.
 ACCEPTANCE_AUDIT_BINARY_COVER_ENV ?=

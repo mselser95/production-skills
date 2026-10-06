@@ -104,7 +104,7 @@ EOS
 # mkrepo <name> <specs 0|1> : scratch repo, base tag on the first commit
 mkrepo() {
   local r="$tmp/$1"; mkdir -p "$r/scripts" "$r/acceptance"
-  cp "$mk" "$r/Makefile"
+  cp "${mkvariant:-$mk}" "$r/Makefile"
   cp -R "$src/scripts/." "$r/scripts/"
   rm -rf "$r/scripts/tests"
   mkdir -p "$r/.github"; cp "$src/.github/ci-tools.txt" "$r/.github/"
@@ -116,11 +116,30 @@ mkrepo() {
   echo "$r"
 }
 
+# mkexec <repo> [VAR=val ...] : run `make acceptance-audit` in <repo> with the mode passed
+# EXPLICITLY on the make COMMAND LINE. A repo may set ACCEPTANCE_AUDIT_BINARY_COVER_ENV and
+# ACCEPTANCE_AUDIT_TIMEOUT in its Makefile (`:=` beats the environment, a command-line variable
+# beats `:=`), so these two are never inherited and never passed as environment: absent from
+# the arguments they are pinned empty (default mode), given they carry the case's value. Every
+# other VAR=val (the stub's, CHANGED_LINE_COVERAGE_BASE, ACCEPTANCE_AUDIT_EXCLUDES) stays environment.
+mkexec() {
+  local r="$1"; shift
+  local -a genv=() gmk=("ACCEPTANCE_AUDIT_BINARY_COVER_ENV=" "ACCEPTANCE_AUDIT_TIMEOUT=") a
+  for a in "$@"; do
+    case "$a" in
+      ACCEPTANCE_AUDIT_BINARY_COVER_ENV=*) gmk[0]="${a//\$/\$\$}";;   # $ -> $$: make would expand a bare one; the case means the literal text
+      ACCEPTANCE_AUDIT_TIMEOUT=*) gmk[1]="${a//\$/\$\$}";;
+      *) genv+=("$a");;
+    esac
+  done
+  ( cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" ${genv[@]+"${genv[@]}"} make --no-print-directory acceptance-audit "${gmk[@]}" 2>&1 )
+}
+
 # run <name> <want-rc> <want-substr> <repo> [VAR=val ...]
 run() {
   local name="$1" wrc="$2" want="$3" r="$4"; shift 4
   local out rc
-  out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base "$@" make --no-print-directory acceptance-audit 2>&1)"; rc=$?
+  out="$(mkexec "$r" CHANGED_LINE_COVERAGE_BASE=base "$@")"; rc=$?
   if [[ "$rc" -eq "$wrc" && "$out" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
   else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; echo "$out" | sed 's/^/       /'; fi
 }
@@ -129,7 +148,7 @@ run() {
 runmk() {
   local name="$1" wrc="$2" want="$3" r="$4"; shift 4
   local out rc
-  out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base STUB_OUT="90.0% (9/10" make --no-print-directory acceptance-audit "$@" 2>&1)"; rc=$?
+  out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base STUB_OUT="90.0% (9/10" make --no-print-directory acceptance-audit ACCEPTANCE_AUDIT_BINARY_COVER_ENV= ACCEPTANCE_AUDIT_TIMEOUT= "$@" 2>&1)"; rc=$?
   if [[ "$rc" -eq "$wrc" && "$out" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
   else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; echo "$out" | sed 's/^/       /'; fi
 }
@@ -298,7 +317,7 @@ run ":!* catch-all is refused" 2 "ACCEPTANCE_AUDIT_EXCLUDES excludes every deliv
 run "(exclude,glob)**/*.go catch-all is refused" 2 "ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)**/*.go'
 run "boundary: exclusions leaving exactly one delivered file pass" 0 "removed 1 changed non-test Go file(s)" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)b.go'
 r="$(mkrepo nogo 1)"; ( cd "$r" && git rm -q a.go && git -c user.email=t@t -c user.name=t commit -q -m nogo )
-out="$(cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" CHANGED_LINE_COVERAGE_BASE=base STUB_OUT="100% (0/0" ACCEPTANCE_AUDIT_EXCLUDES=':!*' make --no-print-directory acceptance-audit 2>&1)"
+out="$(mkexec "$r" CHANGED_LINE_COVERAGE_BASE=base STUB_OUT="100% (0/0" ACCEPTANCE_AUDIT_EXCLUDES=':!*')"
 if [[ "$out" != *"excludes every delivered Go file"* ]]; then pass=$((pass+1)); echo "  ok   zero tracked non-test .go files: exclusions are not the catch-all"; else bad=$((bad+1)); echo "  FAIL zero tracked non-test .go files: exclusions are not the catch-all"; fi
 # uncommitted Go changes are NOT in the measured range: a 0/0 over them stays a failure
 r="$(mkrepo dirty00 1)"; echo "package a // dirty" > "$r/a.go"
@@ -333,7 +352,7 @@ for bad_name in 'A B' 'A;touch pwned' '$(touch pwned)' 'A=B' '1A' 'A`touch pwned
   nm=$((nm+1)); r="$(mkrepo bin-badname-$nm 1)"
   run "invalid ACCEPTANCE_AUDIT_BINARY_COVER_ENV [$bad_name] is refused, value not echoed" 2 "ACCEPTANCE_AUDIT_BINARY_COVER_ENV is not a plain environment variable name" "$r" ACCEPTANCE_AUDIT_BINARY_COVER_ENV="$bad_name" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10"
   crc=1; [[ ! -e "$r/pwned" && ! -e "$r/B" ]] && crc=0; chk "invalid env name [$bad_name]: nothing was executed" "$crc"
-  echoed="$( cd "$r" && env PATH="$r/gopath/bin:$PATH" GOPATH="$r/gopath" ACCEPTANCE_AUDIT_BINARY_COVER_ENV="$bad_name" make --no-print-directory acceptance-audit 2>&1 )"
+  echoed="$(mkexec "$r" ACCEPTANCE_AUDIT_BINARY_COVER_ENV="$bad_name")"
   crc=1; [[ "$echoed" != *"$bad_name"* ]] && crc=0; chk "invalid env name [$bad_name]: the value is not echoed" "$crc"
 done
 r="$(mkrepo bin-nl 1)"
@@ -356,6 +375,23 @@ run "default mode, nothing set: passes" 0 "floor over 1 spec(s)" "$r" STUB_LOG="
 grep -qxF 'go test -count=1 -tags=integration -coverpkg=./... -coverprofile=.prod/coverage/acceptance.out ./internal/e2e/...' "$r/stub.log"; crc=$?; chk "default mode: the go test argv is exactly the previous one" "$crc"
 grep -q covdata "$r/stub.log"; crc=$?; chk "default mode: go tool covdata is never called" $((crc == 0))
 crc=1; [[ ! -e "$r/.prod/coverage/binary" ]] && crc=0; chk "default mode: no binary coverage directory is created" "$crc"
+
+# A repo that ADOPTS the mode sets the variables in its Makefile, with `:=` (beats the
+# environment) or `?=`. The selftest must be right for it as for a repo leaving them empty: the
+# mode is passed on the make command line, so the repo's own value must not leak into any case.
+ad=0
+for op in ':=' '?='; do
+  ad=$((ad+1)); mkvariant="$tmp/Makefile.adopt$ad"
+  sed -e "s/^ACCEPTANCE_AUDIT_BINARY_COVER_ENV [:?]*=.*/ACCEPTANCE_AUDIT_BINARY_COVER_ENV $op SVC_COVDIR/" -e "s/^ACCEPTANCE_AUDIT_TIMEOUT [:?]*=.*/ACCEPTANCE_AUDIT_TIMEOUT $op 30m/" "$mk" > "$mkvariant"
+  crc=1; grep -qx "ACCEPTANCE_AUDIT_BINARY_COVER_ENV $op SVC_COVDIR" "$mkvariant" && grep -qx "ACCEPTANCE_AUDIT_TIMEOUT $op 30m" "$mkvariant" && crc=0
+  chk "adopting Makefile ($op) fixture: both variables are set in the scratch Makefile" "$crc"
+  r="$(mkrepo "adopt-def-$ad" 1)"; echo "package a // c" > "$r/a.go"
+  run "Makefile sets the mode with $op: the default-mode 90 passes case still passes" 0 "acceptance-audit: 90.0% >= 80% floor over 1 spec(s)" "$r" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10"
+  grep -qxF 'go test -count=1 -tags=integration -coverpkg=./... -coverprofile=.prod/coverage/acceptance.out ./internal/e2e/...' "$r/stub.log"; crc=$?; chk "Makefile sets the mode with $op: the default-mode argv carries no repo mode and no repo timeout" "$crc"
+  r="$(mkrepo "adopt-bin-$ad" 1)"; echo "package a // c" > "$r/a.go"
+  run "Makefile sets the mode with $op: binary mode, counters written, passes" 0 "acceptance-audit: 90.0% >= 80% floor over 1 spec(s)" "$r" "${BENVS[@]}" STUB_LOG="$r/stub.log" STUB_COUNTERS=1 STUB_COVDATA_PROFILE="$BPROF" STUB_OUT="90.0% (9/10"
+  mkvariant=""
+done
 
 # n/a branches: only drivable from a repo-shaped root (own=1); in-repo (own=0) the
 # root is the template, so build a scratch repo from it. Skipped where own=1 already.
