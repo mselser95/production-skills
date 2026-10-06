@@ -32,7 +32,7 @@ fails=0
 bad() { echo "candidate-lane-selftest: FAIL -- $*" >&2; fails=$((fails+1)); }
 
 blk="$tmp/block.sh"
-{ echo 'row() { echo "$1 $2 $3"; }'; sed -n '/^# --- 19\./,/^# --- 20\./p' "$probe" | sed '$d'; } >"$blk"
+{ echo 'row() { echo "$1 $2 $3"; }'; grep -E '^PROBE_GREP_EXCLUDES=' "$probe"; sed -n '/^# --- 19\./,/^# --- 20\./p' "$probe" | sed '$d'; } >"$blk"
 [[ $(wc -l <"$blk") -gt 5 ]] || { echo "candidate-lane-selftest: FAIL -- probe 19 block not found in $probe" >&2; exit 1; }
 grep -q 'candidate-lane-segregated' "$blk" || { echo "candidate-lane-selftest: FAIL -- block lacks the row" >&2; exit 1; }
 
