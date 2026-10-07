@@ -41,6 +41,22 @@
 # every other liability in this framework is carried, and the expiry is what
 # stops "we will update it later" from becoming the permanent state.
 #
+# HOW THE GATE READS IT. A vendored path is ACCEPTED (reported under its own
+# "ACCEPTED DRIFT" block, exit 0) when a LIVE entry of registries/contract-debt.yaml
+# names that exact path in a `template_paths:` field, alongside the registry's
+# own `owner:` and `expires:`:
+#
+#   - id: gate-forked-for-monorepo
+#     owner: "@someone"
+#     expires: 2026-12-31
+#     template_paths: [scripts/verify-standard.sh, scripts/foo.sh]   # or a "- path" block list
+#
+# LIVE = has an owner, has an expires (YYYY-MM-DD >= today UTC, or `never`), and
+# carries no `retired:` key (a commented-out entry is retired too). An EXPIRED
+# entry accepts nothing: the path is LOCAL DRIFT again, with the lapsed entry
+# named, because an expired acceptance is drift, not acceptance. The gate reads
+# the registry; it never writes it.
+#
 #   check-template-drift.sh              both checks, template auto-located
 #   check-template-drift.sh --local      local drift only (the CI-safe half; needs no template,
 #                                        and says nothing about files the template added/retired)
@@ -65,7 +81,71 @@ fi
 # against it means comparing against a tree somebody has attested.
 TEMPLATE_DIR="${TEMPLATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/prod-new/template}"
 
-recorded=0; local_drift=0; upstream_drift=0; unknown=0
+# Accepted-drift registry. Parallel arrays (bash 3.2 has no associative arrays):
+# live entries -> LIVE_*, lapsed entries -> LAPSED_* (used only to explain why a
+# path is still drift).
+DEBT="registries/contract-debt.yaml"
+declare -a LIVE_PATH=() LIVE_ID=() LIVE_EXP=() LAPSED_PATH=() LAPSED_ID=() LAPSED_EXP=()
+today="$(date -u +%Y-%m-%d)"
+debt_flush() {
+  [[ -n "$d_id" ]] || return 0
+  local p
+  [[ -n "$d_owner" && -n "$d_exp" && -z "$d_retired" && ${#d_paths[@]} -gt 0 ]] || return 0
+  if [[ "$d_exp" == "never" || ( "$d_exp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && ! "$d_exp" < "$today" ) ]]; then
+    for p in "${d_paths[@]}"; do LIVE_PATH+=("$p"); LIVE_ID+=("$d_id"); LIVE_EXP+=("$d_exp"); done
+  elif [[ "$d_exp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    for p in "${d_paths[@]}"; do LAPSED_PATH+=("$p"); LAPSED_ID+=("$d_id"); LAPSED_EXP+=("$d_exp"); done
+  fi
+}
+debt_unq() { local v="$1"; v="${v%%[[:space:]]#*}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"; printf '%s' "$v"; }
+if [[ -r "$DEBT" ]]; then
+  d_id=""; d_owner=""; d_exp=""; d_retired=""; d_paths=(); d_fi=-1; in_tp=0
+  while IFS= read -r dl; do
+    [[ "$dl" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$dl" =~ ^([[:space:]]*)-[[:space:]]+id:[[:space:]]*(.*)$ ]]; then
+      debt_flush
+      d_fi=$(( ${#BASH_REMATCH[1]} + 2 ))
+      d_id="$(debt_unq "${BASH_REMATCH[2]}")"; d_owner=""; d_exp=""; d_retired=""; d_paths=(); in_tp=0
+      continue
+    fi
+    [[ -n "$d_id" ]] || continue
+    # only keys at the entry's own indent count: prose inside a block scalar
+    # (evidence: >) that happens to contain "owner:" or "expires:" must not
+    # change the entry (the same hazard check-registries.sh closes).
+    ind="${dl%%[![:space:]]*}"
+    if (( in_tp )) && [[ "$dl" =~ ^[[:space:]]*-[[:space:]]+(.+)$ ]] && (( ${#ind} >= d_fi )); then
+      d_paths+=("$(debt_unq "${BASH_REMATCH[1]}")"); continue
+    fi
+    in_tp=0
+    (( ${#ind} == d_fi )) || continue
+    if   [[ "$dl" =~ ^[[:space:]]*owner:[[:space:]]*(.*)$ ]]; then d_owner="$(debt_unq "${BASH_REMATCH[1]}")"
+    elif [[ "$dl" =~ ^[[:space:]]*expires:[[:space:]]*(.*)$ ]]; then d_exp="$(debt_unq "${BASH_REMATCH[1]}")"
+    elif [[ "$dl" =~ ^[[:space:]]*retired:[[:space:]]*(.+)$ ]]; then d_retired="x"
+    elif [[ "$dl" =~ ^[[:space:]]*template_paths:[[:space:]]*(.*)$ ]]; then
+      tpv="${BASH_REMATCH[1]}"
+      if [[ "$tpv" =~ ^\[(.*)\] ]]; then
+        IFS=',' read -r -a tparr <<< "${BASH_REMATCH[1]}"
+        for tp in "${tparr[@]}"; do tp="$(debt_unq "$tp")"; [[ -n "$tp" ]] && d_paths+=("$tp"); done
+      elif [[ -z "$(debt_unq "$tpv")" ]]; then in_tp=1
+      fi
+    fi
+  done < "$DEBT"
+  debt_flush
+fi
+# accepted_for <path> : sets ACC_ID/ACC_EXP (live) or LAPSE_NOTE (lapsed only); returns 0 when live
+accepted_for() {
+  local i; ACC_ID=""; ACC_EXP=""; LAPSE_NOTE=""
+  for i in "${!LIVE_PATH[@]}"; do
+    [[ "${LIVE_PATH[$i]}" == "$1" ]] && { ACC_ID="${LIVE_ID[$i]}"; ACC_EXP="${LIVE_EXP[$i]}"; return 0; }
+  done
+  for i in "${!LAPSED_PATH[@]}"; do
+    [[ "${LAPSED_PATH[$i]}" == "$1" ]] && { LAPSE_NOTE=" [contract-debt entry '${LAPSED_ID[$i]}' EXPIRED ${LAPSED_EXP[$i]} -- an expired acceptance is drift]"; return 1; }
+  done
+  return 1
+}
+
+recorded=0; local_drift=0; upstream_drift=0; unknown=0; accepted=0
+declare -a A_LINES=()
 declare -a L_LINES=() U_LINES=() UNK_LINES=() PROV_PATHS=() M_LINES=() R_LINES=()
 missing_upstream=0; retired_upstream=0
 
@@ -89,12 +169,22 @@ while IFS= read -r line; do
   if [[ -f "$path" ]]; then
     have="$(shasum -a 256 "$path" | awk '{print $1}')"
     if [[ "$have" != "$want" ]]; then
-      local_drift=$((local_drift+1))
-      L_LINES+=("  $path -- edited here since scaffold (recorded ${want:0:12}, now ${have:0:12})")
+      if accepted_for "$path"; then
+        accepted=$((accepted+1))
+        A_LINES+=("  $path -- edited here since scaffold; accepted by contract-debt entry '$ACC_ID' (expires $ACC_EXP)")
+      else
+        local_drift=$((local_drift+1))
+        L_LINES+=("  $path -- edited here since scaffold (recorded ${want:0:12}, now ${have:0:12})$LAPSE_NOTE")
+      fi
     fi
   else
-    local_drift=$((local_drift+1))
-    L_LINES+=("  $path -- vendored at scaffold time and now ABSENT; a gate that was removed rather than declined")
+    if accepted_for "$path"; then
+      accepted=$((accepted+1))
+      A_LINES+=("  $path -- ABSENT; accepted by contract-debt entry '$ACC_ID' (expires $ACC_EXP)")
+    else
+      local_drift=$((local_drift+1))
+      L_LINES+=("  $path -- vendored at scaffold time and now ABSENT; a gate that was removed rather than declined$LAPSE_NOTE")
+    fi
   fi
 
   (( local_only )) && continue
@@ -173,7 +263,12 @@ if (( local_drift )); then
   printf '\nLOCAL DRIFT (%d) -- this repo edited files it vendored from the standard:\n' "$local_drift"
   printf '%s\n' "${L_LINES[@]}"
   printf '  A locally-edited gate is a fork of the standard carrying the standard'"'"'s name.\n'
-  printf '  Either revert it, or record it in registries/contract-debt.yaml with an owner and an expiry.\n'
+  printf '  Either revert it, or record it in registries/contract-debt.yaml with an owner, an expiry and template_paths: [<path>].\n'
+fi
+if (( accepted )); then
+  printf '\nACCEPTED DRIFT (%d) -- deliberate divergence carried in %s with an owner and an expiry:\n' "$accepted" "$DEBT"
+  printf '%s\n' "${A_LINES[@]}"
+  printf '  Accepted is not clean: at expiry these count as local drift again.\n'
 fi
 if (( upstream_drift )); then
   printf '\nUPSTREAM DRIFT (%d) -- the standard moved and this repo is behind:\n' "$upstream_drift"
@@ -199,8 +294,8 @@ fi
 # framework this morning, but a repo whose own copy of a gate was edited has
 # changed what it enforces and that is this repo's own doing.
 if (( local_drift )); then exit 1; fi
-if (( upstream_drift || unknown || missing_upstream || retired_upstream )); then
-  printf '\ntemplate-drift: no local edits; %d behind upstream, %d MISSING UPSTREAM FILE(s), %d retired upstream, %d uncomparable (reported, not failing).\n' "$upstream_drift" "$missing_upstream" "$retired_upstream" "$unknown"
+if (( upstream_drift || unknown || missing_upstream || retired_upstream || accepted )); then
+  printf '\ntemplate-drift: no unaccepted local edits (%d accepted); %d behind upstream, %d MISSING UPSTREAM FILE(s), %d retired upstream, %d uncomparable (reported, not failing).\n' "$accepted" "$upstream_drift" "$missing_upstream" "$retired_upstream" "$unknown"
   exit 0
 fi
 printf 'template-drift: in step with the standard -- %d vendored file(s), no local edits, none behind.\n' "$recorded"

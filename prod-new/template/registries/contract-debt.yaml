@@ -2,6 +2,12 @@
 # Every entry: {id, owner, created, expires, evidence}. The ops sweep
 # escalates expired entries; it never silently extends one.
 #
+# ACCEPTED TEMPLATE DRIFT: an entry may add `template_paths: [scripts/x.sh]` (or a
+# "- path" block list) naming vendored files this repo deliberately diverges on.
+# scripts/check-template-drift.sh then reports those paths as ACCEPTED DRIFT (exit 0)
+# while the entry is live (not `retired:`, expires >= today); once expired the path
+# is LOCAL DRIFT again.
+#
 # Records known API/schema-migration debt (e.g. an N-1 compatibility shim
 # kept alive past its natural retirement date), and durability/verification
 # gaps whose closing test does not exist yet.

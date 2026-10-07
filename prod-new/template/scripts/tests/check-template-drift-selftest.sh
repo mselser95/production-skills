@@ -79,6 +79,35 @@ run "a template stamp script with no readable list: could not compare" 0 "$tmp/r
 echo "edited" >> "$tmp/repo-cur/scripts/a.sh"; TD="$tmp/tpl-new"
 run "local drift still exits 1" 1 "$tmp/repo-cur" "" "LOCAL DRIFT (1)"
 
+# ACCEPTED DRIFT: registries/contract-debt.yaml `template_paths:` + owner + expires
+# mkdebt <repo> <expires> [extra-entry-line] : a registry whose one entry names scripts/a.sh
+mkdebt() {
+  mkdir -p "$1/registries"
+  { echo 'entries:'; echo '  - id: fork-a'; echo '    owner: "@someone"'; echo "    expires: $2"
+    echo '    template_paths: [scripts/a.sh]'; echo '    evidence: >'; echo '      prose that says expires: 2099-01-01 must not extend the entry'
+    [[ -n "${3:-}" ]] && echo "    $3"; } > "$1/registries/contract-debt.yaml"
+}
+LIVE=2099-12-31; LAPSED=2020-01-01
+TD="$tmp/tpl-new"
+for v in absent-live absent-none absent-expired edited-live edited-expired retired; do mkrepo "$tmp/repo-$v" "${NEW[@]}"; done
+rm "$tmp/repo-absent-live/scripts/a.sh" "$tmp/repo-absent-none/scripts/a.sh" "$tmp/repo-absent-expired/scripts/a.sh" "$tmp/repo-retired/scripts/a.sh"
+echo edited >> "$tmp/repo-edited-live/scripts/a.sh"; echo edited >> "$tmp/repo-edited-expired/scripts/a.sh"
+mkdebt "$tmp/repo-absent-live" "$LIVE"; mkdebt "$tmp/repo-absent-expired" "$LAPSED"
+mkdebt "$tmp/repo-edited-live" "$LIVE"; mkdebt "$tmp/repo-edited-expired" "$LAPSED"
+mkdebt "$tmp/repo-retired" "$LIVE" "retired: 2026-01-01"
+run "absent file + live contract-debt entry: ACCEPTED, exit 0" 0 "$tmp/repo-absent-live" "" \
+  "ACCEPTED DRIFT (1)" "scripts/a.sh -- ABSENT; accepted by contract-debt entry 'fork-a' (expires $LIVE)" "!LOCAL DRIFT" "!in step with the standard" "1 accepted"
+run "absent file + no entry: LOCAL DRIFT, exit 1" 1 "$tmp/repo-absent-none" "" \
+  "LOCAL DRIFT (1)" "scripts/a.sh -- vendored at scaffold time and now ABSENT" "!ACCEPTED DRIFT"
+run "absent file + EXPIRED entry: LOCAL DRIFT, exit 1" 1 "$tmp/repo-absent-expired" "" \
+  "LOCAL DRIFT (1)" "entry 'fork-a' EXPIRED $LAPSED" "!ACCEPTED DRIFT"
+run "edited (hash mismatch) file + live entry: ACCEPTED, exit 0" 0 "$tmp/repo-edited-live" "" \
+  "ACCEPTED DRIFT (1)" "edited here since scaffold; accepted by contract-debt entry 'fork-a'" "!LOCAL DRIFT"
+run "edited file + expired entry: LOCAL DRIFT, exit 1" 1 "$tmp/repo-edited-expired" "" \
+  "LOCAL DRIFT (1)" "EXPIRED $LAPSED" "!ACCEPTED DRIFT"
+run "a RETIRED entry accepts nothing" 1 "$tmp/repo-retired" "" "LOCAL DRIFT (1)" "!ACCEPTED DRIFT"
+run "--local honours acceptance too" 0 "$tmp/repo-edited-live" "--local" "ACCEPTED DRIFT (1)" "!LOCAL DRIFT"
+
 if (( pass == 0 )); then echo "check-template-drift selftest: ZERO cases ran"; exit 1; fi
 if (( bad )); then echo "check-template-drift selftest: $bad of $((pass+bad)) case(s) failed"; exit 1; fi
 echo "check-template-drift selftest: ok -- $pass case(s)"
