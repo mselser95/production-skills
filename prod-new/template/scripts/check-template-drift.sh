@@ -52,7 +52,8 @@
 #     template_paths: [scripts/verify-standard.sh, scripts/foo.sh]   # or a "- path" block list
 #
 # LIVE = has an owner, has an expires (YYYY-MM-DD >= today UTC, or `never`), and
-# carries no `retired:` key (a commented-out entry is retired too). An EXPIRED
+# carries no `retired:` key (valued or bare; a commented-out entry is retired
+# too). An empty `template_paths: []` names nothing. An EXPIRED
 # entry accepts nothing: the path is LOCAL DRIFT again, with the lapsed entry
 # named, because an expired acceptance is drift, not acceptance. The gate reads
 # the registry; it never writes it.
@@ -109,6 +110,8 @@ if [[ -r "$DEBT" ]]; then
       continue
     fi
     [[ -n "$d_id" ]] || continue
+    # a blank line is valid YAML anywhere, including inside a block list
+    [[ -n "${dl//[[:space:]]/}" ]] || continue
     # only keys at the entry's own indent count: prose inside a block scalar
     # (evidence: >) that happens to contain "owner:" or "expires:" must not
     # change the entry (the same hazard check-registries.sh closes).
@@ -120,12 +123,12 @@ if [[ -r "$DEBT" ]]; then
     (( ${#ind} == d_fi )) || continue
     if   [[ "$dl" =~ ^[[:space:]]*owner:[[:space:]]*(.*)$ ]]; then d_owner="$(debt_unq "${BASH_REMATCH[1]}")"
     elif [[ "$dl" =~ ^[[:space:]]*expires:[[:space:]]*(.*)$ ]]; then d_exp="$(debt_unq "${BASH_REMATCH[1]}")"
-    elif [[ "$dl" =~ ^[[:space:]]*retired:[[:space:]]*(.+)$ ]]; then d_retired="x"
+    elif [[ "$dl" =~ ^[[:space:]]*retired:([[:space:]]|$) ]]; then d_retired="x"
     elif [[ "$dl" =~ ^[[:space:]]*template_paths:[[:space:]]*(.*)$ ]]; then
       tpv="${BASH_REMATCH[1]}"
       if [[ "$tpv" =~ ^\[(.*)\] ]]; then
         IFS=',' read -r -a tparr <<< "${BASH_REMATCH[1]}"
-        for tp in "${tparr[@]}"; do tp="$(debt_unq "$tp")"; [[ -n "$tp" ]] && d_paths+=("$tp"); done
+        for tp in ${tparr[@]+"${tparr[@]}"}; do tp="$(debt_unq "$tp")"; [[ -n "$tp" ]] && d_paths+=("$tp"); done
       elif [[ -z "$(debt_unq "$tpv")" ]]; then in_tp=1
       fi
     fi
@@ -295,7 +298,11 @@ fi
 # changed what it enforces and that is this repo's own doing.
 if (( local_drift )); then exit 1; fi
 if (( upstream_drift || unknown || missing_upstream || retired_upstream || accepted )); then
-  printf '\ntemplate-drift: no unaccepted local edits (%d accepted); %d behind upstream, %d MISSING UPSTREAM FILE(s), %d retired upstream, %d uncomparable (reported, not failing).\n' "$accepted" "$upstream_drift" "$missing_upstream" "$retired_upstream" "$unknown"
+  if (( accepted )); then
+    printf '\ntemplate-drift: no unaccepted local edits (%d accepted); %d behind upstream, %d MISSING UPSTREAM FILE(s), %d retired upstream, %d uncomparable (reported, not failing).\n' "$accepted" "$upstream_drift" "$missing_upstream" "$retired_upstream" "$unknown"
+  else
+    printf '\ntemplate-drift: no local edits; %d behind upstream, %d MISSING UPSTREAM FILE(s), %d retired upstream, %d uncomparable (reported, not failing).\n' "$upstream_drift" "$missing_upstream" "$retired_upstream" "$unknown"
+  fi
   exit 0
 fi
 printf 'template-drift: in step with the standard -- %d vendored file(s), no local edits, none behind.\n' "$recorded"

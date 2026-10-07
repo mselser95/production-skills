@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 62218c02bd9d688b3d0b312c63b4b52dbda3f6309b38a43acededf593397449c
-short: 62218c02bd9d
+digest: 43e5140c03378a81b01afdf349d1677b88d73e7c7e4bd6c63d3a5e9db3bbf731
+short: 43e5140c0337
 files: 37
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -16,7 +16,7 @@ per_file:
   scripts/acceptance-gap.sh: e9a1b187c4de2e924621e9cf94dab2ad23697c3a61493b91f4934a0c725f9bc2
   scripts/changed-line-coverage.sh: d465d8a7f076a19b8a30183dfb7054d1e6e4c821ed0c6a9ba7c256ee20f30483
   scripts/check-registries.sh: 4497037c9816de4cd3717b5077fd64b0954059554baadec57af423d8341b55a1
-  scripts/check-template-drift.sh: b3dfe46d2c8f6bc7c6e6868812a241819740a4a88548675b9e6ea249636d3e18
+  scripts/check-template-drift.sh: 277411db2c3b54801c413e70e09d76a42b5f956023e7f62f818d8edb96e339be
   scripts/coverage.sh: 9ca791aaa31b8ce26ea7ede20c81d2085dffac5fdca0409f971530f3c64a19cd
   scripts/error-handling-fitness.sh: cfb96953c7727fa872db162123963cfe5aca65102eeb6168cb7d08c7c9dd1327
   scripts/gate-hygiene-fitness.sh: 620bbf6eebcc4b7503643337b7852d20e59b527daf5255a6533a7eb857045e5a
@@ -36,7 +36,7 @@ per_file:
   scripts/tests/changed-line-coverage-golden/profile-missing.golden: 5ab4818318c592b2a149d2c667d0b3e7fdf155a7b5388f34ceda3a05f19939c0
   scripts/tests/changed-line-coverage-selftest.sh: e8c54afecfbf00d6fa45652c1a78c4f4ed50b274945531f6639e6bf132fe4534
   scripts/tests/check-registries-selftest.sh: f3235366ca86906748d2481146606b7a7879f22985eaee5c7e51ae46bdcf541d
-  scripts/tests/check-template-drift-selftest.sh: 77aeb87882e78790f0302f104a24278973006c3db143634c1d7d8dd0fb928f88
+  scripts/tests/check-template-drift-selftest.sh: 468f67bd4520d655c2d736ae783129299d8bdc97fca5dd47880798d1800a2205
   scripts/tests/error-handling-fitness-selftest.sh: 37b2876aea9c242367a9df1ca7f6b544653e2a21c11ebcf354d20044d2067bbb
   scripts/tests/gate-run-selftest.sh: 4ec340bb14acad3e719e105bd79176dcac4c6d42b70b8c949698a5e0811e715c
   scripts/tests/kill-durability-state-selftest.sh: 343085114bbc19aa84bb7c64b1ecfbd44eae156386f05908ae59b17e7963cb41

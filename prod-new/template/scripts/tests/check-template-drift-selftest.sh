@@ -108,6 +108,34 @@ run "edited file + expired entry: LOCAL DRIFT, exit 1" 1 "$tmp/repo-edited-expir
 run "a RETIRED entry accepts nothing" 1 "$tmp/repo-retired" "" "LOCAL DRIFT (1)" "!ACCEPTED DRIFT"
 run "--local honours acceptance too" 0 "$tmp/repo-edited-live" "--local" "ACCEPTED DRIFT (1)" "!LOCAL DRIFT"
 
+# --- edge cases of the registry reader ---
+# mkdebt2 <repo> <entry-lines...> : write `entries:` + the given raw lines
+mkdebt2() { local r="$1"; shift; mkdir -p "$r/registries"; { echo 'entries:'; printf '%s\n' "$@"; } > "$r/registries/contract-debt.yaml"; }
+# edge <name> <want-rc> <want-substr> <raw lines...> : fresh repo with scripts/a.sh absent
+edgen=0
+edge() {
+  local name="$1" wrc="$2" w="$3"; shift 3; edgen=$((edgen+1))
+  local r="$tmp/repo-edge$edgen"; mkrepo "$r" "${NEW[@]}"; rm "$r/scripts/a.sh"; mkdebt2 "$r" "$@"
+  if [[ "$w" == '!'* ]]; then run "$name" "$wrc" "$r" "" "$w"; else run "$name" "$wrc" "$r" "" "$w"; fi
+}
+edge "template_paths: [] names nothing (no crash under set -u)" 1 "LOCAL DRIFT (1)" \
+  '  - id: e' '    owner: o' '    expires: 2099-01-01' '    template_paths: []'
+edge "block list (with a blank line inside) is accepted" 0 "ACCEPTED DRIFT (1)" \
+  '  - id: e' '    owner: o' '    expires: 2099-01-01' '    template_paths:' '      - scripts/zzz.sh' '' '      - scripts/a.sh'
+edge "expires: never is live" 0 "ACCEPTED DRIFT (1)" \
+  '  - id: e' '    owner: o' '    expires: never' '    template_paths: [scripts/a.sh]'
+edge "missing expires accepts nothing" 1 "LOCAL DRIFT (1)" \
+  '  - id: e' '    owner: o' '    template_paths: [scripts/a.sh]'
+edge "missing owner accepts nothing" 1 "LOCAL DRIFT (1)" \
+  '  - id: e' '    expires: 2099-01-01' '    template_paths: [scripts/a.sh]'
+edge "a commented-out entry accepts nothing" 1 "LOCAL DRIFT (1)" \
+  '#  - id: e' '#    owner: o' '#    expires: 2099-01-01' '#    template_paths: [scripts/a.sh]'
+edge "a bare retired: key (no value) retires the entry" 1 "LOCAL DRIFT (1)" \
+  '  - id: e' '    owner: o' '    expires: 2099-01-01' '    retired:' '    template_paths: [scripts/a.sh]'
+# the indent guard: prose that STARTS with `expires:` deeper inside `evidence: >` on an EXPIRED entry
+edge "prose line 'expires: 2099' inside evidence cannot revive an expired entry" 1 "EXPIRED 2020-01-01" \
+  '  - id: e' '    owner: o' '    expires: 2020-01-01' '    template_paths: [scripts/a.sh]' '    evidence: >' '      expires: 2099-01-01'
+
 if (( pass == 0 )); then echo "check-template-drift selftest: ZERO cases ran"; exit 1; fi
 if (( bad )); then echo "check-template-drift selftest: $bad of $((pass+bad)) case(s) failed"; exit 1; fi
 echo "check-template-drift selftest: ok -- $pass case(s)"

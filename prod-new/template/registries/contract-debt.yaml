@@ -6,7 +6,16 @@
 # "- path" block list) naming vendored files this repo deliberately diverges on.
 # scripts/check-template-drift.sh then reports those paths as ACCEPTED DRIFT (exit 0)
 # while the entry is live (not `retired:`, expires >= today); once expired the path
-# is LOCAL DRIFT again.
+# is LOCAL DRIFT again. `owner:` is REQUIRED (an entry without one accepts
+# nothing); `expires:` is a YYYY-MM-DD date, or `never` (permanent -- use sparingly);
+# any `retired:` key retires the entry. Example:
+#
+#   - id: gate-forked-for-monorepo
+#     owner: "@someone"
+#     expires: 2026-12-31
+#     template_paths:
+#       - scripts/verify-standard.sh
+#       - scripts/foo.sh
 #
 # Records known API/schema-migration debt (e.g. an N-1 compatibility shim
 # kept alive past its natural retirement date), and durability/verification
