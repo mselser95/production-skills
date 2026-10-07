@@ -37,18 +37,18 @@ compatibility:
   api: additive
 candidate_invariants:
   - statement: "no template workflow executes a remote script fetched from a mutable ref"
-    evidence: "falsified by any template workflow line that pipes curl or wget to a shell from a branch name, or installs a tool at @latest / @main / @master (scripts/template-workflow-pins.sh is the executable form)"
+    evidence: "falsified by any template workflow line that pipes curl or wget to a shell from a branch name, or installs a tool at @latest / @main / @master (scripts/template-workflow-pins.sh is the executable form). THREAT MODEL: This gate guards the template's OWN workflows, authored and reviewed in this repository, against an UNINTENDED fetch of a remote script from a mutable ref (a branch-named raw URL, an unpinned installer, a tool at @latest/@main). It refuses by default and accepts only the shapes listed. It is NOT a sandbox against an adversarial workflow author: an author who deliberately obfuscates a fetch (string-built command names, data smuggled through expressions, a fetcher this allowlist does not know) can evade it, and the review of the workflow diff is the control for that. A refusal is always safe; an acceptance means 'matches a reviewed shape', not 'proven harmless'. Known residuals out of scope: GOPROXY=direct with shape g; an unknown fetcher binary not in the trigger list; data smuggled via a non-scanned source."
 tasks:
   - id: PS-A
     kind: implement
-    summary: "pin the template's syft install by commit and version, and gate template workflows against unpinned remote scripts"
+    summary: "pin the template's syft install by commit and version, and gate template workflows against unpinned remote scripts (final round PS-A9: block-scalar comments scanned, errexit spellings and name scalars refused, fetchers without a trigger word covered, threat model stated)"
     files: ["prod-new/template/.github/workflows/ci.yaml", "scripts/template-workflow-pins.sh", "scripts/tests/template-workflow-pins-selftest.sh", "Makefile"]
     context: ["template_vending", "a-gate-never-reports-green-over-something-it-did-not-measure", "constraint:public-repo", "constraint:syft-pin"]
     focus: "how are this repo's gates declared in the Makefile's gates target and its selftests discovered, so a new gate over the template's workflows is wired the same way and proven able to fail?"
     delivery: "Ships in a separate pull request and is not part of this branch (the template syft pin, scripts/template-workflow-pins.sh with its selftest, and the gate line in the Makefile)."
     ambiguity: none
     tier: sonnet
-    cost_rationale: "one workflow step, one small gate script with its selftest, one Makefile line"
+    cost_rationale: "one workflow step, one gate script with its selftest, one Makefile line; the gate is an allowlist whose scope is a reviewed-shape match, not a sandbox"
     acceptance: []
     depends_on: []
   - id: PS-B
