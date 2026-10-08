@@ -237,6 +237,7 @@ run "bare '*.go' entry is refused up front (rc 2)" 2 "refusing CHANGED_LINE_EXTR
 if [[ ! -e "$r/stub.log" ]] || ! grep -q '^go test' "$r/stub.log"; then pass=$((pass+1)); echo "  ok   bare '*.go' entry: go test never started"; else bad=$((bad+1)); echo "  FAIL bare '*.go' entry: go test ran before the refusal"; fi
 r="$(mkrepo bareproto 1)"; echo "package a // c" > "$r/a.go"
 run "bare 'internal/proto/**' entry is refused up front too (same rule as the script)" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry 'internal/proto/**'" "$r" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES='internal/proto/**'
+if [[ ! -e "$r/stub.log" ]] || ! grep -q '^go test' "$r/stub.log"; then pass=$((pass+1)); echo "  ok   bare 'internal/proto/**' entry: go test never started"; else bad=$((bad+1)); echo "  FAIL bare 'internal/proto/**' entry: go test ran before the refusal"; fi
 run "a well-formed entry that excludes nothing delivered is accepted" 0 ">= 80% floor" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)internal/proto/**'
 r="$(mkrepo injnl 1)"; cp "$root/scripts/changed-line-coverage.sh" "$r/scripts/changed-line-coverage.sh"
 run "newline between two valid entries: both applied" 0 "excluding from the changed-line set: :!a :!b" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\n:!b'
