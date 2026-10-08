@@ -63,6 +63,11 @@ pass=0 bad=0 skipped=0
 # contract wrapper and a ci-tools file so those two copies are observable by cases.
 src="$tmp/src"; mkdir -p "$src/scripts" "$src/.github"
 [[ -d "$root/scripts" ]] && cp -R "$root/scripts/." "$src/scripts/"
+# A HOST repo may track Go files under scripts/ (e.g. scripts/local/<tool>/main.go). Copied into
+# the scratch repos they would count as tracked non-test .go files and make the catch-all guard
+# ("exclusions must leave at least one tracked non-test .go file") impossible to trigger, so the
+# fixture's Go count would depend on the host's layout. Fixtures carry shell, never Go.
+find "$src/scripts" -name '*.go' -type f -delete 2>/dev/null
 printf '#!/bin/sh\necho contract-wrapped >&2\nexec "$@"\n' > "$src/scripts/with-contract.sh"; chmod +x "$src/scripts/with-contract.sh"
 printf 'fixture-tool\nsecond\n' > "$src/.github/ci-tools.txt"
 
