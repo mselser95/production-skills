@@ -2623,6 +2623,7 @@ if ((${#obs_manifests[@]} == 0)); then
 else
   obs_readers=""
   obs_unread=""
+  obs_reasons=""
   # Strip Go comments (`//` to end of line, `/* */` blocks across lines) while
   # leaving string contents intact: string- and backtick-aware, skips rune
   # literals. Best-effort for exotic lexing, exact for ordinary test files.
@@ -2646,7 +2647,7 @@ else
   for m in "${obs_manifests[@]}"; do
     base=$(basename "$m")
     mp=${m#./}; mdir=$(dirname "$mp")
-    obs_this=0
+    obs_this=0; obs_amb=0; obs_noread=0
     obs_esc=$(printf '%s' "$base" | sed 's/[][\.*^$+?(){}|]/\\&/g')
     obs_same=0
     for m2 in "${obs_manifests[@]}"; do [[ "$(basename "$m2")" == "$base" ]] && obs_same=$((obs_same+1)); done
@@ -2670,7 +2671,7 @@ else
         while [[ "$lit" == ./* || "$lit" == ../* ]]; do lit=${lit#./}; lit=${lit#../}; done
         if [[ "$lit" == "$base" ]]; then
           # bare name: must be unambiguous, or sit in the manifest's own directory
-          if (( obs_same == 1 )) || [[ "${d#./}" == "$mdir" ]]; then obs_named=1; fi
+          if (( obs_same == 1 )) || [[ "${d#./}" == "$mdir" ]]; then obs_named=1; else obs_amb=1; fi
         elif [[ "/$mp" == *"/$lit" ]]; then obs_named=1; fi
       done <<<"$obs_lits"
       (( obs_named )) || continue
@@ -2682,13 +2683,19 @@ else
         if grep -qE 'os\.ReadFile|os\.Open|embed\.FS|ioutil\.ReadFile' <<<"$obs_body" \
            || grep -qE '^[[:space:]]*//go:embed' "$pt" 2>/dev/null; then obs_reads=1; break; fi
       done
-      (( obs_reads )) || continue
+      (( obs_reads )) || { obs_noread=1; continue; }
       # And it must be a real Go package, asked of the toolchain rather than
       # inferred from the path.
       if go list "$d" >/dev/null 2>&1; then obs_readers+="$d"$'\n'; obs_this=1; fi
     done < <(grep -rlF "${PROBE_GREP_EXCLUDES[@]}" -- "$base" --include='*_test.go' . 2>/dev/null)
     # EVERY manifest owes a reader: one read manifest must not vouch for the rest.
-    [[ "$obs_this" == 1 ]] || obs_unread+="$m"$'\n'
+    if [[ "$obs_this" != 1 ]]; then
+      obs_unread+="$m"$'\n'
+      if (( obs_noread )); then obs_why1="named but no _test.go in that package reads a file"
+      elif (( obs_amb )); then obs_why1="named only by a bare basename that is ambiguous ($obs_same manifests share it): qualify the path"
+      else obs_why1="no string literal names it outside comments"; fi
+      obs_reasons+="$m ($obs_why1); "
+    fi
   done
   obs_pkgs=$(printf '%s' "$obs_readers" | sort -u | sed '/^$/d')
   # The `go test` branch below leaves its package list UNQUOTED on purpose: the
@@ -2701,7 +2708,7 @@ else
   # elif turned three clean files into three unparseable ones.
   # shellcheck disable=SC2046
   if [[ -n "$obs_unread" ]]; then
-    row "observability-contract-checked" FAIL "manifest(s) read by no test (naming one in a comment is not a check): $(printf '%s' "$obs_unread" | sed '/^$/d' | tr '\n' ' ')"
+    row "observability-contract-checked" FAIL "manifest(s) read by no test: ${obs_reasons%; }"
   elif obs_out=$(go test -count=1 $(printf './%s ' $(printf '%s' "$obs_pkgs" | sed 's|^\./||')) 2>&1); then
     row "observability-contract-checked" PASS "${#obs_manifests[@]} manifest(s), each read by a test ($(grep -c . <<<"$obs_pkgs") package(s), green)"
   else

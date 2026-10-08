@@ -275,7 +275,8 @@ run_obs() {             # $1 = fixture dir, $2.. = manifests -> prints "unread=<
     # shellcheck disable=SC1090
     . "$TMP/obs.sh"
     # shellcheck disable=SC2154
-    printf 'unread=%s\n' "$(printf '%s' "$obs_unread" | tr '\n' ' ' | sed 's/ $//')" )
+    if [ "${OBS_OUT:-unread}" = why ]; then printf 'why=%s\n' "${obs_reasons%; }"
+    else printf 'unread=%s\n' "$(printf '%s' "$obs_unread" | tr '\n' ' ' | sed 's/ $//')"; fi )
 }
 # mkfx <dir> -- a Go module with both manifests; callers add test files.
 mkfx() {
@@ -301,8 +302,10 @@ check "obs: both manifests read -> nothing unread" \
 
 # (a) comment-only mention + an unrelated ReadFile must not count
 mkfx "$TMP/obs-cmt"
-gof "$TMP/obs-cmt/x_test.go" '// see observability/spans.yaml
-/* spans.yaml */
+# shellcheck disable=SC2016
+gof "$TMP/obs-cmt/x_test.go" '// see "spans.yaml"
+/* "observability/spans.yaml"
+   and `spans.yaml` over several lines */
 func a() { _, _ = os.ReadFile("other.txt") }'
 check "obs: comment-only mention + unrelated ReadFile -> unread" \
       "unread=./spans.yaml" "$(run_obs "$TMP/obs-cmt" ./spans.yaml)"
@@ -325,6 +328,7 @@ check "obs: \"observability/spans.yaml\" literal -> read" \
       "unread=" "$(run_obs "$TMP/obs-path" ./observability/spans.yaml)"
 # (e) backtick literal
 mkfx "$TMP/obs-bt"
+# shellcheck disable=SC2016
 gof "$TMP/obs-bt/x_test.go" 'func a() { _, _ = os.ReadFile(`spans.yaml`) }'
 check "obs: backtick literal -> read" \
       "unread=" "$(run_obs "$TMP/obs-bt" ./spans.yaml)"
@@ -335,6 +339,24 @@ printf 'package a\n' > "$TMP/obs-dup/a/a.go"; printf 'package b\n' > "$TMP/obs-d
 printf 'package b\n\nimport "os"\n\nfunc t() { _, _ = os.ReadFile("b/spans.yaml") }\n' > "$TMP/obs-dup/b/b_test.go"
 check "obs: same basename in two dirs -> only the one actually named is read" \
       "unread=./a/spans.yaml" "$(run_obs "$TMP/obs-dup" ./a/spans.yaml ./b/spans.yaml)"
+
+# (g) the bare literal is AMBIGUOUS when two manifests share the basename and the
+# test sits in a THIRD directory: neither manifest is vouched for, and the reason says why.
+mkfx "$TMP/obs-amb"
+mkdir -p "$TMP/obs-amb/internal/obsdup" "$TMP/obs-amb/third"
+: > "$TMP/obs-amb/internal/obsdup/spans.yaml"
+printf 'package third\n\nimport "os"\n\nfunc t() { _, _ = os.ReadFile("spans.yaml") }\n' > "$TMP/obs-amb/third/t_test.go"
+check "obs: bare basename shared by two manifests, test in a third dir -> both unread" \
+      "unread=./spans.yaml ./internal/obsdup/spans.yaml" "$(run_obs "$TMP/obs-amb" ./spans.yaml ./internal/obsdup/spans.yaml)"
+check "obs: ambiguous bare basename -> the reason says so" \
+      "why=./spans.yaml (named only by a bare basename that is ambiguous (2 manifests share it): qualify the path); ./internal/obsdup/spans.yaml (named only by a bare basename that is ambiguous (2 manifests share it): qualify the path)" \
+      "$(OBS_OUT=why run_obs "$TMP/obs-amb" ./spans.yaml ./internal/obsdup/spans.yaml)"
+check "obs: comment-only mention -> the reason says no literal outside comments" \
+      "why=./spans.yaml (no string literal names it outside comments)" "$(OBS_OUT=why run_obs "$TMP/obs-cmt" ./spans.yaml)"
+mkfx "$TMP/obs-noread"
+printf 'package obsfix\n\nfunc a() { _ = "spans.yaml" }\n' > "$TMP/obs-noread/x_test.go"
+check "obs: named but nothing reads a file -> the reason says so" \
+      "why=./spans.yaml (named but no _test.go in that package reads a file)" "$(OBS_OUT=why run_obs "$TMP/obs-noread" ./spans.yaml)"
 
 # --- verdict -----------------------------------------------------------------
 if [ "$CASES" -eq 0 ]; then
