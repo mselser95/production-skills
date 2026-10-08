@@ -2623,9 +2623,35 @@ if ((${#obs_manifests[@]} == 0)); then
 else
   obs_readers=""
   obs_unread=""
+  # Strip Go comments (`//` to end of line, `/* */` blocks across lines) while
+  # leaving string contents intact: string- and backtick-aware, skips rune
+  # literals. Best-effort for exotic lexing, exact for ordinary test files.
+  obs_strip() {
+    awk 'BEGIN { blk = 0; bt = 0 }
+    { line = $0; out = ""; n = length(line); i = 1; dq = 0
+      while (i <= n) {
+        c = substr(line, i, 1); c2 = substr(line, i, 2)
+        if (blk) { if (c2 == "*/") { blk = 0; i += 2 } else i++; continue }
+        if (bt)  { out = out c; if (c == "`") bt = 0; i++; continue }
+        if (dq)  { out = out c; if (c == "\\") { out = out substr(line, i+1, 1); i += 2; continue }
+                   if (c == "\"") dq = 0; i++; continue }
+        if (c2 == "//") break
+        if (c2 == "/*") { blk = 1; i += 2; continue }
+        if (c == "`") { bt = 1; out = out c; i++; continue }
+        if (c == "\"") { dq = 1; out = out c; i++; continue }
+        if (c == "\047") { r = substr(line, i, 4); if (substr(r, 2, 1) == "\\") { out = out substr(line, i, 4); i += 4 } else { out = out substr(line, i, 3); i += 3 } continue }
+        out = out c; i++ }
+      print out }' "$1" 2>/dev/null
+  }
   for m in "${obs_manifests[@]}"; do
     base=$(basename "$m")
+    mp=${m#./}; mdir=$(dirname "$mp")
     obs_this=0
+    obs_esc=$(printf '%s' "$base" | sed 's/[][\.*^$+?(){}|]/\\&/g')
+    obs_same=0
+    for m2 in "${obs_manifests[@]}"; do [[ "$(basename "$m2")" == "$base" ]] && obs_same=$((obs_same+1)); done
+    # Candidate files: those that NAME the basename (fixed string, so `spans.yaml`
+    # is not a regex); the real test is the literal check below.
     while IFS= read -r tf; do
       # Belt and braces on the filename. `--include` is not honoured
       # identically by every grep on every machine -- ugrep matched
@@ -2634,12 +2660,32 @@ else
       # "no Go files", turning a green contract into a red row for a reason
       # that has nothing to do with observability.
       [[ "$tf" == *_test.go ]] || continue
-      grep -qE 'os\.ReadFile|os\.Open|embed\.FS|//go:embed|ioutil\.ReadFile' "$tf" 2>/dev/null || continue
       d=$(dirname "$tf")
+      # (1) a Go string literal that IS the manifest path -- comments excluded.
+      obs_lits=$(obs_strip "$tf" | grep -oE "\"([^\"]*/)?${obs_esc}\"|\`([^\`]*/)?${obs_esc}\`" || true)
+      obs_named=0
+      while IFS= read -r lit; do
+        [[ -n "$lit" ]] || continue
+        lit=${lit#[\"\`]}; lit=${lit%[\"\`]}
+        while [[ "$lit" == ./* || "$lit" == ../* ]]; do lit=${lit#./}; lit=${lit#../}; done
+        if [[ "$lit" == "$base" ]]; then
+          # bare name: must be unambiguous, or sit in the manifest's own directory
+          if (( obs_same == 1 )) || [[ "${d#./}" == "$mdir" ]]; then obs_named=1; fi
+        elif [[ "/$mp" == *"/$lit" ]]; then obs_named=1; fi
+      done <<<"$obs_lits"
+      (( obs_named )) || continue
+      # (2) SOME test file of that package (not necessarily this one) reads a file.
+      obs_reads=0
+      for pt in "$d"/*_test.go; do
+        [[ -f "$pt" ]] || continue
+        if obs_strip "$pt" | grep -qE 'os\.ReadFile|os\.Open|embed\.FS|ioutil\.ReadFile' \
+           || grep -qE '^[[:space:]]*//go:embed' "$pt" 2>/dev/null; then obs_reads=1; break; fi
+      done
+      (( obs_reads )) || continue
       # And it must be a real Go package, asked of the toolchain rather than
       # inferred from the path.
       if go list "$d" >/dev/null 2>&1; then obs_readers+="$d"$'\n'; obs_this=1; fi
-    done < <(grep -rl "${PROBE_GREP_EXCLUDES[@]}" -- "$base" --include='*_test.go' . 2>/dev/null)
+    done < <(grep -rlF "${PROBE_GREP_EXCLUDES[@]}" -- "$base" --include='*_test.go' . 2>/dev/null)
     # EVERY manifest owes a reader: one read manifest must not vouch for the rest.
     [[ "$obs_this" == 1 ]] || obs_unread+="$m"$'\n'
   done

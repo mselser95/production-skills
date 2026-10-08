@@ -34,6 +34,13 @@
 # is the reason the extraction below is anchored on distinctive lines and FAILS
 # LOUDLY if an anchor stops matching, instead of silently testing nothing.
 set -uo pipefail
+# The probe it lifts code from needs bash >= 4 and exits 2 below that; refuse the
+# same way instead of dying midway on `unbound variable` / a `case` in `$()`
+# that bash 3.2 cannot parse (macOS /bin/bash is 3.2).
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "observability-provenance selftest: needs bash >= 4 (running ${BASH_VERSION}); put a newer bash first on PATH" >&2
+  exit 2
+fi
 
 CASES=0
 FAILED=0
@@ -252,34 +259,82 @@ check "prov: a granted waiver outranks the diagnostic FAILs" \
 sed -n '/^  obs_readers=""$/,/^  obs_pkgs=\$(/p' "$PROBE" > "$TMP/obs.sh"
 [ -s "$TMP/obs.sh" ] || { echo "FAIL: observability-contract anchor matched nothing -- the probe changed shape" >&2; exit 2; }
 grep -q '^  obs_pkgs=' "$TMP/obs.sh" || { echo "FAIL: observability-contract extraction truncated" >&2; exit 2; }
-run_obs() {             # $1 = fixture dir -> prints "unread=<paths>"
+run_obs() {             # $1 = fixture dir, $2.. = manifests -> prints "unread=<paths>"
   ( cd "$1" || exit 2
-    # SC2034: inputs read by the lifted fragment sourced below.
+    shift_dir=$1; shift
+    : "$shift_dir"
+    # SC2034: inputs read by the lifted fragment sourced below. The exclude list
+    # is NON-EMPTY on purpose: an empty array is "unbound" under `set -u` on
+    # bash 3.2, which is what made this selftest die on macOS /bin/bash.
     # shellcheck disable=SC2034
     PROBE_FIND_PRUNE=()
     # shellcheck disable=SC2034
-    PROBE_GREP_EXCLUDES=()
+    PROBE_GREP_EXCLUDES=(--exclude-dir=.git)
     # shellcheck disable=SC2034
-    obs_manifests=(./spans.yaml ./emitted-metrics.yaml)
+    obs_manifests=("$@")
     # shellcheck disable=SC1090
     . "$TMP/obs.sh"
     # shellcheck disable=SC2154
     printf 'unread=%s\n' "$(printf '%s' "$obs_unread" | tr '\n' ' ' | sed 's/ $//')" )
 }
-mkobs() {               # $1 = dir, $2.. = manifest basenames the test reads
-  d="$1"; shift
-  mkdir -p "$d"; printf 'module obsfix\n\ngo 1.21\n' > "$d/go.mod"
-  : > "$d/spans.yaml"; : > "$d/emitted-metrics.yaml"
-  { printf 'package obsfix\n\nimport "os"\n\nfunc read() { _, _ = os.ReadFile("%s") }\n' "${1:-none}"
-    for b in "$@"; do printf '// %s\n' "$b"; done; } > "$d/x_test.go"
-  if [ "$#" -eq 2 ]; then printf 'func read2() { _, _ = os.ReadFile("%s") }\n' "$2" >> "$d/x_test.go"; fi
+# mkfx <dir> -- a Go module with both manifests; callers add test files.
+mkfx() {
+  mkdir -p "$1"; printf 'module obsfix\n\ngo 1.21\n' > "$1/go.mod"
+  : > "$1/spans.yaml"; : > "$1/emitted-metrics.yaml"
 }
-mkobs "$TMP/obs-one" spans.yaml
-mkobs "$TMP/obs-both" spans.yaml emitted-metrics.yaml
+gof() {                 # gof <file> <body...>: a test file in package obsfix
+  f="$1"; shift; printf 'package obsfix\n\nimport "os"\n\n%s\n' "$*" > "$f"
+}
+BOTH="./spans.yaml ./emitted-metrics.yaml"
+
+mkfx "$TMP/obs-one"
+gof "$TMP/obs-one/x_test.go" 'func a() { _, _ = os.ReadFile("spans.yaml") }
+// emitted-metrics.yaml'
+mkfx "$TMP/obs-both"
+gof "$TMP/obs-both/x_test.go" 'func a() { _, _ = os.ReadFile("spans.yaml"); _, _ = os.ReadFile("emitted-metrics.yaml") }'
+# shellcheck disable=SC2086
 check "obs: one of two manifests unread -> the unread one is named" \
-      "unread=./emitted-metrics.yaml" "$(run_obs "$TMP/obs-one")"
+      "unread=./emitted-metrics.yaml" "$(run_obs "$TMP/obs-one" $BOTH)"
+# shellcheck disable=SC2086
 check "obs: both manifests read -> nothing unread" \
-      "unread=" "$(run_obs "$TMP/obs-both")"
+      "unread=" "$(run_obs "$TMP/obs-both" $BOTH)"
+
+# (a) comment-only mention + an unrelated ReadFile must not count
+mkfx "$TMP/obs-cmt"
+gof "$TMP/obs-cmt/x_test.go" '// see observability/spans.yaml
+/* spans.yaml */
+func a() { _, _ = os.ReadFile("other.txt") }'
+check "obs: comment-only mention + unrelated ReadFile -> unread" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-cmt" ./spans.yaml)"
+# (b) the reading helper lives in ANOTHER test file of the package
+mkfx "$TMP/obs-helper"
+gof "$TMP/obs-helper/x_test.go" 'func a() { _ = "spans.yaml" }'
+gof "$TMP/obs-helper/helper_test.go" 'func readManifest(p string) { _, _ = os.ReadFile(p) }'
+check "obs: reader helper in a sibling test file -> read" \
+      "unread=" "$(run_obs "$TMP/obs-helper" ./spans.yaml)"
+# (c) myspans.yaml is not spans.yaml
+mkfx "$TMP/obs-my"
+gof "$TMP/obs-my/x_test.go" 'func a() { _, _ = os.ReadFile("myspans.yaml") }'
+check "obs: myspans.yaml literal does not vouch for spans.yaml" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-my" ./spans.yaml)"
+# (d) a path literal ending in /spans.yaml
+mkfx "$TMP/obs-path"
+mkdir -p "$TMP/obs-path/observability"; : > "$TMP/obs-path/observability/spans.yaml"
+gof "$TMP/obs-path/x_test.go" 'func a() { _, _ = os.ReadFile("../observability/spans.yaml") }'
+check "obs: \"observability/spans.yaml\" literal -> read" \
+      "unread=" "$(run_obs "$TMP/obs-path" ./observability/spans.yaml)"
+# (e) backtick literal
+mkfx "$TMP/obs-bt"
+gof "$TMP/obs-bt/x_test.go" 'func a() { _, _ = os.ReadFile(`spans.yaml`) }'
+check "obs: backtick literal -> read" \
+      "unread=" "$(run_obs "$TMP/obs-bt" ./spans.yaml)"
+# (f) two manifests with the same basename must not vouch for each other
+mkfx "$TMP/obs-dup"
+mkdir -p "$TMP/obs-dup/a" "$TMP/obs-dup/b"; : > "$TMP/obs-dup/a/spans.yaml"; : > "$TMP/obs-dup/b/spans.yaml"
+printf 'package a\n' > "$TMP/obs-dup/a/a.go"; printf 'package b\n' > "$TMP/obs-dup/b/b.go"
+printf 'package b\n\nimport "os"\n\nfunc t() { _, _ = os.ReadFile("b/spans.yaml") }\n' > "$TMP/obs-dup/b/b_test.go"
+check "obs: same basename in two dirs -> only the one actually named is read" \
+      "unread=./a/spans.yaml" "$(run_obs "$TMP/obs-dup" ./a/spans.yaml ./b/spans.yaml)"
 
 # --- verdict -----------------------------------------------------------------
 if [ "$CASES" -eq 0 ]; then
