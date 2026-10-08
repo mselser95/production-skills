@@ -358,6 +358,24 @@ printf 'package obsfix\n\nfunc a() { _ = "spans.yaml" }\n' > "$TMP/obs-noread/x_
 check "obs: named but nothing reads a file -> the reason says so" \
       "why=./spans.yaml (named but no _test.go in that package reads a file)" "$(OBS_OUT=why run_obs "$TMP/obs-noread" ./spans.yaml)"
 
+# (h) the //go:embed reader paths and their negative twins
+mkfx "$TMP/obs-embed"
+printf 'package obsfix\n\nimport _ "embed"\n\n//go:embed spans.yaml\nvar spansRaw string\n\nfunc a() { _ = "spans.yaml"; _ = spansRaw }\n' > "$TMP/obs-embed/x_test.go"
+check "obs: //go:embed directive is the only reader -> read" \
+      "unread=" "$(run_obs "$TMP/obs-embed" ./spans.yaml)"
+mkfx "$TMP/obs-embedfs"
+printf 'package obsfix\n\nimport "embed"\n\n//go:embed spans.yaml\nvar fsys embed.FS\n\nfunc a() { _, _ = fsys.ReadFile("spans.yaml") }\n' > "$TMP/obs-embedfs/x_test.go"
+check "obs: //go:embed + embed.FS -> read" \
+      "unread=" "$(run_obs "$TMP/obs-embedfs" ./spans.yaml)"
+mkfx "$TMP/obs-noreader"
+printf 'package obsfix\n\nfunc a() { _ = "spans.yaml" }\n' > "$TMP/obs-noreader/x_test.go"
+check "obs: manifest named, no reader at all -> unread" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-noreader" ./spans.yaml)"
+mkfx "$TMP/obs-embedcmt"
+printf 'package obsfix\n\n// see //go:embed spans.yaml\nfunc a() { _ = "spans.yaml" }\n' > "$TMP/obs-embedcmt/x_test.go"
+check "obs: //go:embed only inside a comment -> unread" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-embedcmt" ./spans.yaml)"
+
 # --- verdict -----------------------------------------------------------------
 if [ "$CASES" -eq 0 ]; then
   echo "observability-provenance selftest: ZERO cases ran -- refusing to report a pass over an empty set" >&2
