@@ -1864,11 +1864,19 @@ extract_real_tag() {   # extract_real_tag [dir] -> the chosen build tag, or empt
   grep -rhoE "${PROBE_GREP_EXCLUDES[@]}" 'go:build [A-Za-z0-9_.]+' --include='*_test.go' "${1:-.}" 2>/dev/null | awk '{print $2}' \
     | grep -v '^$' | grep -vE '^(candidate|ignore)$' | sort -u | head -1
 }
-real_tag=$(extract_real_tag .)
+# EVERY real tag, one per line. extract_real_tag above keeps returning only the first (alphabetical)
+# one because the selftest sources it on its own; the two rows below used to take that first tag
+# as THE lane, so a repo with `dbisolation` and `integration` was scored on `dbisolation` alone and
+# its integration lane was never run nor looked for in CI.
+extract_real_tags() {   # extract_real_tags [dir] -> every build tag except candidate/ignore, sorted, one per line
+  grep -rhoE "${PROBE_GREP_EXCLUDES[@]}" 'go:build [A-Za-z0-9_.]+' --include='*_test.go' "${1:-.}" 2>/dev/null | awk '{print $2}' \
+    | grep -v '^$' | grep -vE '^(candidate|ignore)$' | sort -u
+}
+real_tags=$(extract_real_tags .)
 live_gate=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
 if shard_run dynamic; then   # @shard-begin dynamic
-if [[ -n "$real_tag" ]]; then
-  # Scope the run to the packages that actually CONTAIN the tagged files, and
+if [[ -n "$real_tags" ]]; then
+  # Scope each lane's run to the packages that actually CONTAIN its tagged files, and
   # keep the output.
   #
   # This used to be `go test -tags=$real_tag ./... >/dev/null 2>&1`, which is
@@ -1877,15 +1885,25 @@ if [[ -n "$real_tag" ]]; then
   # blaming a lane that was fine. And it discarded the output, so the FAIL
   # carried no evidence at all: the one thing a finding must always do is name
   # the defect.
-  real_pkgs=$(grep -rl "${PROBE_GREP_EXCLUDES[@]}" "go:build $real_tag" --include='*_test.go' . 2>/dev/null \
-              | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|' | tr '\n' ' ')
-  [[ -n "$real_pkgs" ]] || real_pkgs=./...
-  # shellcheck disable=SC2086
-  if rl_out=$(go test -tags="$real_tag" $real_pkgs -count=1 2>&1); then
+  # EVERY tag is a lane and every lane must be green; the row names each one.
+  rl_green=""; rl_red=""; rl_npkg=0
+  while IFS= read -r rt; do
+    [[ -n "$rt" ]] || continue
+    real_pkgs=$(grep -rl "${PROBE_GREP_EXCLUDES[@]}" "go:build $rt" --include='*_test.go' . 2>/dev/null \
+                | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|' | tr '\n' ' ')
+    [[ -n "$real_pkgs" ]] || real_pkgs=./...
+    # shellcheck disable=SC2086
+    if rl_out=$(go test -tags="$rt" $real_pkgs -count=1 2>&1); then
+      rl_green+="${rl_green:+, }'-tags=$rt'"; rl_npkg=$((rl_npkg + $(wc -w <<<"$real_pkgs" | tr -d ' ')))
+    else
+      rl_red+="${rl_red:+; }lane '-tags=$rt': $(go_fail_evidence "$rl_out" | grep . || grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$rl_out" | cut -c1-120)"
+    fi
+  done <<<"$real_tags"
+  if [[ -z "$rl_red" ]]; then
     extra=""; [[ -n "$live_gate" ]] && extra=" + env-gated live lane"
-    row "integration-real-lane" PASS "lane '-tags=$real_tag' runs green in $(wc -w <<<"$real_pkgs" | tr -d ' ') pkg(s)$extra"
+    row "integration-real-lane" PASS "lane(s) $rl_green run green in $rl_npkg pkg(s)$extra"
   else
-    row "integration-real-lane" FAIL "lane '-tags=$real_tag': $(go_fail_evidence "$rl_out" | grep . || grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$rl_out" | cut -c1-120)"
+    row "integration-real-lane" FAIL "$rl_red${rl_green:+ (green: $rl_green)}"
   fi
 elif [[ -n "$live_gate" ]]; then
   row "integration-real-lane" PASS "env-gated live lane only ($live_gate)"
@@ -4869,7 +4887,7 @@ elif (( inmake >= nfuzz )); then
 else
   row "ci-runs-fuzz" FAIL "$inmake of $nfuzz fuzz targets named in the Makefile — the rest run nowhere ($fuzz_ci_evidence)"
 fi
-if [[ -n "${real_tag:-}" ]]; then
+if [[ -n "${real_tags:-}" ]]; then
   # COMMENTS ARE STRIPPED BEFORE MATCHING. Found on re-canary 2026-08-23: a
   # comment written INTO pr.yaml, explaining that the lane runs with
   # `-tags=chaos`, satisfied this row for four commits -- prose about the gate
@@ -4877,22 +4895,32 @@ if [[ -n "${real_tag:-}" ]]; then
   # probe already fixed for artifact-provenance and secret-scan-all-triggers;
   # this sibling row was missed. Reproduced before fixing: a workflow whose
   # ONLY mention of the tag is a comment gave PASS.
-  il_hits=$(grep -rl -- "-tags=$real_tag\|tags: *$real_tag" Makefile $wf 2>/dev/null || true)
-  il_real=""
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    # drop comment bodies, then look again in what is left
-    stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
-    if grep -q -- "-tags=$real_tag\|tags: *$real_tag" <<<"$stripped"; then
-      il_real="$f"; break
+  # EVERY tag's lane must be wired; the FAIL names each one that is not.
+  il_wired=""; il_bad=""
+  while IFS= read -r rt; do
+    [[ -n "$rt" ]] || continue
+    il_hits=$(grep -rl -- "-tags=$rt\|tags: *$rt" Makefile $wf 2>/dev/null || true)
+    il_real=""
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      # drop comment bodies, then look again in what is left
+      stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
+      if grep -q -- "-tags=$rt\|tags: *$rt" <<<"$stripped"; then
+        il_real="$f"; break
+      fi
+    done <<<"$il_hits"
+    if [[ -n "$il_real" ]]; then
+      il_wired+="${il_wired:+, }'$rt' into ${il_real#./}"
+    elif [[ -n "$il_hits" ]]; then
+      il_bad+="${il_bad:+; }'$rt' appears ONLY inside comments ($(echo "$il_hits" | tr '\n' ' ' | sed 's/ *$//')) — prose about a lane is not a lane"
+    else
+      il_bad+="${il_bad:+; }'$rt' lane exists but no make target or CI job runs it"
     fi
-  done <<<"$il_hits"
-  if [[ -n "$il_real" ]]; then
-    row "ci-runs-integration-lane" PASS "'$real_tag' lane wired into ${il_real#./}"
-  elif [[ -n "$il_hits" ]]; then
-    row "ci-runs-integration-lane" FAIL "'$real_tag' appears ONLY inside comments ($(echo "$il_hits" | tr '\n' ' ' | sed 's/ *$//')) — prose about a lane is not a lane"
+  done <<<"$real_tags"
+  if [[ -z "$il_bad" ]]; then
+    row "ci-runs-integration-lane" PASS "lane(s) wired: $il_wired"
   else
-    row "ci-runs-integration-lane" FAIL "'$real_tag' lane exists but no make target or CI job runs it"
+    row "ci-runs-integration-lane" FAIL "$il_bad${il_wired:+ (wired: $il_wired)}"
   fi
 fi
 # The probe VENDORS ITSELF into scripts/, and the line you are reading contains
