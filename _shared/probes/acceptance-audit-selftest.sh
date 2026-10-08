@@ -219,14 +219,25 @@ nomarker() { # nomarker <name> <marker>
 r="$(mkrepo inject 1)"; cp "$root/scripts/changed-line-coverage.sh" "$r/scripts/changed-line-coverage.sh"; echo "package a // c" > "$r/a.go"
 run "quote-breaking exclusion value is refused, fails closed" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry" "$r" ACCEPTANCE_AUDIT_EXCLUDES=":!x';touch $r/PWNED;'"
 nomarker "quote-breaking exclusion value executed nothing" "$r/PWNED"
+# One-word tokens (`$(>file)` creates the marker if the shell ever ran the value): the recipe now
+# validates every whitespace-separated entry up front, so a two-word value would be refused.
 r="$(mkrepo injstub 1)"; echo "package a // c" > "$r/a.go"
 printf '#!/bin/sh\necho "excludes-seen=[$CHANGED_LINE_EXTRA_EXCLUDES]"\necho "changed-line coverage: $STUB_OUT lines)"\n' > "$r/scripts/changed-line-coverage.sh"
-run '$(...) in a value reaches the script literally' 0 'excludes-seen=[:!$(touch '"$r"'/M1)]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!$(touch '"$r"'/M1)'
+run '$(...) in a value reaches the script literally' 0 'excludes-seen=[:!$(>'"$r"'/M1)]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!$(>'"$r"'/M1)'
 nomarker '$(...) in a value executed nothing' "$r/M1"
-run "backtick in a value reaches the script literally" 0 'excludes-seen=[:!`touch '"$r"'/M2`]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!`touch '"$r"'/M2`'
+run "backtick in a value reaches the script literally" 0 'excludes-seen=[:!`>'"$r"'/M2`]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!`>'"$r"'/M2`'
 nomarker "backtick in a value executed nothing" "$r/M2"
 run '$HOME in a value is not expanded' 0 'excludes-seen=[:!$HOME/x]' "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':!$HOME/x'
 run "a glob in a value is not shell-expanded: the literal *.go reached git as a pathspec and swallowed everything (catch-all refusal)" 2 "ACCEPTANCE_AUDIT_EXCLUDES excludes every delivered Go file; nothing would be measured" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)*.go'
+# PS-6: EVERY entry is checked up front, not only those starting with `:`. A bare `*.go` used to
+# pass the Makefile guard, run the whole integration suite, and only then be refused by
+# changed-line-coverage.sh. The stub log proves `go test` never started.
+r="$(mkrepo bareglob 1)"; echo "package a // c" > "$r/a.go"
+run "bare '*.go' entry is refused up front (rc 2)" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry '*.go'" "$r" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES='*.go'
+if [[ ! -e "$r/stub.log" ]] || ! grep -q '^go test' "$r/stub.log"; then pass=$((pass+1)); echo "  ok   bare '*.go' entry: go test never started"; else bad=$((bad+1)); echo "  FAIL bare '*.go' entry: go test ran before the refusal"; fi
+r="$(mkrepo bareproto 1)"; echo "package a // c" > "$r/a.go"
+run "bare 'internal/proto/**' entry is refused up front too (same rule as the script)" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry 'internal/proto/**'" "$r" STUB_LOG="$r/stub.log" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES='internal/proto/**'
+run "a well-formed entry that excludes nothing delivered is accepted" 0 ">= 80% floor" "$r" STUB_OUT="90.0% (9/10" ACCEPTANCE_AUDIT_EXCLUDES=':(exclude,glob)internal/proto/**'
 r="$(mkrepo injnl 1)"; cp "$root/scripts/changed-line-coverage.sh" "$r/scripts/changed-line-coverage.sh"
 run "newline between two valid entries: both applied" 0 "excluding from the changed-line set: :!a :!b" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\n:!b'
 run "newline then a non-pathspec: refused, fails closed" 2 "refusing CHANGED_LINE_EXTRA_EXCLUDES entry 'notapathspec'" "$r" ACCEPTANCE_AUDIT_EXCLUDES=$':!a\nnotapathspec'

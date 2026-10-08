@@ -420,6 +420,9 @@ ACCEPTANCE_AUDIT_TIMEOUT ?=
 # value containing a quote, $, backtick or backslash is replaced by a marker the recipe
 # refuses, so it cannot reach the shell. FLOOR must be a plain number or the recipe fails.
 _aa_unsafe = $(or $(findstring ",$(1)),$(findstring ',$(1)),$(findstring $$,$(1)),$(findstring `,$(1)),$(findstring \,$(1)))
+# EXCLUDES entries: every whitespace-separated entry is checked up front. Entries starting with ':' are accepted
+# here (changed-line-coverage.sh still refuses e.g. ':/x' later); any entry that is not a pathspec at all
+# (a bare '*.go') is refused BEFORE go test starts, with the script's own wording.
 export ACCEPTANCE_AUDIT_FLOOR ACCEPTANCE_AUDIT_EXCLUDES ACCEPTANCE_AUDIT_BINARY_COVER_ENV ACCEPTANCE_AUDIT_TIMEOUT
 acceptance-audit: override ACCEPTANCE_AUDIT_COVER_DIR := $(if $(call _aa_unsafe,$(ACCEPTANCE_AUDIT_COVER_DIR)),__unsafe_cover_dir__,$(ACCEPTANCE_AUDIT_COVER_DIR))
 acceptance-audit:
@@ -434,6 +437,7 @@ acceptance-audit:
 	  set -f; set --; for e in $$EXCL; do case "$$e" in \
 	      :*) case "$$e" in :/*) p="";; :\(*\)*) p="$${e#*\)}";; :[\!^]*) p="$${e#:?}";; *) p="$${e#:}";; esac; \
 	        case "$$p" in /*) echo "acceptance-audit: FAIL -- ACCEPTANCE_AUDIT_EXCLUDES entry is an absolute path"; exit 1;; esac; set -- "$$@" "$$e";; \
+	      *) echo "acceptance-audit: FAIL -- refusing CHANGED_LINE_EXTRA_EXCLUDES entry '$$e': each entry must start with ':!' or ':(exclude' (a non-pathspec entry is refused up front, as changed-line-coverage.sh would, so no test run is wasted)"; exit 1;; \
 	    esac; done; \
 	  if [ "$$#" -gt 0 ]; then \
 	    all_go=$$(git ls-files -- '*.go' ':(exclude)*_test.go' | head -n 1); \
