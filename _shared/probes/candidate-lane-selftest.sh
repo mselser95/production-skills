@@ -17,6 +17,9 @@
 #   e  no candidate files                                                      NA
 #   g  untagged candidate under .claude/worktrees, vendor, node_modules: ignored;
 #      the same file in the real tree FAILS
+#   a3 `// provenance: candidate, ttl: 2026-12-31` (colon), untagged          FAIL, names the file
+#   c3 same header in x_candidate_test.go with //go:build candidate           PASS
+#   d2 `// provenance: derived` only                                          NA
 #   f  go_fail_evidence over --- FAIL / bind / build-failed samples
 # PROBE_SRC=<file> points the selftest at another verify-standard.sh (used to
 # show it goes RED against the old probe).
@@ -80,7 +83,7 @@ d=$(mk); w "$d/pkg/x_candidate_test.go" '//go:build candidate' '// provenance: c
 n=$((n+1)); o=$(run "$d"); [[ "$o" == *" PASS "* ]] || bad "c3: expected PASS, got: $o"
 # PS-3 d2: a derived header is not a candidate: never FAILs
 d=$(mk); w "$d/pkg/x_test.go" '// provenance: derived' 'package pkg'
-n=$((n+1)); o=$(run "$d"); [[ "$o" != *" FAIL "* ]] || bad "d2: derived must not FAIL, got: $o"
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "d2: derived-only tree must be NA, got: $o"
 
 # g: nested checkouts and vendored trees are not THIS tree
 d=$(mk)
