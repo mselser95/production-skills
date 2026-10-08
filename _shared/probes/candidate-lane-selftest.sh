@@ -72,6 +72,16 @@ n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "d: expected NA, got: $
 d=$(mk); w "$d/pkg/q_test.go" 'package pkg'
 n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "e: expected NA, got: $o"
 
+# PS-3 a3: the exact header a governed repo shipped (`, ttl: <date>` with a colon) must be seen
+d=$(mk); w "$d/pkg/x_test.go" '// provenance: candidate, ttl: 2026-12-31' 'package pkg'
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *x_test.go* ]] || bad "a3: expected FAIL naming x_test.go, got: $o"
+# PS-3 c3: the same header in a *_candidate_test.go carrying the build tag passes
+d=$(mk); w "$d/pkg/x_candidate_test.go" '//go:build candidate' '// provenance: candidate, ttl: 2026-12-31' 'package pkg'
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" PASS "* ]] || bad "c3: expected PASS, got: $o"
+# PS-3 d2: a derived header is not a candidate: never FAILs
+d=$(mk); w "$d/pkg/x_test.go" '// provenance: derived' 'package pkg'
+n=$((n+1)); o=$(run "$d"); [[ "$o" != *" FAIL "* ]] || bad "d2: derived must not FAIL, got: $o"
+
 # g: nested checkouts and vendored trees are not THIS tree
 d=$(mk)
 for sub in .claude/worktrees/x/pkg vendor/m node_modules/m .git/x; do

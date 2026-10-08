@@ -2613,8 +2613,8 @@ esac
 # appearing anywhere in any *_test.go, which a comment satisfies; a repo could
 # delete the comparison, keep the sentence describing it, and stay green while
 # the manifest went back to being documentation. Now: the manifest must exist,
-# some test must both name it AND actually read a file, and that test package
-# must run green.
+# EVERY manifest must have a test that both names it AND actually reads a file, and those test packages
+# must run green (one read manifest never vouches for an unread one).
 if shard_run dynamic; then   # @shard-begin dynamic
 mapfile -t obs_manifests < <(find . "${PROBE_FIND_PRUNE[@]}" \
   \( -name 'spans.yaml' -o -name 'emitted-metrics.*' \) -print 2>/dev/null)
