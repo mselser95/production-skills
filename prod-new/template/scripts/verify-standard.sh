@@ -1868,9 +1868,15 @@ extract_real_tag() {   # extract_real_tag [dir] -> the chosen build tag, or empt
 # one because the selftest sources it on its own; the two rows below used to take that first tag
 # as THE lane, so a repo with `dbisolation` and `integration` was scored on `dbisolation` alone and
 # its integration lane was never run nor looked for in CI.
-extract_real_tags() {   # extract_real_tags [dir] -> every build tag except candidate/ignore, sorted, one per line
-  grep -rhoE "${PROBE_GREP_EXCLUDES[@]}" 'go:build [A-Za-z0-9_.]+' --include='*_test.go' "${1:-.}" 2>/dev/null | awk '{print $2}' \
-    | grep -v '^$' | grep -vE '^(candidate|ignore)$' | sort -u
+extract_real_tags() {   # extract_real_tags [dir] -> every build tag except candidate/ignore/platform terms, sorted, one per line
+  # Parse EVERY //go:build line: `(chaos || soak)` is two tags, `integration && !unit` is one, and
+  # `linux && integration` is one (linux is a platform constraint, not a lane). Negated terms are
+  # dropped; so are the static GOOS/GOARCH/toolchain words and go1.N version terms.
+  grep -rhE "${PROBE_GREP_EXCLUDES[@]}" '^[[:space:]]*//go:build ' --include='*_test.go' "${1:-.}" 2>/dev/null \
+    | sed 's|^[[:space:]]*//go:build||' | tr '()&|' '    ' | tr -s '[:space:]' '\n' \
+    | grep -E '^[A-Za-z0-9_.]+$' \
+    | grep -vE '^(candidate|ignore|linux|darwin|windows|freebsd|openbsd|netbsd|solaris|plan9|aix|dragonfly|illumos|ios|android|js|wasip1|wasm|amd64|arm64|arm|386|ppc64|ppc64le|mips[0-9a-z]*|riscv64|s390x|loong64|cgo|unix|gc|gccgo|purego|race|msan|asan|go1\.[0-9]+)$' \
+    | sort -u
 }
 real_tags=$(extract_real_tags .)
 live_gate=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
@@ -1886,22 +1892,24 @@ if [[ -n "$real_tags" ]]; then
   # carried no evidence at all: the one thing a finding must always do is name
   # the defect.
   # EVERY tag is a lane and every lane must be green; the row names each one.
-  rl_green=""; rl_red=""; rl_npkg=0
+  rl_green=""; rl_red=""; rl_allpkgs=""
   while IFS= read -r rt; do
     [[ -n "$rt" ]] || continue
-    real_pkgs=$(grep -rl "${PROBE_GREP_EXCLUDES[@]}" "go:build $rt" --include='*_test.go' . 2>/dev/null \
-                | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|' | tr '\n' ' ')
+    rt_re=$(printf '%s' "$rt" | sed 's/[][\.*^$+?(){}|]/\\&/g')
+    real_pkgs=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" "go:build.*[^A-Za-z0-9_.]${rt_re}([^A-Za-z0-9_.]|$)" --include='*_test.go' . 2>/dev/null \
+                | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^\./||; s|^|./|' | tr '\n' ' ')
     [[ -n "$real_pkgs" ]] || real_pkgs=./...
     # shellcheck disable=SC2086
     if rl_out=$(go test -tags="$rt" $real_pkgs -count=1 2>&1); then
-      rl_green+="${rl_green:+, }'-tags=$rt'"; rl_npkg=$((rl_npkg + $(wc -w <<<"$real_pkgs" | tr -d ' ')))
+      rl_green+="${rl_green:+, }'-tags=$rt'"; rl_allpkgs+="$(printf '%s' "$real_pkgs" | tr ' ' '\n')"$'\n'
     else
       rl_red+="${rl_red:+; }lane '-tags=$rt': $(go_fail_evidence "$rl_out" | grep . || grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$rl_out" | cut -c1-120)"
     fi
   done <<<"$real_tags"
   if [[ -z "$rl_red" ]]; then
     extra=""; [[ -n "$live_gate" ]] && extra=" + env-gated live lane"
-    row "integration-real-lane" PASS "lane(s) $rl_green run green in $rl_npkg pkg(s)$extra"
+    rl_npkg=$(printf '%s' "$rl_allpkgs" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')
+    row "integration-real-lane" PASS "lane(s) $rl_green run green in $rl_npkg distinct pkg(s)$extra"
   else
     row "integration-real-lane" FAIL "$rl_red${rl_green:+ (green: $rl_green)}"
   fi
@@ -4899,13 +4907,17 @@ if [[ -n "${real_tags:-}" ]]; then
   il_wired=""; il_bad=""
   while IFS= read -r rt; do
     [[ -n "$rt" ]] || continue
-    il_hits=$(grep -rl -- "-tags=$rt\|tags: *$rt" Makefile $wf 2>/dev/null || true)
+    il_re=$(printf '%s' "$rt" | sed 's/[][\.*^$+?(){}|]/\\&/g')
+    # The tag must be a WHOLE element of the list: `-tags=dbisolation,integration` wires both,
+    # `-tags=integration_soak` wires neither `integration` nor `soak`.
+    il_pat="-tags=[\"']?([^[:space:],]*,)*${il_re}([\"',[:space:]]|$)|tags: *[\"']?([^[:space:],]*,)*${il_re}([\"',[:space:]]|$)"
+    il_hits=$(grep -rlE -- "$il_pat" Makefile $wf 2>/dev/null || true)
     il_real=""
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
       # drop comment bodies, then look again in what is left
       stripped=$(sed 's/#.*$//' "$f" 2>/dev/null || true)
-      if grep -q -- "-tags=$rt\|tags: *$rt" <<<"$stripped"; then
+      if grep -qE -- "$il_pat" <<<"$stripped"; then
         il_real="$f"; break
       fi
     done <<<"$il_hits"

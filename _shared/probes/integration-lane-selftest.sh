@@ -82,6 +82,7 @@ n=$((n+1)); o=$(ci d aaa integration)
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/go" <<'EOS'
 #!/bin/sh
+echo "go $*" >> "$STUB_LOG"
 for a in "$@"; do case "$a" in -tags=*) echo "tags ${a#-tags=}" >> "$STUB_LOG"; [ "${a#-tags=}" = "${RED_TAG:-}" ] && { echo "--- FAIL: TestX"; exit 1; };; esac; done
 exit 0
 EOS
@@ -94,6 +95,36 @@ grep -q '^tags integration$' "$tmp/stub.log" || bad "e1: the integration lane wa
 n=$((n+1)); RED_TAG=integration o=$(lane e2 aaa integration)
 [[ "$o" == *"integration-real-lane FAIL"* && "$o" == *"-tags=integration"* ]] || bad "e2: a red integration lane must FAIL naming it, got: $o"
 
-[[ $n -ge 6 ]] || { echo "integration-lane-selftest: FAIL -- only $n checks ran" >&2; exit 1; }
+
+# --- PS-7b: parsing, anchoring, distinct packages ------------------------------
+tags_of() { # tags_of <constraint...> -> extract_real_tags over a fixture with those //go:build lines
+  local d="$tmp/tags"; rm -rf "$d"; mkdir -p "$d"; local i=0 c
+  for c in "$@"; do i=$((i+1)); printf '//go:build %s\n\npackage p\n' "$c" > "$d/f${i}_test.go"; done
+  ( cd "$d" || exit 2
+    # shellcheck disable=SC2034
+    PROBE_GREP_EXCLUDES=(--exclude-dir=.git)
+    # shellcheck disable=SC1090
+    . "$tmp/fns.sh"
+    if declare -F extract_real_tags >/dev/null; then extract_real_tags . | tr '\n' ' ' | sed 's/ $//'; else extract_real_tag .; fi ); }
+n=$((n+1)); o=$(tags_of '(chaos || soak)')
+[[ "$o" == "chaos soak" ]] || bad "f1: '(chaos || soak)' must yield 'chaos soak', got: '$o'"
+n=$((n+1)); o=$(tags_of 'integration && !unit')
+[[ "$o" == "integration" ]] || bad "f2: 'integration && !unit' must yield 'integration', got: '$o'"
+n=$((n+1)); o=$(tags_of 'linux && integration' 'go1.21 && amd64')
+[[ "$o" == "integration" ]] || bad "f3: platform and go1.N terms are not lanes, got: '$o'"
+MK=$'test-a:\n\tgo test -tags=dbisolation,integration ./...'
+n=$((n+1)); o=$(ci g1 dbisolation integration)
+[[ "$o" == *"ci-runs-integration-lane PASS"* && "$o" == *"'dbisolation'"* && "$o" == *"'integration'"* ]] || bad "g1: -tags=a,b must wire both, got: $o"
+MK=$'test-a:\n\tgo test -tags=integration_soak ./...'
+n=$((n+1)); o=$(ci g2 integration)
+[[ "$o" == *"ci-runs-integration-lane FAIL"* && "$o" == *"'integration'"* ]] || bad "g2: -tags=integration_soak must not wire 'integration', got: $o"
+# h: two lanes in ONE package directory are one distinct package, printed without ./././
+hd="$tmp/lane-h"; rm -rf "$hd"; mkdir -p "$hd/pkg"
+printf '//go:build aaa\n\npackage pkg\n' > "$hd/pkg/a_test.go"; printf '//go:build integration\n\npackage pkg\n' > "$hd/pkg/b_test.go"
+: > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG='' harness "$hd" "$tmp/lane.sh")
+[[ "$o" == *"integration-real-lane PASS"* && "$o" == *"in 1 distinct pkg(s)"* ]] || bad "h: two lanes in one package must count 1 distinct pkg, got: $o"
+grep -q '^tags integration$' "$tmp/stub.log" && ! grep -q '\./\./' "$tmp/stub.log" || bad "h: lane run missing or path not clean"
+
+[[ $n -ge 12 ]] || { echo "integration-lane-selftest: FAIL -- only $n checks ran" >&2; exit 1; }
 if (( fails )); then echo "integration-lane-selftest: $fails FAIL" >&2; exit 1; fi
 echo "integration-lane-selftest: ok -- $n case(s)"
