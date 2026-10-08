@@ -4655,12 +4655,37 @@ if base="$prov_base"; [ -n "$base" ]; then
   # Benchmarks are excluded: they are neither blocking nor candidate — they
   # live in their own non-gating lane, so a provenance header would claim a
   # lane membership they do not have.
-  added=$(git diff "$base"..HEAD -- '*_test.go' 2>/dev/null | grep -cE '^\+func (Test|Fuzz)' || true)
-  # an added func is "headed" when a provenance line is added within the diff too
-  heads=$(git diff "$base"..HEAD -- '*_test.go' 2>/dev/null | grep -cE '^\+.*provenance:' || true)
+  # PAIRED, NOT COUNTED. Counting added `provenance:` lines against added funcs
+  # turned a pure rename red (the header line is unchanged, so the diff has a
+  # `+func` and no `+provenance:`), and passed a diff where one func had two
+  # headers and its neighbour none. Each added func is looked up in the HEAD
+  # post-image and must have a `// provenance:` line in the comment block right
+  # above its declaration (<= 12 lines: `verifies:`/`author:`/blank `//` allowed).
+  prov_funcs=$(git diff -U0 "$base"..HEAD -- '*_test.go' 2>/dev/null | awk '
+    /^\+\+\+ /      { f = substr($0, 7); next }
+    /^@@ /           { split($3, a, ","); ln = substr(a[1], 2) + 0; next }
+    /^\+/            { if ($0 ~ /^\+func (Test|Fuzz)/) { fn = $0; sub(/^\+func /, "", fn); sub(/[(].*/, "", fn); print f ":" ln " " fn } ln++ }')
+  added=0; prov_bad=""; prov_nbad=0
+  while IFS= read -r pf; do
+    [[ -n "$pf" ]] || continue
+    added=$((added+1))
+    pf_loc=${pf%% *}; pf_file=${pf_loc%:*}; pf_line=${pf_loc##*:}
+    pf_head=0; pf_i=$((pf_line-1)); pf_n=0
+    pf_text=$(git show "HEAD:$pf_file" 2>/dev/null | sed -n "1,$((pf_line-1))p")
+    while (( pf_i >= 1 && pf_n < 12 )); do
+      pf_l=$(printf '%s\n' "$pf_text" | sed -n "${pf_i}p")
+      [[ "$pf_l" =~ ^[[:space:]]*// ]] || break
+      if [[ "$pf_l" =~ provenance: ]]; then pf_head=1; break; fi
+      pf_i=$((pf_i-1)); pf_n=$((pf_n+1))
+    done
+    if (( pf_head == 0 )); then
+      prov_nbad=$((prov_nbad+1))
+      (( prov_nbad <= 10 )) && prov_bad+="${prov_bad:+, }$pf"
+    fi
+  done <<<"$prov_funcs"
   if (( added == 0 )); then row "provenance-headers" NA "no test funcs added"
-  elif (( heads >= added )); then row "provenance-headers" PASS "$added added test funcs, $heads provenance lines"
-  else row "provenance-headers" FAIL "$added added test funcs but only $heads provenance headers ($((added-heads)) unheaded)"; fi
+  elif (( prov_nbad == 0 )); then row "provenance-headers" PASS "$added added test funcs, each with its own provenance header"
+  else row "provenance-headers" FAIL "$prov_nbad of $added added test funcs have no provenance header in the comment block above them: $prov_bad"; fi
 else
   # NO HISTORY AND NO BASE ARE DIFFERENT ANSWERS, and the row used to give both
   # the same one. A repo with commits but no resolvable base is misconfigured
