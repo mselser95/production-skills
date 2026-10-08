@@ -2622,8 +2622,10 @@ if ((${#obs_manifests[@]} == 0)); then
   row "observability-contract-checked" FAIL "no spans.yaml / emitted-metrics.* manifest exists at all"
 else
   obs_readers=""
+  obs_unread=""
   for m in "${obs_manifests[@]}"; do
     base=$(basename "$m")
+    obs_this=0
     while IFS= read -r tf; do
       # Belt and braces on the filename. `--include` is not honoured
       # identically by every grep on every machine -- ugrep matched
@@ -2636,8 +2638,10 @@ else
       d=$(dirname "$tf")
       # And it must be a real Go package, asked of the toolchain rather than
       # inferred from the path.
-      go list "$d" >/dev/null 2>&1 && obs_readers+="$d"$'\n'
+      if go list "$d" >/dev/null 2>&1; then obs_readers+="$d"$'\n'; obs_this=1; fi
     done < <(grep -rl "${PROBE_GREP_EXCLUDES[@]}" -- "$base" --include='*_test.go' . 2>/dev/null)
+    # EVERY manifest owes a reader: one read manifest must not vouch for the rest.
+    [[ "$obs_this" == 1 ]] || obs_unread+="$m"$'\n'
   done
   obs_pkgs=$(printf '%s' "$obs_readers" | sort -u | sed '/^$/d')
   # The `go test` branch below leaves its package list UNQUOTED on purpose: the
@@ -2649,10 +2653,10 @@ else
   # PARSE ERROR (SC1123/SC1072/SC1073). Measured 2026-08-30: putting it on the
   # elif turned three clean files into three unparseable ones.
   # shellcheck disable=SC2046
-  if [[ -z "$obs_pkgs" ]]; then
-    row "observability-contract-checked" FAIL "${#obs_manifests[@]} manifest(s) exist but no test READS one — naming it in a comment is not a check"
+  if [[ -n "$obs_unread" ]]; then
+    row "observability-contract-checked" FAIL "manifest(s) read by no test (naming one in a comment is not a check): $(printf '%s' "$obs_unread" | sed '/^$/d' | tr '\n' ' ')"
   elif obs_out=$(go test -count=1 $(printf './%s ' $(printf '%s' "$obs_pkgs" | sed 's|^\./||')) 2>&1); then
-    row "observability-contract-checked" PASS "$(grep -c . <<<"$obs_pkgs") package(s) read and verify ${#obs_manifests[@]} manifest(s), green"
+    row "observability-contract-checked" PASS "${#obs_manifests[@]} manifest(s), each read by a test ($(grep -c . <<<"$obs_pkgs") package(s), green)"
   else
     # Prefer a file:line diagnostic, fall back to the first real error line --
     # "see go test output" is not evidence, and this row printed exactly that

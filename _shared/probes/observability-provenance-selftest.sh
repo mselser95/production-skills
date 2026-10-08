@@ -245,6 +245,42 @@ check "prov: nothing at all still fails" \
 check "prov: a granted waiver outranks the diagnostic FAILs" \
       "NA" "$waived_verdict"
 
+# --- observability-contract-checked: EVERY manifest needs a reader -----------
+# PS-2: the row used to PASS when ANY one manifest was read by a test, so a
+# second manifest nobody read rode along green. Lifted from the probe by anchor.
+# shellcheck disable=SC2016
+sed -n '/^  obs_readers=""$/,/^  obs_pkgs=\$(/p' "$PROBE" > "$TMP/obs.sh"
+[ -s "$TMP/obs.sh" ] || { echo "FAIL: observability-contract anchor matched nothing -- the probe changed shape" >&2; exit 2; }
+grep -q '^  obs_pkgs=' "$TMP/obs.sh" || { echo "FAIL: observability-contract extraction truncated" >&2; exit 2; }
+run_obs() {             # $1 = fixture dir -> prints "unread=<paths>"
+  ( cd "$1" || exit 2
+    # SC2034: inputs read by the lifted fragment sourced below.
+    # shellcheck disable=SC2034
+    PROBE_FIND_PRUNE=()
+    # shellcheck disable=SC2034
+    PROBE_GREP_EXCLUDES=()
+    # shellcheck disable=SC2034
+    obs_manifests=(./spans.yaml ./emitted-metrics.yaml)
+    # shellcheck disable=SC1090
+    . "$TMP/obs.sh"
+    # shellcheck disable=SC2154
+    printf 'unread=%s\n' "$(printf '%s' "$obs_unread" | tr '\n' ' ' | sed 's/ $//')" )
+}
+mkobs() {               # $1 = dir, $2.. = manifest basenames the test reads
+  d="$1"; shift
+  mkdir -p "$d"; printf 'module obsfix\n\ngo 1.21\n' > "$d/go.mod"
+  : > "$d/spans.yaml"; : > "$d/emitted-metrics.yaml"
+  { printf 'package obsfix\n\nimport "os"\n\nfunc read() { _, _ = os.ReadFile("%s") }\n' "${1:-none}"
+    for b in "$@"; do printf '// %s\n' "$b"; done; } > "$d/x_test.go"
+  if [ "$#" -eq 2 ]; then printf 'func read2() { _, _ = os.ReadFile("%s") }\n' "$2" >> "$d/x_test.go"; fi
+}
+mkobs "$TMP/obs-one" spans.yaml
+mkobs "$TMP/obs-both" spans.yaml emitted-metrics.yaml
+check "obs: one of two manifests unread -> the unread one is named" \
+      "unread=./emitted-metrics.yaml" "$(run_obs "$TMP/obs-one")"
+check "obs: both manifests read -> nothing unread" \
+      "unread=" "$(run_obs "$TMP/obs-both")"
+
 # --- verdict -----------------------------------------------------------------
 if [ "$CASES" -eq 0 ]; then
   echo "observability-provenance selftest: ZERO cases ran -- refusing to report a pass over an empty set" >&2
