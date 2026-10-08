@@ -55,8 +55,10 @@ if [[ "$own" = 1 ]]; then
     fi
   fi
 fi
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-audit-selftest.XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-audit-selftest.XXXXXX")" || { echo "acceptance-audit selftest: mktemp failed (TMPDIR=${TMPDIR:-/tmp})" >&2; exit 1; }
+# Never build paths from, or rm -rf, an empty/missing scratch root: "$tmp/src" would be "/src".
+[[ -n "$tmp" && -d "$tmp" ]] || { echo "acceptance-audit selftest: no scratch directory" >&2; exit 1; }
+trap '[[ -n "$tmp" && -d "$tmp" ]] && rm -rf "$tmp"' EXIT
 pass=0 bad=0 skipped=0
 
 # src: the root mkrepo copies scripts/ and .github/ci-tools.txt from. It carries a
@@ -67,7 +69,7 @@ src="$tmp/src"; mkdir -p "$src/scripts" "$src/.github"
 # the scratch repos they would count as tracked non-test .go files and make the catch-all guard
 # ("exclusions must leave at least one tracked non-test .go file") impossible to trigger, so the
 # fixture's Go count would depend on the host's layout. Fixtures carry shell, never Go.
-find "$src/scripts" -name '*.go' -type f -delete 2>/dev/null
+find "$src/scripts" -name '*.go' \( -type f -o -type l \) -delete 2>/dev/null
 printf '#!/bin/sh\necho contract-wrapped >&2\nexec "$@"\n' > "$src/scripts/with-contract.sh"; chmod +x "$src/scripts/with-contract.sh"
 printf 'fixture-tool\nsecond\n' > "$src/.github/ci-tools.txt"
 
