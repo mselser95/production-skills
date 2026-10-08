@@ -2678,7 +2678,8 @@ else
       obs_reads=0
       for pt in "$d"/*_test.go; do
         [[ -f "$pt" ]] || continue
-        if obs_strip "$pt" | grep -qE 'os\.ReadFile|os\.Open|embed\.FS|ioutil\.ReadFile' \
+        obs_body=$(obs_strip "$pt")
+        if grep -qE 'os\.ReadFile|os\.Open|embed\.FS|ioutil\.ReadFile' <<<"$obs_body" \
            || grep -qE '^[[:space:]]*//go:embed' "$pt" 2>/dev/null; then obs_reads=1; break; fi
       done
       (( obs_reads )) || continue
@@ -4707,26 +4708,28 @@ if base="$prov_base"; [ -n "$base" ]; then
   # headers and its neighbour none. Each added func is looked up in the HEAD
   # post-image and must have a `// provenance:` line in the comment block right
   # above its declaration (<= 12 lines: `verifies:`/`author:`/blank `//` allowed).
-  prov_funcs=$(git diff -U0 "$base"..HEAD -- '*_test.go' 2>/dev/null | awk '
-    /^\+\+\+ /      { f = substr($0, 7); next }
-    /^@@ /           { split($3, a, ","); ln = substr(a[1], 2) + 0; next }
-    /^\+/            { if ($0 ~ /^\+func (Test|Fuzz)/) { fn = $0; sub(/^\+func /, "", fn); sub(/[(].*/, "", fn); print f ":" ln " " fn } ln++ }')
+  prov_funcs=$(git -c diff.noprefix=false diff -U0 --src-prefix=a/ --dst-prefix=b/ "$base"..HEAD -- '*_test.go' 2>/dev/null | awk -F'\t' '
+    /^\+\+\+ /      { f = substr($1, 7); next }
+    /^@@ /           { split($0, h, " "); split(h[3], a, ","); ln = substr(a[1], 2) + 0; next }
+    /^\+/            { if ($0 ~ /^\+func (Test|Fuzz)/) { fn = $0; sub(/^\+func /, "", fn); sub(/[(].*/, "", fn); if (fn != "TestMain") printf "%s\t%s\t%s\n", ln, fn, f } ln++ }')
   added=0; prov_bad=""; prov_nbad=0
-  while IFS= read -r pf; do
-    [[ -n "$pf" ]] || continue
+  # Records are `line<TAB>func<TAB>file` so a path with spaces survives; TestMain
+  # is the harness entry point, not a test, and carries no header.
+  while IFS=$'\t' read -r prov_line prov_fn prov_file; do
+    [[ -n "$prov_line" ]] || continue
+    prov_id="${prov_file}:${prov_line} ${prov_fn}"
     added=$((added+1))
-    pf_loc=${pf%% *}; pf_file=${pf_loc%:*}; pf_line=${pf_loc##*:}
-    pf_head=0; pf_i=$((pf_line-1)); pf_n=0
-    pf_text=$(git show "HEAD:$pf_file" 2>/dev/null | sed -n "1,$((pf_line-1))p")
-    while (( pf_i >= 1 && pf_n < 12 )); do
-      pf_l=$(printf '%s\n' "$pf_text" | sed -n "${pf_i}p")
-      [[ "$pf_l" =~ ^[[:space:]]*// ]] || break
-      if [[ "$pf_l" =~ provenance: ]]; then pf_head=1; break; fi
-      pf_i=$((pf_i-1)); pf_n=$((pf_n+1))
+    phd_head=0; phd_i=$((prov_line-1)); phd_n=0
+    phd_text=$(git show "HEAD:$prov_file" 2>/dev/null | sed -n "1,$((prov_line-1))p")
+    while (( phd_i >= 1 && phd_n < 12 )); do
+      phd_l=$(printf '%s\n' "$phd_text" | sed -n "${phd_i}p")
+      [[ "$phd_l" =~ ^[[:space:]]*// ]] || break
+      if [[ "$phd_l" =~ provenance: ]]; then phd_head=1; break; fi
+      phd_i=$((phd_i-1)); phd_n=$((phd_n+1))
     done
-    if (( pf_head == 0 )); then
+    if (( phd_head == 0 )); then
       prov_nbad=$((prov_nbad+1))
-      (( prov_nbad <= 10 )) && prov_bad+="${prov_bad:+, }$pf"
+      (( prov_nbad <= 10 )) && prov_bad+="${prov_bad:+, }$prov_id"
     fi
   done <<<"$prov_funcs"
   if (( added == 0 )); then row "provenance-headers" NA "no test funcs added"

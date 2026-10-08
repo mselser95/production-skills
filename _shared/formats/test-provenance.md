@@ -15,6 +15,10 @@ credit; `candidate` tests run in the advisory lane and expire.
 func TestLedgerConservation_RandomEventSequences(t *testing.T) { ... }
 ```
 
+The `provenance-headers` row pairs each added `func Test…`/`func Fuzz…` with the
+comment block directly above it (up to 12 lines). `func TestMain` is the harness
+entry point, not a test, and is exempt.
+
 ## Classes
 
 - **ratified** — asserts a human-approved invariant. `verifies:` must name an
