@@ -2680,8 +2680,8 @@ else
       for pt in "$d"/*_test.go; do
         [[ -f "$pt" ]] || continue
         obs_body=$(obs_strip "$pt")
-        if grep -qE 'os\.ReadFile|os\.Open|embed\.FS|ioutil\.ReadFile' <<<"$obs_body" \
-           || grep -qE '^[[:space:]]*//go:embed' "$pt" 2>/dev/null; then obs_reads=1; break; fi
+        if grep -qE 'os\.ReadFile|os\.Open|embed\.FS|ioutil\.ReadFile' <<<"$obs_body"; then obs_reads=1; break; fi
+        if grep -qE '^[[:space:]]*//go:embed' "$pt" 2>/dev/null; then obs_reads=1; break; fi
       done
       (( obs_reads )) || { obs_noread=1; continue; }
       # And it must be a real Go package, asked of the toolchain rather than

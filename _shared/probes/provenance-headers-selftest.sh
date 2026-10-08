@@ -18,6 +18,8 @@
 #   f  two headers above one func, none above its neighbour      FAIL naming the naked one
 #   g  header 12 comment lines above PASS; 13 lines above        FAIL
 #   h  test file in a directory whose name has a space           PASS when headed
+#   j  one file, TWO hunks, both funcs headed                    PASS
+#   j2 same, the LATER func unheaded                             FAIL naming a_test.go:<its real line>
 #   i  `func TestMain` without a header                          NA (harness entry, not a test)
 # PROBE_SRC=<file> points the selftest at another verify-standard.sh (used to show
 # it goes RED against the old counting probe).
@@ -106,6 +108,26 @@ n=$((n+1)); o=$(run "package p" "package p
 $H
 func TestSpace(t *testing.T) {}" "my dir/x_test.go")
 [[ "$o" == *" PASS "* ]] || bad "h: headed func under a directory with a space must PASS, got: $o"
+# j: two hunks in one file. The middle is unrelated code so the added funcs land in
+# separate hunks; the line number of the second must come from ITS hunk header.
+MID="$(for i in $(seq 1 15); do printf 'var v%s = %s\n' "$i" "$i"; done)"
+JBASE="package p
+$MID"
+n=$((n+1)); o=$(run "$JBASE" "package p
+$H
+func TestTop(t *testing.T) {}
+$MID
+$H
+func TestBottom(t *testing.T) {}" "a_test.go")
+[[ "$o" == *" PASS "* ]] || bad "j: two headed funcs in separate hunks must PASS, got: $o"
+JHEAD="package p
+$H
+func TestTop(t *testing.T) {}
+$MID
+func TestBottom(t *testing.T) {}"
+want=$(printf '%s\n' "$JHEAD" | grep -n 'func TestBottom' | cut -d: -f1)
+n=$((n+1)); o=$(run "$JBASE" "$JHEAD" "a_test.go")
+[[ "$o" == *" FAIL "* && "$o" == *"a_test.go:$want TestBottom"* && "$o" != *TestTop* ]] || bad "j2: expected FAIL naming a_test.go:$want TestBottom, got: $o"
 # i: TestMain is the harness entry, not a test
 n=$((n+1)); o=$(run "package p" "package p
 func TestMain(m *testing.M) {}")
