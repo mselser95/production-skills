@@ -125,6 +125,22 @@ printf '//go:build aaa\n\npackage pkg\n' > "$hd/pkg/a_test.go"; printf '//go:bui
 [[ "$o" == *"integration-real-lane PASS"* && "$o" == *"in 1 distinct pkg(s)"* ]] || bad "h: two lanes in one package must count 1 distinct pkg, got: $o"
 grep -q '^tags integration$' "$tmp/stub.log" && ! grep -q '\./\./' "$tmp/stub.log" || bad "h: lane run missing or path not clean"
 
-[[ $n -ge 12 ]] || { echo "integration-lane-selftest: FAIL -- only $n checks ran" >&2; exit 1; }
+# PS-7c: a negated-only package is not in the lane; the space forms of -tags wire the lane
+hd="$tmp/lane-k"; rm -rf "$hd"; mkdir -p "$hd/a" "$hd/h" "$hd/k"
+printf '//go:build integration\n\npackage a\n' > "$hd/a/x_test.go"; printf '//go:build !integration\n\npackage h\n' > "$hd/h/x_test.go"
+printf '//go:build integration && linux\n\npackage k\n' > "$hd/k/x_test.go"
+: > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG='' harness "$hd" "$tmp/lane.sh")
+[[ "$o" == *"in 2 distinct pkg(s)"* ]] || bad "k1: !integration package must not count, got: $o"
+grep -q '\./h' "$tmp/stub.log" && bad "k2: ./h (build !integration) was put into the integration lane: $(cat "$tmp/stub.log")"
+MK=$'t:\n\tgo test -tags integration ./...'
+n=$((n+1)); o=$(ci m1 integration); [[ "$o" == *"ci-runs-integration-lane PASS"* ]] || bad "m1: '-tags integration' must wire the lane, got: $o"
+MK=$'t:\n\tgo test -tags "unit integration" ./...'
+n=$((n+1)); o=$(ci m2 integration); [[ "$o" == *"ci-runs-integration-lane PASS"* ]] || bad "m2: -tags \"unit integration\" must wire the lane, got: $o"
+MK=$'t:\n\tgo test -tags \'a integration\' ./...'
+n=$((n+1)); o=$(ci m3 integration); [[ "$o" == *"ci-runs-integration-lane PASS"* ]] || bad "m3: -tags 'a integration' must wire the lane, got: $o"
+MK=$'t:\n\tgo test -tags integration_soak ./...'
+n=$((n+1)); o=$(ci m4 integration); [[ "$o" == *"ci-runs-integration-lane FAIL"* ]] || bad "m4: '-tags integration_soak' must not wire 'integration', got: $o"
+
+[[ $n -ge 17 ]] || { echo "integration-lane-selftest: FAIL -- only $n checks ran" >&2; exit 1; }
 if (( fails )); then echo "integration-lane-selftest: $fails FAIL" >&2; exit 1; fi
 echo "integration-lane-selftest: ok -- $n case(s)"

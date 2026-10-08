@@ -1896,7 +1896,7 @@ if [[ -n "$real_tags" ]]; then
   while IFS= read -r rt; do
     [[ -n "$rt" ]] || continue
     rt_re=$(printf '%s' "$rt" | sed 's/[][\.*^$+?(){}|]/\\&/g')
-    real_pkgs=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" "go:build.*[^A-Za-z0-9_.]${rt_re}([^A-Za-z0-9_.]|$)" --include='*_test.go' . 2>/dev/null \
+    real_pkgs=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" "go:build.*[^A-Za-z0-9_.!]${rt_re}([^A-Za-z0-9_.]|$)" --include='*_test.go' . 2>/dev/null \
                 | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^\./||; s|^|./|' | tr '\n' ' ')
     [[ -n "$real_pkgs" ]] || real_pkgs=./...
     # shellcheck disable=SC2086
@@ -4909,8 +4909,10 @@ if [[ -n "${real_tags:-}" ]]; then
     [[ -n "$rt" ]] || continue
     il_re=$(printf '%s' "$rt" | sed 's/[][\.*^$+?(){}|]/\\&/g')
     # The tag must be a WHOLE element of the list: `-tags=dbisolation,integration` wires both,
-    # `-tags=integration_soak` wires neither `integration` nor `soak`.
-    il_pat="-tags=[\"']?([^[:space:],]*,)*${il_re}([\"',[:space:]]|$)|tags: *[\"']?([^[:space:],]*,)*${il_re}([\"',[:space:]]|$)"
+    # `-tags=integration_soak` wires neither `integration` nor `soak`. The space forms
+    # (`-tags integration`, `-tags "unit integration"`) count; an UNQUOTED space list does not,
+    # because its second word is a package argument, not a tag.
+    il_pat="-tags[= ]+[\"']?([^[:space:],\"']*,)*${il_re}([\"',[:space:]]|$)|-tags[= ]+[\"']([^\"']*[[:space:],])?${il_re}([\"',[:space:]])|tags: *[\"']?([^[:space:],\"']*,)*${il_re}([\"',[:space:]]|$)"
     il_hits=$(grep -rlE -- "$il_pat" Makefile $wf 2>/dev/null || true)
     il_real=""
     while IFS= read -r f; do
