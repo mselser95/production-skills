@@ -4654,12 +4654,16 @@ fi
 # indistinguishable from a tombstone: a checker that reads prose cannot tell a
 # declaration from a discussion of one.
 # The header may carry a suffix that starts with `(` or `,` (`candidate (TTL: 90d)`,
-# `candidate, ttl 2027-04-01`) or end the line; a prose word after it does not count.
+# `candidate, ttl 2027-04-01`, `candidate; ttl: ..`, `candidate -- reason`) or end the
+# line; a prose word after it (`candidate files carry a ttl`) does not count. The old form
+# accepted only `(`/`,`, so `candidate; ttl:` and `candidate -- reason` -- the shapes real
+# repos ship -- matched 0 files and the row reported NA over a tree full of candidates.
+# The tag is `//go:build` (any expression term, not negated) or the pre-1.17 `// +build`.
 # Tagging is checked PER FILE: comparing the count of tagged files with the count of
 # candidate files compared two unrelated sets (one untagged candidate plus two tagged
 # files elsewhere passed).
-cand_hdr='^[[:space:]]*//[[:space:]]*provenance:[[:space:]]*candidate([[:space:]]*$|[[:space:]]*[(,])'
-cand_tag='^//go:build (.*[^[:alnum:]_!])?candidate([^[:alnum:]_]|$)'
+cand_hdr='^[[:space:]]*//[[:space:]]*provenance:[[:space:]]*candidate([[:space:]]*$|[[:space:]]*[(,;:.]|[[:space:]]*(--|-|—))'
+cand_tag='^//go:build (.*[^[:alnum:]_!])?candidate([^[:alnum:]_]|$)|^// \+build (.*[ ,])?candidate([ ,]|$)'
 cand_files=$(grep -rlE "$cand_hdr" --include='*_test.go' "${PROBE_GREP_EXCLUDES[@]}" . 2>/dev/null | sort)
 cand=0; cand_bad=0; cand_bad_list=""
 while IFS= read -r cf; do

@@ -85,6 +85,26 @@ n=$((n+1)); o=$(run "$d"); [[ "$o" == *" PASS "* ]] || bad "c3: expected PASS, g
 d=$(mk); w "$d/pkg/x_test.go" '// provenance: derived' 'package pkg'
 n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "d2: derived-only tree must be NA, got: $o"
 
+# PS-8: the header shapes real repos ship (falcon-xyz-udf-service PR #15): `;`, ` -- reason`, `(TTL ..) -- reason`
+for shape in 'candidate; ttl: 2027-01-08; pinning: false' 'candidate -- acceptance:live-bar/AC-07 (a closed minute)' 'candidate (TTL 2027-01-08) pinning: true -- focus' 'candidate: ttl 2027-01-08'; do
+  d=$(mk); w "$d/pkg/x_test.go" "// provenance: $shape" 'package pkg'
+  n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* && "$o" == *x_test.go* ]] || bad "h: untagged '$shape' must FAIL naming x_test.go, got: $o"
+  d=$(mk); w "$d/pkg/x_test.go" '//go:build candidate' "// provenance: $shape" 'package pkg'
+  n=$((n+1)); o=$(run "$d"); [[ "$o" == *" PASS "* ]] || bad "h: tagged '$shape' must PASS, got: $o"
+done
+# PS-8: combined tag expressions and the pre-1.17 form
+for tag in '//go:build candidate && integration' '//go:build integration && candidate' '//go:build (candidate || e2e) && linux' '// +build candidate' '// +build integration,candidate' '// +build linux candidate'; do
+  d=$(mk); w "$d/pkg/x_test.go" "$tag" '// provenance: candidate (TTL 2026-12-31)' 'package pkg'
+  n=$((n+1)); o=$(run "$d"); [[ "$o" == *" PASS "* ]] || bad "t: '$tag' must segregate (PASS), got: $o"
+done
+for tag in '//go:build !candidate' '//go:build integration && !candidate' '//go:build candidates' '//go:build not_candidate' '// +build !candidate' '//go:build integration'; do
+  d=$(mk); w "$d/pkg/x_test.go" "$tag" '// provenance: candidate (TTL 2026-12-31)' 'package pkg'
+  n=$((n+1)); o=$(run "$d"); [[ "$o" == *" FAIL "* ]] || bad "t: '$tag' must NOT segregate (FAIL), got: $o"
+done
+# PS-8: prose after the word is still not a header
+d=$(mk); w "$d/pkg/x_test.go" '// provenance: candidate tests are advisory' 'package pkg'
+n=$((n+1)); o=$(run "$d"); [[ "$o" == *" NA "* ]] || bad "p: prose after candidate must stay NA, got: $o"
+
 # g: nested checkouts and vendored trees are not THIS tree
 d=$(mk)
 for sub in .claude/worktrees/x/pkg vendor/m node_modules/m .git/x; do
