@@ -1878,6 +1878,49 @@ extract_real_tags() {   # extract_real_tags [dir] -> every build tag except cand
     | grep -vE '^(candidate|ignore|linux|darwin|windows|freebsd|openbsd|netbsd|solaris|plan9|aix|dragonfly|illumos|ios|android|js|wasip1|wasm|amd64|arm64|arm|386|ppc64|ppc64le|mips[0-9a-z]*|riscv64|s390x|loong64|cgo|unix|gc|gccgo|purego|race|msan|asan|go1\.[0-9]+)$' \
     | sort -u
 }
+# LANES, not tags. A constraint `integration && acceptance && heldout` compiles ONLY when all
+# three tags are set, so the lane is the SET {acceptance, heldout, integration}; running each
+# conjunct as its own lane (`-tags=acceptance`) excludes every file of the package ("build
+# constraints exclude all Go files") and the row FAILs for a lane that is fine -- and the usual
+# workaround, an untagged doc.go, turns that into "[no test files]", a vacuous pass. `||` makes
+# separate lanes ((a || b) && c is {a,c} and {b,c}); negated terms and static platform terms
+# are dropped, as in extract_real_tags. One line per (lane, file): "<tag,tag,...><TAB><file>".
+extract_real_lanes() {   # extract_real_lanes [dir]
+  grep -rHE "${PROBE_GREP_EXCLUDES[@]}" '^[[:space:]]*//go:build ' --include='*_test.go' "${1:-.}" 2>/dev/null \
+    | awk -v static='^(candidate|ignore|linux|darwin|windows|freebsd|openbsd|netbsd|solaris|plan9|aix|dragonfly|illumos|ios|android|js|wasip1|wasm|amd64|arm64|arm|386|ppc64|ppc64le|mips[0-9a-z]*|riscv64|s390x|loong64|cgo|unix|gc|gccgo|purego|race|msan|asan|go1\.[0-9]+)$' '
+      function isstatic(t) { return t ~ static || t == "candidate" || t == "ignore" }
+      function cross(a, b,   na, nb, i, j, A, B, out) {
+        na = split(a, A, "|"); nb = split(b, B, "|"); out = ""
+        for (i = 1; i <= na; i++) for (j = 1; j <= nb; j++) out = out (out == "" ? "" : "|") A[i] " " B[j]
+        return out }
+      function peek() { return tok[pos] }
+      function parse_or(   r, x) { r = parse_and(); while (peek() == "||") { pos++; x = parse_and(); r = r "|" x } return r }
+      function parse_and(   r, x) { r = parse_atom(); while (peek() == "&&") { pos++; x = parse_atom(); r = cross(r, x) } return r }
+      function parse_atom(   t, r, neg) {
+        neg = 0
+        while (peek() == "!") { neg = 1; pos++ }
+        t = tok[pos]
+        if (t == "(") { pos++; r = parse_or(); if (peek() == ")") pos++; return neg ? " " : r }
+        pos++
+        if (neg || isstatic(t) || t !~ /^[A-Za-z0-9_.]+$/) return " "
+        return t }
+      {
+        i = index($0, ":"); file = substr($0, 1, i - 1); expr = $0; sub(/^[^:]*:[[:space:]]*\/\/go:build[[:space:]]+/, "", expr)
+        gsub(/\(/, " ( ", expr); gsub(/\)/, " ) ", expr); gsub(/&&/, " \\&\\& ", expr); gsub(/\|\|/, " || ", expr); gsub(/!/, " ! ", expr)
+        n = split(expr, raw, /[[:space:]]+/); k = 0; delete tok
+        for (i = 1; i <= n; i++) if (raw[i] != "") tok[++k] = raw[i]
+        tok[k + 1] = ""; pos = 1
+        alts = parse_or(); na = split(alts, A, "|")
+        for (a = 1; a <= na; a++) {
+          m = split(A[a], T, " "); delete seen; lane = ""
+          for (i = 1; i <= m; i++) if (T[i] != "") seen[T[i]] = 1
+          cnt = 0; delete L; for (x in seen) L[++cnt] = x
+          for (i = 2; i <= cnt; i++) { v = L[i]; j = i - 1; while (j >= 1 && L[j] > v) { L[j + 1] = L[j]; j-- } L[j + 1] = v }
+          for (i = 1; i <= cnt; i++) lane = lane (i > 1 ? "," : "") L[i]
+          if (lane != "") print lane "\t" file
+        }
+      }' | sort -u
+}
 real_tags=$(extract_real_tags .)
 live_gate=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" 'os\.Getenv\("[A-Z_]*LIVE[A-Z_]*"\)' --include='*_test.go' . 2>/dev/null | head -1)
 if shard_run dynamic; then   # @shard-begin dynamic
@@ -1893,19 +1936,26 @@ if [[ -n "$real_tags" ]]; then
   # the defect.
   # EVERY tag is a lane and every lane must be green; the row names each one.
   rl_green=""; rl_red=""; rl_allpkgs=""
+  rl_lanes=$(extract_real_lanes . | cut -f1 | sort -u)
+  [[ -n "$rl_lanes" ]] || rl_red="tags [$(echo $real_tags)] are declared but no lane could be derived from them -- a lane list that is empty runs nothing"
   while IFS= read -r rt; do
     [[ -n "$rt" ]] || continue
-    rt_re=$(printf '%s' "$rt" | sed 's/[][\.*^$+?(){}|]/\\&/g')
-    real_pkgs=$(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" "go:build.*[^A-Za-z0-9_.!]${rt_re}([^A-Za-z0-9_.]|$)" --include='*_test.go' . 2>/dev/null \
+    real_pkgs=$(extract_real_lanes . | awk -F'\t' -v l="$rt" '$1 == l {print $2}' \
                 | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^\./||; s|^|./|' | tr '\n' ' ')
     [[ -n "$real_pkgs" ]] || real_pkgs=./...
     # shellcheck disable=SC2086
-    if rl_out=$(go test -tags="$rt" $real_pkgs -count=1 2>&1); then
+    rl_out=$(go test -tags="$rt" $real_pkgs -count=1 2>&1); rl_rc=$?
+    # A lane the repo DECLARES (files carry its constraint) that compiles nothing or runs no test
+    # is not green: "[no test files]" / "build constraints exclude all Go files" is a lane that
+    # ran nothing, whatever the exit code says.
+    if (( rl_rc == 0 )) && ! grep -qE '\[no test files\]|build constraints exclude all Go files' <<<"$rl_out"; then
       rl_green+="${rl_green:+, }'-tags=$rt'"; rl_allpkgs+="$(printf '%s' "$real_pkgs" | tr ' ' '\n')"$'\n'
+    elif (( rl_rc == 0 )); then
+      rl_red+="${rl_red:+; }lane '-tags=$rt' ran NO test ($(grep -m1 -E '\[no test files\]|build constraints exclude' <<<"$rl_out" | cut -c1-120)) -- a declared lane that executes nothing is not a pass"
     else
       rl_red+="${rl_red:+; }lane '-tags=$rt': $(go_fail_evidence "$rl_out" | grep . || grep -m1 -E '^--- FAIL|^FAIL|panic:' <<<"$rl_out" | cut -c1-120)"
     fi
-  done <<<"$real_tags"
+  done <<<"$rl_lanes"
   if [[ -z "$rl_red" ]]; then
     extra=""; [[ -n "$live_gate" ]] && extra=" + env-gated live lane"
     rl_npkg=$(printf '%s' "$rl_allpkgs" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')

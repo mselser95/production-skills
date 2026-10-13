@@ -29,7 +29,7 @@ bad() { echo "integration-lane-selftest: FAIL -- $*" >&2; fails=$((fails+1)); }
 
 # --- lift the programs ------------------------------------------------------
 fn_src() { sed -n "/^$1() {/,/^}/p" "$probe"; }
-{ fn_src extract_real_tag; fn_src extract_real_tags; fn_src go_fail_evidence; } >"$tmp/fns.sh"
+{ fn_src extract_real_tag; fn_src extract_real_tags; fn_src extract_real_lanes; fn_src go_fail_evidence; } >"$tmp/fns.sh"
 grep -q '^extract_real_tag()' "$tmp/fns.sh" || { echo "integration-lane-selftest: FAIL -- extract_real_tag not found" >&2; exit 1; }
 sed -n '/^if \[\[ -n "\${real_tags\{0,1\}:-}" \]\]; then$/,/^fi$/p' "$probe" >"$tmp/ci.sh"
 sed -n '/^if \[\[ -n "\$real_tags\{0,1\}" \]\]; then$/,/^else row "integration-real-lane" FAIL/p' "$probe" >"$tmp/lane.sh"
@@ -83,6 +83,7 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/go" <<'EOS'
 #!/bin/sh
 echo "go $*" >> "$STUB_LOG"
+[ -n "${STUB_NOTEST:-}" ] && { echo "?   	pkg	[no test files]"; exit 0; }
 for a in "$@"; do case "$a" in -tags=*) echo "tags ${a#-tags=}" >> "$STUB_LOG"; [ "${a#-tags=}" = "${RED_TAG:-}" ] && { echo "--- FAIL: TestX"; exit 1; };; esac; done
 exit 0
 EOS
@@ -140,6 +141,38 @@ MK=$'t:\n\tgo test -tags \'a integration\' ./...'
 n=$((n+1)); o=$(ci m3 integration); [[ "$o" == *"ci-runs-integration-lane PASS"* ]] || bad "m3: -tags 'a integration' must wire the lane, got: $o"
 MK=$'t:\n\tgo test -tags integration_soak ./...'
 n=$((n+1)); o=$(ci m4 integration); [[ "$o" == *"ci-runs-integration-lane FAIL"* ]] || bad "m4: '-tags integration_soak' must not wire 'integration', got: $o"
+
+# PS-7d: a lane is the SET of tags that compiles its files, never one conjunct of it
+# (a) only `integration && acceptance && heldout` files: ONE lane run with all three tags
+hd="$tmp/lane-p"; rm -rf "$hd"; mkdir -p "$hd/internal/e2e"
+printf '//go:build integration && acceptance && heldout\n\npackage e2e\n' > "$hd/internal/e2e/a_test.go"
+: > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG='' harness "$hd" "$tmp/lane.sh")
+[[ "$o" == *"integration-real-lane PASS"* && "$o" == *"acceptance,heldout,integration"* ]] || bad "p1: expected PASS on the full tag set, got: $o"
+[[ "$(grep -c '^tags ' "$tmp/stub.log")" == 1 ]] && grep -q '^tags acceptance,heldout,integration$' "$tmp/stub.log" || bad "p2: expected exactly one run with all three tags, stub saw: $(tr '\n' ' ' <"$tmp/stub.log")"
+# (a') a REAL go toolchain (when present) compiles and executes that package under the lane
+if command -v go >/dev/null 2>&1; then
+  rd="$tmp/lane-real"; rm -rf "$rd"; mkdir -p "$rd/internal/e2e"; printf 'module lanefx\n\ngo 1.21\n' > "$rd/go.mod"
+  printf '//go:build integration && acceptance && heldout\n\npackage e2e\n\nimport "testing"\n\nfunc TestRan(t *testing.T) { t.Log("ran") }\n' > "$rd/internal/e2e/a_test.go"
+  n=$((n+1)); o=$(harness "$rd" "$tmp/lane.sh")
+  [[ "$o" == *"integration-real-lane PASS"* ]] || bad "p3: real go: expected PASS, got: $o"
+  o=$( cd "$rd" && go test -tags=acceptance,heldout,integration -count=1 -v ./internal/e2e 2>&1 ); [[ "$o" == *"--- PASS: TestRan"* ]] || bad "p4: real go did not execute TestRan under the full tag set"
+  # (b) the doc.go trick: the old per-conjunct lane `-tags=acceptance` would say "[no test files]" and look green
+  printf 'package e2e\n' > "$rd/internal/e2e/doc.go"
+  o=$( cd "$rd" && go test -tags=acceptance -count=1 ./internal/e2e 2>&1 ); [[ "$o" == *"no test files"* ]] || bad "q0: fixture invalid -- doc.go did not produce 'no test files' under a partial lane"
+  n=$((n+1)); o=$(harness "$rd" "$tmp/lane.sh")
+  [[ "$o" == *"integration-real-lane PASS"* && "$o" == *"acceptance,heldout,integration"* ]] || bad "q1: doc.go + full-lane run must still execute the tests, got: $o"
+fi
+# (b) a declared lane whose go run reports "[no test files]" is a FAIL, never a PASS
+hd="$tmp/lane-q"; rm -rf "$hd"; mkdir -p "$hd/internal/e2e"
+printf '//go:build integration && acceptance && heldout\n\npackage e2e\n' > "$hd/internal/e2e/a_test.go"; printf 'package e2e\n' > "$hd/internal/e2e/doc.go"
+: > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" STUB_NOTEST=1 harness "$hd" "$tmp/lane.sh")
+[[ "$o" == *"integration-real-lane FAIL"* && "$o" == *"ran NO test"* ]] || bad "q2: '[no test files]' on a declared lane must FAIL, got: $o"
+# (c) single-tag lanes are unchanged: one run per tag, `||` is separate lanes, `(a || b) && c` expands
+hd="$tmp/lane-r"; rm -rf "$hd"; mkdir -p "$hd/a" "$hd/b" "$hd/c"
+printf '//go:build integration\n\npackage a\n' > "$hd/a/x_test.go"; printf '//go:build chaos || soak\n\npackage b\n' > "$hd/b/x_test.go"
+printf '//go:build (x1 || x2) && y && !unit && linux\n\npackage c\n' > "$hd/c/x_test.go"
+: > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG='' harness "$hd" "$tmp/lane.sh")
+[[ "$(grep '^tags ' "$tmp/stub.log" | sort | tr '\n' ' ')" == "tags chaos tags integration tags soak tags x1,y tags x2,y " ]] || bad "r1: lane set wrong, stub saw: $(grep '^tags ' "$tmp/stub.log" | sort | tr '\n' ' ')"
 
 [[ $n -ge 17 ]] || { echo "integration-lane-selftest: FAIL -- only $n checks ran" >&2; exit 1; }
 if (( fails )); then echo "integration-lane-selftest: $fails FAIL" >&2; exit 1; fi
