@@ -1868,15 +1868,10 @@ extract_real_tag() {   # extract_real_tag [dir] -> the chosen build tag, or empt
 # one because the selftest sources it on its own; the two rows below used to take that first tag
 # as THE lane, so a repo with `dbisolation` and `integration` was scored on `dbisolation` alone and
 # its integration lane was never run nor looked for in CI.
-extract_real_tags() {   # extract_real_tags [dir] -> every build tag except candidate/ignore/platform terms, sorted, one per line
-  # Parse EVERY //go:build line: `(chaos || soak)` is two tags, `integration && !unit` is one, and
-  # `linux && integration` is one (linux is a platform constraint, not a lane). Negated terms are
-  # dropped; so are the static GOOS/GOARCH/toolchain words and go1.N version terms.
-  grep -rhE "${PROBE_GREP_EXCLUDES[@]}" '^[[:space:]]*//go:build ' --include='*_test.go' "${1:-.}" 2>/dev/null \
-    | sed 's|^[[:space:]]*//go:build||' | tr '()&|' '    ' | tr -s '[:space:]' '\n' \
-    | grep -E '^[A-Za-z0-9_.]+$' \
-    | grep -vE '^(candidate|ignore|linux|darwin|windows|freebsd|openbsd|netbsd|solaris|plan9|aix|dragonfly|illumos|ios|android|js|wasip1|wasm|amd64|arm64|arm|386|ppc64|ppc64le|mips[0-9a-z]*|riscv64|s390x|loong64|cgo|unix|gc|gccgo|purego|race|msan|asan|go1\.[0-9]+)$' \
-    | sort -u
+extract_real_tags() {   # extract_real_tags [dir] -> every tag of every derived lane (extract_real_lanes), sorted, one per line
+  # Derived from the lanes so the two can never disagree: a file that requires `candidate` (advisory
+  # lane), negated terms and static platform/toolchain terms contribute no tag (PS-10).
+  extract_real_lanes "${1:-.}" | cut -f1 | tr ',' '\n' | sort -u
 }
 # LANES, not tags. A constraint `integration && acceptance && heldout` compiles ONLY when all
 # three tags are set, so the lane is the SET {acceptance, heldout, integration}; running each
@@ -1888,7 +1883,7 @@ extract_real_tags() {   # extract_real_tags [dir] -> every build tag except cand
 extract_real_lanes() {   # extract_real_lanes [dir]
   grep -rHE "${PROBE_GREP_EXCLUDES[@]}" '^[[:space:]]*//go:build ' --include='*_test.go' "${1:-.}" 2>/dev/null \
     | awk -v static='^(candidate|ignore|linux|darwin|windows|freebsd|openbsd|netbsd|solaris|plan9|aix|dragonfly|illumos|ios|android|js|wasip1|wasm|amd64|arm64|arm|386|ppc64|ppc64le|mips[0-9a-z]*|riscv64|s390x|loong64|cgo|unix|gc|gccgo|purego|race|msan|asan|go1\.[0-9]+)$' '
-      function isstatic(t) { return t ~ static || t == "candidate" || t == "ignore" }
+      function isstatic(t) { return t ~ static || t == "ignore" }
       function cross(a, b,   na, nb, i, j, A, B, out) {
         na = split(a, A, "|"); nb = split(b, B, "|"); out = ""
         for (i = 1; i <= na; i++) for (j = 1; j <= nb; j++) out = out (out == "" ? "" : "|") A[i] " " B[j]
@@ -1902,6 +1897,10 @@ extract_real_lanes() {   # extract_real_lanes [dir]
         t = tok[pos]
         if (t == "(") { pos++; r = parse_or(); if (peek() == ")") pos++; return neg ? " " : r }
         pos++
+        # A file whose constraint REQUIRES candidate is in the advisory candidate lane by definition
+        # (candidate-lane-segregated): it must derive no blocking lane. Mark it; a negated candidate
+        # (!candidate) is just a negation, ignored as in PS-7c.
+        if (!neg && t == "candidate") return "@cand"
         if (neg || isstatic(t) || t !~ /^[A-Za-z0-9_.]+$/) return " "
         return t }
       {
@@ -1912,7 +1911,9 @@ extract_real_lanes() {   # extract_real_lanes [dir]
         tok[k + 1] = ""; pos = 1
         alts = parse_or(); na = split(alts, A, "|")
         for (a = 1; a <= na; a++) {
-          m = split(A[a], T, " "); delete seen; lane = ""
+          m = split(A[a], T, " "); delete seen; lane = ""; iscand = 0
+          for (i = 1; i <= m; i++) if (T[i] == "@cand") iscand = 1
+          if (iscand) continue
           for (i = 1; i <= m; i++) if (T[i] != "") seen[T[i]] = 1
           cnt = 0; delete L; for (x in seen) L[++cnt] = x
           for (i = 2; i <= cnt; i++) { v = L[i]; j = i - 1; while (j >= 1 && L[j] > v) { L[j + 1] = L[j]; j-- } L[j + 1] = v }

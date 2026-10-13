@@ -174,6 +174,39 @@ printf '//go:build (x1 || x2) && y && !unit && linux\n\npackage c\n' > "$hd/c/x_
 : > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG='' harness "$hd" "$tmp/lane.sh")
 [[ "$(grep '^tags ' "$tmp/stub.log" | sort | tr '\n' ' ')" == "tags chaos tags integration tags soak tags x1,y tags x2,y " ]] || bad "r1: lane set wrong, stub saw: $(grep '^tags ' "$tmp/stub.log" | sort | tr '\n' ' ')"
 
+# PS-10: a file whose constraint REQUIRES candidate is in the advisory candidate lane: no blocking lane
+lanes_of() { ( cd "$1" || exit 2
+  # shellcheck disable=SC2034
+  PROBE_GREP_EXCLUDES=(--exclude-dir=.git); . "$tmp/fns.sh"; extract_real_lanes . | cut -f1 | sort -u | tr '\n' ' '; echo "|tags:$(extract_real_tags . | tr '\n' ' ')" ); }
+# (a) only `load && candidate`: no lane, no tag, the row is not failed by it
+hd="$tmp/lane-s"; rm -rf "$hd"; mkdir -p "$hd/load"
+printf '//go:build load && candidate\n\npackage load\n' > "$hd/load/x_test.go"
+n=$((n+1)); o=$(lanes_of "$hd"); [[ "$o" == "|tags:" ]] || bad "s1: load && candidate must derive no lane/tag, got: $o"
+: > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG='' harness "$hd" "$tmp/lane.sh")
+[[ "$o" != *"setup failed"* && "$o" != *"-tags=load"* && ! -s "$tmp/stub.log" ]] || bad "s2: row must not run a lane (nor fail '[setup failed]') for a candidate-only package, got: $o / $(cat "$tmp/stub.log")"
+# (b) `integration && candidate` alone: no lane
+hd="$tmp/lane-t"; rm -rf "$hd"; mkdir -p "$hd/a"
+printf '//go:build integration && candidate\n\npackage a\n' > "$hd/a/x_test.go"
+n=$((n+1)); o=$(lanes_of "$hd"); [[ "$o" == "|tags:" ]] || bad "t1: integration && candidate must derive no lane, got: $o"
+# `candidate && integration` (order) and `integration && (candidate || x)` shapes
+printf '//go:build candidate && integration\n\npackage a\n' > "$hd/a/x_test.go"
+n=$((n+1)); o=$(lanes_of "$hd"); [[ "$o" == "|tags:" ]] || bad "t2: candidate && integration must derive no lane, got: $o"
+# !candidate is a plain negation: the lane stays
+printf '//go:build integration && !candidate\n\npackage a\n' > "$hd/a/x_test.go"
+n=$((n+1)); o=$(lanes_of "$hd"); [[ "$o" == "integration |tags:integration " ]] || bad "t3: integration && !candidate must keep lane integration, got: $o"
+# (c) mixed package: integration files + integration && candidate files -> lane integration only
+hd="$tmp/lane-u"; rm -rf "$hd"; mkdir -p "$hd/a"
+printf '//go:build integration\n\npackage a\n' > "$hd/a/x_test.go"; printf '//go:build integration && candidate\n\npackage a\n' > "$hd/a/y_test.go"
+n=$((n+1)); o=$(lanes_of "$hd"); [[ "$o" == "integration |tags:integration " ]] || bad "u1: mixed package must derive lane integration only, got: $o"
+: > "$tmp/stub.log"; n=$((n+1)); o=$(PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG='' harness "$hd" "$tmp/lane.sh")
+[[ "$o" == *"integration-real-lane PASS"* && "$(grep '^tags ' "$tmp/stub.log" | tr '\n' ' ')" == "tags integration " ]] || bad "u2: mixed package: expected one run with -tags=integration, got: $o / $(cat "$tmp/stub.log")"
+if command -v go >/dev/null 2>&1; then
+  rd="$tmp/lane-real2"; rm -rf "$rd"; mkdir -p "$rd/a"; printf 'module lanefx2\n\ngo 1.21\n' > "$rd/go.mod"
+  printf '//go:build integration\n\npackage a\n\nimport "testing"\n\nfunc TestReal(t *testing.T) {}\n' > "$rd/a/x_test.go"
+  printf '//go:build integration && candidate\n\npackage a\n\nimport "testing"\n\nfunc TestCand(t *testing.T) {}\n' > "$rd/a/y_test.go"
+  n=$((n+1)); o=$(harness "$rd" "$tmp/lane.sh"); [[ "$o" == *"integration-real-lane PASS"* ]] || bad "u3: real go mixed package must PASS, got: $o"
+fi
+
 [[ $n -ge 17 ]] || { echo "integration-lane-selftest: FAIL -- only $n checks ran" >&2; exit 1; }
 if (( fails )); then echo "integration-lane-selftest: $fails FAIL" >&2; exit 1; fi
 echo "integration-lane-selftest: ok -- $n case(s)"
