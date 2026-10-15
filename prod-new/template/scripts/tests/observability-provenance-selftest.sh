@@ -34,6 +34,13 @@
 # is the reason the extraction below is anchored on distinctive lines and FAILS
 # LOUDLY if an anchor stops matching, instead of silently testing nothing.
 set -uo pipefail
+# The probe it lifts code from needs bash >= 4 and exits 2 below that; refuse the
+# same way instead of dying midway on `unbound variable` / a `case` in `$()`
+# that bash 3.2 cannot parse (macOS /bin/bash is 3.2).
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "observability-provenance selftest: needs bash >= 4 (running ${BASH_VERSION}); put a newer bash first on PATH" >&2
+  exit 2
+fi
 
 CASES=0
 FAILED=0
@@ -58,6 +65,11 @@ sed -n '/^  slog_plain=0$/,/^  done < <(grep -rlE/p' "$PROBE" > "$TMP/logs.sh"
 [ -s "$TMP/logs.sh" ] || { echo "FAIL: logs_correlate anchor matched nothing -- the probe changed shape" >&2; exit 2; }
 grep -q 'done < <(grep -rlE' "$TMP/logs.sh" || { echo "FAIL: logs_correlate extraction truncated" >&2; exit 2; }
 
+sed -n '/^tracer_sites=\$(grep -rn/,/no tracing at all/p' "$PROBE" > "$TMP/trace.sh"
+[ -s "$TMP/trace.sh" ] || { echo "FAIL: tracing-wired anchor matched nothing -- the probe changed shape" >&2; exit 2; }
+grep -q 'no tracing at all' "$TMP/trace.sh" || { echo "FAIL: tracing-wired extraction truncated" >&2; exit 2; }
+printf 'fi\n' >> "$TMP/trace.sh"
+
 sed -n '/^  if grep -qE "cosign\[\[:space:\]\]+attest/,/^  else row "artifact-provenance"/p' "$PROBE" > "$TMP/prov.sh"
 [ -s "$TMP/prov.sh" ] || { echo "FAIL: artifact-provenance anchor matched nothing -- the probe changed shape" >&2; exit 2; }
 grep -q 'else row "artifact-provenance"' "$TMP/prov.sh" || { echo "FAIL: artifact-provenance extraction truncated" >&2; exit 2; }
@@ -72,6 +84,16 @@ run_logs() {            # $1 = fixture dir -> prints "plain=<n> ctx=<n>"
     . "$TMP/logs.sh"
     # shellcheck disable=SC2154
     printf 'plain=%s ctx=%s\n' "$slog_plain" "$slog_ctx" )
+}
+
+run_trace() {           # $1 = fixture dir -> prints "<VERDICT> <first words of evidence>"
+  ( cd "$1" || exit 2
+    row() { printf '%s %s\n' "$2" "$(printf '%s' "$3" | awk '{print $1, $2, $3}')"; }
+    declined() { return 1; }
+    inbound_route_sites() { :; }
+    code_lines_only() { grep -vE '^[^:]*:[0-9]+:[[:space:]]*//'; }
+    # shellcheck disable=SC1090
+    . "$TMP/trace.sh" )
 }
 
 run_prov() {            # $1 = workflow dir, $2 = "waived"|"" -> prints the verdict
@@ -174,10 +196,62 @@ package client
 func (s *S) A(ctx context.Context) { s.logger.InfoContext(ctx, "ok") }
 GO
 
+# TEST-SUPPORT without the _test.go suffix (measured on falcon-xyz-ledger-service:
+# 68 of 75 "plain" calls were testify require.Error in a contracttest package).
+mkdir -p "$TMP/logs-testsupport/contracttest" "$TMP/logs-testsupport/testdata"
+cat > "$TMP/logs-testsupport/contracttest/suite.go" <<'GO'
+package contracttest
+
+func Run(t T, s *Suite) {
+	require.Error(t, err)
+	assert.Error(t, err)
+	s.Require().Error(err)
+	s.Assert().Error(err)
+	suite.Error(err)
+	fake.Warn("only the package clause can exclude this")
+	t.Error("x")
+}
+GO
+# same assertion calls in a NON-test package: only the receiver filter can keep them out
+cat > "$TMP/logs-testsupport/helper.go" <<'GO'
+package helper
+
+func Check(t T, b B) {
+	require.Error(t, err)
+	assert.Error(t, err)
+	t.Error("x")
+	b.Error("y")
+	red.Error("a redactor, not a logger")
+	red.Warn("same")
+}
+GO
+printf 'package fixture\n\nfunc f() { logger.Info("x") }\n' > "$TMP/logs-testsupport/testdata/f.go"
+cat > "$TMP/logs-testsupport/real.go" <<'GO'
+package svc
+
+func (s *S) A(ctx context.Context) {
+	log.Info("a")
+	logger.Warn("b")
+	l.Error("c")
+	slog.Debug("d")
+	s.log.Info("e")
+	lgr := slog.New(h)
+	lgr.Info("f")
+	s.logger.InfoContext(ctx, "ok")
+}
+GO
+# a real package whose name merely ends in "test" must still be counted
+mkdir -p "$TMP/logs-latest"
+printf 'package latest\n\nfunc f() { logger.Info("x") }\n' > "$TMP/logs-latest/l.go"
+
 check "logs: status.Error+http.Error+generated are NOT log calls" \
       "plain=0 ctx=2" "$(run_logs "$TMP/logs-healthy")"
 check "logs: a real plain log call is still counted" \
       "plain=3 ctx=1" "$(run_logs "$TMP/logs-broken")"
+check "logs: assertion receivers, *test packages and testdata are NOT log calls; real ones are" \
+      "plain=6 ctx=1" "$(run_logs "$TMP/logs-testsupport")"
+check "logs: package latest (ends in test, is production) is still counted" \
+      "plain=1 ctx=0" "$(run_logs "$TMP/logs-latest")"
 check "logs: generated-only tree yields an empty denominator" \
       "plain=0 ctx=0" "$(run_logs "$TMP/logs-genonly")"
 check "logs: a real log call inside a GENERATED file is excluded" \
@@ -197,6 +271,53 @@ check "logs: a real log call inside a GENERATED file is excluded" \
 # deleting the explanation. Measured: it did exactly that on its first run.
 oc_misuse=$(grep -vE '^[[:space:]]*#' "$TMP/logs.sh" | grep -cE "grep[[:space:]]+(-[A-Za-z]*[[:space:]]+)*-[A-Za-z]*(oc|co)[A-Za-z]*[[:space:]]" || true)
 check "logs: no non-portable 'grep -oc' in the counting program" "0" "$oc_misuse"
+
+# --- tracing-wired-in-prod fixtures ------------------------------------------
+mkt() { mkdir -p "$1/cmd/svc"; printf 'module example.com/svc\n\ngo 1.21\n' > "$1/go.mod"; }
+mkt "$TMP/tr-middle"
+printf 'package main\n\nfunc main() {\n\tNewServer(obs.Tracer, obs.Meter)\n}\n' > "$TMP/tr-middle/cmd/svc/main.go"
+mkt "$TMP/tr-discard"
+printf 'package main\n\nfunc main() {\n\ttracer, err := newTracer()\n\t_ = tracer\n\t_ = err\n}\n' > "$TMP/tr-discard/cmd/svc/main.go"
+mkt "$TMP/tr-lib"
+cat > "$TMP/tr-lib/cmd/svc/main.go" <<'GO'
+package main
+
+import (
+	"github.com/acme/shared/pkg/telemetry"
+)
+
+func main() {
+	obs, err := telemetry.New(cfg)
+	_, _ = obs, err
+}
+GO
+mkt "$TMP/tr-lib-local"
+cat > "$TMP/tr-lib-local/cmd/svc/main.go" <<'GO'
+package main
+
+import (
+	"example.com/svc/internal/telemetry"
+)
+
+func main() {
+	obs, err := telemetry.New(cfg)
+	_, _ = obs, err
+}
+GO
+# names a tracer, calls no bootstrap, passes nothing
+mkt "$TMP/tr-named"
+printf 'package main\n\nvar tracer = otel.Tracer("x")\n\nfunc main() {}\n' > "$TMP/tr-named/cmd/svc/main.go"
+
+check "trace: tracer passed as a MIDDLE argument counts as wired" \
+      "PASS 1 tracer call-site(s)" "$(run_trace "$TMP/tr-middle")"
+check "trace: tracer declared (tracer, err :=) and discarded still FAILs" \
+      "FAIL cmd/ names a" "$(run_trace "$TMP/tr-discard")"
+check "trace: kept result of an EXTERNAL telemetry bootstrap passes" \
+      "PASS LIBRARY-installed TracerProvider shape:" "$(run_trace "$TMP/tr-lib")"
+check "trace: a telemetry package INSIDE this module is not a library install" \
+      "FAIL no tracing at" "$(run_trace "$TMP/tr-lib-local")"
+check "trace: a named-but-unused tracer still FAILs" \
+      "FAIL cmd/ names a" "$(run_trace "$TMP/tr-named")"
 
 # --- artifact-provenance fixtures --------------------------------------------
 mkdir -p "$TMP/prov-grant" "$TMP/prov-real" "$TMP/prov-sign" "$TMP/prov-none"
@@ -244,6 +365,130 @@ check "prov: nothing at all still fails" \
 # named for -- a waiver that is dead code in its own use case.
 check "prov: a granted waiver outranks the diagnostic FAILs" \
       "NA" "$waived_verdict"
+
+# --- observability-contract-checked: EVERY manifest needs a reader -----------
+# PS-2: the row used to PASS when ANY one manifest was read by a test, so a
+# second manifest nobody read rode along green. Lifted from the probe by anchor.
+# shellcheck disable=SC2016
+sed -n '/^  obs_readers=""$/,/^  obs_pkgs=\$(/p' "$PROBE" > "$TMP/obs.sh"
+[ -s "$TMP/obs.sh" ] || { echo "FAIL: observability-contract anchor matched nothing -- the probe changed shape" >&2; exit 2; }
+grep -q '^  obs_pkgs=' "$TMP/obs.sh" || { echo "FAIL: observability-contract extraction truncated" >&2; exit 2; }
+run_obs() {             # $1 = fixture dir, $2.. = manifests -> prints "unread=<paths>"
+  ( cd "$1" || exit 2
+    shift_dir=$1; shift
+    : "$shift_dir"
+    # SC2034: inputs read by the lifted fragment sourced below. The exclude list
+    # is NON-EMPTY on purpose: an empty array is "unbound" under `set -u` on
+    # bash 3.2, which is what made this selftest die on macOS /bin/bash.
+    # shellcheck disable=SC2034
+    PROBE_FIND_PRUNE=()
+    # shellcheck disable=SC2034
+    PROBE_GREP_EXCLUDES=(--exclude-dir=.git)
+    # shellcheck disable=SC2034
+    obs_manifests=("$@")
+    # shellcheck disable=SC1090
+    . "$TMP/obs.sh"
+    # shellcheck disable=SC2154
+    if [ "${OBS_OUT:-unread}" = why ]; then printf 'why=%s\n' "${obs_reasons%; }"
+    else printf 'unread=%s\n' "$(printf '%s' "$obs_unread" | tr '\n' ' ' | sed 's/ $//')"; fi )
+}
+# mkfx <dir> -- a Go module with both manifests; callers add test files.
+mkfx() {
+  mkdir -p "$1"; printf 'module obsfix\n\ngo 1.21\n' > "$1/go.mod"
+  : > "$1/spans.yaml"; : > "$1/emitted-metrics.yaml"
+}
+gof() {                 # gof <file> <body...>: a test file in package obsfix
+  f="$1"; shift; printf 'package obsfix\n\nimport "os"\n\n%s\n' "$*" > "$f"
+}
+BOTH="./spans.yaml ./emitted-metrics.yaml"
+
+mkfx "$TMP/obs-one"
+gof "$TMP/obs-one/x_test.go" 'func a() { _, _ = os.ReadFile("spans.yaml") }
+// emitted-metrics.yaml'
+mkfx "$TMP/obs-both"
+gof "$TMP/obs-both/x_test.go" 'func a() { _, _ = os.ReadFile("spans.yaml"); _, _ = os.ReadFile("emitted-metrics.yaml") }'
+# shellcheck disable=SC2086
+check "obs: one of two manifests unread -> the unread one is named" \
+      "unread=./emitted-metrics.yaml" "$(run_obs "$TMP/obs-one" $BOTH)"
+# shellcheck disable=SC2086
+check "obs: both manifests read -> nothing unread" \
+      "unread=" "$(run_obs "$TMP/obs-both" $BOTH)"
+
+# (a) comment-only mention + an unrelated ReadFile must not count
+mkfx "$TMP/obs-cmt"
+# shellcheck disable=SC2016
+gof "$TMP/obs-cmt/x_test.go" '// see "spans.yaml"
+/* "observability/spans.yaml"
+   and `spans.yaml` over several lines */
+func a() { _, _ = os.ReadFile("other.txt") }'
+check "obs: comment-only mention + unrelated ReadFile -> unread" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-cmt" ./spans.yaml)"
+# (b) the reading helper lives in ANOTHER test file of the package
+mkfx "$TMP/obs-helper"
+gof "$TMP/obs-helper/x_test.go" 'func a() { _ = "spans.yaml" }'
+gof "$TMP/obs-helper/helper_test.go" 'func readManifest(p string) { _, _ = os.ReadFile(p) }'
+check "obs: reader helper in a sibling test file -> read" \
+      "unread=" "$(run_obs "$TMP/obs-helper" ./spans.yaml)"
+# (c) myspans.yaml is not spans.yaml
+mkfx "$TMP/obs-my"
+gof "$TMP/obs-my/x_test.go" 'func a() { _, _ = os.ReadFile("myspans.yaml") }'
+check "obs: myspans.yaml literal does not vouch for spans.yaml" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-my" ./spans.yaml)"
+# (d) a path literal ending in /spans.yaml
+mkfx "$TMP/obs-path"
+mkdir -p "$TMP/obs-path/observability"; : > "$TMP/obs-path/observability/spans.yaml"
+gof "$TMP/obs-path/x_test.go" 'func a() { _, _ = os.ReadFile("../observability/spans.yaml") }'
+check "obs: \"observability/spans.yaml\" literal -> read" \
+      "unread=" "$(run_obs "$TMP/obs-path" ./observability/spans.yaml)"
+# (e) backtick literal
+mkfx "$TMP/obs-bt"
+# shellcheck disable=SC2016
+gof "$TMP/obs-bt/x_test.go" 'func a() { _, _ = os.ReadFile(`spans.yaml`) }'
+check "obs: backtick literal -> read" \
+      "unread=" "$(run_obs "$TMP/obs-bt" ./spans.yaml)"
+# (f) two manifests with the same basename must not vouch for each other
+mkfx "$TMP/obs-dup"
+mkdir -p "$TMP/obs-dup/a" "$TMP/obs-dup/b"; : > "$TMP/obs-dup/a/spans.yaml"; : > "$TMP/obs-dup/b/spans.yaml"
+printf 'package a\n' > "$TMP/obs-dup/a/a.go"; printf 'package b\n' > "$TMP/obs-dup/b/b.go"
+printf 'package b\n\nimport "os"\n\nfunc t() { _, _ = os.ReadFile("b/spans.yaml") }\n' > "$TMP/obs-dup/b/b_test.go"
+check "obs: same basename in two dirs -> only the one actually named is read" \
+      "unread=./a/spans.yaml" "$(run_obs "$TMP/obs-dup" ./a/spans.yaml ./b/spans.yaml)"
+
+# (g) the bare literal is AMBIGUOUS when two manifests share the basename and the
+# test sits in a THIRD directory: neither manifest is vouched for, and the reason says why.
+mkfx "$TMP/obs-amb"
+mkdir -p "$TMP/obs-amb/internal/obsdup" "$TMP/obs-amb/third"
+: > "$TMP/obs-amb/internal/obsdup/spans.yaml"
+printf 'package third\n\nimport "os"\n\nfunc t() { _, _ = os.ReadFile("spans.yaml") }\n' > "$TMP/obs-amb/third/t_test.go"
+check "obs: bare basename shared by two manifests, test in a third dir -> both unread" \
+      "unread=./spans.yaml ./internal/obsdup/spans.yaml" "$(run_obs "$TMP/obs-amb" ./spans.yaml ./internal/obsdup/spans.yaml)"
+check "obs: ambiguous bare basename -> the reason says so" \
+      "why=./spans.yaml (named only by a bare basename that is ambiguous (2 manifests share it): qualify the path); ./internal/obsdup/spans.yaml (named only by a bare basename that is ambiguous (2 manifests share it): qualify the path)" \
+      "$(OBS_OUT=why run_obs "$TMP/obs-amb" ./spans.yaml ./internal/obsdup/spans.yaml)"
+check "obs: comment-only mention -> the reason says no literal outside comments" \
+      "why=./spans.yaml (no string literal names it outside comments)" "$(OBS_OUT=why run_obs "$TMP/obs-cmt" ./spans.yaml)"
+mkfx "$TMP/obs-noread"
+printf 'package obsfix\n\nfunc a() { _ = "spans.yaml" }\n' > "$TMP/obs-noread/x_test.go"
+check "obs: named but nothing reads a file -> the reason says so" \
+      "why=./spans.yaml (named but no _test.go in that package reads a file)" "$(OBS_OUT=why run_obs "$TMP/obs-noread" ./spans.yaml)"
+
+# (h) the //go:embed reader paths and their negative twins
+mkfx "$TMP/obs-embed"
+printf 'package obsfix\n\nimport _ "embed"\n\n//go:embed spans.yaml\nvar spansRaw string\n\nfunc a() { _ = "spans.yaml"; _ = spansRaw }\n' > "$TMP/obs-embed/x_test.go"
+check "obs: //go:embed directive is the only reader -> read" \
+      "unread=" "$(run_obs "$TMP/obs-embed" ./spans.yaml)"
+mkfx "$TMP/obs-embedfs"
+printf 'package obsfix\n\nimport "embed"\n\n//go:embed spans.yaml\nvar fsys embed.FS\n\nfunc a() { _, _ = fsys.ReadFile("spans.yaml") }\n' > "$TMP/obs-embedfs/x_test.go"
+check "obs: //go:embed + embed.FS -> read" \
+      "unread=" "$(run_obs "$TMP/obs-embedfs" ./spans.yaml)"
+mkfx "$TMP/obs-noreader"
+printf 'package obsfix\n\nfunc a() { _ = "spans.yaml" }\n' > "$TMP/obs-noreader/x_test.go"
+check "obs: manifest named, no reader at all -> unread" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-noreader" ./spans.yaml)"
+mkfx "$TMP/obs-embedcmt"
+printf 'package obsfix\n\n// see //go:embed spans.yaml\nfunc a() { _ = "spans.yaml" }\n' > "$TMP/obs-embedcmt/x_test.go"
+check "obs: //go:embed only inside a comment -> unread" \
+      "unread=./spans.yaml" "$(run_obs "$TMP/obs-embedcmt" ./spans.yaml)"
 
 # --- verdict -----------------------------------------------------------------
 if [ "$CASES" -eq 0 ]; then

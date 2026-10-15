@@ -65,6 +65,11 @@ sed -n '/^  slog_plain=0$/,/^  done < <(grep -rlE/p' "$PROBE" > "$TMP/logs.sh"
 [ -s "$TMP/logs.sh" ] || { echo "FAIL: logs_correlate anchor matched nothing -- the probe changed shape" >&2; exit 2; }
 grep -q 'done < <(grep -rlE' "$TMP/logs.sh" || { echo "FAIL: logs_correlate extraction truncated" >&2; exit 2; }
 
+sed -n '/^tracer_sites=\$(grep -rn/,/no tracing at all/p' "$PROBE" > "$TMP/trace.sh"
+[ -s "$TMP/trace.sh" ] || { echo "FAIL: tracing-wired anchor matched nothing -- the probe changed shape" >&2; exit 2; }
+grep -q 'no tracing at all' "$TMP/trace.sh" || { echo "FAIL: tracing-wired extraction truncated" >&2; exit 2; }
+printf 'fi\n' >> "$TMP/trace.sh"
+
 sed -n '/^  if grep -qE "cosign\[\[:space:\]\]+attest/,/^  else row "artifact-provenance"/p' "$PROBE" > "$TMP/prov.sh"
 [ -s "$TMP/prov.sh" ] || { echo "FAIL: artifact-provenance anchor matched nothing -- the probe changed shape" >&2; exit 2; }
 grep -q 'else row "artifact-provenance"' "$TMP/prov.sh" || { echo "FAIL: artifact-provenance extraction truncated" >&2; exit 2; }
@@ -79,6 +84,16 @@ run_logs() {            # $1 = fixture dir -> prints "plain=<n> ctx=<n>"
     . "$TMP/logs.sh"
     # shellcheck disable=SC2154
     printf 'plain=%s ctx=%s\n' "$slog_plain" "$slog_ctx" )
+}
+
+run_trace() {           # $1 = fixture dir -> prints "<VERDICT> <first words of evidence>"
+  ( cd "$1" || exit 2
+    row() { printf '%s %s\n' "$2" "$(printf '%s' "$3" | awk '{print $1, $2, $3}')"; }
+    declined() { return 1; }
+    inbound_route_sites() { :; }
+    code_lines_only() { grep -vE '^[^:]*:[0-9]+:[[:space:]]*//'; }
+    # shellcheck disable=SC1090
+    . "$TMP/trace.sh" )
 }
 
 run_prov() {            # $1 = workflow dir, $2 = "waived"|"" -> prints the verdict
@@ -181,10 +196,62 @@ package client
 func (s *S) A(ctx context.Context) { s.logger.InfoContext(ctx, "ok") }
 GO
 
+# TEST-SUPPORT without the _test.go suffix (measured on falcon-xyz-ledger-service:
+# 68 of 75 "plain" calls were testify require.Error in a contracttest package).
+mkdir -p "$TMP/logs-testsupport/contracttest" "$TMP/logs-testsupport/testdata"
+cat > "$TMP/logs-testsupport/contracttest/suite.go" <<'GO'
+package contracttest
+
+func Run(t T, s *Suite) {
+	require.Error(t, err)
+	assert.Error(t, err)
+	s.Require().Error(err)
+	s.Assert().Error(err)
+	suite.Error(err)
+	fake.Warn("only the package clause can exclude this")
+	t.Error("x")
+}
+GO
+# same assertion calls in a NON-test package: only the receiver filter can keep them out
+cat > "$TMP/logs-testsupport/helper.go" <<'GO'
+package helper
+
+func Check(t T, b B) {
+	require.Error(t, err)
+	assert.Error(t, err)
+	t.Error("x")
+	b.Error("y")
+	red.Error("a redactor, not a logger")
+	red.Warn("same")
+}
+GO
+printf 'package fixture\n\nfunc f() { logger.Info("x") }\n' > "$TMP/logs-testsupport/testdata/f.go"
+cat > "$TMP/logs-testsupport/real.go" <<'GO'
+package svc
+
+func (s *S) A(ctx context.Context) {
+	log.Info("a")
+	logger.Warn("b")
+	l.Error("c")
+	slog.Debug("d")
+	s.log.Info("e")
+	lgr := slog.New(h)
+	lgr.Info("f")
+	s.logger.InfoContext(ctx, "ok")
+}
+GO
+# a real package whose name merely ends in "test" must still be counted
+mkdir -p "$TMP/logs-latest"
+printf 'package latest\n\nfunc f() { logger.Info("x") }\n' > "$TMP/logs-latest/l.go"
+
 check "logs: status.Error+http.Error+generated are NOT log calls" \
       "plain=0 ctx=2" "$(run_logs "$TMP/logs-healthy")"
 check "logs: a real plain log call is still counted" \
       "plain=3 ctx=1" "$(run_logs "$TMP/logs-broken")"
+check "logs: assertion receivers, *test packages and testdata are NOT log calls; real ones are" \
+      "plain=6 ctx=1" "$(run_logs "$TMP/logs-testsupport")"
+check "logs: package latest (ends in test, is production) is still counted" \
+      "plain=1 ctx=0" "$(run_logs "$TMP/logs-latest")"
 check "logs: generated-only tree yields an empty denominator" \
       "plain=0 ctx=0" "$(run_logs "$TMP/logs-genonly")"
 check "logs: a real log call inside a GENERATED file is excluded" \
@@ -204,6 +271,53 @@ check "logs: a real log call inside a GENERATED file is excluded" \
 # deleting the explanation. Measured: it did exactly that on its first run.
 oc_misuse=$(grep -vE '^[[:space:]]*#' "$TMP/logs.sh" | grep -cE "grep[[:space:]]+(-[A-Za-z]*[[:space:]]+)*-[A-Za-z]*(oc|co)[A-Za-z]*[[:space:]]" || true)
 check "logs: no non-portable 'grep -oc' in the counting program" "0" "$oc_misuse"
+
+# --- tracing-wired-in-prod fixtures ------------------------------------------
+mkt() { mkdir -p "$1/cmd/svc"; printf 'module example.com/svc\n\ngo 1.21\n' > "$1/go.mod"; }
+mkt "$TMP/tr-middle"
+printf 'package main\n\nfunc main() {\n\tNewServer(obs.Tracer, obs.Meter)\n}\n' > "$TMP/tr-middle/cmd/svc/main.go"
+mkt "$TMP/tr-discard"
+printf 'package main\n\nfunc main() {\n\ttracer, err := newTracer()\n\t_ = tracer\n\t_ = err\n}\n' > "$TMP/tr-discard/cmd/svc/main.go"
+mkt "$TMP/tr-lib"
+cat > "$TMP/tr-lib/cmd/svc/main.go" <<'GO'
+package main
+
+import (
+	"github.com/acme/shared/pkg/telemetry"
+)
+
+func main() {
+	obs, err := telemetry.New(cfg)
+	_, _ = obs, err
+}
+GO
+mkt "$TMP/tr-lib-local"
+cat > "$TMP/tr-lib-local/cmd/svc/main.go" <<'GO'
+package main
+
+import (
+	"example.com/svc/internal/telemetry"
+)
+
+func main() {
+	obs, err := telemetry.New(cfg)
+	_, _ = obs, err
+}
+GO
+# names a tracer, calls no bootstrap, passes nothing
+mkt "$TMP/tr-named"
+printf 'package main\n\nvar tracer = otel.Tracer("x")\n\nfunc main() {}\n' > "$TMP/tr-named/cmd/svc/main.go"
+
+check "trace: tracer passed as a MIDDLE argument counts as wired" \
+      "PASS 1 tracer call-site(s)" "$(run_trace "$TMP/tr-middle")"
+check "trace: tracer declared (tracer, err :=) and discarded still FAILs" \
+      "FAIL cmd/ names a" "$(run_trace "$TMP/tr-discard")"
+check "trace: kept result of an EXTERNAL telemetry bootstrap passes" \
+      "PASS LIBRARY-installed TracerProvider shape:" "$(run_trace "$TMP/tr-lib")"
+check "trace: a telemetry package INSIDE this module is not a library install" \
+      "FAIL no tracing at" "$(run_trace "$TMP/tr-lib-local")"
+check "trace: a named-but-unused tracer still FAILs" \
+      "FAIL cmd/ names a" "$(run_trace "$TMP/tr-named")"
 
 # --- artifact-provenance fixtures --------------------------------------------
 mkdir -p "$TMP/prov-grant" "$TMP/prov-real" "$TMP/prov-sign" "$TMP/prov-none"

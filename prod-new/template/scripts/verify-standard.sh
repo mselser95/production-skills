@@ -2864,13 +2864,43 @@ if grep -rql "${PROBE_GREP_EXCLUDES[@]}" 'log/slog' --include='*.go' . 2>/dev/nu
   # first few lines captured into a VARIABLE rather than piped into `grep -q`
   # -- see this file's own probe-self row: a producer piped into a quiet grep
   # is the SIGPIPE-under-pipefail race that reports a match as a failure.
+  # RECEIVER RULE (enforced on the _n_plain line below): a plain call counts
+  # ONLY when its receiver is positively a logger -- an ALLOWLIST. The earlier
+  # denylist (status|http|require|assert|t|...) kept missing names: measured on
+  # falcon-xyz-scanning-service, ~51 `red.Error(` calls were a REDACTOR, not a
+  # logger. A receiver (last identifier before the method) is a logger when it
+  #   (a) is `slog` (the package), or
+  #   (b) is conventionally named: log, logger, lg, l, slogger, logr, zl, sl, or
+  #       ends in Log/Logger/log/logger (s.log, d.logger, deps.Log, reqLog), or
+  #   (c) is declared IN THAT FILE as a logger: `x := slog.New|Default(`,
+  #       `x := <anything>.With(`, or `x *slog.Logger` / `x *zap.Logger` (param,
+  #       field, var).
+  # The cost, stated: a logger held under an unconventional name and declared in
+  # ANOTHER file is not counted, so the row can under-report; that is the safer
+  # error than failing a healthy service on assertion/redactor/error-constructor
+  # calls. Still counted: log.Info(, logger.Warn(, l.Error(, slog.Debug(, s.log.Info(.
   slog_plain=0
   slog_ctx=0
   while IFS= read -r _logf; do
     [[ -n "$_logf" ]] || continue
     _loghdr=$(head -n 5 "$_logf" 2>/dev/null)
     [[ "$_loghdr" == *"Code generated"*"DO NOT EDIT."* ]] && continue
-    _n_plain=$(grep -hE '\.(Info|Warn|Error|Debug)\(([^)]|$)' "$_logf" 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '[A-Za-z0-9_]*\.(Info|Warn|Error|Debug)\(([^)]|$)' | grep -vcE '^(status|http)\.')
+    # TEST-SUPPORT FILES ARE NOT PRODUCTION LOG SITES, even without the _test.go
+    # suffix. Measured on falcon-xyz-ledger-service@fcf29d9: 68 of the 75 "plain
+    # log calls" were testify `require.Error(` in internal/.../contracttest/*.go
+    # (package contracttest), so the row said "75 of 99 drop the trace context"
+    # when 7 did. Two exclusions: a testdata/ path (the go tool ignores it), and
+    # a package clause ending in `test`/`tests` (contracttest, e2etest, ...),
+    # minus real English words that merely end that way. The receiver filter
+    # below is the second line of defence for assertion calls in other files.
+    case "$_logf" in */testdata/*) continue ;; esac
+    _logpkg=$(grep -m1 -E '^package[[:space:]]+[A-Za-z0-9_]+' "$_logf" 2>/dev/null | awk '{print $2}')
+    case "$_logpkg" in latest|attest|contest|protest) ;; *test|*tests) continue ;; esac
+    _logdecl=$(grep -oE '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:?=[[:space:]]*(slog\.(New|Default)|[A-Za-z0-9_.]*\.With)\(|[A-Za-z_][A-Za-z0-9_]*[[:space:]]+\*?(slog|zap)\.Logger' "$_logf" 2>/dev/null | grep -oE '^[A-Za-z_][A-Za-z0-9_]*' | sort -u | tr '\n' '|')
+    _logre="slog|log|logger|lg|l|slogger|logr|zl|sl|[A-Za-z0-9_]*([Ll]og|[Ll]ogger)"
+    [[ -n "$_logdecl" ]] && _logre="$_logre|${_logdecl%|}"
+    _logre="^($_logre)\\."
+    _n_plain=$(grep -hE '\.(Info|Warn|Error|Debug)\(([^)]|$)' "$_logf" 2>/dev/null | grep -vE '^[[:space:]]*//' | grep -oE '[A-Za-z0-9_]*\.(Info|Warn|Error|Debug)\(([^)]|$)' | grep -cE "$_logre")
     # `-o | wc -l`, NEVER `grep -oc`. Combining -o and -c is NOT portable: BSD
     # grep (macOS, where this is usually developed) prints the number of
     # MATCHES, GNU/busybox grep (ubuntu-latest, where CI runs it) prints the
@@ -3000,8 +3030,12 @@ inbound_route_sites() {
 # dimension it was written about. That is the exact wording the standard uses --
 # "tracing wired in cmd/, not merely imported; a tracer that is never injected
 # is a no-op in production" -- failing on its own example.
+# A tracer passed as ANY argument counts, not only the last: the final alternative
+# matches `(obs.Tracer, obs.Meter)` / `, tracer, x`. It needs a `(` or `,` right
+# before the identifier so `tracer, err := newTracer()` (a declaration that may be
+# discarded) is NOT a call site.
 tracer_sites=$(grep -rn --include='*.go' --exclude='*_test.go' \
-  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)" cmd/ 2>/dev/null \
+  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)\|[(,][[:space:]]*[A-Za-z0-9_.]*[Tt]racer," cmd/ 2>/dev/null \
   | code_lines_only | grep -vE '^[^:]+:[0-9]+:[[:space:]]*func[[:space:]]' \
   | wc -l | tr -d ' ')
 
@@ -3054,6 +3088,25 @@ global_tp_install=$(grep -rn --include='*.go' --exclude='*_test.go' \
 cmd_tracing_boot=$(grep -rnE --include='*.go' --exclude='*_test.go' \
   '^[[:space:]]*[A-Za-z_][A-Za-z0-9_,[:space:]]*(:=|=)[[:space:]]*(([A-Za-z0-9_]+\.)?([Ss]etup|[Ii]nit|[Nn]ew|[Ss]tart|[Cc]onfigure|[Bb]ootstrap|[Ee]nable|[Ii]nstall|[Pp]rovide)[A-Za-z0-9_]*[Tt]rac[A-Za-z0-9_]*|[A-Za-z0-9_]*[Tt]rac[A-Za-z0-9_]*\.([Ss]etup|[Ii]nit|[Nn]ew|[Ss]tart|[Cc]onfigure|[Bb]ootstrap|[Ee]nable|[Ii]nstall|[Pp]rovide)[A-Za-z0-9_]*)\(' \
   cmd/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+# THE THIRD SHAPE: a LIBRARY installs the global provider. A shared module
+# (falcon-xyz-go `telemetry.New`) calls otel.SetTracerProvider inside ITS
+# repo, so `global_tp_install` above counts zero here although the service is
+# traced end to end (measured on falcon-xyz-ledger-service: cmd/ledger/main.go
+# `obs, err := observability.New(...)`, a local wrapper over telemetry.New, and
+# `obs.Tracer, obs.Meter)` passed on). Two signals, both required:
+#   - cmd/ KEEPS the result of a telemetry/observability bootstrap call
+#     (`x, err := observability.New(` / `telemetry.Setup(`), and
+#   - non-test code imports a telemetry/tracing/otelx package from OUTSIDE this
+#     module -- the only place a provider this repo never installs can come from.
+# Existence only, like the shapes above: the library's behaviour is not read, so
+# the evidence says "assumed installed by the library", never "installed".
+lib_mod=$(awk '/^module[[:space:]]/ {print $2; exit}' go.mod 2>/dev/null)
+cmd_lib_boot=$(grep -rnE --include='*.go' --exclude='*_test.go' \
+  '^[[:space:]]*[A-Za-z_][A-Za-z0-9_,[:space:]]*(:=|=)[[:space:]]*(telemetry|observability|otelx|tracing)\.([Nn]ew|[Ss]etup|[Ii]nit|[Ss]tart|[Bb]ootstrap)[A-Za-z0-9_]*\(' \
+  cmd/ 2>/dev/null | code_lines_only | wc -l | tr -d ' ')
+ext_telemetry_import=$(grep -rhE --include='*.go' --exclude='*_test.go' \
+  '^[[:space:]]*([A-Za-z_]+[[:space:]]+)?"[^"]+/(telemetry|tracing|otelx)"' cmd/ internal/ pkg/ 2>/dev/null \
+  | grep -vF "\"${lib_mod:-@@no-module@@}/" | wc -l | tr -d ' ')
 # Named only in the evidence, never required: a gRPC-only service uses otelgrpc,
 # a worker neither, and demanding one of them would red a correct repo for the
 # transport it happens to speak.
@@ -3091,6 +3144,8 @@ elif [[ "${tracer_sites:-0}" -gt 0 ]]; then
   row "tracing-wired-in-prod" PASS "$tracer_sites tracer call-site(s) in non-test cmd/ code — call sites only, function declarations excluded. NOT proven here: that a span is ever emitted at runtime. And mechanisms-driven does NOT cover this -- tracing is not among its declared mechanisms, so an earlier version of this sentence pointed at a backstop that does not exist for this dimension"
 elif (( ${global_tp_install:-0} > 0 && ${cmd_tracing_boot:-0} > 0 )); then
   row "tracing-wired-in-prod" PASS "GLOBAL TracerProvider shape: $cmd_tracing_boot non-test cmd/ line(s) keep the result of a tracing bootstrap call, and $global_tp_install non-test otel.SetTracerProvider( call site(s) install the provider they read$global_tp_instr_note — existence only, same as the threaded shape above: this proves the wiring EXISTS in the entrypoints, not that it is reached in production; only a contract test exercising the entrypoint can"
+elif (( ${cmd_lib_boot:-0} > 0 && ${ext_telemetry_import:-0} > 0 )); then
+  row "tracing-wired-in-prod" PASS "LIBRARY-installed TracerProvider shape: $cmd_lib_boot non-test cmd/ line(s) keep the result of a telemetry/observability bootstrap call and non-test code imports $ext_telemetry_import telemetry package(s) from outside this module, which is ASSUMED to install the global provider (not read here). NOT proven here: that the library installs it, or that a span is ever emitted at runtime"
 elif grep -rql "Tracer\|tracer\|SpanFunc" cmd/ 2>/dev/null; then
   row "tracing-wired-in-prod" FAIL "cmd/ names a tracer but never passes or assigns it — constructed and discarded is a no-op in production"
 else
