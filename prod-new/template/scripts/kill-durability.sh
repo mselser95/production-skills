@@ -74,6 +74,12 @@
 #   make kill-durability            build, run, kill, restart, verify
 #   EVENTS=50 make kill-durability  seed more effects
 #
+# PRIVATE MODULES: point KILL_DURABILITY_SECRET_FILE at a file holding a token;
+# the build passes it as `--secret id=gh_token,src=<file>` and the Dockerfile
+# mounts it as secret id=gh_token. Unset (or unreadable) means the build line
+# is byte-identical to before. It is a FILE, not free-form flags, on purpose:
+# nothing from the environment is ever word-split into the docker command.
+#
 # Requires docker. Leaves nothing behind: the container and image are removed
 # on exit, including on failure.
 #
@@ -175,6 +181,20 @@ assert_state_identical() {
   return 0
 }
 
+# build_secret_args fills BUILD_SECRET_ARGS: the BuildKit secret flags when
+# KILL_DURABILITY_SECRET_FILE names a readable file, else nothing. A variable
+# that is SET but unreadable is an error, not a silent downgrade to a build
+# that would then fail later with a confusing private-module message.
+build_secret_args() {
+  BUILD_SECRET_ARGS=()
+  [[ -n "${KILL_DURABILITY_SECRET_FILE:-}" ]] || return 0
+  if [[ ! -r "$KILL_DURABILITY_SECRET_FILE" ]]; then
+    bad "KILL_DURABILITY_SECRET_FILE is set but not readable: $KILL_DURABILITY_SECRET_FILE"
+    return 1
+  fi
+  BUILD_SECRET_ARGS=(--secret "id=gh_token,src=$KILL_DURABILITY_SECRET_FILE")
+}
+
 # THE LIBRARY SEAM. Everything above is definitions; everything below builds an
 # image and talks to a docker daemon. Sourcing with KILL_DURABILITY_LIB=1 stops
 # here, which is what lets the state comparison be exercised on a machine that
@@ -215,7 +235,8 @@ intent_ids() {
 }
 
 step "building the real image"
-if ! docker build -q -t "$IMAGE" -f docker/Dockerfile . >"$WORK/build.log" 2>&1; then
+build_secret_args || exit 1
+if ! docker build -q ${BUILD_SECRET_ARGS[@]+"${BUILD_SECRET_ARGS[@]}"} -t "$IMAGE" -f docker/Dockerfile . >"$WORK/build.log" 2>&1; then
   bad "docker build failed:"; tail -20 "$WORK/build.log"; exit 1
 fi
 say "built $IMAGE"

@@ -268,5 +268,23 @@ fi
 
 unset -f curl
 
+# --- the build-secret flag -------------------------------------------------
+# Passed only when KILL_DURABILITY_SECRET_FILE is set; unset is no extra args.
+bs_case() { # bs_case <label> <want-joined> <env-file-or-UNSET>
+  local got rc
+  if [[ "$3" == UNSET ]]; then got="$( unset KILL_DURABILITY_SECRET_FILE; build_secret_args >/dev/null 2>&1; echo "${BUILD_SECRET_ARGS[*]-}")"
+  else got="$( export KILL_DURABILITY_SECRET_FILE="$3"; build_secret_args >/dev/null 2>&1; echo "${BUILD_SECRET_ARGS[*]-}")"; fi
+  if [[ "$got" == "$2" ]]; then printf '  ok    %-46s %s\n' "$1" "${got:-<none>}"; ok=$((ok + 1))
+  else printf '  FAIL  %-46s got %q want %q\n' "$1" "$got" "$2"; fails=$((fails + 1)); fi
+}
+_sf="$(mktemp)"; echo tok >"$_sf"
+bs_case "secret file unset: no extra build args" "" UNSET
+bs_case "secret file set: --secret passed" "--secret id=gh_token,src=$_sf" "$_sf"
+bs_case "secret file set but missing: no args" "" "$_sf.missing"
+if ( export KILL_DURABILITY_SECRET_FILE="$_sf.missing"; build_secret_args ) >/dev/null 2>&1; then
+  printf '  FAIL  %-46s unreadable file did not fail\n' "set-but-unreadable is an error"; fails=$((fails + 1))
+else printf '  ok    %-46s %s\n' "set-but-unreadable is an error" FAIL; ok=$((ok + 1)); fi
+rm -f "$_sf"
+
 printf '\n%d ok, %d failed\n' "$ok" "$fails"
 ((fails == 0)) || exit 1
