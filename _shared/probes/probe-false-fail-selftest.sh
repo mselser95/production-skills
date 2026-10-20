@@ -55,7 +55,7 @@ lift grepx.sh    '/^grep_x() {/,/^}/p' 'stripped'
 lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
 lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
 lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
-lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'promql'
+lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'jsonstr'
 lift lanetag.sh  '/^lane_tagonly_stats() {/,/^}/p' 'comm -23'
 # shellcheck disable=SC2034  # read by the lifted imports_pkg
 PROBE_GREP_EXCLUDES=(--exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor)
@@ -333,14 +333,38 @@ rbtok() {   # rbtok <body> <token> -> yes/no
   runbook_token_is_series_ref "$2" "$rbd/rbt.md" && echo yes || echo no
 }
 check "rbtok: JSON key event_broker is NOT a citation" no "$(rbtok '{"event_broker":"ok","event_drain":"ok"}' event_broker)"
-check "rbtok: JSON key snapshot_stream is NOT a citation" no "$(rbtok 'check snapshot_stream in /outboxz' snapshot_stream)"
+check "rbtok: JSON key with spaces before colon is NOT a citation" no "$(rbtok '  "event_broker"   : "ok"' event_broker)"
+check "rbtok: perps-style multi-line json fence keys are NOT citations" no "$(rbtok $'```json\n{\n  "event_broker": "ok",\n  "snapshot_stream": "ok"\n}\n```' snapshot_stream)"
+check "rbtok: quoted string VALUE in a json fence is NOT a citation" no "$(rbtok $'```json\n{"check": "event_broker"}\n```' event_broker)"
+check "rbtok: quoted string value OUTSIDE a json fence IS a citation" yes "$(rbtok 'set "event_broker" to ok' event_broker)"
+check "rbtok: quoted string value in a non-json fence IS a citation" yes "$(rbtok $'```yaml\nname: "event_broker"\n```' event_broker)"
+check "rbtok: json fence closed, later prose mention IS a citation" yes "$(rbtok $'```json\n{"event_broker": "ok"}\n```\nwatch event_broker' event_broker)"
+check "rbtok: prose mention IS a citation" yes "$(rbtok 'watch event_drain_backlog today' event_drain_backlog)"
+check "rbtok: bash fence grep IS a citation" yes "$(rbtok $'```bash\ncurl :9090/metrics | grep event_drain_backlog\n```' event_drain_backlog)"
+check "rbtok: yaml fence expr IS a citation" yes "$(rbtok $'```yaml\nexpr: event_drain_backlog > 100\n```' event_drain_backlog)"
+check "rbtok: recording rule name in prose IS a citation" yes "$(rbtok 'see job:event_lagx:rate5m on the board' event_lagx)"
+check "rbtok: _ms suffix in prose IS a citation" yes "$(rbtok 'p99 event_latency_ms' event_latency_ms)"
+check "rbtok: _created suffix in prose IS a citation" yes "$(rbtok 'event_ts_created' event_ts_created)"
+check "rbtok: _percent suffix in prose IS a citation" yes "$(rbtok 'event_cpu_percent' event_cpu_percent)"
 check "rbtok: _total suffix is a citation" yes "$(rbtok 'see foo_requests_total' foo_requests_total)"
+check "rbtok: _total as a JSON key is NOT a citation" no "$(rbtok '{"foo_requests_total": 1}' foo_requests_total)"
 check "rbtok: selector with { is a citation" yes "$(rbtok 'event_lag{job="x"}' event_lag)"
+check "rbtok: range selector with [ is a citation" yes "$(rbtok 'event_lag[5m]' event_lag)"
 check "rbtok: function arg rate(x[5m]) is a citation" yes "$(rbtok 'rate(event_lag[5m])' event_lag)"
+check "rbtok: prose (event_drain) IS a citation (operator must name a real thing)" yes "$(rbtok 'the drain (event_drain) is slow' event_drain)"
 check "rbtok: bare name inside a promql fence is a citation" yes "$(rbtok $'```promql\nevent_lag\n```' event_lag)"
-check "rbtok: same bare name in an untagged fence is NOT" no "$(rbtok $'```\nevent_lag\n```' event_lag)"
+check "rbtok: bare name in an untagged fence IS a citation" yes "$(rbtok $'```\nevent_lag\n```' event_lag)"
+check "rbtok: longer identifier containing the token is NOT an occurrence (prefix side)" no "$(rbtok 'xevent_lag and "event_lag_x": 1' event_lag)"
+check "rbtok: longer identifier containing the token is NOT an occurrence (suffix side)" no "$(rbtok 'event_lagx event_lag_x' event_lag)"
+check "rbtok: ANY citing occurrence wins over a JSON-key occurrence" yes "$(rbtok $'{"event_broker": "ok"}\nalso event_broker' event_broker)"
+check "rbtok: two keys on one line, token only as key -> NOT a citation" no "$(rbtok '{"event_drain": 1, "event_broker": 2}' event_broker)"
+check "rbtok: closing quote without opening quote is NOT a key (IS a citation)" yes "$(rbtok 'event_broker": ok' event_broker)"
+check "rbtok: opening quote without closing quote is NOT a key (IS a citation)" yes "$(rbtok '"event_broker: ok' event_broker)"
+check "rbtok: json fence state resets at the closing fence (later quoted value IS a citation)" yes "$(rbtok $'```json\n{"a": 1}\n```\nset "event_broker" now' event_broker)"
+check "rbtok: later occurrence on the SAME line as a key occurrence is still examined" yes "$(rbtok '{"event_broker": 1} then event_broker' event_broker)"
+check "rbtok: json fence, opening quote only (malformed) IS a citation" yes "$(rbtok $'```json\n"event_broker: x\n```' event_broker)"
+check "rbtok: absent token is NOT a citation" no "$(rbtok 'nothing here' event_broker)"
 check_has "wiring: citations loop skips non-metric-shaped undeclared tokens" "1" "$(grep -c '|| runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue' "$PROBE")"
-check "NEG rbtok: prose after a closed promql fence is NOT a citation" no "$(rbtok $'```promql\nup\n```\nevent_lag' event_lag)"
 
 # --- the probe really consumes these functions (wiring, not just definitions) --
 check_has "wiring: invariants-ratified registry branch calls registry_run" "1" "$(grep -c '^  registry_run$' "$PROBE")"

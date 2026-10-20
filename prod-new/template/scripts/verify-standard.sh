@@ -2051,26 +2051,37 @@ extract_real_lanes() {   # extract_real_lanes [dir]
         }
       }' | sort -u
 }
-# A RUNBOOK token that shares a declared series prefix is a METRIC CITATION only
-# if it is metric-shaped. Measured on perps: /outboxz health-check JSON keys
-# (`event_broker`, `event_drain`, `snapshot_stream`) share the `event_`/`snapshot_`
-# prefixes of declared series and were reported as non-existent series, and the
-# repo deleted operator-facing keys from its runbook to pass. Rule (documented,
-# deliberately narrow): a token that is NOT itself declared counts as a citation
-# iff (1) it ends in a Prometheus suffix (_total _seconds _bytes _count _sum
-# _bucket _ratio _state _info), or (2) it is used as a selector/function arg in
-# PromQL: directly followed by `{` or `[`, or directly preceded by `(`, or it sits
-# inside a ```promql fenced block. Exact declared names are checked by the caller
-# before this is consulted. An undeclared real-looking name still FAILS.
+# A RUNBOOK token that shares a declared series prefix is a METRIC CITATION unless
+# the occurrence is a JSON object key. Measured on perps: /outboxz health-check JSON
+# keys (`event_broker`, `event_drain`, `snapshot_stream`) share the `event_`/`snapshot_`
+# prefixes of declared series and were reported as non-existent series, and the repo
+# deleted operator-facing keys from its runbook to pass. Rule (a DENY-list, evaluated
+# PER OCCURRENCE; a first allow-list of metric suffixes / PromQL shapes let real
+# undeclared citations pass silently -- prose, bash/yaml fences, recording rules,
+# `_ms`/`_created`/`_percent` -- and its `(` rule was file-global): an occurrence is
+# NOT a citation only when it is (a) a quoted JSON key `"tok":` (optional spaces
+# before the colon) anywhere, or (b) a quoted string `"tok"` inside a ```json fence.
+# Every other occurrence is a citation, and the token is cited if ANY occurrence is.
+# Exact declared names are checked by the caller before this is consulted.
 runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook>
-  local t="$1" f="$2"
-  case "$t" in
-    *_total|*_seconds|*_bytes|*_count|*_sum|*_bucket|*_ratio|*_state|*_info) return 0 ;;
-  esac
-  if grep -qE -- "(^|[^a-zA-Z0-9_])${t}[{[]|[(]${t}([^a-zA-Z0-9_]|\$)" "$f"; then return 0; fi
-  awk -v t="$t" '/^[[:space:]]*```/ { if (inb) inb=0; else if ($0 ~ /```[[:space:]]*promql/) inb=1; next }
-    inb { n=split($0, a, /[^a-zA-Z0-9_]+/); for (i=1;i<=n;i++) if (a[i]==t) { found=1; exit } }
-    END { exit found?0:1 }' "$f"
+  awk -v t="$1" '
+    /^[[:space:]]*```/ { if (fence != "") fence = ""; else { fence = $0; sub(/^[[:space:]]*```[[:space:]]*/, "", fence); fence = (fence == "" ? "-" : tolower(fence)) } next }
+    {
+      line = $0; off = 0; L = length(t)
+      while ((p = index(line, t)) > 0) {
+        before = (off + p > 1) ? substr($0, off + p - 1, 1) : ""
+        rest = substr(line, p + L)
+        after = substr(rest, 1, 1)
+        if (before !~ /[a-zA-Z0-9_]/ && after !~ /[a-zA-Z0-9_]/) {
+          quoted = (before == "\"" && after == "\"")
+          key = quoted && (rest ~ /^"[[:space:]]*:/)
+          jsonstr = quoted && (fence ~ /^json/)
+          if (!key && !jsonstr) { found = 1; exit }
+        }
+        off += p + L - 1; line = rest
+      }
+    }
+    END { exit found ? 0 : 1 }' "$2"
 }
 # lane_tagonly_stats <lane> <go test -v output> <pkgs...>
 # A lane is a build tag; its package ALSO holds untagged tests that run with or without it, so
@@ -4755,7 +4766,7 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
       # commands. A gate that invents a citation and then reports it unresolved
       # sends someone to fix a document that was correct.
       [[ "$m" == *_ ]] && continue
-      # Not declared and not metric-shaped (a health-check JSON key, prose): not a citation.
+      # Not declared and every occurrence is a JSON object key (health-check name): not a citation.
       [[ " ${declared_series[*]-} " == *" $m "* ]] || runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue
       cited=$((cited+1))
       # NOT `printf ... | grep -qx "$m"`. Under this file's `set -o pipefail` that
