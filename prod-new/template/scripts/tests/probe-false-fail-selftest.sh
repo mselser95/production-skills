@@ -55,9 +55,10 @@ lift grepx.sh    '/^grep_x() {/,/^}/p' 'stripped'
 lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
 lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
 lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
+lift lanetag.sh  '/^lane_tagonly_stats() {/,/^}/p' 'comm -23'
 # shellcheck disable=SC2034  # read by the lifted imports_pkg
 PROBE_GREP_EXCLUDES=(--exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor)
-for f in classify grepx imports stamp codelines tracer reg; do
+for f in classify grepx imports stamp codelines tracer lanetag reg; do
   # shellcheck disable=SC1090  # lifted from the probe at runtime
   . "$TMP/$f.sh"
 done
@@ -255,6 +256,24 @@ d="$TMP/tr-neg-comment"; mkgo "$d/cmd/app" 'package main
 func main() {}' main.go
 check "NEG tracer: a comment mentioning WithTracer does NOT count" 0 "$(tsites "$d")"
 check_has "wiring: tracing row counts via tracer_call_sites" "1" "$(grep -c '^tracer_sites=\$(tracer_call_sites' "$PROBE")"
+
+# ===== integration-real-lane: a lane whose TAG-ONLY tests all skip is not green ======
+# derived-from: none (candidate; TTL 2027-01-20) -- perps replaygen lane measured PASS with 16 skipped generators
+lane_fix() {   # lane_fix <dir> <tagged-test-body>   (module with one untagged passing test)
+  mkdir -p "$1"; printf 'module lanefix\n\ngo 1.21\n' > "$1/go.mod"
+  printf 'package p\nimport "testing"\nfunc TestUntagged(t *testing.T) {}\n' > "$1/a_test.go"
+  printf '//go:build lane\n\npackage p\nimport "testing"\nfunc TestTagged(t *testing.T) {\n%s\n}\n' "$2" > "$1/b_test.go"
+}
+lane_stats() { ( cd "$1" && o=$(go test -v -tags=lane . -count=1 2>&1); lane_tagonly_stats lane "$o" . ); }
+lane_fix "$TMP/ln-skip" '	t.Skip("REPLAYGEN_OUT not set")'
+check "lane: tag-only test skips -> total 1 ran 0 skipped 1, skip message kept" "1 0 1 0	b_test.go:6: REPLAYGEN_OUT not set" "$(lane_stats "$TMP/ln-skip")"
+lane_fix "$TMP/ln-pass" '	_ = 1'
+check "lane: tag-only test passes -> ran 1" "1 1 0 0	" "$(lane_stats "$TMP/ln-pass")"
+lane_fix "$TMP/ln-fail" '	t.Fatal("boom")'
+check "lane: tag-only test fails -> failed 1" "1 1 0 1	" "$(lane_stats "$TMP/ln-fail")"
+check_has "wiring: lane run is -v and all-skipped lane lands in rl_na" "1" "$(grep -c 'rl_na+=' "$PROBE")"
+check_has "wiring: lane run uses -v (the stats parse its --- SKIP lines)" "1" "$(grep -c 'rl_out=$(go test -v -tags="$rt"' "$PROBE")"
+check_has "wiring: all-skipped lane row is NA" "1" "$(grep -c 'row "integration-real-lane" NA' "$PROBE")"
 
 # --- the probe really consumes these functions (wiring, not just definitions) --
 check_has "wiring: invariants-ratified registry branch calls registry_run" "1" "$(grep -c '^  registry_run$' "$PROBE")"
