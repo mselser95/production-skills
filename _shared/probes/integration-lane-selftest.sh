@@ -29,7 +29,8 @@ bad() { echo "integration-lane-selftest: FAIL -- $*" >&2; fails=$((fails+1)); }
 
 # --- lift the programs ------------------------------------------------------
 fn_src() { sed -n "/^$1() {/,/^}/p" "$probe"; }
-{ fn_src extract_real_tag; fn_src extract_real_tags; fn_src extract_real_lanes; fn_src go_fail_evidence; } >"$tmp/fns.sh"
+{ fn_src extract_real_tag; fn_src extract_real_tags; fn_src extract_real_lanes; fn_src go_fail_evidence; fn_src lane_tagonly_stats; fn_src lane_verdict; sed -n '/^count_distinct_lines() {.*}$/p' "$probe"; } >"$tmp/fns.sh"
+for f in lane_tagonly_stats lane_verdict count_distinct_lines; do grep -q "^$f() {" "$tmp/fns.sh" || { echo "integration-lane-selftest: FAIL -- $f not lifted" >&2; exit 1; }; done
 grep -q '^extract_real_tag()' "$tmp/fns.sh" || { echo "integration-lane-selftest: FAIL -- extract_real_tag not found" >&2; exit 1; }
 sed -n '/^if \[\[ -n "\${real_tags\{0,1\}:-}" \]\]; then$/,/^fi$/p' "$probe" >"$tmp/ci.sh"
 sed -n '/^if \[\[ -n "\$real_tags\{0,1\}" \]\]; then$/,/^else row "integration-real-lane" FAIL/p' "$probe" >"$tmp/lane.sh"
@@ -84,7 +85,12 @@ cat > "$tmp/bin/go" <<'EOS'
 #!/bin/sh
 echo "go $*" >> "$STUB_LOG"
 [ -n "${STUB_NOTEST:-}" ] && { echo "?   	pkg	[no test files]"; exit 0; }
+# `-list` (lane_tagonly_stats): the tagged listing has ONE tag-only test, the untagged listing none.
+case " $* " in *" -list "*)
+  case " $* " in *" -tags="*) echo "TestTagOnly";; esac; echo "ok  	stubpkg	0.001s"; exit 0;; esac
 for a in "$@"; do case "$a" in -tags=*) echo "tags ${a#-tags=}" >> "$STUB_LOG"; [ "${a#-tags=}" = "${RED_TAG:-}" ] && { echo "--- FAIL: TestX"; exit 1; };; esac; done
+# a green lane run: the tag-only test ran and passed (so the verdict is PASS, not NA)
+echo "--- PASS: TestTagOnly (0.00s)"; echo "ok  	stubpkg	0.001s"
 exit 0
 EOS
 chmod +x "$tmp/bin/go"

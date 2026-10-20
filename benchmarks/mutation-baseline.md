@@ -45,4 +45,4 @@ here would be a threshold nobody derived.
 | `probe-self-gate-selftest.sh` | 29 |
 | `template-workflow-pins-selftest.sh` | 565 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1542** |
+| **total** | **1588** |
