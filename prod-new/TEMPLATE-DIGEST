@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: c712fc88b465eed48623c5f163221427c078a18253fd6859b33e1834266728e9
-short: c712fc88b465
+digest: 34e97cfec36c54808df1b17e31dd8b8f9dd4b085c386dca0b4ff50788d1217cb
+short: 34e97cfec36c
 files: 37
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -47,4 +47,4 @@ per_file:
   scripts/tests/retry-selftest.sh: be8d6ca86f42d4753d2421fe0518da79b69fb5474721fc62a806a7d0a24315a6
   scripts/tests/sbom-ordering-selftest.sh: 9ca6a2eff6c60a007525d0d9ec5a691fa8b5c9cdacfbb2d9afef4387494e8af3
   scripts/tests/single-suite-run-selftest.sh: f3628dcf7564605ac5a413a46e8f3fb77945dc5a869bec32380a6a92d0877a6a
-  scripts/verify-standard.sh: f5a1ff3fcc7910b8a1702ef5506aba1633b3be47463a6cd476460ac8e4fb3fac
+  scripts/verify-standard.sh: d00093d33a738db09e510a56adb0220dea8d3db6e92dbef4102486b596f14eb5

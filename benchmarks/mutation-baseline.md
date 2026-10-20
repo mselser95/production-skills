@@ -31,7 +31,7 @@ here would be a threshold nobody derived.
 | `observability-provenance-selftest.sh` | 10 |
 | `policy-coverage-selftest.sh` | 7 |
 | `probe-excludes-selftest.sh` | 6 |
-| `probe-false-fail-selftest.sh` | 41 |
+| `probe-false-fail-selftest.sh` | 50 |
 | `probe-wiring-selftest.sh` | 13 |
 | `prove-mutation-selftest.sh` | 18 |
 | `sbom-ordering-selftest.sh` | 10 |

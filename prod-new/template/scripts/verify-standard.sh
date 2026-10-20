@@ -3185,10 +3185,21 @@ inbound_route_sites() {
 # matches `(obs.Tracer, obs.Meter)` / `, tracer, x`. It needs a `(` or `,` right
 # before the identifier so `tracer, err := newTracer()` (a declaration that may be
 # discarded) is NOT a call site.
-tracer_sites=$(grep -rn --include='*.go' --exclude='*_test.go' \
-  "SetTracer(\|WithTracer(\|Tracer:\|Interceptor(.*[Tt]racer\|[Tt]racer)\|[(,][[:space:]]*[A-Za-z0-9_.]*[Tt]racer," cmd/ 2>/dev/null \
-  | code_lines_only | grep -vE '^[^:]+:[0-9]+:[[:space:]]*func[[:space:]]' \
-  | wc -l | tr -d ' ')
+# tracer_call_sites: the cmd/ lines where a tracer is PASSED or ASSIGNED. Match is
+# case-INsensitive and plural-tolerant (and TracerProvider-tolerant) because real
+# pass-throughs are idiomatic in all of those spellings: an unexported option
+# `withTracers(deps.Tel.Tracers)`, a field `Tracers: tracers`, `TracerProvider: tp`,
+# `tracers)` as an argument. The old case/plural-sensitive regex made a perps
+# implementer rename an option to the exported `WithTracer` just to satisfy it.
+# Still NOT a call site (so a decorative tracer still FAILs): `tp := NewTracerProvider()`
+# + `_ = tp`, `tracer := x` (`:=` is excluded from the field alternative), a
+# `func` declaration, and any commented-out line.
+tracer_call_sites() {
+  grep -rniE --include='*.go' --exclude='*_test.go' \
+    '(set|with)tracers?(provider)?\(|tracers?(provider)?:([^=]|$)|interceptor\(.*tracer|tracers?(provider)?\)|[(,][[:space:]]*[A-Za-z0-9_.]*tracers?(provider)?,' cmd/ 2>/dev/null \
+    | code_lines_only | grep -vE '^[^:]+:[0-9]+:[[:space:]]*func[[:space:]]'
+}
+tracer_sites=$(tracer_call_sites | wc -l | tr -d ' ')
 
 # THE SECOND WIRING SHAPE: a process-wide TracerProvider instead of a threaded
 # tracer.

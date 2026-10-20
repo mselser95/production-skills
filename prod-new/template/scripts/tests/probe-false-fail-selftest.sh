@@ -53,9 +53,11 @@ lift classify.sh '/^classify_mutation_result() {/,/^}/p' 'DETECTED'
 lift imports.sh  '/^imports_pkg() {/,/^}/p' 'grep -rqE'
 lift grepx.sh    '/^grep_x() {/,/^}/p' 'stripped'
 lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
+lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
+lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
 # shellcheck disable=SC2034  # read by the lifted imports_pkg
 PROBE_GREP_EXCLUDES=(--exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor)
-for f in classify grepx imports stamp reg; do
+for f in classify grepx imports stamp codelines tracer reg; do
   # shellcheck disable=SC1090  # lifted from the probe at runtime
   . "$TMP/$f.sh"
 done
@@ -207,6 +209,52 @@ check "registry: db-lane row without DATABASE_URL is COUNTED as not run" "rows=1
 check "registry: db-lane row is COUNTED as not mutation-proven" "proven=0/0 dbskip=1 bad=[]" \
   "$(reg "$FX" "I01${T}./pkg/a${T}TestAdd${T}-${T}I01.patch${T}db\n" summ_prove)"
 check "registry: prove after the negatives still leaves the tree clean" "" "$(cd "$FX" && git status --porcelain --untracked-files=no)"
+
+# ============================ 4. tracing-wired-in-prod call sites ============
+# provenance: candidate (pinning: true) -- ttl 2027-01-20
+tsites() { ( cd "$1" && tracer_call_sites | wc -l | tr -d ' ' ); }
+d="$TMP/tr-with"; mkgo "$d/cmd/app" 'package main
+func main() {
+	app := build(withTracers(deps.Tel.Tracers)); _ = app
+}' main.go
+check "tracer: unexported plural option withTracers(x) counts" 1 "$(tsites "$d")"
+d="$TMP/tr-field"; mkgo "$d/cmd/app" 'package main
+func main() { c := Config{
+	Tracers: tracers,
+}; _ = c }' main.go
+check "tracer: struct field Tracers: x counts" 1 "$(tsites "$d")"
+d="$TMP/tr-tp"; mkgo "$d/cmd/app" 'package main
+func main() {
+	c := Config{TracerProvider: tp}; _ = c
+}' main.go
+check "tracer: TracerProvider: x counts" 1 "$(tsites "$d")"
+d="$TMP/tr-arg"; mkgo "$d/cmd/app" 'package main
+func main() {
+	run(ctx, cfg, tracers)
+}' main.go
+check "tracer: tracers) as last argument counts" 1 "$(tsites "$d")"
+d="$TMP/tr-old"; mkgo "$d/cmd/app" 'package main
+func main() {
+	l.SetTracer(adapt(t)); x := New(WithTracer(t)); _ = x
+}' main.go
+check "tracer: classic SetTracer( / WithTracer( still count" 1 "$(tsites "$d")"
+d="$TMP/tr-neg-decor"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tp := sdktrace.NewTracerProvider(); _ = tp
+}' main.go
+check "NEG tracer: constructed-and-discarded NewTracerProvider does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-decl"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tracer := newTracer()
+	_ = tracer
+}
+func withTracers(t Tracers) Option { return nil }' main.go
+check "NEG tracer: := declaration, _ = discard and func decl do NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-comment"; mkgo "$d/cmd/app" 'package main
+// wire it with WithTracer(t) and Tracers: x
+func main() {}' main.go
+check "NEG tracer: a comment mentioning WithTracer does NOT count" 0 "$(tsites "$d")"
+check_has "wiring: tracing row counts via tracer_call_sites" "1" "$(grep -c '^tracer_sites=\$(tracer_call_sites' "$PROBE")"
 
 # --- the probe really consumes these functions (wiring, not just definitions) --
 check_has "wiring: invariants-ratified registry branch calls registry_run" "1" "$(grep -c '^  registry_run$' "$PROBE")"
