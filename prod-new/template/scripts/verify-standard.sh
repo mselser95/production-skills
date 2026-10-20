@@ -1545,7 +1545,7 @@ fi
 # Registry mode applies only when verification/ratified/ holds no *_test.go.
 REG_TSV="${RATIFY_REGISTRY:-verification/ratified/invariants.tsv}"
 REG_ROWS=0; REG_IDS=""; REG_BAD=""; REG_RAN=0; REG_PASS=0; REG_DB_SKIPPED=0
-REG_PROVEN=0; REG_PROVE_TOTAL=0; REG_PROVE_SKIPPED=0; REG_ARMED=""
+REG_ID_COUNT=0; REG_PROVEN=0; REG_PROVE_TOTAL=0; REG_PROVE_SKIPPED=0; REG_ARMED=""
 registry_present() { [[ -f "$REG_TSV" ]]; }
 registry_rows() {   # US-separated so empty fields survive `read`
   awk -F'\t' -v OFS='\037' '/^[[:space:]]*#/ || $1 == "" {next}
@@ -1571,6 +1571,9 @@ registry_cite() {   # existence of every cited test and named patch
     fi
   done < <(registry_rows)
   REG_IDS=$(printf '%s' "$REG_IDS" | sed '/^$/d' | sort -u)
+  # `printf '%s\n'`: without the trailing newline `wc -l` undercounts the last id
+  # (14 ids read as 13 -- measured on falcon-xyz-perps-service).
+  REG_ID_COUNT=$(printf '%s\n' "$REG_IDS" | sed '/^$/d' | wc -l | tr -d ' ')
 }
 registry_run() {   # every runnable row must run and PASS
   REG_ROWS=0; REG_BAD=""; REG_RAN=0; REG_PASS=0; REG_DB_SKIPPED=0
@@ -4836,9 +4839,12 @@ if ! ls verification/ratified/*_test.go >/dev/null 2>&1 && registry_present; the
   registry_cite
   inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null | head -1)
   inv=${inv:-0}
-  pkgs=$(printf '%s' "$REG_IDS" | sed '/^$/d' | wc -l | tr -d ' ')
+  pkgs=$REG_ID_COUNT
   reg_spec_ids=$(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null \
     | grep -oE '^[[:space:]]*-[[:space:]]+id:[[:space:]]*["'"'"']?[A-Za-z0-9_.-]+' | sed -E "s/.*id:[[:space:]]*[\"']?//")
+  # When the spec's ids could be read, THEY are the invariant count: the dash-line
+  # count above also counts sub-lists nested inside an entry.
+  if [[ -n "$reg_spec_ids" ]]; then inv=$(printf '%s\n' "$reg_spec_ids" | wc -l | tr -d ' '); fi
   reg_unbacked=""
   for _rid in $reg_spec_ids; do
     grep -qxF -- "$_rid" <<<"$REG_IDS" || reg_unbacked+=" $_rid"

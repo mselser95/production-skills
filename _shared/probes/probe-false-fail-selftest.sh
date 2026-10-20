@@ -170,6 +170,7 @@ reg() {   # reg <dir> <tsv-body> <fn...> -> runs fns inside dir, prints a summar
     "$@" )
 }
 summ_cite()  { registry_cite;  printf 'rows=%s bad=[%s]' "$REG_ROWS" "${REG_BAD# }"; }
+summ_ids()   { registry_cite;  printf 'ids=%s' "$REG_ID_COUNT"; }
 summ_run()   { registry_run;   printf 'rows=%s ran=%s pass=%s dbskip=%s bad=[%s]' "$REG_ROWS" "$REG_RAN" "$REG_PASS" "$REG_DB_SKIPPED" "${REG_BAD# }"; }
 summ_prove() { registry_prove; printf 'proven=%s/%s dbskip=%s bad=[%s]' "$REG_PROVEN" "$REG_PROVE_TOTAL" "$REG_PROVE_SKIPPED" "${REG_BAD# }"; }
 
@@ -198,6 +199,9 @@ check_has "NEG registry: patch file that does not exist FAILS (cite)" "patch-mis
 check_has "NEG registry: unknown lane (typo) FAILS" "unknown-lane" \
   "$(reg "$FX" "I01${T}./pkg/a${T}TestAdd${T}-${T}I01.patch${T}DB\n" summ_run)"
 check "NEG registry: empty registry has zero rows (the row FAILS on this)" "rows=0 bad=[]" "$(reg "$FX" "" summ_cite)"
+check "registry: distinct-id count is exact (2 ids over 3 rows -> 2, not 1)" "ids=2" \
+  "$(reg "$FX" "I01${T}./pkg/a${T}TestAdd${T}-${T}I01.patch\nI01${T}./pkg/a${T}TestVacuous${T}-${T}I01.patch\nI02${T}./pkg/a${T}TestAdd${T}-${T}I01.patch\n" summ_ids)"
+check "registry: id count of an empty registry is 0" "ids=0" "$(reg "$FX" "" summ_ids)"
 check "registry: db-lane row without DATABASE_URL is COUNTED as not run" "rows=1 ran=0 pass=0 dbskip=1 bad=[]" \
   "$(reg "$FX" "I01${T}./pkg/a${T}TestAdd${T}-${T}I01.patch${T}db\n" summ_run)"
 check "registry: db-lane row is COUNTED as not mutation-proven" "proven=0/0 dbskip=1 bad=[]" \
