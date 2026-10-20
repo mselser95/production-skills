@@ -725,6 +725,12 @@ if [[ -n "$uout" ]]; then
   rc=1
 fi
 sum="$(grep '^SUMMARY ' <<<"$out" | head -n 1)"
+# The awk pass counts its own findings; fold the R5 ones in so the summary never says findings=0 beside a FAIL.
+if [[ -n "$uout" && -n "$sum" ]]; then
+  n_r5="$(grep -c . <<<"$uout")"
+  n_awk="${sum##*findings=}"
+  sum="${sum%findings=*}findings=$((n_awk + n_r5))"
+fi
 grep -v '^SUMMARY ' <<<"$out" >&2
 if [[ -z "$sum" ]]; then
   echo "template-workflow-pins: INTERNAL ERROR -- no summary produced (rc=$rc); refusing to report clean" >&2

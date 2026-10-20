@@ -1211,6 +1211,14 @@ for c in uses-tag uses-branch uses-short uses-nover; do
   o="$(bash "$GATE" "$T/$c" 2>&1)"; rc=$?
   [[ $rc == 1 ]] && grep -qF "w.yaml:5: third-party action not pinned" <<<"$o"; check "$c: tag/branch/short/no-ref third-party action fails rc=1 naming w.yaml:5" $?
 done
+# the summary count includes R5 findings (was findings=0 beside a FAIL)
+r5_count_case() {
+  local o
+  o="$(bash "$GATE" "$T/uses-tag" 2>&1)"
+  grep -qF "findings=1" <<<"$o"; check "uses-tag: summary counts the R5 finding (findings=1)" $?
+  grep -qF "findings=0" <<<"$o"; [[ $? == 1 ]]; check "uses-tag: summary does not say findings=0 beside a FAIL" $?
+}
+r5_count_case
 for c in uses-sha uses-local; do
   bash "$GATE" "$T/$c" >/dev/null 2>&1; check "$c: SHA-pinned (or local) action passes, first-party actions/checkout@v4 tolerated" $?
 done

@@ -55,13 +55,14 @@ lift grepx.sh    '/^grep_x() {/,/^}/p' 'stripped'
 lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
 lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
 lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
+lift lockregen.sh '/^lockfile_makefile_regen() {/,/^}/p' 'queue'
 lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'defined'
 lift lanetag.sh  '/^lane_tagonly_stats() {/,/^}/p' 'comm -23'
 lift laneverdict.sh '/^lane_verdict() {/,/^}/p' 'no tag-only tests'
 lift lanerow.sh  '/^lane_row_verdict() {/,/^}/p' 'gating env'
 # shellcheck disable=SC2034  # read by the lifted imports_pkg
 PROBE_GREP_EXCLUDES=(--exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor)
-for f in classify grepx imports stamp codelines tracer lanetag laneverdict lanerow rbtok reg; do
+for f in classify grepx imports stamp codelines tracer lanetag laneverdict lanerow lockregen rbtok reg; do
   # shellcheck disable=SC1090  # lifted from the probe at runtime
   . "$TMP/$f.sh"
 done
@@ -574,6 +575,37 @@ check "rbtok: closing quote without opening quote is NOT a key (IS a citation)" 
 check "rbtok: opening quote without closing quote is NOT a key (IS a citation)" yes "$(rbtok '"event_broker: ok' event_broker)"
 check "rbtok: absent token is NOT a citation" no "$(rbtok 'nothing here' event_broker)"
 check "wiring: citations loop skips non-metric-shaped undeclared tokens" 1 "$(grep -c '|| runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue' "$PROBE")"
+
+# ===== dependency-lockfile: `go mod tidy` only counts where the build/CI can reach it ==
+# provenance: candidate; ttl: 2027-01-20; pinning: true -- perps Makefile:64 developer-only `tidy:` target FAILed the row
+lrd="$TMP/lr"; mkdir -p "$lrd"
+lrg() {   # lrg <makefile-body> [workflow-run-line] -> number of reachable regen lines
+  rm -rf "$lrd/fx"; mkdir -p "$lrd/fx/.github/workflows"
+  printf '%b' "$1" > "$lrd/fx/Makefile"
+  [ -n "${2:-}" ] && printf 'jobs:\n  j:\n    steps:\n      - run: %s\n' "$2" > "$lrd/fx/.github/workflows/ci.yaml"
+  ( cd "$lrd/fx" && lockfile_makefile_regen '(go mod tidy|npm install)' | grep -c . )
+}
+check "lockregen: standalone developer tidy target is NOT reachable" 0 "$(lrg 'build:\n\tgo build ./...\n\ntidy:\n\t@go mod tidy\n')"
+check "lockregen: build: tidy prerequisite IS reachable" 1 "$(lrg 'build: tidy\n\tgo build ./...\n\ntidy:\n\t@go mod tidy\n')"
+check "lockregen: check-fast recipe calling \$(MAKE) tidy IS reachable" 1 "$(lrg 'check-fast:\n\t$(MAKE) tidy\n\ntidy:\n\tgo mod tidy\n')"
+check "lockregen: transitive prerequisite chain IS reachable" 1 "$(lrg 'test: gen\n\tgo test ./...\ngen: tidy\n\ttrue\ntidy:\n\tgo mod tidy\n')"
+check "lockregen: target a workflow runs via make IS reachable" 1 "$(lrg 'build:\n\ttrue\n\nrelease-prep:\n\tgo mod tidy\n' 'make release-prep')"
+check "lockregen: target no workflow runs and nothing depends on is NOT reachable" 0 "$(lrg 'build:\n\ttrue\n\nrelease-prep:\n\tgo mod tidy\n' 'make build')"
+check "lockregen: commented tidy call is ignored" 0 "$(lrg 'build: tidy\n\ttrue\ntidy:\n\t# go mod tidy\n')"
+# end-to-end through the real row (lifted block, `row` stubbed to print "STATUS|detail")
+lift lockrow.sh '/^_lock_files=""$/,/^# --- chaos engineering/p' 'dependency-lockfile'
+sed -i.bak '$d' "$TMP/lockrow.sh" && rm -f "$TMP/lockrow.sh.bak"
+lrrow() {   # lrrow <makefile-body> [workflow-run-line] -> "STATUS|detail"
+  rm -rf "$lrd/e2e"; mkdir -p "$lrd/e2e/.github/workflows"
+  printf 'module x\n\ngo 1.22\n' > "$lrd/e2e/go.mod"; : > "$lrd/e2e/go.sum"; printf '%b' "$1" > "$lrd/e2e/Makefile"
+  [ -n "${2:-}" ] && printf 'jobs:\n  j:\n    steps:\n      - run: %s\n' "$2" > "$lrd/e2e/.github/workflows/ci.yaml"
+  ( cd "$lrd/e2e" && row() { printf '%s|%s' "$2" "$3"; }; . "$TMP/lockrow.sh" )
+}
+check "lockrow: developer-only tidy target -> PASS" PASS "$(lrrow 'build:\n\tgo build ./...\n\ntidy:\n\t@go mod tidy\n' | cut -d'|' -f1)"
+check_has "lockrow: developer-only PASS carries the developer-only note" "developer-only" "$(lrrow 'build:\n\tgo build ./...\n\ntidy:\n\t@go mod tidy\n')"
+check "lockrow: build: tidy -> FAIL" FAIL "$(lrrow 'build: tidy\n\tgo build ./...\n\ntidy:\n\t@go mod tidy\n' | cut -d'|' -f1)"
+check "lockrow: check-fast calls \$(MAKE) tidy -> FAIL" FAIL "$(lrrow 'check-fast:\n\t$(MAKE) tidy\n\ntidy:\n\tgo mod tidy\n' | cut -d'|' -f1)"
+check "lockrow: workflow run: go mod tidy -> FAIL" FAIL "$(lrrow 'build:\n\tgo build ./...\n' 'go mod tidy' | cut -d'|' -f1)"
 
 # --- the probe really consumes these functions (wiring, not just definitions) --
 check "wiring: invariants-ratified registry branch calls registry_run" 1 "$(grep -c '^  registry_run$' "$PROBE")"

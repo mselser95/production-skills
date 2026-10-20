@@ -3884,6 +3884,69 @@ if [[ -x "$(gobin)/govulncheck" ]] || have govulncheck; then
 else row "vuln-scan" FAIL "govulncheck not installed — gate unproven"; fi
 fi   # @shard-end
 
+# lockfile_makefile_regen <regen-ere>: print "N: line" for each Makefile recipe
+# line matching <regen-ere> (outside comments) whose target is REACHABLE.
+# Roots: the first non-dot target (make's default), targets named
+# all/default/build/test/check/ci/verify/lint/release/install (plus -suffixed
+# variants such as check-fast), and any target a workflow passes to `make`.
+# Edges: prerequisites, and `$(MAKE) X` / `make X` inside a recipe. Transitive.
+# Simple on purpose: no variable expansion, no include, no line continuations.
+lockfile_makefile_regen() {
+  [[ -f Makefile ]] || return 0
+  local _wf=() _f
+  for _f in .github/workflows/*.y*ml; do [[ -f "$_f" ]] && _wf+=("$_f"); done
+  awk -v pat="$1" '
+    function addroot(t) { if (t != "" && !(t in root)) { root[t] = 1 } }
+    function tok_targets(rest, from,   n, i, a) {
+      sub(/[;&|].*$/, "", rest); n = split(rest, a, /[ \t]+/)
+      for (i = 1; i <= n; i++) if (a[i] != "" && a[i] !~ /^-/ && a[i] !~ /[=$]/) edge(from, a[i])
+    }
+    function edge(f, t) { adj[f] = adj[f] " " t }
+    function scan_make(line, from,   rest) {
+      rest = line
+      while (match(rest, /(\$\(MAKE\)|\$\{MAKE\}|(^|[ \t;&|])make)[ \t]+/)) {
+        rest = substr(rest, RSTART + RLENGTH)
+        if (from == "") { tmp = rest; sub(/[;&|].*$/, "", tmp); n2 = split(tmp, b, /[ \t]+/); for (j = 1; j <= n2; j++) if (b[j] != "" && b[j] !~ /^-/ && b[j] !~ /[=$]/) addroot(b[j]) }
+        else tok_targets(rest, from)
+      }
+    }
+    FILENAME != "Makefile" { l = $0; sub(/#.*/, "", l); scan_make(l, ""); next }
+    /^\t/ {
+      l = $0; sub(/#.*/, "", l)
+      if (cur == "") next
+      scan_make(l, cur)
+      if (l ~ pat) { nrec++; recn[nrec] = FNR; rect[nrec] = $0; recg[nrec] = cur }
+      next
+    }
+    /^[A-Za-z0-9_.\/%][^\t:=]*:([^=]|$)/ {
+      l = $0; sub(/#.*/, "", l); i = index(l, ":"); names = substr(l, 1, i - 1); rest = substr(l, i + 1)
+      sub(/^:/, "", rest)
+      inl = ""; j = index(rest, ";"); if (j) { inl = substr(rest, j + 1); rest = substr(rest, 1, j - 1) }
+      sub(/\|.*$/, "", rest)
+      n = split(names, nm, /[ \t]+/); cur = ""
+      for (k = 1; k <= n; k++) {
+        if (nm[k] == "" ) continue
+        if (cur == "") cur = nm[k]
+        if (nm[k] ~ /^\./) continue
+        if (first == "") first = nm[k]
+        m = split(rest, pr, /[ \t]+/)
+        for (q = 1; q <= m; q++) if (pr[q] != "" && pr[q] !~ /[$%]/) edge(nm[k], pr[q])
+      }
+      if (cur ~ /^\./) cur = ""
+      if (inl != "" && cur != "") { scan_make(inl, cur); if (inl ~ pat) { nrec++; recn[nrec] = FNR; rect[nrec] = $0; recg[nrec] = cur } }
+      next
+    }
+    /^[^\t#]/ { cur = "" }
+    END {
+      addroot(first)
+      for (t in adj) if (t ~ /^(all|default|build|test|check|ci|verify|lint|release|install)([-_].*)?$/) addroot(t)
+      for (r in root) { if (!(r in seen)) { seen[r] = 1; queue[++qn] = r } }
+      for (qi = 1; qi <= qn; qi++) { n = split(adj[queue[qi]], a, " "); for (i = 1; i <= n; i++) if (!(a[i] in seen)) { seen[a[i]] = 1; queue[++qn] = a[i] } }
+      for (x = 1; x <= nrec; x++) if (recg[x] in seen) printf "%d:%s\n", recn[x], rect[x]
+    }
+  ' "${_wf[@]}" Makefile 2>/dev/null
+}
+
 # --- dependency lockfile: committed AND not regenerated in CI ---------------
 #
 # tier-policy: `dependency_currency.lockfile: committed_and_ci_enforced`, whose
@@ -3922,9 +3985,18 @@ else
   # Regeneration in CI, in command position. `grep -v '#'` first so a comment
   # explaining why the repo does NOT run `go mod tidy` is not read as running
   # it -- the comment-as-code defect three rows were fixed for on 2026-08-29.
-  _regen=$(grep -rhnE '^[^#]*(go mod tidy|go get -u|npm install|yarn install|pnpm install|bundle update|cargo update|poetry update)' \
-             .github/workflows/*.y*ml Makefile 2>/dev/null \
+  # Workflows: any executable occurrence counts (CI itself ran it). Makefile:
+  # only a recipe REACHABLE from what CI or the default build path runs counts
+  # (see lockfile_makefile_regen); a standalone developer `tidy:` target that
+  # nothing depends on is not the build rewriting the lockfile.
+  _regen_pat='(go mod tidy|go get -u|npm install|yarn install|pnpm install|bundle update|cargo update|poetry update)'
+  _regen=$( { grep -hnE "^[^#]*${_regen_pat}" .github/workflows/*.y*ml 2>/dev/null
+              lockfile_makefile_regen "$_regen_pat"; } \
            | grep -vE 'frozen-lockfile|--locked|npm ci|--frozen' | head -2 | tr '\n' ' ')
+  _regen_dev=""
+  if [[ -z "$_regen" ]] && grep -qE "^[^#]*${_regen_pat}" Makefile 2>/dev/null; then
+    _regen_dev=" (a regenerating Makefile target exists but is developer-only: nothing CI or the build path runs reaches it)"
+  fi
   if [[ -n "$_regen" ]]; then
     row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) but CI/Makefile REGENERATES it: $(printf '%s' "$_regen" | cut -c1-110) -- a lockfile the build rewrites pins nothing"
   else
@@ -3933,9 +4005,9 @@ else
                   .github/workflows/*.y*ml Makefile 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
     _gover=$(grep -m1 -oE '^go [0-9]+\.[0-9]+' go.mod 2>/dev/null | awk '{print $2}')
     if [[ -n "$_enforced" ]]; then
-      row "dependency-lockfile" PASS "lockfile committed ($_lock_files) and enforced explicitly in CI ($_enforced); nothing regenerates it"
+      row "dependency-lockfile" PASS "lockfile committed ($_lock_files) and enforced explicitly in CI ($_enforced); nothing regenerates it${_regen_dev}"
     elif [[ -n "$_gover" ]] && awk -v v="$_gover" 'BEGIN{split(v,a,".");exit !(a[1]>1||(a[1]==1&&a[2]>=16))}'; then
-      row "dependency-lockfile" PASS "lockfile committed ($_lock_files), nothing in CI regenerates it, and go $_gover defaults to -mod=readonly so the build cannot silently rewrite it"
+      row "dependency-lockfile" PASS "lockfile committed ($_lock_files), nothing in CI regenerates it, and go $_gover defaults to -mod=readonly so the build cannot silently rewrite it${_regen_dev}"
     else
       row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) and nothing regenerates it, but NOTHING ENFORCES readonly either -- no --frozen-lockfile/--locked/-mod=readonly and no toolchain default to lean on, so a build that resolves differently would not be refused"
     fi
