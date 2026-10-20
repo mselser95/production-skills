@@ -58,9 +58,13 @@
 #    Shape d: -w/--write-out takes only %{http_code} %{url_effective} %{time_total} %{response_code} %{size_download}
 #    and literal text (no %output, %header, @file, %{json}, other %).
 #    Shape g is refused when the file sets GOSUMDB=off or GOFLAGS with -insecure (GOPROXY=direct is NOT refused: known gap).
-#    h  `uses:` lines are OUT OF SCOPE (only run: scalars are read; another gate may cover them).
+#    h  `uses:` lines are not judged by the awk pass above; they get their own rule, R5.
 #    A mention is accepted only when the whole line is echo/printf/# with no pipe, redirect,
 #    ; & or backtick.
+# R5 THIRD-PARTY ACTIONS ARE SHA-PINNED. Every `uses: owner/repo@ref` whose owner is not actions or github (the repo's own
+#    convention: first-party actions stay on a major tag, e.g. actions/checkout@v4) must be `@<40 lowercase hex>`; a tag or
+#    branch is mutable, and the action runs with the job's token. Local (./) and docker:// refs are not judged here. A trailing
+#    `# vX.Y.Z` comment records the tag. Reported as file:line, like the other findings.
 # R4 FAIL CLOSED. No workflow files: exit 2. Unreadable file or awk/grep missing: exit 3.
 #    run/steps keys the line parser did not read (flow or JSON style): refused. A workflow whose steps are all
 #    `uses:` is accepted (uses steps count as read steps).
@@ -704,6 +708,22 @@ END {
 }
 ' "${files[@]}" 2>&1)"
 rc=$?
+# R5: third-party `uses:` must be pinned to a full commit SHA
+uout="$(awk '
+  {
+    l = $0; sub(/^[ \t]*-?[ \t]*/, "", l)
+    if (l !~ /^"?uses"?[ \t]*:/) next
+    sub(/^"?uses"?[ \t]*:[ \t]*/, "", l); sub(/[ \t]+#.*$/, "", l); gsub(/["\047]/, "", l)
+    if (l ~ /^\.\// || l ~ /^docker:\/\//) next
+    split(l, a, "@"); ref = a[2]; owner = a[1]; sub(/\/.*/, "", owner)
+    if (owner == "actions" || owner == "github") next
+    if (!(length(ref) == 40 && ref ~ /^[0-9a-f]+$/)) printf "%s:%d: third-party action not pinned to a 40-hex commit SHA: uses: %s\n", FILENAME, FNR, l
+  }
+' "${files[@]}" 2>&1)"
+if [[ -n "$uout" ]]; then
+  echo "$uout" >&2
+  rc=1
+fi
 sum="$(grep '^SUMMARY ' <<<"$out" | head -n 1)"
 grep -v '^SUMMARY ' <<<"$out" >&2
 if [[ -z "$sum" ]]; then

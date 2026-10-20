@@ -1198,6 +1198,23 @@ awk_failure_case() {
 awk_failure_case
 rm -rf "$T/stubbin"
 
+# ======================= R5: third-party `uses:` must be SHA-pinned =======================
+# provenance: candidate; ttl: 2027-04-01; pinning: true (the template shipped docker/build-push-action@v6)
+uses_fx() { mkdir -p "$T/$1"; printf 'jobs:\n  j:\n    steps:\n      - uses: actions/checkout@v4\n      - uses: %s\n' "$2" > "$T/$1/w.yaml"; }
+uses_fx uses-tag    "docker/build-push-action@v6"
+uses_fx uses-branch "docker/build-push-action@main"
+uses_fx uses-short  "docker/build-push-action@10e90e3"
+uses_fx uses-nover  "docker/build-push-action"
+uses_fx uses-sha    "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2"
+uses_fx uses-local  "./.github/actions/x"
+for c in uses-tag uses-branch uses-short uses-nover; do
+  o="$(bash "$GATE" "$T/$c" 2>&1)"; rc=$?
+  [[ $rc == 1 ]] && grep -qF "w.yaml:5: third-party action not pinned" <<<"$o"; check "$c: tag/branch/short/no-ref third-party action fails rc=1 naming w.yaml:5" $?
+done
+for c in uses-sha uses-local; do
+  bash "$GATE" "$T/$c" >/dev/null 2>&1; check "$c: SHA-pinned (or local) action passes, first-party actions/checkout@v4 tolerated" $?
+done
+
 # MISSING TEST 2: the loop-run cases must cover the fixtures declared (counted from the directories, not the loop)
 coverage_guard() {
   local ndirs; ndirs="$(find "$T" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"

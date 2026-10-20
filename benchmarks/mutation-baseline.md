@@ -45,6 +45,6 @@ here would be a threshold nobody derived.
 | `probe-self-gate-selftest.sh` | 29 |
 | `mutation-baseline-selftest.sh` | 8 |
 | `template-vendored-list-selftest.sh` | 5 |
-| `template-workflow-pins-selftest.sh` | 565 |
+| `template-workflow-pins-selftest.sh` | 571 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1635** |
+| **total** | **1641** |
