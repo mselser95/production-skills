@@ -56,7 +56,7 @@ lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
 lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
 lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
 lift lockregen.sh '/^lockfile_makefile_regen() {/,/^}/p' 'queue'
-lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'defined'
+lift rbtok.sh    '/^RUNBOOK_METRIC_SUFFIXES=/p;/^runbook_token_is_series_ref() {/,/^}/p' 'defined'
 lift lanetag.sh  '/^lane_tagonly_stats() {/,/^}/p' 'comm -23'
 lift laneverdict.sh '/^lane_verdict() {/,/^}/p' 'no tag-only tests'
 lift lanerow.sh  '/^lane_row_verdict() {/,/^}/p' 'gating env'
@@ -561,7 +561,18 @@ check "rbtok: _ms suffix in prose IS a citation" yes "$(rbtok 'p99 event_latency
 check "rbtok: _created suffix in prose IS a citation" yes "$(rbtok 'event_ts_created' event_ts_created)"
 check "rbtok: _percent suffix in prose IS a citation" yes "$(rbtok 'event_cpu_percent' event_cpu_percent)"
 check "rbtok: _total suffix is a citation" yes "$(rbtok 'see foo_requests_total' foo_requests_total)"
-check "rbtok: _total as a JSON key is NOT a citation" no "$(rbtok '{"foo_requests_total": 1}' foo_requests_total)"
+# metric-shaped tokens get no key exemption (a metric documented as a key must still resolve)
+check "rbtok: _total as a JSON key IS a citation (metric-shaped, no key exemption)" yes "$(rbtok '{"foo_requests_total": 1}' foo_requests_total)"
+check "rbtok: undeclared {\"event_ghost_total\": 5} IS a citation" yes "$(rbtok '{"event_ghost_total": 5}' event_ghost_total)"
+check "rbtok: undeclared backticked key `event_ghost_total`: 5 IS a citation" yes "$(rbtok '- `event_ghost_total`: 5' event_ghost_total)"
+check "rbtok: key-defined non-metric event_broker is a term (not cited)" no "$(rbtok '- `event_broker`: the status' event_broker)"
+check "rbtok: perps:196 metric-shaped definition-list key snapshot_publisher_stream_state IS a citation" yes "$(rbtok '  - `snapshot_publisher_stream_state`: `unchecked`' snapshot_publisher_stream_state)"
+check "rbtok: RESIDUAL HOLE -- suffix-less gauge documented only as key is a term" no "$(rbtok '- `queue_depth`: 3' queue_depth)"
+for sfx in _total _seconds _bytes _count _sum _bucket _ratio _state _info _ms _created _percent; do
+  check "rbtok: suffix $sfx as backticked key IS a citation" yes "$(rbtok "- \`event_k$sfx\`: x" "event_k$sfx")"
+  check "rbtok: suffix $sfx as JSON key IS a citation" yes "$(rbtok "{\"event_k$sfx\": 1}" "event_k$sfx")"
+done
+check "rbtok: bare suffix-looking token equal to a suffix (_total) is not metric-shaped" no "$(rbtok '- `x`: 1' x)"
 check "rbtok: selector with { is a citation" yes "$(rbtok 'event_lag{job="x"}' event_lag)"
 check "rbtok: range selector with [ is a citation" yes "$(rbtok 'event_lag[5m]' event_lag)"
 check "rbtok: function arg rate(x[5m]) is a citation" yes "$(rbtok 'rate(event_lag[5m])' event_lag)"

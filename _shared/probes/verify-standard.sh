@@ -2097,16 +2097,27 @@ extract_real_lanes() {   # extract_real_lanes [dir]
 # deleted operator-facing keys from its runbook to pass; its real RUNBOOK then defined
 # them in backticked prose ("`event_broker`: the broker connection's status") and
 # mentioned them elsewhere (`event_broker` / `event_drain` fails).
-# Rule: a runbook may define its own check keys; a key-defined name is a term of the
-# runbook, not a series. A token is DEFINED iff ANY occurrence is a KEY: wrapped in
-# matching double quotes or matching backticks, then optional spaces, then `:`
-# ("tok": or `tok`:). A defined token is never a citation, whatever its other
+# Rule: a runbook may define its own check keys; a key-defined NON-metric-shaped name is a
+# term of the runbook, not a series. A token is DEFINED iff ANY occurrence is a KEY: wrapped
+# in matching double quotes or matching backticks, then optional spaces, then `:`
+# ("tok": or `tok`:). A defined non-metric token is never a citation, whatever its other
 # occurrences. A token never defined as a key is evaluated PER OCCURRENCE (whole-token
 # boundaries) and cited if ANY occurrence exists: prose, backticked mentions, JSON string
 # VALUES ({"expr": "tok"}), dotted forms (tok.a.b), bash/yaml fences. No fence tracking.
+# METRIC-SHAPED tokens (name ends in one of RUNBOOK_METRIC_SUFFIXES, the single list below)
+# get NO key exemption: every occurrence, key or not, is a citation that must resolve to a
+# declared series -- else a metric documented as a definition-list key (`x_state`: `ok`)
+# goes silent when renamed, and {"event_ghost_total": 5} hides an undeclared metric.
+# RESIDUAL HOLE: a suffix-less gauge documented only as a key (`queue_depth`: 3) is treated
+# as a term and is not checked.
 # Exact declared names are checked by the caller before this is consulted.
+RUNBOOK_METRIC_SUFFIXES="_total _seconds _bytes _count _sum _bucket _ratio _state _info _ms _created _percent"
 runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook>
-  awk -v t="$1" '
+  awk -v t="$1" -v sfx="$RUNBOOK_METRIC_SUFFIXES" '
+    BEGIN {
+      n = split(sfx, S, " ")
+      for (k = 1; k <= n; k++) if (length(t) > length(S[k]) && substr(t, length(t) - length(S[k]) + 1) == S[k]) metric = 1
+    }
     {
       line = $0; off = 0; L = length(t)
       while ((p = index(line, t)) > 0) {
@@ -2114,7 +2125,7 @@ runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook
         rest = substr(line, p + L)
         after = substr(rest, 1, 1)
         if (before !~ /[a-zA-Z0-9_]/ && after !~ /[a-zA-Z0-9_]/) {
-          if (((before == "\"" && after == "\"") || (before == "`" && after == "`")) && (rest ~ /^["`][[:space:]]*:/)) defined = 1
+          if (!metric && ((before == "\"" && after == "\"") || (before == "`" && after == "`")) && (rest ~ /^["`][[:space:]]*:/)) defined = 1
           else found = 1
         }
         off += p + L - 1; line = rest
@@ -4953,7 +4964,8 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
       # commands. A gate that invents a citation and then reports it unresolved
       # sends someone to fix a document that was correct.
       [[ "$m" == *_ ]] && continue
-      # Not declared and every occurrence is a JSON object key (health-check name): not a citation.
+      # Not declared: a token DEFINED as a key ("tok": / `tok`:) and NOT metric-shaped is a runbook
+      # term (health-check name), not a citation; metric-shaped tokens are always citations.
       [[ " ${declared_series[*]-} " == *" $m "* ]] || runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue
       cited=$((cited+1))
       # NOT `printf ... | grep -qx "$m"`. Under this file's `set -o pipefail` that
