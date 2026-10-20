@@ -32,14 +32,17 @@
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.." || exit 2
 
-BASELINE="benchmarks/mutation-baseline.md"
+BASELINE="${MUTATION_BASELINE_FILE:-benchmarks/mutation-baseline.md}"   # env overrides: selftest only
 
 # Counts come from RUNNING each selftest, never from grepping it for `check`
 # calls: a case that is present in the source and never reached is exactly what
 # this is supposed to notice, and a static count would report it as covered.
 declare -a NAMES=() COUNTS=()
 total=0
-for t in _shared/probes/*-selftest.sh _shared/probes/tests/*-selftest.sh scripts/tests/*-selftest.sh; do
+# MUTATION_BASELINE_SUITES (selftest only) is a word list of suite paths
+SUITES=(_shared/probes/*-selftest.sh _shared/probes/tests/*-selftest.sh scripts/tests/*-selftest.sh)
+[[ -n "${MUTATION_BASELINE_SUITES:-}" ]] && read -ra SUITES <<<"$MUTATION_BASELINE_SUITES"
+for t in "${SUITES[@]}"; do
   [[ -f "$t" ]] || continue
   name="$(basename "$t")"
   out=$(bash "$t" 2>&1); rc=$?
@@ -93,6 +96,17 @@ if [[ ! -f "$BASELINE" ]]; then
   echo "mutation-baseline: no $BASELINE -- nothing to compare against." >&2
   echo "  Run: make mutation-baseline" >&2
   exit 1
+fi
+
+# The recorded `**total**` line must equal the sum of the recorded rows. Per-suite comparison
+# alone lets a hand-edited (or half-regenerated) total drift from its rows unnoticed.
+rec_sum=$(grep -E '^\| `[^`]+` \|' "$BASELINE" | awk -F'|' '{gsub(/ /,"",$3); s+=$3} END {print s+0}')
+rec_total=$(grep -E '^\| \*\*total\*\* \|' "$BASELINE" | awk -F'|' '{gsub(/[ *]/,"",$3); print $3}')
+if [[ -z "$rec_total" ]]; then
+  echo "mutation-baseline: $BASELINE has no **total** line -- cannot verify it against the rows" >&2; exit 1
+elif (( rec_total != rec_sum )); then
+  echo "mutation-baseline: recorded **total** ($rec_total) != sum of recorded rows ($rec_sum) in $BASELINE." >&2
+  echo "  Do not hand-edit it; run \`make mutation-baseline\`." >&2; exit 1
 fi
 
 fell=0

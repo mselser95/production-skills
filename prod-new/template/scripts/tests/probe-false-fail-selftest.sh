@@ -109,30 +109,34 @@ d="$TMP/imp-blockcmt-line"; mkgo "$d" 'package x
 // import "log/slog"
 func f() {}' log.go
 check "slog: a commented-out import is not an import" no "$(imp "$d" log/slog)"
-d="$TMP/imp-slice"; mkgo "$d" 'package x
-var pkgs = []string{
-	"fmt",
+d="$TMP/imp-concat"; mkgo "$d" 'package x
+var s = "a" +
 	"log/slog"
-}
 func f() {}' log.go
-check "NEG slog: a string-slice element is not an import" no "$(imp "$d" log/slog)"
-d="$TMP/imp-slice2"; mkgo "$d" 'package x
+check "NEG slog: a concatenated string continuation line is not an import" no "$(imp "$d" log/slog)"
+d="$TMP/imp-callarg"; mkgo "$d" 'package x
 import "fmt"
-var pkgs = map[string]string{
-	"a": "b",
-}
-var one = []string{
-	"log/slog",
+func f() {
+	fmt.Println(
+		"a",
+		"log/slog"
+	)
 }' log.go
-check "NEG slog: slice element after an unrelated import is not an import" no "$(imp "$d" log/slog)"
-d="$TMP/imp-block-then-slice"; mkgo "$d" 'package x
+check "NEG slog: a multi-line call argument after an import is not an import" no "$(imp "$d" log/slog)"
+d="$TMP/imp-block-then-concat"; mkgo "$d" 'package x
 import (
 	"fmt"
 )
+var s = "a" +
+	"log/slog"' log.go
+check "NEG slog: a continuation line after a CLOSED import block is not an import" no "$(imp "$d" log/slog)"
+d="$TMP/imp-slice"; mkgo "$d" 'package x
 var pkgs = []string{
-	"log/slog"
-}' log.go
-check "NEG slog: slice element after a CLOSED import block is not an import" no "$(imp "$d" log/slog)"
+	"fmt",
+	"log/slog",
+}
+func f() {}' log.go
+check "NEG slog: a valid multi-line slice element is not an import" no "$(imp "$d" log/slog)"
 # The probe wiring: zap-only repos must get an explicit NA, never a slog FAIL.
 check "probe: zap-only repo emits explicit NA rows (not FAIL, not PASS)" 2 "$(grep -cE 'row "observability:(logs_correlate|log_handler_installed)" NA "zap: ' "$PROBE")"
 
@@ -272,14 +276,14 @@ b
 
 a")"
 check "count_distinct_lines: empty -> 0" 0 "$(count_distinct_lines "")"
-check_has "wiring: ratification-packages takes pkgs from REG_ID_COUNT" "1" "$(grep -c '^  pkgs=\$REG_ID_COUNT$' "$PROBE")"
-check_has "wiring: ratification-packages verdict via ratification_pkgs_verdict" "1" "$(grep -c 'ratification_pkgs_verdict "\$pkgs" "\$inv" "\$reg_unbacked"' "$PROBE")"
-check_has "wiring: ratification-packages inv from registry_inv_count" "1" "$(grep -c 'inv=\$(registry_inv_count "\$SPEC")' "$PROBE")"
-check_has "wiring: invariants-ratified uses registry_run_verdict" "1" "$(grep -c 'registry_run_verdict "\$REG_ROWS"' "$PROBE")"
-check_has "wiring: invariants-ratified evidence uses registry_skip_note" "1" "$(grep -c 'registry_skip_note "\$REG_DB_SKIPPED"' "$PROBE")"
-check_has "wiring: ratification-citations uses registry_cites_verdict" "1" "$(grep -c 'registry_cites_verdict "\$REG_ROWS" "\$REG_BAD"' "$PROBE")"
-check_has "wiring: integration-real-lane distinct count via count_distinct_lines" "1" "$(grep -c 'rl_npkg=\$(count_distinct_lines "\$rl_allpkgs")' "$PROBE")"
-check_has "wiring: REG_ID_COUNT counted via count_distinct_lines" "1" "$(grep -c 'REG_ID_COUNT=\$(count_distinct_lines "\$REG_IDS")' "$PROBE")"
+check "wiring: ratification-packages takes pkgs from REG_ID_COUNT" 1 "$(grep -c '^  pkgs=\$REG_ID_COUNT$' "$PROBE")"
+check "wiring: ratification-packages verdict via ratification_pkgs_verdict" 1 "$(grep -c 'ratification_pkgs_verdict "\$pkgs" "\$inv" "\$reg_unbacked"' "$PROBE")"
+check "wiring: ratification-packages inv from registry_inv_count" 1 "$(grep -c 'inv=\$(registry_inv_count "\$SPEC")' "$PROBE")"
+check "wiring: invariants-ratified uses registry_run_verdict" 1 "$(grep -c 'registry_run_verdict "\$REG_ROWS"' "$PROBE")"
+check "wiring: invariants-ratified evidence uses registry_skip_note" 1 "$(grep -c 'registry_skip_note "\$REG_DB_SKIPPED"' "$PROBE")"
+check "wiring: ratification-citations uses registry_cites_verdict" 1 "$(grep -c 'registry_cites_verdict "\$REG_ROWS" "\$REG_BAD"' "$PROBE")"
+check "wiring: integration-real-lane distinct count via count_distinct_lines" 1 "$(grep -c 'rl_npkg=\$(count_distinct_lines "\$rl_allpkgs")' "$PROBE")"
+check "wiring: REG_ID_COUNT counted via count_distinct_lines" 1 "$(grep -c 'REG_ID_COUNT=\$(count_distinct_lines "\$REG_IDS")' "$PROBE")"
 
 # ============================ 4. tracing-wired-in-prod call sites ============
 # provenance: candidate (pinning: true) -- ttl 2027-01-20
@@ -419,7 +423,7 @@ func main() {
 	var a, tracer, b []int = f()
 }' main.go
 check "NEG tracer: var a, tracer, b []int = f() (var branch only) does NOT count" 0 "$(tsites "$d")"
-check_has "wiring: tracing row counts via tracer_call_sites" "1" "$(grep -c '^tracer_sites=\$(tracer_call_sites' "$PROBE")"
+check "wiring: tracing row counts via tracer_call_sites" 1 "$(grep -c '^tracer_sites=\$(tracer_call_sites' "$PROBE")"
 
 # ===== integration-real-lane: a lane whose TAG-ONLY tests all skip is not green ======
 # derived-from: none (candidate; TTL 2027-01-20) -- perps replaygen lane measured PASS with 16 skipped generators
@@ -435,9 +439,9 @@ lane_fix "$TMP/ln-pass" '	_ = 1'
 check "lane: tag-only test passes -> ran 1" "1 1 0 0	" "$(lane_stats "$TMP/ln-pass")"
 lane_fix "$TMP/ln-fail" '	t.Fatal("boom")'
 check "lane: tag-only test fails -> failed 1" "1 1 0 1	" "$(lane_stats "$TMP/ln-fail")"
-check_has "wiring: lane run is -v and all-skipped lane lands in rl_na" "1" "$(grep -c 'rl_na+=' "$PROBE")"
-check_has "wiring: lane run uses -v (the stats parse its --- SKIP lines)" "1" "$(grep -c 'rl_out=$(go test -v -tags="$rt"' "$PROBE")"
-check_has "wiring: the all-skipped NA row is emitted by lane_row_verdict" "1" "$(grep -c "printf 'NA" "$TMP/lanerow.sh")"
+check "wiring: lane run is -v and all-skipped lane lands in rl_na" 1 "$(grep -c 'rl_na+=' "$PROBE")"
+check "wiring: lane run uses -v (the stats parse its --- SKIP lines)" 1 "$(grep -c 'rl_out=$(go test -v -tags="$rt"' "$PROBE")"
+check "wiring: the all-skipped NA row is emitted by lane_row_verdict" 1 "$(grep -c "printf 'NA" "$TMP/lanerow.sh")"
 # extra fixtures: subtests, non-Test tag-only items, skip-message selection
 lane_fix "$TMP/ln-subskip" '	t.Run("a", func(t *testing.T) { t.Skip("sub a off") })
 	t.Run("b", func(t *testing.T) { t.Skip("sub b off") })'
@@ -511,11 +515,11 @@ check "mixed lanes: FAIL plus a green lane names the green one" "FAIL|z (green: 
 check "mixed lanes: env-gated live lane noted on PASS" "PASS|lane(s) 'g' run green in 2 distinct pkg(s) + env-gated live lane" "$(agg "'g'" '' '' 'x_test.go')"
 lane_fix "$TMP/ln-multiline" '	t.Skip("line one\nline two")'
 check "lane: multi-line skip message keeps the file:line header, not the trailing indented line" "1 0 1 0	b_test.go:6: line one" "$(lane_stats "$TMP/ln-multiline")"
-check_has "wiring: row feeds lane_verdict from lane_tagonly_stats" "1" "$(grep -c 'rl_st=$(lane_tagonly_stats "$rt" "$rl_out" $real_pkgs)' "$PROBE")"
-check_has "wiring: row calls lane_verdict with the lane stats" "1" "$(grep -c 'rl_v=$(lane_verdict "$rt" "$rl_rc" "$rl_out" "$rl_st")' "$PROBE")"
-check_has "wiring: row routes NA verdicts to rl_na and FAIL to rl_red" "1" "$(grep -c '^      NA)   rl_na+=' "$PROBE")"
-check_has "wiring: row delegates its aggregation to lane_row_verdict (the function the mixed-lane cases execute)" "1" "$(grep -c 'rl_rv=$(lane_row_verdict "$rl_green" "$rl_red" "$rl_na" "$rl_npkg" "$live_gate")' "$PROBE")"
-check_has "wiring: row status comes from lane_row_verdict's output" "1" "$(grep -cF 'row "integration-real-lane" "$rl_rs" "$rl_rd"' "$PROBE")"
+check "wiring: row feeds lane_verdict from lane_tagonly_stats" 1 "$(grep -c 'rl_st=$(lane_tagonly_stats "$rt" "$rl_out" $real_pkgs)' "$PROBE")"
+check "wiring: row calls lane_verdict with the lane stats" 1 "$(grep -c 'rl_v=$(lane_verdict "$rt" "$rl_rc" "$rl_out" "$rl_st")' "$PROBE")"
+check "wiring: row routes NA verdicts to rl_na and FAIL to rl_red" 1 "$(grep -c '^      NA)   rl_na+=' "$PROBE")"
+check "wiring: row delegates its aggregation to lane_row_verdict (the function the mixed-lane cases execute)" 1 "$(grep -c 'rl_rv=$(lane_row_verdict "$rl_green" "$rl_red" "$rl_na" "$rl_npkg" "$live_gate")' "$PROBE")"
+check "wiring: row status comes from lane_row_verdict's output" 1 "$(grep -cF 'row "integration-real-lane" "$rl_rs" "$rl_rd"' "$PROBE")"
 
 
 # ===== runbook-citations-resolve: only metric-shaped tokens are citations ==========
@@ -569,14 +573,14 @@ check "rbtok: two keys on one line, token only as key -> NOT a citation" no "$(r
 check "rbtok: closing quote without opening quote is NOT a key (IS a citation)" yes "$(rbtok 'event_broker": ok' event_broker)"
 check "rbtok: opening quote without closing quote is NOT a key (IS a citation)" yes "$(rbtok '"event_broker: ok' event_broker)"
 check "rbtok: absent token is NOT a citation" no "$(rbtok 'nothing here' event_broker)"
-check_has "wiring: citations loop skips non-metric-shaped undeclared tokens" "1" "$(grep -c '|| runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue' "$PROBE")"
+check "wiring: citations loop skips non-metric-shaped undeclared tokens" 1 "$(grep -c '|| runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue' "$PROBE")"
 
 # --- the probe really consumes these functions (wiring, not just definitions) --
-check_has "wiring: invariants-ratified registry branch calls registry_run" "1" "$(grep -c '^  registry_run$' "$PROBE")"
-check_has "wiring: invariants-non-vacuity registry branch calls registry_prove" "1" "$(grep -c '^  registry_prove$' "$PROBE")"
-check_has "wiring: ratification rows call registry_cite" "1" "$(grep -c '^  registry_cite$' "$PROBE")"
-check_has "wiring: operational-determinism calls revision_stamp_kind" "1" "$(grep -c 'stampable=\$(revision_stamp_kind)' "$PROBE")"
-check_has "wiring: slog rows are gated by imports_pkg, not a bare grep" "1" "$(grep -c "^if imports_pkg 'log/slog'; then" "$PROBE")"
+check "wiring: invariants-ratified registry branch calls registry_run" 1 "$(grep -c '^  registry_run$' "$PROBE")"
+check "wiring: invariants-non-vacuity registry branch calls registry_prove" 1 "$(grep -c '^  registry_prove$' "$PROBE")"
+check "wiring: ratification rows call registry_cite" 1 "$(grep -c '^  registry_cite$' "$PROBE")"
+check "wiring: operational-determinism calls revision_stamp_kind" 1 "$(grep -c 'stampable=\$(revision_stamp_kind)' "$PROBE")"
+check "wiring: slog rows are gated by imports_pkg, not a bare grep" 1 "$(grep -c "^if imports_pkg 'log/slog'; then" "$PROBE")"
 
 if [ "$CASES" -eq 0 ]; then echo "probe-false-fail selftest: ZERO cases ran" >&2; exit 2; fi
 if [ "$FAILED" -ne 0 ]; then echo "probe-false-fail selftest: $FAILED of $CASES case(s) FAILED" >&2; exit 1; fi

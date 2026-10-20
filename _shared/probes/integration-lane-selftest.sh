@@ -85,9 +85,10 @@ cat > "$tmp/bin/go" <<'EOS'
 #!/bin/sh
 echo "go $*" >> "$STUB_LOG"
 [ -n "${STUB_NOTEST:-}" ] && { echo "?   	pkg	[no test files]"; exit 0; }
-# `-list` (lane_tagonly_stats): the tagged listing has ONE tag-only test, the untagged listing none.
+# `-list` (lane_tagonly_stats): both listings carry an UNTAGGED test (TestUntagged, so the tag-only
+# subtraction `comm -23 with without` is exercised); the tagged listing adds ONE tag-only test.
 case " $* " in *" -list "*)
-  case " $* " in *" -tags="*) [ -n "${STUB_LISTFAIL:-}" ] && { echo "stub: cannot load package" >&2; exit 1; }; [ -n "${STUB_NOTAG:-}" ] || echo "TestTagOnly";; esac; echo "ok  	stubpkg	0.001s"; exit 0;; esac
+  case " $* " in *" -tags="*) [ -n "${STUB_LISTFAIL:-}" ] && { echo "stub: cannot load package" >&2; exit 1; }; echo "TestUntagged"; [ -n "${STUB_NOTAG:-}" ] || echo "TestTagOnly";; *) echo "TestUntagged";; esac; echo "ok  	stubpkg	0.001s"; exit 0;; esac
 for a in "$@"; do case "$a" in -tags=*) echo "tags ${a#-tags=}" >> "$STUB_LOG"; [ "${a#-tags=}" = "${RED_TAG:-}" ] && { echo "--- FAIL: TestX"; exit 1; };; esac; done
 # STUB_SKIP: the tag-only test skips (the lane is NA); STUB_NORAN: it is listed but never reported
 [ -n "${STUB_SKIP:-}" ] && { echo "=== RUN   TestTagOnly"; echo "    stub_test.go:3: gate env off"; echo "--- SKIP: TestTagOnly (0.00s)"; echo "ok  	stubpkg	0.001s"; exit 0; }
