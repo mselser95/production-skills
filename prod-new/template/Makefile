@@ -303,6 +303,7 @@ probe-selftests:
 	bash scripts/tests/retry-selftest.sh
 	bash scripts/tests/gate-run-selftest.sh
 	bash scripts/tests/observability-provenance-selftest.sh
+	bash scripts/tests/probe-false-fail-selftest.sh
 	bash scripts/tests/coverage-ratchet-selftest.sh
 	bash scripts/tests/single-suite-run-selftest.sh
 	bash scripts/tests/acceptance-coverage-selftest.sh

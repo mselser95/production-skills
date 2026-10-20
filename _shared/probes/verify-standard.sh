@@ -304,6 +304,11 @@ fi
 # the tool that cleans it, on every exit path, not just the happy one.
 restore_mutations() {
   local bak
+  # A registry mutation (git patch) in flight when the probe died.
+  if [[ -n "${REG_ARMED:-}" ]]; then
+    git apply -R --check "$REG_ARMED" 2>/dev/null && git apply -R "$REG_ARMED" 2>/dev/null
+    REG_ARMED=""
+  fi
   while IFS= read -r bak; do
     [[ -n "$bak" ]] || continue
     mv -f "$bak" "${bak%.nvbak}" 2>/dev/null
@@ -1518,6 +1523,102 @@ else
   row "probe-self:no-pipe-into-grep-q" FAIL "PROBE_SELF unset or unreadable, so this probe cannot check itself -- a self-check that cannot run is not a check"
 fi
 
+# --- registry-mode ratified invariants ---------------------------------------
+# Some repos (falcon-xyz-perps-service) keep each ratified test INSIDE its own
+# package -- it needs that package's helpers -- and register it in a TSV that a
+# runner executes, instead of copying *_test.go into verification/ratified/.
+# The probe used to read only the second layout, so such a repo got
+# "invariants-ratified FAIL has no tests" and the three rows behind it reported
+# "not probed", although every invariant ran green and was mutation-proven in
+# its own CI. A registry is accepted as the SAME evidence, held to the SAME bar,
+# and cannot be a way round it:
+#   - a row naming a test that does not exist in its package           -> BAD
+#   - a row whose test does not RUN and PASS (skip / no-test / red)    -> BAD
+#   - a row with no mutation, a patch that does not apply, or a
+#     mutation the test survives (or that only breaks the build)       -> BAD
+#   - a spec invariant id with no registry row                         -> FAIL
+# Format (verification/ratified/invariants.tsv): `#` comments, then rows
+#   id <TAB> package <TAB> test <TAB> tags|- <TAB> patch|- <TAB> lane(unit|db)
+# Rows of lane `db` need a database: they run only when DATABASE_URL is set, and
+# are NEVER mutation-proven here (a fresh database per row is the repo runner's
+# job); every row not run or not proven is COUNTED and named in the evidence.
+# Registry mode applies only when verification/ratified/ holds no *_test.go.
+REG_TSV="${RATIFY_REGISTRY:-verification/ratified/invariants.tsv}"
+REG_ROWS=0; REG_IDS=""; REG_BAD=""; REG_RAN=0; REG_PASS=0; REG_DB_SKIPPED=0
+REG_PROVEN=0; REG_PROVE_TOTAL=0; REG_PROVE_SKIPPED=0; REG_ARMED=""
+registry_present() { [[ -f "$REG_TSV" ]]; }
+registry_rows() {   # US-separated so empty fields survive `read`
+  awk -F'\t' -v OFS='\037' '/^[[:space:]]*#/ || $1 == "" {next}
+    {l=$6; if (l == "" || l == "-") l="unit"; print $1,$2,$3,$4,$5,l}' "$REG_TSV"
+}
+registry_patch_path() {   # <patch>
+  local p="$1"
+  [[ "$p" == /* ]] && { printf '%s' "$p"; return; }
+  printf '%s/%s' "${RATIFY_MUTATIONS_DIR:-$(dirname "$REG_TSV")/mutations}" "$p"
+}
+registry_tree_hash() { { git diff; git diff --cached; } | shasum | cut -d' ' -f1; }
+registry_cite() {   # existence of every cited test and named patch
+  REG_ROWS=0; REG_IDS=""; REG_BAD=""
+  local id pkg test tags patch lane
+  while IFS=$'\037' read -r id pkg test tags patch lane; do
+    REG_ROWS=$((REG_ROWS+1)); REG_IDS+="$id"$'\n'
+    case "$lane" in unit|db) ;; *) REG_BAD+=" $id/$test:unknown-lane"; continue ;; esac
+    if ! grep -qE "^func[[:space:]]+${test}\(" "$pkg"/*_test.go 2>/dev/null; then
+      REG_BAD+=" $id/$test:no-such-test-in-$pkg"
+    fi
+    if [[ -n "$patch" && "$patch" != "-" && ! -f "$(registry_patch_path "$patch")" ]]; then
+      REG_BAD+=" $id/$test:patch-missing($patch)"
+    fi
+  done < <(registry_rows)
+  REG_IDS=$(printf '%s' "$REG_IDS" | sed '/^$/d' | sort -u)
+}
+registry_run() {   # every runnable row must run and PASS
+  REG_ROWS=0; REG_BAD=""; REG_RAN=0; REG_PASS=0; REG_DB_SKIPPED=0
+  local id pkg test tags patch lane out rc targs
+  while IFS=$'\037' read -r id pkg test tags patch lane; do
+    REG_ROWS=$((REG_ROWS+1))
+    case "$lane" in unit|db) ;; *) REG_BAD+=" $id/$test:unknown-lane"; continue ;; esac
+    if [[ "$lane" == db && -z "${DATABASE_URL:-}" ]]; then REG_DB_SKIPPED=$((REG_DB_SKIPPED+1)); continue; fi
+    targs=(); [[ -n "$tags" && "$tags" != "-" ]] && targs=(-tags "$tags")
+    out=$(go test "${targs[@]}" -count=1 -v -run "^${test}\$" "$pkg" 2>&1); rc=$?
+    REG_RAN=$((REG_RAN+1))
+    if (( rc == 0 )) && [[ "$out" == *"--- PASS: ${test} "* ]]; then REG_PASS=$((REG_PASS+1))
+    else REG_BAD+=" $id/$test:did-not-run-green"; fi
+  done < <(registry_rows)
+}
+registry_revert_armed() {
+  [[ -n "${REG_ARMED:-}" ]] || return 0
+  git apply -R --check "$REG_ARMED" 2>/dev/null && git apply -R "$REG_ARMED" 2>/dev/null
+  REG_ARMED=""
+}
+registry_prove() {   # every unit row's mutation must turn ITS test red
+  REG_BAD=""; REG_PROVEN=0; REG_PROVE_TOTAL=0; REG_PROVE_SKIPPED=0
+  local id pkg test tags patch lane pf out targs before after verdict
+  while IFS=$'\037' read -r id pkg test tags patch lane; do
+    case "$lane" in unit|db) ;; *) REG_BAD+=" $id/$test:unknown-lane"; continue ;; esac
+    if [[ "$lane" == db ]]; then REG_PROVE_SKIPPED=$((REG_PROVE_SKIPPED+1)); continue; fi
+    REG_PROVE_TOTAL=$((REG_PROVE_TOTAL+1))
+    if [[ -z "$patch" || "$patch" == "-" ]]; then REG_BAD+=" $id/$test:no-mutation-recorded"; continue; fi
+    pf=$(registry_patch_path "$patch")
+    if [[ ! -f "$pf" ]] || ! git apply --check "$pf" 2>/dev/null; then
+      REG_BAD+=" $id/$test:patch-does-not-apply($patch)"; continue
+    fi
+    before=$(registry_tree_hash)
+    REG_ARMED="$pf"
+    git apply "$pf"
+    targs=(); [[ -n "$tags" && "$tags" != "-" ]] && targs=(-tags "$tags")
+    out=$(go test "${targs[@]}" -v -run "^${test}\$" -count=1 "$pkg" 2>&1)
+    registry_revert_armed
+    after=$(registry_tree_hash)
+    if [[ "$before" != "$after" ]]; then REG_BAD+=" $id/$test:REVERT-LEFT-TREE-CHANGED"; continue; fi
+    verdict=$(classify_mutation_result "$out" "$test")
+    case "$verdict" in
+      DETECTED) REG_PROVEN=$((REG_PROVEN+1)) ;;
+      *)        REG_BAD+=" $id/$test:$verdict" ;;
+    esac
+  done < <(registry_rows)
+}
+
 if shard_run dynamic; then   # @shard-begin dynamic
 # --- 4. ratified invariants (exist AND run AND provably non-vacuous) --------
 if ls verification/ratified/*_test.go >/dev/null 2>&1; then
@@ -1680,6 +1781,31 @@ open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$
     row "invariants-non-vacuity" FAIL "mutation(s) not detected or decayed:${nv_broken}"
   else
     row "invariants-non-vacuity" PASS "$nv_proven/$nv_total mutations RE-VERIFIED red this run"
+  fi
+elif registry_present; then
+  registry_run
+  if (( REG_ROWS == 0 )); then
+    row "invariants-ratified" FAIL "registry $REG_TSV has zero rows -- a list that registers nothing proves nothing"
+  elif [[ -n "$REG_BAD" ]]; then
+    row "invariants-ratified" FAIL "registry test(s) not green:${REG_BAD}"
+  elif (( REG_RAN == 0 )); then
+    row "invariants-ratified" FAIL "$REG_ROWS registered but none runnable here ($REG_DB_SKIPPED db-lane need DATABASE_URL) -- nothing was executed"
+  else
+    ratified_n=$(spec_seq_count invariants)
+    pending_n=$(spec_seq_count invariants_pending_ratification)
+    if ! [[ "$ratified_n" =~ ^[0-9]+$ && "$pending_n" =~ ^[0-9]+$ ]]; then
+      row "invariants-ratified" FAIL "the ratified/pending counts could not be computed (got '$ratified_n'/'$pending_n') -- the registry tests are green, but this row cannot say how many invariants they cover"
+    else
+      row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $REG_PASS/$REG_ROWS registry test(s) ACTUALLY RAN green via $REG_TSV ($REG_DB_SKIPPED db-lane row(s) NOT run: DATABASE_URL unset)"
+    fi
+  fi
+  registry_prove
+  if (( REG_PROVE_TOTAL == 0 )); then
+    row "invariants-non-vacuity" FAIL "no unit-lane registry row to mutate ($REG_PROVE_SKIPPED db-lane not provable here) -- nothing was proven non-vacuous"
+  elif [[ -n "$REG_BAD" ]]; then
+    row "invariants-non-vacuity" FAIL "mutation(s) not detected or decayed:${REG_BAD}"
+  else
+    row "invariants-non-vacuity" PASS "$REG_PROVEN/$REG_PROVE_TOTAL registry mutations RE-VERIFIED red this run ($REG_PROVE_SKIPPED db-lane row(s) NOT mutation-proven here)"
   fi
 else row "invariants-ratified" FAIL "verification/ratified/ has no tests"; fi
 
@@ -2812,7 +2938,20 @@ fi   # @shard-end
 # none, must not fail a row about slog. An absent denominator is NA, never PASS
 # -- "0 of 0 call sites are wrong" is the vacuous pass this framework exists to
 # refuse.
-if grep -rql "${PROBE_GREP_EXCLUDES[@]}" 'log/slog' --include='*.go' . 2>/dev/null; then
+# imports_pkg <import-path> -> exit 0 when some Go file REALLY imports it.
+#
+# The slog rows were switched on by `grep -rql 'log/slog'`, which a COMMENT
+# satisfies: falcon-xyz-perps-service has the string only in a doc comment
+# (internal/shared/infrastructure/temporal/log.go:11, "...adapts zap to
+# go.temporal.io's log.Logger, not log/slog"), logs through zap, and was failed
+# for "no slog handler is constructed" -- a row about a logger it does not use.
+# An import is a line whose ONLY content is the quoted path, optionally
+# preceded by `import` and/or an alias, optionally followed by a comment.
+imports_pkg() {
+  local _re="^[[:space:]]*(import[[:space:]]+)?([A-Za-z_.][A-Za-z0-9_]*[[:space:]]+)?\"$1\"[[:space:]]*(//.*)?\$"
+  grep -rqE "${PROBE_GREP_EXCLUDES[@]}" "$_re" --include='*.go' . 2>/dev/null
+}
+if imports_pkg 'log/slog'; then
   # The two counts are DISJOINT: `\.Info\(` requires the paren immediately
   # after the name, so it does not match `.InfoContext(`. An earlier version
   # of this row subtracted one from the other "to remove the overlap", which
@@ -2947,6 +3086,15 @@ if grep -rql "${PROBE_GREP_EXCLUDES[@]}" 'log/slog' --include='*.go' . 2>/dev/nu
   else
     row "observability:log_handler_installed" FAIL "no slog handler is constructed anywhere -- slog.Default() emits unstructured text to stderr, so every structured field is lost before it reaches a log store"
   fi
+elif imports_pkg 'go.uber.org/zap'; then
+  # The repo logs through zap and never imports log/slog. The two slog rows
+  # measure slog's *Context call sites and handler constructor; zap carries the
+  # trace context through a context-bound logger helper whose name is a repo
+  # decision this probe cannot derive, so a count here would be a guess. Say so
+  # explicitly (NA, never PASS and never FAIL): an unprobed dimension is
+  # reported as unprobed, not silently absent and not green.
+  row "observability:logs_correlate" NA "zap: correlation not probed -- this repo imports go.uber.org/zap and not log/slog; the slog *Context check does not apply and no zap correlation helper is declared, so log/trace joinability is UNMEASURED here"
+  row "observability:log_handler_installed" NA "zap: handler not probed -- this repo imports go.uber.org/zap and not log/slog; the slog handler check does not apply"
 fi
 
 # THE probe that catches the no-op-port trap: wiring lives in the entrypoints
@@ -4681,7 +4829,33 @@ if (( _ca_ok )); then
 else row "contract-artifacts" FAIL "contract artifacts unusable:${_ca_why} — nothing to audit the diff against"; fi
 
 # --- 18. ratification packages back every ratified invariant -----------------
-if ls verification/ratified/*_test.go >/dev/null 2>&1; then
+if ! ls verification/ratified/*_test.go >/dev/null 2>&1 && registry_present; then
+  # Registry mode: each distinct registry id is one ratified invariant's evidence
+  # trail, and every spec invariant must have one. A count alone would let a
+  # surplus id hide a missing one.
+  registry_cite
+  inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null | head -1)
+  inv=${inv:-0}
+  pkgs=$(printf '%s' "$REG_IDS" | sed '/^$/d' | wc -l | tr -d ' ')
+  reg_spec_ids=$(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null \
+    | grep -oE '^[[:space:]]*-[[:space:]]+id:[[:space:]]*["'"'"']?[A-Za-z0-9_.-]+' | sed -E "s/.*id:[[:space:]]*[\"']?//")
+  reg_unbacked=""
+  for _rid in $reg_spec_ids; do
+    grep -qxF -- "$_rid" <<<"$REG_IDS" || reg_unbacked+=" $_rid"
+  done
+  if (( pkgs > 0 && pkgs >= inv )) && [[ -z "$reg_unbacked" ]]; then
+    row "ratification-packages" PASS "$pkgs registry invariant id(s) for $inv ratified invariants in $REG_TSV"
+  else
+    row "ratification-packages" FAIL "$pkgs registry invariant id(s) for $inv ratified invariants; spec id(s) with NO registry row:${reg_unbacked:- (none -- the count is short)}"
+  fi
+  if (( REG_ROWS == 0 )); then
+    row "ratification-citations" FAIL "registry $REG_TSV has zero rows -- the citation is what makes the registry evidence"
+  elif [[ -n "$REG_BAD" ]]; then
+    row "ratification-citations" FAIL "registry cites test(s)/patch(es) that do not exist:${REG_BAD}"
+  else
+    row "ratification-citations" PASS "$REG_ROWS registry row(s) each cite a test that exists in its package and a patch that exists"
+  fi
+elif ls verification/ratified/*_test.go >/dev/null 2>&1; then
   # Same class of bug as the fuzz counter above, and it survived that fix
   # because I repaired the instance that bit instead of sweeping the pattern:
   # `grep -c` prints "0" AND exits non-zero on zero matches, so `|| echo 0`
@@ -5077,6 +5251,34 @@ else
   fi
 fi
 
+# revision_stamp_kind -> ldflags | build-arg | makefile | no
+#
+# Where can a build put a revision into the shipped binary? It used to look ONLY
+# under docker/, so a repo whose Dockerfile lives at the root (the Go default,
+# and what `docker build .` finds) was reported as "no ldflags path exists"
+# although its Dockerfile carried `-ldflags="... -X ${VERSION_PKG}.Commit=${GIT_SHA}"`
+# (falcon-xyz-perps-service: a false FAIL). Now every Dockerfile wherever it
+# lives (root, docker/, build/, deploy/, or `*.Dockerfile`, to depth 3) is read.
+#   - the package in `-X <pkg>.<Var>=` may be a shell/make variable
+#     (`${VERSION_PKG}`, `$(PKG)`), because Dockerfiles parameterise it;
+#   - comments are stripped by grep_x, so a commented-out stamp is no stamp;
+#   - the word `ldflags` alone is still not a stamp (`-ldflags="-s -w"`);
+#   - a Makefile `-X` stamp counts ONLY when the repo has no Dockerfile at all
+#     (binaries built by make): when an image is the artifact, a stamp the image
+#     build never sees ships revision="" and must not be credited.
+revision_stamp_kind() {
+  local _df=() _f
+  while IFS= read -r _f; do _df+=("$_f"); done < <(find . -maxdepth 3 \( -path ./.git -o -path ./vendor -o -path '*/node_modules' \) -prune -o -type f \
+    \( -name 'Dockerfile' -o -name 'Dockerfile.*' -o -name '*.Dockerfile' -o -name '*.dockerfile' \) -print 2>/dev/null | sort)
+  local _xre='-X[[:space:]=]+[A-Za-z0-9_./${}()-]+\.[A-Za-z0-9_]+=[A-Za-z0-9_${(/.-]'
+  if (( ${#_df[@]} > 0 )); then
+    if [[ -n "$(grep_x -- "$_xre" "${_df[@]}")" ]]; then echo ldflags
+    elif [[ -n "$(grep_x 'GIT_SHA' "${_df[@]}")" ]]; then echo build-arg
+    else echo no; fi
+  elif [[ -n "$(grep_x -- "$_xre" Makefile docker build 2>/dev/null)" ]]; then echo makefile
+  else echo no; fi
+}
+
 # --- 22. reproducibility / operational determinism (restored dimension) -----
 # Probe the EFFECT: a revision that CAN be non-empty in the shipped artifact.
 # An earlier version passed on the mere presence of the wiring while every image
@@ -5091,13 +5293,7 @@ if grep -rqE "commit|git_sha|config_version|schema_version|build_info" observabi
     # symbols and sets nothing, so the image ships revision="" while this row
     # reports the revision as stampable. An `-X <pkg>.<Var>=` assignment is what
     # makes it a stamp, and GIT_SHA stays a separate, sufficient build-arg path.
-    if [[ -n "$(grep_x -- '-X[[:space:]=]+[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+=[A-Za-z0-9_${(/.-]' docker/)" ]]; then
-      stampable="ldflags"
-    elif [[ -n "$(grep_x 'GIT_SHA' docker/)" ]]; then
-      stampable="build-arg"
-    else
-      stampable="no"
-    fi
+    stampable=$(revision_stamp_kind)
   else stampable="buildvcs"; fi
   case "$stampable" in
     no) row "operational-determinism" FAIL "signals declare a revision but .dockerignore excludes .git and no ldflags path exists — every image ships revision=\"\"" ;;

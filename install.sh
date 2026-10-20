@@ -297,6 +297,10 @@ mirrors=(
   # it belongs in the mirrored set rather than in the "someone will notice"
   # category.
   "prod-new/template/scripts/tests/load-rows-selftest.sh:_shared/probes/load-rows-selftest.sh"
+  # The false-FAIL selftest lifts the registry / import / revision-stamp functions
+  # out of the probe by anchor, so a template copy that drifted from _shared would
+  # lift from a DIFFERENT file than the one that runs.
+  "prod-new/template/scripts/tests/probe-false-fail-selftest.sh:_shared/probes/probe-false-fail-selftest.sh"
 )
 drift=0
 for m in "${mirrors[@]}"; do
