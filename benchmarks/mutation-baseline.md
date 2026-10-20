@@ -24,7 +24,7 @@ here would be a threshold nobody derived.
 | `diagnostic-evidence-selftest.sh` | 4 |
 | `fuzz-row-selftest.sh` | 8 |
 | `gate-run-selftest.sh` | 17 |
-| `integration-lane-selftest.sh` | 30 |
+| `integration-lane-selftest.sh` | 35 |
 | `load-rows-selftest.sh` | 60 |
 | `memory-index-check-selftest.sh` | 17 |
 | `no-unfilled-slots-selftest.sh` | 6 |
@@ -32,7 +32,7 @@ here would be a threshold nobody derived.
 | `observability-provenance-selftest.sh` | 33 |
 | `policy-coverage-selftest.sh` | 7 |
 | `probe-excludes-selftest.sh` | 6 |
-| `probe-false-fail-selftest.sh` | 154 |
+| `probe-false-fail-selftest.sh` | 164 |
 | `probe-wiring-selftest.sh` | 13 |
 | `prove-mutation-selftest.sh` | 18 |
 | `provenance-headers-selftest.sh` | 12 |
@@ -45,4 +45,4 @@ here would be a threshold nobody derived.
 | `probe-self-gate-selftest.sh` | 29 |
 | `template-workflow-pins-selftest.sh` | 565 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1588** |
+| **total** | **1603** |

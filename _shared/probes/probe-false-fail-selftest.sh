@@ -58,9 +58,10 @@ lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
 lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'jsonstr'
 lift lanetag.sh  '/^lane_tagonly_stats() {/,/^}/p' 'comm -23'
 lift laneverdict.sh '/^lane_verdict() {/,/^}/p' 'no tag-only tests'
+lift lanerow.sh  '/^lane_row_verdict() {/,/^}/p' 'gating env'
 # shellcheck disable=SC2034  # read by the lifted imports_pkg
 PROBE_GREP_EXCLUDES=(--exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor)
-for f in classify grepx imports stamp codelines tracer lanetag laneverdict rbtok reg; do
+for f in classify grepx imports stamp codelines tracer lanetag laneverdict lanerow rbtok reg; do
   # shellcheck disable=SC1090  # lifted from the probe at runtime
   . "$TMP/$f.sh"
 done
@@ -390,7 +391,7 @@ lane_fix "$TMP/ln-fail" '	t.Fatal("boom")'
 check "lane: tag-only test fails -> failed 1" "1 1 0 1	" "$(lane_stats "$TMP/ln-fail")"
 check_has "wiring: lane run is -v and all-skipped lane lands in rl_na" "1" "$(grep -c 'rl_na+=' "$PROBE")"
 check_has "wiring: lane run uses -v (the stats parse its --- SKIP lines)" "1" "$(grep -c 'rl_out=$(go test -v -tags="$rt"' "$PROBE")"
-check_has "wiring: all-skipped lane row is NA" "1" "$(grep -c 'row "integration-real-lane" NA' "$PROBE")"
+check_has "wiring: the all-skipped NA row is emitted by lane_row_verdict" "1" "$(grep -c "printf 'NA" "$TMP/lanerow.sh")"
 # extra fixtures: subtests, non-Test tag-only items, skip-message selection
 lane_fix "$TMP/ln-subskip" '	t.Run("a", func(t *testing.T) { t.Skip("sub a off") })
 	t.Run("b", func(t *testing.T) { t.Skip("sub b off") })'
@@ -398,6 +399,22 @@ check "lane: parent whose subtests ALL skip counts as skipped, reason from the S
 lane_fix "$TMP/ln-submix" '	t.Run("a", func(t *testing.T) { t.Skip("sub a off") })
 	t.Run("b", func(t *testing.T) {})'
 check "lane: parent with one subtest that ran counts as ran" "1 1 0 0	" "$(lane_stats "$TMP/ln-submix")"
+# nested (depth 2): TestTagged -> a -> x. A depth-1-only count saw "a" PASS with no skipped child and
+# said ran; a node is skipped iff SKIP, or PASS with children that are ALL skipped, at any depth.
+lane_fix "$TMP/ln-nested" '	t.Run("a", func(t *testing.T) {
+		t.Run("x", func(t *testing.T) { t.Skip("deep off") })
+	})'
+check "lane: depth-2 subtests all skipped -> parent counts as skipped" "1 0 1 0	b_test.go:7: deep off" "$(lane_stats "$TMP/ln-nested")"
+lane_fix "$TMP/ln-nested-mixed" '	t.Run("a", func(t *testing.T) {
+		t.Run("x", func(t *testing.T) { t.Skip("deep off") })
+		t.Run("y", func(t *testing.T) {})
+	})'
+check "lane: one depth-2 leaf that runs -> parent counts as ran" "1 1 0 0	" "$(lane_stats "$TMP/ln-nested-mixed")"
+lane_fix "$TMP/ln-nested-fail" '	t.Run("a", func(t *testing.T) {
+		t.Run("x", func(t *testing.T) { t.Skip("deep off") })
+		t.Error("mid-level failure")
+	})'
+check "lane: failing middle node with an all-skipped child is ran+failed, not skipped" "1 1 0 1	" "$(lane_stats "$TMP/ln-nested-fail")"
 d="$TMP/ln-bench"; lane_fix "$d" '	_ = 1'
 printf '//go:build lane\n\npackage p\nimport "testing"\nfunc BenchmarkOnly(b *testing.B) {}\nfunc Only() {}\nfunc ExampleOnly() {}\n' > "$d/c_test.go"
 check "lane: tag-only Benchmark/Example are not counted (tot stays 1)" "1 1 0 0	" "$(lane_stats "$d")"
@@ -409,6 +426,14 @@ lane_fix "$TMP/ln-msg" '	t.Log("noise before")
 	t.Skip("the real reason")
 	t.Log("never printed")'
 check "lane: skip reason is the t.Skip line, not merely the last indented line" "1 0 1 0	b_test.go:7: the real reason" "$(lane_stats "$TMP/ln-msg")"
+# a t.Cleanup t.Log PRINTS after the skip line and ends in a bare continuation line: the reason must be a
+# file:line header (the regex), never the last indented line (a bare `prev = l` would pick "continuation")
+lane_fix "$TMP/ln-msg-after" '	t.Cleanup(func() { t.Log("cleanup\ncontinuation") })
+	t.Skip("the real reason")'
+check "lane: a log printed after the skip keeps a file:line header, never a bare continuation line" "1 0 1 0	b_test.go:6: cleanup" "$(lane_stats "$TMP/ln-msg-after")"
+# go test -list failing is a failed listing, not "0 tag-only tests"
+d="$TMP/ln-listfail"; lane_fix "$d" '	_ = 1'; printf 'package p\nfunc broken( {\n' > "$d/z.go"
+r="$(lane_stats "$d")"; check "lane: go test -list failing -> list-failed marker, not a zero count" "list-failed" "${r%%	*}"
 
 # lane_verdict: the row's per-lane decision (verdict<TAB>reason)
 lv() { lane_verdict lane "$1" "$2" "$3" | cut -f1; }
@@ -422,24 +447,29 @@ check "verdict: tag-only test failed (rc 1) -> FAIL" FAIL "$(lv 1 $'--- FAIL: Te
 check "verdict: build break (rc 1, no stats) -> FAIL, never NA" FAIL "$(lv 1 $'# p\nb_test.go:3: syntax error\nFAIL\tp [build failed]' '')"
 check "verdict: rc 1 even when stats say all skipped -> FAIL, never NA" FAIL "$(lv 1 'FAIL p' "$SK")"
 check "verdict: rc 0 but [no test files] -> FAIL" FAIL "$(lv 0 '?   p [no test files]' '')"
-check "verdict: zero tag-only tests -> NA no tag-only tests" "NA|lane '-tags=lane': no tag-only tests (nothing in the lane runs beyond the untagged tests)" "$(lv 0 'ok p' "$(printf '0 0 0 0\t')")|$(lvr 0 'ok p' "$(printf '0 0 0 0\t')")"
-# mixed lanes through the row's own aggregation block
-agg() {   # agg <verdict-line>...  -> row status, using the probe's case block
-  local rl_green="" rl_na="" rl_red="" v rl_vd rl_vr
-  for v in "$@"; do rl_vd=${v%%|*}; rl_vr=${v#*|}
-    case "$rl_vd" in PASS) rl_green+="g,";; NA) rl_na+="$rl_vr;";; *) rl_red+="$rl_vr;";; esac; done
-  if [[ -z "$rl_red" && -z "$rl_green" && -n "$rl_na" ]]; then echo NA
-  elif [[ -z "$rl_red" ]]; then echo "PASS${rl_na:+ (NA: $rl_na)}"; else echo FAIL; fi
+# decision (a): zero tag-only Test* functions was NA; it is now FAIL (consistent with [no test files]):
+# a lane holding only benchmarks/helpers proves nothing, and NA would hide a lane that never tests.
+check "verdict: zero tag-only tests -> FAIL no tag-only tests" "FAIL|lane '-tags=lane': no tag-only tests under -tags=lane: a lane holding only benchmarks/helpers proves nothing" "$(lv 0 'ok p' "$(printf '0 0 0 0\t')")|$(lvr 0 'ok p' "$(printf '0 0 0 0\t')")"
+# decision (b): a failed listing is FAIL carrying its tail
+check "verdict: go test -list failed -> FAIL with its output" "FAIL|lane '-tags=lane': go test -list failed: boom tail" "$(lv 0 'ok p' "$(printf 'list-failed\tboom tail')")|$(lvr 0 'ok p' "$(printf 'list-failed\tboom tail')")"
+# decision (c): listed but nothing ran or skipped is never PASS
+check "verdict: tag-only tests listed but none ran -> FAIL" "FAIL|lane '-tags=lane': listed 4 tag-only tests but none ran" "$(lv 0 'ok p' "$(printf '4 0 0 0\t')")|$(lvr 0 'ok p' "$(printf '4 0 0 0\t')")"
+# mixed lanes through the row's REAL aggregation function (lane_row_verdict, lifted from the probe)
+agg() {   # agg <green> <red> <na>  -> "STATUS|detail"
+  local r; r=$(lane_row_verdict "$1" "$2" "$3" 2 "${4:-}"); printf '%s|%s' "${r%%	*}" "${r#*	}"
 }
-check "mixed lanes: one NA one green -> row PASS carrying the NA note" "PASS (NA: x;)" "$(agg 'NA|x' 'PASS|')"
-check "mixed lanes: all NA -> row NA" NA "$(agg 'NA|x' 'NA|y')"
-check "mixed lanes: one FAIL one NA -> row FAIL" FAIL "$(agg 'FAIL|z' 'NA|y')"
+check "mixed lanes: one NA one green -> row PASS carrying the NA note" "PASS|lane(s) 'g' run green in 2 distinct pkg(s) (NA: x)" "$(agg "'g'" '' 'x')"
+check "mixed lanes: all NA -> row NA" "NA|x; y -- the lane's own tests did not execute (set its gating env to run them)" "$(agg '' '' 'x; y')"
+check "mixed lanes: one FAIL one NA -> row FAIL" "FAIL|z" "$(agg '' 'z' 'y')"
+check "mixed lanes: FAIL plus a green lane names the green one" "FAIL|z (green: 'g')" "$(agg "'g'" 'z' '')"
+check "mixed lanes: env-gated live lane noted on PASS" "PASS|lane(s) 'g' run green in 2 distinct pkg(s) + env-gated live lane" "$(agg "'g'" '' '' 'x_test.go')"
 lane_fix "$TMP/ln-multiline" '	t.Skip("line one\nline two")'
 check "lane: multi-line skip message keeps the file:line header, not the trailing indented line" "1 0 1 0	b_test.go:6: line one" "$(lane_stats "$TMP/ln-multiline")"
 check_has "wiring: row feeds lane_verdict from lane_tagonly_stats" "1" "$(grep -c 'rl_st=$(lane_tagonly_stats "$rt" "$rl_out" $real_pkgs)' "$PROBE")"
 check_has "wiring: row calls lane_verdict with the lane stats" "1" "$(grep -c 'rl_v=$(lane_verdict "$rt" "$rl_rc" "$rl_out" "$rl_st")' "$PROBE")"
 check_has "wiring: row routes NA verdicts to rl_na and FAIL to rl_red" "1" "$(grep -c '^      NA)   rl_na+=' "$PROBE")"
-check_has "wiring: row aggregation block is the one the mixed-lane cases mirror" "1" "$(grep -c 'if \[\[ -z "$rl_red" && -z "$rl_green" && -n "$rl_na" \]\]; then' "$PROBE")"
+check_has "wiring: row delegates its aggregation to lane_row_verdict (the function the mixed-lane cases execute)" "1" "$(grep -c 'rl_rv=$(lane_row_verdict "$rl_green" "$rl_red" "$rl_na" "$rl_npkg" "$live_gate")' "$PROBE")"
+check_has "wiring: row status comes from lane_row_verdict's output" "1" "$(grep -cF 'row "integration-real-lane" "$rl_rs" "$rl_rd"' "$PROBE")"
 
 
 # ===== runbook-citations-resolve: only metric-shaped tokens are citations ==========

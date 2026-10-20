@@ -29,8 +29,8 @@ bad() { echo "integration-lane-selftest: FAIL -- $*" >&2; fails=$((fails+1)); }
 
 # --- lift the programs ------------------------------------------------------
 fn_src() { sed -n "/^$1() {/,/^}/p" "$probe"; }
-{ fn_src extract_real_tag; fn_src extract_real_tags; fn_src extract_real_lanes; fn_src go_fail_evidence; fn_src lane_tagonly_stats; fn_src lane_verdict; sed -n '/^count_distinct_lines() {.*}$/p' "$probe"; } >"$tmp/fns.sh"
-for f in lane_tagonly_stats lane_verdict count_distinct_lines; do grep -q "^$f() {" "$tmp/fns.sh" || { echo "integration-lane-selftest: FAIL -- $f not lifted" >&2; exit 1; }; done
+{ fn_src extract_real_tag; fn_src extract_real_tags; fn_src extract_real_lanes; fn_src go_fail_evidence; fn_src lane_tagonly_stats; fn_src lane_verdict; fn_src lane_row_verdict; sed -n '/^count_distinct_lines() {.*}$/p' "$probe"; } >"$tmp/fns.sh"
+for f in lane_tagonly_stats lane_verdict lane_row_verdict count_distinct_lines; do grep -q "^$f() {" "$tmp/fns.sh" || { echo "integration-lane-selftest: FAIL -- $f not lifted" >&2; exit 1; }; done
 grep -q '^extract_real_tag()' "$tmp/fns.sh" || { echo "integration-lane-selftest: FAIL -- extract_real_tag not found" >&2; exit 1; }
 sed -n '/^if \[\[ -n "\${real_tags\{0,1\}:-}" \]\]; then$/,/^fi$/p' "$probe" >"$tmp/ci.sh"
 sed -n '/^if \[\[ -n "\$real_tags\{0,1\}" \]\]; then$/,/^else row "integration-real-lane" FAIL/p' "$probe" >"$tmp/lane.sh"
@@ -87,15 +87,29 @@ echo "go $*" >> "$STUB_LOG"
 [ -n "${STUB_NOTEST:-}" ] && { echo "?   	pkg	[no test files]"; exit 0; }
 # `-list` (lane_tagonly_stats): the tagged listing has ONE tag-only test, the untagged listing none.
 case " $* " in *" -list "*)
-  case " $* " in *" -tags="*) echo "TestTagOnly";; esac; echo "ok  	stubpkg	0.001s"; exit 0;; esac
+  case " $* " in *" -tags="*) [ -n "${STUB_LISTFAIL:-}" ] && { echo "stub: cannot load package" >&2; exit 1; }; [ -n "${STUB_NOTAG:-}" ] || echo "TestTagOnly";; esac; echo "ok  	stubpkg	0.001s"; exit 0;; esac
 for a in "$@"; do case "$a" in -tags=*) echo "tags ${a#-tags=}" >> "$STUB_LOG"; [ "${a#-tags=}" = "${RED_TAG:-}" ] && { echo "--- FAIL: TestX"; exit 1; };; esac; done
+# STUB_SKIP: the tag-only test skips (the lane is NA); STUB_NORAN: it is listed but never reported
+[ -n "${STUB_SKIP:-}" ] && { echo "=== RUN   TestTagOnly"; echo "    stub_test.go:3: gate env off"; echo "--- SKIP: TestTagOnly (0.00s)"; echo "ok  	stubpkg	0.001s"; exit 0; }
+[ -n "${STUB_NORAN:-}" ] && { echo "ok  	stubpkg	0.001s"; exit 0; }
 # a green lane run: the tag-only test ran and passed (so the verdict is PASS, not NA)
 echo "--- PASS: TestTagOnly (0.00s)"; echo "ok  	stubpkg	0.001s"
 exit 0
 EOS
 chmod +x "$tmp/bin/go"
 lane() { local d="$tmp/lane-$1"; shift; mkfx "$d" "$@"; : > "$tmp/stub.log"
-  PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG="${RED_TAG:-}" harness "$d" "$tmp/lane.sh"; }
+  PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/stub.log" RED_TAG="${RED_TAG:-}" STUB_SKIP="${STUB_SKIP:-}" STUB_NOTAG="${STUB_NOTAG:-}" STUB_NORAN="${STUB_NORAN:-}" STUB_LISTFAIL="${STUB_LISTFAIL:-}" harness "$d" "$tmp/lane.sh"; }
+# e3-e6: the row's verdict through the REAL row block (lane_verdict + lane_row_verdict), per decision
+n=$((n+1)); o=$(STUB_SKIP=1 lane e3 aaa integration)
+[[ "$o" == *"integration-real-lane NA"* && "$o" == *"all 1 tag-only tests skipped: stub_test.go:3: gate env off"* && "$o" == *"set its gating env"* ]] || bad "e3: every lane skipped -> row NA naming the skip reason, got: $o"
+n=$((n+1)); o=$(STUB_SKIP=1 RED_TAG=integration lane e3b aaa integration)
+[[ "$o" == *"integration-real-lane FAIL"* && "$o" == *"-tags=integration"* ]] || bad "e3b: one lane skipped + one red -> row FAIL, got: $o"
+n=$((n+1)); o=$(STUB_NOTAG=1 lane e4 aaa)
+[[ "$o" == *"integration-real-lane FAIL"* && "$o" == *"no tag-only tests under -tags=aaa"* ]] || bad "e4: a lane with zero tag-only tests is FAIL (was NA), got: $o"
+n=$((n+1)); o=$(STUB_LISTFAIL=1 lane e5 aaa)
+[[ "$o" == *"integration-real-lane FAIL"* && "$o" == *"go test -list failed: stub: cannot load package"* ]] || bad "e5: a failing go test -list is FAIL with its output, got: $o"
+n=$((n+1)); o=$(STUB_NORAN=1 lane e6 aaa)
+[[ "$o" == *"integration-real-lane FAIL"* && "$o" == *"listed 1 tag-only tests but none ran"* ]] || bad "e6: listed tests none of which ran must FAIL, got: $o"
 n=$((n+1)); RED_TAG='' o=$(lane e1 aaa integration)
 [[ "$o" == *"integration-real-lane PASS"* && "$o" == *aaa* && "$o" == *integration* ]] || bad "e1: expected PASS naming both lanes, got: $o"
 grep -q '^tags integration$' "$tmp/stub.log" || bad "e1: the integration lane was never run (stub saw: $(tr '\n' ' ' <"$tmp/stub.log"))"

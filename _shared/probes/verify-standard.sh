@@ -2128,16 +2128,31 @@ runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook
 # generators all SKIP without REPLAYGEN_OUT, the package's untagged tests passed, row said PASS).
 # Tag-only tests = `go test -list .` WITH the tag minus WITHOUT it, per package. Prints one line:
 #   <tag-only-total> <ran(pass+fail)> <skipped> <failed><TAB><first skip message>
+# or, when either `go test -list` exits non-zero (a build break must not read as "0 tag-only"):
+#   list-failed<TAB><tail of its output>
 # Reads the -v output the lane run already produced, so nothing is run twice.
+# A test counts as SKIPPED when it is SKIP, or it is PASS, has subtests, and every subtest is
+# skipped -- recursively at any depth (a t.Run inside a t.Run inside a skipped leaf is still skipped).
 lane_tagonly_stats() {
   local lane="$1" out="$2"; shift 2
-  local tl="${TMPDIR:-/tmp}/lts.$$"; mkdir -p "$tl"
-  # shellcheck disable=SC2068
-  go test -tags="$lane" -list . $@ 2>/dev/null | awk -F'\t' '/^(Test|Example|Benchmark|Fuzz)[A-Za-z0-9_]*$/ {b[++n]=$0; next}
-    /^ok[ \t]/ {split($0, a, /[ \t]+/); for (i=1;i<=n;i++) print a[2] "\t" b[i]; n=0}' | sort -u > "$tl/with"
-  # shellcheck disable=SC2068
-  go test -list . $@ 2>/dev/null | awk '/^(Test|Example|Benchmark|Fuzz)[A-Za-z0-9_]*$/ {b[++n]=$0; next}
-    /^ok[ \t]/ {split($0, a, /[ \t]+/); for (i=1;i<=n;i++) print a[2] "\t" b[i]; n=0}' | sort -u > "$tl/without"
+  local tl="${TMPDIR:-/tmp}/lts.$$" lo lrc lp mode
+  mkdir -p "$tl"
+  # Listed PER PACKAGE: a package whose files are ALL tagged exits non-zero ("build constraints
+  # exclude all Go files") WITHOUT the tag -- that is an empty untagged listing, not a failure;
+  # any other non-zero exit (a build break) is a failed listing, never "0 tag-only tests".
+  for mode in with without; do
+    : > "$tl/$mode"
+    for lp in "$@"; do
+      if [[ $mode == with ]]; then lo=$(go test -tags="$lane" -list . "$lp" 2>&1); lrc=$?
+      else lo=$(go test -list . "$lp" 2>&1); lrc=$?; fi
+      if (( lrc != 0 )) && ! grep -q 'build constraints exclude all Go files' <<<"$lo"; then
+        printf 'list-failed\t%s\n' "$(printf '%s\n' "$lo" | grep . | tail -n 3 | tr '\n' ' ' | cut -c1-160)"; rm -rf "$tl"; return 0
+      fi
+      printf '%s\n' "$lo" | awk -F'\t' '/^(Test|Example|Benchmark|Fuzz)[A-Za-z0-9_]*$/ {b[++n]=$0; next}
+        /^ok[ \t]/ {split($0, a, /[ \t]+/); for (i=1;i<=n;i++) print a[2] "\t" b[i]; n=0}' >> "$tl/$mode"
+    done
+    sort -u "$tl/$mode" -o "$tl/$mode"
+  done
   # Only Test* functions count: Benchmark*/Example*/Fuzz* are listed by -list but a plain
   # `go test -v` never runs them (an Example without an Output comment is only compiled), so
   # counting them would make "ran 0 skipped 0" look like a pass.
@@ -2145,27 +2160,33 @@ lane_tagonly_stats() {
   printf '%s\n' "$out" | awk -v onlyf="$tl/only" '
     BEGIN { while ((getline l < onlyf) > 0) { only[l] = 1; total++ } }
     /^=== / { prev = ""; next }
-    # a subtest result line (printed AFTER its parent'"'"'s --- line): depth-1 only (Parent/sub),
-    # counted against the parent entry just recorded
-    /^[ \t]+--- (PASS|FAIL|SKIP): / { if (n > 0 && split($3, pp, "/") == 2 && pp[1] == nm[n]) { sub_n[n]++
-        if ($2 == "SKIP:") sub_s[n]++ }
-      next }
+    # a subtest result line (printed AFTER its parent'"'"'s --- line, indented one level per depth):
+    # recorded as a node of the current package; the parent is resolved at package end
+    /^[ \t]+--- (PASS|FAIL|SKIP): / { n++; st[n] = $2; nm[n] = $3; top[n] = 0; idx[$3] = n; next }
     # only the line that carries the t.Skip/t.Log message (file.go:NN: text) is a reason
     /^[ \t]+[^ \t]/ { l = $0; sub(/^[ \t]+/, "", l); if (l ~ /^[A-Za-z0-9_.\/-]+\.go:[0-9]+:/) prev = l; next }
-    /^--- (PASS|FAIL|SKIP): / { n++; st[n] = $2; nm[n] = $3; msg[n] = prev; sub_n[n] = 0; sub_s[n] = 0; prev = ""; next }
+    /^--- (PASS|FAIL|SKIP): / { n++; st[n] = $2; nm[n] = $3; msg[n] = prev; top[n] = 1; idx[$3] = n; prev = ""; next }
     /^(ok|FAIL)[ \t]+[^ \t]/ { pkg = $2
-      for (i = 1; i <= n; i++) if ((pkg "\t" nm[i]) in only) {
-        if (st[i] == "SKIP:" || (st[i] == "PASS:" && sub_n[i] > 0 && sub_s[i] == sub_n[i])) {
-          sk++; if (first == "") first = (msg[i] != "" ? msg[i] : nm[i] " skipped") }
+      # parent = the longest recorded prefix ending before a "/"; children are recorded after
+      # their parent, so a reverse sweep sees every child before its parent
+      for (i = 1; i <= n; i++) { par[i] = 0
+        for (p = length(nm[i]); p > 0; p--)
+          if (substr(nm[i], p, 1) == "/" && (substr(nm[i], 1, p - 1) in idx)) { par[i] = idx[substr(nm[i], 1, p - 1)]; break } }
+      for (i = n; i >= 1; i--) {
+        skp[i] = (st[i] == "SKIP:" || (st[i] == "PASS:" && nk[i] > 0 && nks[i] == nk[i])) ? 1 : 0
+        if (par[i] > 0) { nk[par[i]]++; nks[par[i]] += skp[i] } }
+      for (i = 1; i <= n; i++) if (top[i] && ((pkg "\t" nm[i]) in only)) {
+        if (skp[i]) { sk++; if (first == "") first = (msg[i] != "" ? msg[i] : nm[i] " skipped") }
         else { ran++; if (st[i] == "FAIL:") fl++ } }
-      n = 0; prev = ""; delete st; delete nm; delete msg; delete sub_n; delete sub_s }
+      n = 0; prev = ""; delete st; delete nm; delete msg; delete top; delete idx; delete par; delete skp; delete nk; delete nks }
     END { printf "%d %d %d %d\t%s\n", total, ran, sk, fl, substr(first, 1, 120) }'
   rm -rf "$tl"
 }
 # lane_verdict <lane> <rc> <go test -v output> <lane_tagonly_stats line>
-# The row's per-lane decision. Prints "<PASS|NA|FAIL><TAB><reason>". A non-zero rc (build break,
-# test failure) is FAIL and is NEVER softened to NA; rc 0 with no tests is FAIL; rc 0 whose
-# tag-only Test* functions are absent or ALL skipped is NA (the green came from untagged tests).
+# The row's per-lane decision. Prints "<PASS|NA|FAIL><TAB><reason>". NA only when the lane's
+# tag-only Test* functions exist and ALL skipped (the green came from untagged tests). FAIL when:
+# rc != 0 (never softened to NA); no tests ran; `go test -list` failed; the lane holds ZERO
+# tag-only Test* functions (benchmarks/helpers only prove nothing); or tests were listed but none ran.
 lane_verdict() {
   local lane="$1" rc="$2" out="$3" st="$4" cnt tot ran skip msg
   if (( rc != 0 )); then
@@ -2178,14 +2199,34 @@ lane_verdict() {
     printf 'FAIL\tlane '"'"'-tags=%s'"'"' ran NO test (%s) -- a declared lane that executes nothing is not a pass\n' \
       "$lane" "$(grep -m1 -E '\[no test files\]|build constraints exclude' <<<"$out" | cut -c1-120)"; return 0
   fi
+  if [[ "$st" == list-failed* ]]; then
+    printf 'FAIL\tlane '"'"'-tags=%s'"'"': go test -list failed: %s\n' "$lane" "${st#*$'\t'}"; return 0
+  fi
   cnt=${st%%$'\t'*}; msg=${st#*$'\t'}
   read -r tot ran skip _ <<<"$cnt"
   if (( ${tot:-0} == 0 )); then
-    printf 'NA\tlane '"'"'-tags=%s'"'"': no tag-only tests (nothing in the lane runs beyond the untagged tests)\n' "$lane"
-  elif (( ran == 0 && skip > 0 )); then
+    printf 'FAIL\tlane '"'"'-tags=%s'"'"': no tag-only tests under -tags=%s: a lane holding only benchmarks/helpers proves nothing\n' "$lane" "$lane"
+  elif (( ${ran:-0} == 0 && ${skip:-0} == 0 )); then
+    printf 'FAIL\tlane '"'"'-tags=%s'"'"': listed %s tag-only tests but none ran\n' "$lane" "$tot"
+  elif (( ran == 0 )); then
     printf 'NA\tlane '"'"'-tags=%s'"'"': all %s tag-only tests skipped: %s\n' "$lane" "$skip" "$msg"
   else
     printf 'PASS\t\n'
+  fi
+}
+# lane_row_verdict <green-list> <red-list> <na-list> <distinct-pkg-count> <live_gate>
+# The row's aggregation over the per-lane verdicts. Prints "<STATUS><TAB><detail>".
+# Any red lane FAILs the row; all-NA is NA; otherwise PASS (carrying the NA note).
+lane_row_verdict() {
+  local green="$1" red="$2" na="$3" npkg="$4" live="$5" extra=""
+  if [[ -n "$red" ]]; then
+    printf 'FAIL\t%s%s\n' "$red" "${green:+ (green: $green)}"
+  elif [[ -z "$green" && -n "$na" ]]; then
+    printf 'NA\t%s -- the lane'"'"'s own tests did not execute (set its gating env to run them)\n' "$na"
+  else
+    [[ -n "$na" ]] && extra=" (NA: $na)"
+    [[ -n "$live" ]] && extra+=" + env-gated live lane"
+    printf 'PASS\tlane(s) %s run green in %s distinct pkg(s)%s\n' "$green" "$npkg" "$extra"
   fi
 }
 real_tags=$(extract_real_tags .)
@@ -2226,16 +2267,9 @@ if [[ -n "$real_tags" ]]; then
       *)    rl_red+="${rl_red:+; }$rl_vr" ;;
     esac
   done <<<"$rl_lanes"
-  if [[ -z "$rl_red" && -z "$rl_green" && -n "$rl_na" ]]; then
-    row "integration-real-lane" NA "$rl_na -- the lane's own tests did not execute (set its gating env to run them)"
-  elif [[ -z "$rl_red" ]]; then
-    extra=""; [[ -n "$rl_na" ]] && extra=" (NA: $rl_na)"
-    [[ -n "$live_gate" ]] && extra+=" + env-gated live lane"
-    rl_npkg=$(count_distinct_lines "$rl_allpkgs")
-    row "integration-real-lane" PASS "lane(s) $rl_green run green in $rl_npkg distinct pkg(s)$extra"
-  else
-    row "integration-real-lane" FAIL "$rl_red${rl_green:+ (green: $rl_green)}"
-  fi
+  rl_npkg=$(count_distinct_lines "$rl_allpkgs")
+  rl_rv=$(lane_row_verdict "$rl_green" "$rl_red" "$rl_na" "$rl_npkg" "$live_gate"); rl_rs=${rl_rv%%$'\t'*}; rl_rd=${rl_rv#*$'\t'}
+  row "integration-real-lane" "$rl_rs" "$rl_rd"
 elif [[ -n "$live_gate" ]]; then
   row "integration-real-lane" PASS "env-gated live lane only ($live_gate)"
 else row "integration-real-lane" FAIL "every test is hermetic — no real-dependency lane"; fi
