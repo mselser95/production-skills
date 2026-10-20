@@ -373,6 +373,52 @@ func main() {
 	_, _ = a, tracer
 }' main.go
 check "NEG tracer: var a, tracer = setup() does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-trail"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tp, err := sdktrace.NewTracerProvider() // tracer: wired later
+	_, _ = tp, err
+}' main.go
+check "NEG tracer: trailing // comment mentioning tracer: does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-escq"; mkgo "$d/cmd/app" 'package main
+func main() {
+	log.Printf("q\" tracer: %v", err)
+}' main.go
+check "NEG tracer: escaped quote inside string literal does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-bt"; mkgo "$d/cmd/app" 'package main
+func main() {
+	x := `tracer: y`
+	_ = x
+}' main.go
+check "NEG tracer: backtick raw string does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-rune"; mkgo "$d/cmd/app" 'package main
+func main() {
+	x := '"'tracer: y'"'
+	_ = x
+}' main.go
+# NOTE: not valid Go (multi-char rune) on purpose. In valid Go a rune is one char and
+# its closing quote always separates it from any identifier, so the rune strip is only
+# observable on an apostrophe-delimited span; this pins that the strip still removes it.
+check "NEG tracer: apostrophe-delimited span with tracer-colon does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-massign"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tp, tracer = setup()
+}' main.go
+check "NEG tracer: plain multi-assign tp, tracer = setup() does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-massign3"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tp, tracer, err = setup()
+}' main.go
+check "NEG tracer: plain multi-assign tp, tracer, err = setup() (assign branch only) does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-vartyped"; mkgo "$d/cmd/app" 'package main
+func main() {
+	var tracer trace.Tracer = x
+}' main.go
+check "NEG tracer: var tracer trace.Tracer = x does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-vararr"; mkgo "$d/cmd/app" 'package main
+func main() {
+	var a, tracer, b []int = f()
+}' main.go
+check "NEG tracer: var a, tracer, b []int = f() (var branch only) does NOT count" 0 "$(tsites "$d")"
 check_has "wiring: tracing row counts via tracer_call_sites" "1" "$(grep -c '^tracer_sites=\$(tracer_call_sites' "$PROBE")"
 
 # ===== integration-real-lane: a lane whose TAG-ONLY tests all skip is not green ======

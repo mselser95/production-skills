@@ -3381,7 +3381,8 @@ inbound_route_sites() {
 # Still NOT a call site (so a decorative tracer still FAILs): `tp := NewTracerProvider()`
 # + `_ = tp`, `tracer := x` (the `:=`/`var`/`=` LHS is dropped before matching), a
 # `func` declaration, a `case tracer:` arm, a string literal ("init tracer: %w"),
-# and any commented-out line.
+# and any commented-out line or trailing `// ...` comment (stripped after the
+# literals, so a `//` inside a string is already gone).
 tracer_call_sites() {
   # Literals are stripped BEFORE matching (a `log.Fatalf("tracer: %v", err)` or
   # `fmt.Errorf("init tracer: %w", err)` is prose, not wiring), and so is the
@@ -3395,6 +3396,7 @@ tracer_call_sites() {
         gsub(/"([^"\\]|\\.)*"/, "\"\"", c)
         gsub(/`[^`]*`/, "``", c)
         gsub(/\047([^\047\\]|\\.)+\047/, "\047\047", c)
+        sub(/\/\/.*/, "", c)
         c = tolower(c)
         if (c ~ /^[ \t]*func[ \t]/) next
         if (c ~ /^[ \t]*(case|default)([ \t]|:)/) next
