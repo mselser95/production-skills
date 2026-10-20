@@ -1547,6 +1547,48 @@ REG_TSV="${RATIFY_REGISTRY:-verification/ratified/invariants.tsv}"
 REG_ROWS=0; REG_IDS=""; REG_BAD=""; REG_RAN=0; REG_PASS=0; REG_DB_SKIPPED=0
 REG_ID_COUNT=0; REG_PROVEN=0; REG_PROVE_TOTAL=0; REG_PROVE_SKIPPED=0; REG_ARMED=""
 registry_present() { [[ -f "$REG_TSV" ]]; }
+# count_distinct_lines <text> -> number of distinct non-empty lines. printf '%s\n':
+# the count must not depend on a later `sort -u` happening to terminate the last line.
+count_distinct_lines() { printf '%s\n' "$1" | sed '/^$/d' | sort -u | wc -l | tr -d ' '; }
+# The decision of the registry rows, lifted so the selftest drives it.
+# registry_run_verdict <rows> <bad> <ran> <db_skipped> -> "OK" | "FAIL<TAB>reason"
+registry_run_verdict() {
+  if (( $1 == 0 )); then printf 'FAIL\tregistry %s has zero rows -- a list that registers nothing proves nothing\n' "$REG_TSV"
+  elif [[ -n "$2" ]]; then printf 'FAIL\tregistry test(s) not green:%s\n' "$2"
+  elif (( $3 == 0 )); then printf 'FAIL\t%s registered but none runnable here (%s db-lane need DATABASE_URL) -- nothing was executed\n' "$1" "$4"
+  else printf 'OK\n'; fi
+}
+# registry_skip_note <db_skipped> -> evidence text that says WHY rows were not run
+# (the skip happens only when DATABASE_URL is unset, so 0 skipped means they ran).
+registry_skip_note() {
+  if (( $1 > 0 )); then printf '%s db-lane row(s) NOT run: DATABASE_URL unset' "$1"
+  else printf 'no db-lane row skipped (DATABASE_URL set or no db-lane rows)'; fi
+}
+# registry_spec_ids <spec> -> the invariant ids under `invariants:`, one per line
+registry_spec_ids() {
+  sed -n '/^invariants:/,/^[a-z_]*:/p' "$1" 2>/dev/null \
+    | grep -oE '^[[:space:]]*-[[:space:]]+id:[[:space:]]*["'"'"']?[A-Za-z0-9_.-]+' | sed -E "s/.*id:[[:space:]]*[\"']?//"
+}
+# registry_inv_count <spec> -> the ratified-invariant count. When the ids can be
+# read THEY are the count: the dash-line count also counts sub-lists nested in an entry.
+registry_inv_count() {
+  local n ids
+  n=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$1" 2>/dev/null) 2>/dev/null | head -1)
+  n=${n:-0}
+  ids=$(registry_spec_ids "$1")
+  if [[ -n "$ids" ]]; then n=$(printf '%s\n' "$ids" | wc -l | tr -d ' '); fi
+  printf '%s' "$n"
+}
+# ratification_pkgs_verdict <pkgs> <inv> <unbacked-ids> -> PASS | FAIL
+ratification_pkgs_verdict() {
+  if (( $1 > 0 && $1 >= $2 )) && [[ -z "$3" ]]; then echo PASS; else echo FAIL; fi
+}
+# registry_cites_verdict <rows> <bad> -> OK | FAIL<TAB>reason
+registry_cites_verdict() {
+  if (( $1 == 0 )); then printf 'FAIL\tregistry %s has zero rows -- the citation is what makes the registry evidence\n' "$REG_TSV"
+  elif [[ -n "$2" ]]; then printf 'FAIL\tregistry cites test(s)/patch(es) that do not exist:%s\n' "$2"
+  else printf 'OK\n'; fi
+}
 registry_rows() {   # US-separated so empty fields survive `read`
   awk -F'\t' -v OFS='\037' '/^[[:space:]]*#/ || $1 == "" {next}
     {l=$6; if (l == "" || l == "-") l="unit"; print $1,$2,$3,$4,$5,l}' "$REG_TSV"
@@ -1573,7 +1615,7 @@ registry_cite() {   # existence of every cited test and named patch
   REG_IDS=$(printf '%s' "$REG_IDS" | sed '/^$/d' | sort -u)
   # `printf '%s\n'`: without the trailing newline `wc -l` undercounts the last id
   # (14 ids read as 13 -- measured on falcon-xyz-perps-service).
-  REG_ID_COUNT=$(printf '%s\n' "$REG_IDS" | sed '/^$/d' | wc -l | tr -d ' ')
+  REG_ID_COUNT=$(count_distinct_lines "$REG_IDS")
 }
 registry_run() {   # every runnable row must run and PASS
   REG_ROWS=0; REG_BAD=""; REG_RAN=0; REG_PASS=0; REG_DB_SKIPPED=0
@@ -1787,19 +1829,16 @@ open(path,"w").write(src.replace(os.environ["FIND"], os.environ["REPL"], 1))' "$
   fi
 elif registry_present; then
   registry_run
-  if (( REG_ROWS == 0 )); then
-    row "invariants-ratified" FAIL "registry $REG_TSV has zero rows -- a list that registers nothing proves nothing"
-  elif [[ -n "$REG_BAD" ]]; then
-    row "invariants-ratified" FAIL "registry test(s) not green:${REG_BAD}"
-  elif (( REG_RAN == 0 )); then
-    row "invariants-ratified" FAIL "$REG_ROWS registered but none runnable here ($REG_DB_SKIPPED db-lane need DATABASE_URL) -- nothing was executed"
+  reg_rv=$(registry_run_verdict "$REG_ROWS" "$REG_BAD" "$REG_RAN" "$REG_DB_SKIPPED")
+  if [[ "${reg_rv%%$'\t'*}" == FAIL ]]; then
+    row "invariants-ratified" FAIL "${reg_rv#*$'\t'}"
   else
     ratified_n=$(spec_seq_count invariants)
     pending_n=$(spec_seq_count invariants_pending_ratification)
     if ! [[ "$ratified_n" =~ ^[0-9]+$ && "$pending_n" =~ ^[0-9]+$ ]]; then
       row "invariants-ratified" FAIL "the ratified/pending counts could not be computed (got '$ratified_n'/'$pending_n') -- the registry tests are green, but this row cannot say how many invariants they cover"
     else
-      row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $REG_PASS/$REG_ROWS registry test(s) ACTUALLY RAN green via $REG_TSV ($REG_DB_SKIPPED db-lane row(s) NOT run: DATABASE_URL unset)"
+      row "invariants-ratified" PASS "$ratified_n ratified per $SPEC (+$pending_n pending human ratification); $REG_PASS/$REG_ROWS registry test(s) ACTUALLY RAN green via $REG_TSV ($(registry_skip_note "$REG_DB_SKIPPED"))"
     fi
   fi
   registry_prove
@@ -2192,7 +2231,7 @@ if [[ -n "$real_tags" ]]; then
   elif [[ -z "$rl_red" ]]; then
     extra=""; [[ -n "$rl_na" ]] && extra=" (NA: $rl_na)"
     [[ -n "$live_gate" ]] && extra+=" + env-gated live lane"
-    rl_npkg=$(printf '%s' "$rl_allpkgs" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')
+    rl_npkg=$(count_distinct_lines "$rl_allpkgs")
     row "integration-real-lane" PASS "lane(s) $rl_green run green in $rl_npkg distinct pkg(s)$extra"
   else
     row "integration-real-lane" FAIL "$rl_red${rl_green:+ (green: $rl_green)}"
@@ -3055,8 +3094,18 @@ fi   # @shard-end
 # An import is a line whose ONLY content is the quoted path, optionally
 # preceded by `import` and/or an alias, optionally followed by a comment.
 imports_pkg() {
-  local _re="^[[:space:]]*(import[[:space:]]+)?([A-Za-z_.][A-Za-z0-9_]*[[:space:]]+)?\"$1\"[[:space:]]*(//.*)?\$"
-  grep -rqE "${PROBE_GREP_EXCLUDES[@]}" "$_re" --include='*.go' . 2>/dev/null
+  local _re="^[[:space:]]*(import[[:space:]]+)?([A-Za-z_.][A-Za-z0-9_]*[[:space:]]+)?\"$1\"[[:space:]]*(//.*)?\$" _f
+  # Candidate lines are then CONTEXT-checked: a bare quoted path also appears as an
+  # element of a string-slice literal, which is not an import. Only `import "x"`
+  # lines and lines inside an `import ( ... )` block count.
+  while IFS= read -r _f; do
+    awk -v re="$_re" '
+      /^[[:space:]]*import[[:space:]]*\([[:space:]]*(\/\/.*)?$/ { inb=1; next }
+      inb && /^[[:space:]]*\)/ { inb=0; next }
+      $0 ~ re { if (inb || $0 ~ /^[[:space:]]*import[[:space:]]/) { found=1; exit } }
+      END { exit !found }' "$_f" && return 0
+  done < <(grep -rlE "${PROBE_GREP_EXCLUDES[@]}" "$_re" --include='*.go' . 2>/dev/null)
+  return 1
 }
 if imports_pkg 'log/slog'; then
   # The two counts are DISJOINT: `\.Info\(` requires the paren immediately
@@ -4972,27 +5021,21 @@ if ! ls verification/ratified/*_test.go >/dev/null 2>&1 && registry_present; the
   # trail, and every spec invariant must have one. A count alone would let a
   # surplus id hide a missing one.
   registry_cite
-  inv=$(grep -cE '^[[:space:]]*-[[:space:]]' <(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null) 2>/dev/null | head -1)
-  inv=${inv:-0}
+  inv=$(registry_inv_count "$SPEC")
   pkgs=$REG_ID_COUNT
-  reg_spec_ids=$(sed -n '/^invariants:/,/^[a-z_]*:/p' "$SPEC" 2>/dev/null \
-    | grep -oE '^[[:space:]]*-[[:space:]]+id:[[:space:]]*["'"'"']?[A-Za-z0-9_.-]+' | sed -E "s/.*id:[[:space:]]*[\"']?//")
-  # When the spec's ids could be read, THEY are the invariant count: the dash-line
-  # count above also counts sub-lists nested inside an entry.
-  if [[ -n "$reg_spec_ids" ]]; then inv=$(printf '%s\n' "$reg_spec_ids" | wc -l | tr -d ' '); fi
+  reg_spec_ids=$(registry_spec_ids "$SPEC")
   reg_unbacked=""
   for _rid in $reg_spec_ids; do
     grep -qxF -- "$_rid" <<<"$REG_IDS" || reg_unbacked+=" $_rid"
   done
-  if (( pkgs > 0 && pkgs >= inv )) && [[ -z "$reg_unbacked" ]]; then
+  if [[ $(ratification_pkgs_verdict "$pkgs" "$inv" "$reg_unbacked") == PASS ]]; then
     row "ratification-packages" PASS "$pkgs registry invariant id(s) for $inv ratified invariants in $REG_TSV"
   else
     row "ratification-packages" FAIL "$pkgs registry invariant id(s) for $inv ratified invariants; spec id(s) with NO registry row:${reg_unbacked:- (none -- the count is short)}"
   fi
-  if (( REG_ROWS == 0 )); then
-    row "ratification-citations" FAIL "registry $REG_TSV has zero rows -- the citation is what makes the registry evidence"
-  elif [[ -n "$REG_BAD" ]]; then
-    row "ratification-citations" FAIL "registry cites test(s)/patch(es) that do not exist:${REG_BAD}"
+  reg_cv=$(registry_cites_verdict "$REG_ROWS" "$REG_BAD")
+  if [[ "${reg_cv%%$'\t'*}" == FAIL ]]; then
+    row "ratification-citations" FAIL "${reg_cv#*$'\t'}"
   else
     row "ratification-citations" PASS "$REG_ROWS registry row(s) each cite a test that exists in its package and a patch that exists"
   fi

@@ -50,7 +50,7 @@ lift() {   # lift <outfile> <sed-script> <must-contain>
 lift reg.sh      '/^REG_TSV=/,/^if shard_run dynamic/p' 'registry_prove()'
 sed '$d' "$TMP/reg.sh" > "$TMP/reg2.sh" && mv "$TMP/reg2.sh" "$TMP/reg.sh"   # drop the `if shard_run` anchor line
 lift classify.sh '/^classify_mutation_result() {/,/^}/p' 'DETECTED'
-lift imports.sh  '/^imports_pkg() {/,/^}/p' 'grep -rqE'
+lift imports.sh  '/^imports_pkg() {/,/^}/p' 'grep -rlE'
 lift grepx.sh    '/^grep_x() {/,/^}/p' 'stripped'
 lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
 lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
@@ -108,6 +108,30 @@ d="$TMP/imp-blockcmt-line"; mkgo "$d" 'package x
 // import "log/slog"
 func f() {}' log.go
 check "slog: a commented-out import is not an import" no "$(imp "$d" log/slog)"
+d="$TMP/imp-slice"; mkgo "$d" 'package x
+var pkgs = []string{
+	"fmt",
+	"log/slog"
+}
+func f() {}' log.go
+check "NEG slog: a string-slice element is not an import" no "$(imp "$d" log/slog)"
+d="$TMP/imp-slice2"; mkgo "$d" 'package x
+import "fmt"
+var pkgs = map[string]string{
+	"a": "b",
+}
+var one = []string{
+	"log/slog",
+}' log.go
+check "NEG slog: slice element after an unrelated import is not an import" no "$(imp "$d" log/slog)"
+d="$TMP/imp-block-then-slice"; mkgo "$d" 'package x
+import (
+	"fmt"
+)
+var pkgs = []string{
+	"log/slog"
+}' log.go
+check "NEG slog: slice element after a CLOSED import block is not an import" no "$(imp "$d" log/slog)"
 # The probe wiring: zap-only repos must get an explicit NA, never a slog FAIL.
 check "probe: zap-only repo emits explicit NA rows (not FAIL, not PASS)" 2 "$(grep -cE 'row "observability:(logs_correlate|log_handler_installed)" NA "zap: ' "$PROBE")"
 
@@ -212,6 +236,49 @@ check "registry: db-lane row without DATABASE_URL is COUNTED as not run" "rows=1
 check "registry: db-lane row is COUNTED as not mutation-proven" "proven=0/0 dbskip=1 bad=[]" \
   "$(reg "$FX" "I01${T}./pkg/a${T}TestAdd${T}-${T}I01.patch${T}db\n" summ_prove)"
 check "registry: prove after the negatives still leaves the tree clean" "" "$(cd "$FX" && git status --porcelain --untracked-files=no)"
+
+# --- the rows' DECISION logic (lifted: registry_run_verdict & co) --------------
+rvd() { registry_run_verdict "$@" | cut -f1; }
+check "NEG registry verdict: zero rows -> FAIL (invariants-ratified)" FAIL "$(rvd 0 "" 0 0)"
+check_has "NEG registry verdict: zero rows reason says so" "zero rows" "$(registry_run_verdict 0 "" 0 0)"
+check "NEG registry verdict: a bad row -> FAIL" FAIL "$(rvd 2 " I01/T:did-not-run-green" 1 0)"
+check "NEG registry verdict: nothing runnable -> FAIL" FAIL "$(rvd 1 "" 0 1)"
+check "registry verdict: rows ran green -> OK" OK "$(rvd 2 "" 2 0)"
+check "NEG registry citations: zero rows -> FAIL (ratification-citations)" FAIL "$(registry_cites_verdict 0 "" | cut -f1)"
+check "NEG registry citations: a missing cite -> FAIL" FAIL "$(registry_cites_verdict 1 " I01/T:no-such-test-in-p" | cut -f1)"
+check "registry citations: all cites resolve -> OK" OK "$(registry_cites_verdict 1 "" | cut -f1)"
+check "evidence: skipped db rows say DATABASE_URL unset" "2 db-lane row(s) NOT run: DATABASE_URL unset" "$(registry_skip_note 2)"
+check "evidence: zero skipped never claims 'NOT run' / 'unset'" "no db-lane row skipped (DATABASE_URL set or no db-lane rows)" "$(registry_skip_note 0)"
+check "NEG ratification-packages: pkgs=0 -> FAIL" FAIL "$(ratification_pkgs_verdict 0 0 "")"
+check "NEG ratification-packages: pkgs < inv -> FAIL" FAIL "$(ratification_pkgs_verdict 2 3 "")"
+check "ratification-packages: pkgs == inv -> PASS" PASS "$(ratification_pkgs_verdict 3 3 "")"
+check "ratification-packages: pkgs > inv -> PASS" PASS "$(ratification_pkgs_verdict 4 3 "")"
+check "NEG ratification-packages: enough ids but a spec id has no row -> FAIL" FAIL "$(ratification_pkgs_verdict 4 3 " I03")"
+SPECF="$TMP/spec.yaml"
+printf 'invariants:\n  - id: I01\n    text: a\n    examples:\n      - one\n      - two\n  - id: "I02"\n    text: b\n  - id: I03\ninvariants_pending_ratification:\n  - id: P1\n' > "$SPECF"
+check "spec ids: ids read from the invariants block only, quotes stripped" "I01 I02 I03" "$(registry_spec_ids "$SPECF" | tr '\n' ' ' | sed 's/ $//')"
+check "inv recount: nested sub-list dash lines are NOT counted (3, not 5)" 3 "$(registry_inv_count "$SPECF")"
+printf 'invariants:\n  - plain text one\n  - plain text two\nother: x\n' > "$SPECF"
+check "inv recount: no readable ids -> falls back to the dash-line count" 2 "$(registry_inv_count "$SPECF")"
+printf 'name: x\n' > "$SPECF"
+check "inv recount: no invariants block -> 0" 0 "$(registry_inv_count "$SPECF")"
+printf 'invariants:\n  - id: I01\n  - id: I02\n  - id: I03\n' > "$SPECF"
+check "NEG packages vs spec: 2 registry ids for 3 spec invariants -> FAIL" FAIL "$(ratification_pkgs_verdict 2 "$(registry_inv_count "$SPECF")" "")"
+check "packages vs spec: 3 registry ids for 3 spec invariants -> PASS" PASS "$(ratification_pkgs_verdict 3 "$(registry_inv_count "$SPECF")" "")"
+check "count_distinct_lines: no trailing newline, one item -> 1" 1 "$(count_distinct_lines "a")"
+check "count_distinct_lines: no trailing newline, dup + blank lines -> 2" 2 "$(count_distinct_lines "a
+b
+
+a")"
+check "count_distinct_lines: empty -> 0" 0 "$(count_distinct_lines "")"
+check_has "wiring: ratification-packages takes pkgs from REG_ID_COUNT" "1" "$(grep -c '^  pkgs=\$REG_ID_COUNT$' "$PROBE")"
+check_has "wiring: ratification-packages verdict via ratification_pkgs_verdict" "1" "$(grep -c 'ratification_pkgs_verdict "\$pkgs" "\$inv" "\$reg_unbacked"' "$PROBE")"
+check_has "wiring: ratification-packages inv from registry_inv_count" "1" "$(grep -c 'inv=\$(registry_inv_count "\$SPEC")' "$PROBE")"
+check_has "wiring: invariants-ratified uses registry_run_verdict" "1" "$(grep -c 'registry_run_verdict "\$REG_ROWS"' "$PROBE")"
+check_has "wiring: invariants-ratified evidence uses registry_skip_note" "1" "$(grep -c 'registry_skip_note "\$REG_DB_SKIPPED"' "$PROBE")"
+check_has "wiring: ratification-citations uses registry_cites_verdict" "1" "$(grep -c 'registry_cites_verdict "\$REG_ROWS" "\$REG_BAD"' "$PROBE")"
+check_has "wiring: integration-real-lane distinct count via count_distinct_lines" "1" "$(grep -c 'rl_npkg=\$(count_distinct_lines "\$rl_allpkgs")' "$PROBE")"
+check_has "wiring: REG_ID_COUNT counted via count_distinct_lines" "1" "$(grep -c 'REG_ID_COUNT=\$(count_distinct_lines "\$REG_IDS")' "$PROBE")"
 
 # ============================ 4. tracing-wired-in-prod call sites ============
 # provenance: candidate (pinning: true) -- ttl 2027-01-20
