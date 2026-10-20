@@ -3255,12 +3255,30 @@ inbound_route_sites() {
 # `tracers)` as an argument. The old case/plural-sensitive regex made a perps
 # implementer rename an option to the exported `WithTracer` just to satisfy it.
 # Still NOT a call site (so a decorative tracer still FAILs): `tp := NewTracerProvider()`
-# + `_ = tp`, `tracer := x` (`:=` is excluded from the field alternative), a
-# `func` declaration, and any commented-out line.
+# + `_ = tp`, `tracer := x` (the `:=`/`var`/`=` LHS is dropped before matching), a
+# `func` declaration, a `case tracer:` arm, a string literal ("init tracer: %w"),
+# and any commented-out line.
 tracer_call_sites() {
-  grep -rniE --include='*.go' --exclude='*_test.go' \
-    '(set|with)tracers?(provider)?\(|tracers?(provider)?:([^=]|$)|interceptor\(.*tracer|tracers?(provider)?\)|[(,][[:space:]]*[A-Za-z0-9_.]*tracers?(provider)?,' cmd/ 2>/dev/null \
-    | code_lines_only | grep -vE '^[^:]+:[0-9]+:[[:space:]]*func[[:space:]]'
+  # Literals are stripped BEFORE matching (a `log.Fatalf("tracer: %v", err)` or
+  # `fmt.Errorf("init tracer: %w", err)` is prose, not wiring), and so is the
+  # LHS of a declaration / multi-assign (`tp, tracer, err := setup()` declares,
+  # it does not pass). `case tracer:` is a switch arm, not a field.
+  grep -rn --include='*.go' --exclude='*_test.go' '' cmd/ 2>/dev/null \
+    | code_lines_only \
+    | awk '{
+        if (!match($0, /^[^:]+:[0-9]+:/)) next
+        pre = substr($0, 1, RLENGTH); c = substr($0, RLENGTH + 1)
+        gsub(/"([^"\\]|\\.)*"/, "\"\"", c)
+        gsub(/`[^`]*`/, "``", c)
+        gsub(/\047([^\047\\]|\\.)+\047/, "\047\047", c)
+        c = tolower(c)
+        if (c ~ /^[ \t]*func[ \t]/) next
+        if (c ~ /^[ \t]*(case|default)([ \t]|:)/) next
+        if (match(c, /:=/)) c = substr(c, RSTART + 2)
+        else if (c ~ /^[ \t]*var[ \t][^=]*=/) sub(/^[ \t]*var[ \t][^=]*=/, "", c)
+        else if (c ~ /^[ \t]*[a-z0-9_.,* \t]+=[^=]/) sub(/^[ \t]*[a-z0-9_.,* \t]+=/, "", c)
+        if (c ~ /(set|with)tracers?(provider)?\(/ || c ~ /tracers?(provider)?:([^=]|$)/ || c ~ /interceptor\(.*tracer/ || c ~ /tracers?(provider)?\)/ || c ~ /[(,][ \t]*[a-z0-9_.]*tracers?(provider)?,/) print pre c
+      }'
 }
 tracer_sites=$(tracer_call_sites | wc -l | tr -d ' ')
 

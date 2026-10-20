@@ -256,6 +256,54 @@ d="$TMP/tr-neg-comment"; mkgo "$d/cmd/app" 'package main
 // wire it with WithTracer(t) and Tracers: x
 func main() {}' main.go
 check "NEG tracer: a comment mentioning WithTracer does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-lit-fatal"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tp, err := sdktrace.NewTracerProvider()
+	if err != nil { log.Fatalf("tracer: %v", err) }
+	_ = tp
+}' main.go
+check "NEG tracer: string literal tracer-colon in log.Fatalf does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-lit-errorf"; mkgo "$d/cmd/app" 'package main
+func f() error {
+	return fmt.Errorf("init tracer: %w", err)
+}' main.go
+check "NEG tracer: string literal init-tracer in Errorf does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-lit-println"; mkgo "$d/cmd/app" 'package main
+func main() {
+	log.Println("disabled (tracer)")
+}' main.go
+check "NEG tracer: string literal (tracer) in Println does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-multi-tp"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tp, tracerProvider, err := setup()
+	_ = err
+}' main.go
+check "NEG tracer: multi-assign tp, tracerProvider, err := setup() does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-multi-t"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tp, tracer, err := setup()
+	_ = err
+}' main.go
+check "NEG tracer: multi-assign tp, tracer, err := setup() does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-case"; mkgo "$d/cmd/app" 'package main
+func f(k string) {
+	switch k {
+	case tracer:
+	}
+}' main.go
+check "NEG tracer: switch arm case tracer: does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-short"; mkgo "$d/cmd/app" 'package main
+func main() {
+	tracer:=x
+	_ = tracer
+}' main.go
+check "NEG tracer: tracer:=x short declaration does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-neg-var"; mkgo "$d/cmd/app" 'package main
+func main() {
+	var a, tracer = setup()
+	_, _ = a, tracer
+}' main.go
+check "NEG tracer: var a, tracer = setup() does NOT count" 0 "$(tsites "$d")"
 check_has "wiring: tracing row counts via tracer_call_sites" "1" "$(grep -c '^tracer_sites=\$(tracer_call_sites' "$PROBE")"
 
 # ===== integration-real-lane: a lane whose TAG-ONLY tests all skip is not green ======

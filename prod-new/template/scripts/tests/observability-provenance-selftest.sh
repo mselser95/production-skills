@@ -65,7 +65,7 @@ sed -n '/^  slog_plain=0$/,/^  done < <(grep -rlE/p' "$PROBE" > "$TMP/logs.sh"
 [ -s "$TMP/logs.sh" ] || { echo "FAIL: logs_correlate anchor matched nothing -- the probe changed shape" >&2; exit 2; }
 grep -q 'done < <(grep -rlE' "$TMP/logs.sh" || { echo "FAIL: logs_correlate extraction truncated" >&2; exit 2; }
 
-sed -n '/^tracer_sites=\$(grep -rn/,/no tracing at all/p' "$PROBE" > "$TMP/trace.sh"
+sed -n '/^tracer_call_sites() {/,/no tracing at all/p' "$PROBE" > "$TMP/trace.sh"
 [ -s "$TMP/trace.sh" ] || { echo "FAIL: tracing-wired anchor matched nothing -- the probe changed shape" >&2; exit 2; }
 grep -q 'no tracing at all' "$TMP/trace.sh" || { echo "FAIL: tracing-wired extraction truncated" >&2; exit 2; }
 printf 'fi\n' >> "$TMP/trace.sh"
