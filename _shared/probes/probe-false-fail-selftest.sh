@@ -55,10 +55,11 @@ lift grepx.sh    '/^grep_x() {/,/^}/p' 'stripped'
 lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
 lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
 lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
+lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'promql'
 lift lanetag.sh  '/^lane_tagonly_stats() {/,/^}/p' 'comm -23'
 # shellcheck disable=SC2034  # read by the lifted imports_pkg
 PROBE_GREP_EXCLUDES=(--exclude-dir=.claude --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=vendor)
-for f in classify grepx imports stamp codelines tracer lanetag reg; do
+for f in classify grepx imports stamp codelines tracer lanetag rbtok reg; do
   # shellcheck disable=SC1090  # lifted from the probe at runtime
   . "$TMP/$f.sh"
 done
@@ -274,6 +275,24 @@ check "lane: tag-only test fails -> failed 1" "1 1 0 1	" "$(lane_stats "$TMP/ln-
 check_has "wiring: lane run is -v and all-skipped lane lands in rl_na" "1" "$(grep -c 'rl_na+=' "$PROBE")"
 check_has "wiring: lane run uses -v (the stats parse its --- SKIP lines)" "1" "$(grep -c 'rl_out=$(go test -v -tags="$rt"' "$PROBE")"
 check_has "wiring: all-skipped lane row is NA" "1" "$(grep -c 'row "integration-real-lane" NA' "$PROBE")"
+
+
+# ===== runbook-citations-resolve: only metric-shaped tokens are citations ==========
+# derived-from: none (candidate; TTL 2027-01-20) -- perps /outboxz keys event_broker/event_drain flagged as missing series
+rbd="$TMP/rb"; mkdir -p "$rbd"
+rbtok() {   # rbtok <body> <token> -> yes/no
+  printf '%s\n' "$1" > "$rbd/rbt.md"
+  runbook_token_is_series_ref "$2" "$rbd/rbt.md" && echo yes || echo no
+}
+check "rbtok: JSON key event_broker is NOT a citation" no "$(rbtok '{"event_broker":"ok","event_drain":"ok"}' event_broker)"
+check "rbtok: JSON key snapshot_stream is NOT a citation" no "$(rbtok 'check snapshot_stream in /outboxz' snapshot_stream)"
+check "rbtok: _total suffix is a citation" yes "$(rbtok 'see foo_requests_total' foo_requests_total)"
+check "rbtok: selector with { is a citation" yes "$(rbtok 'event_lag{job="x"}' event_lag)"
+check "rbtok: function arg rate(x[5m]) is a citation" yes "$(rbtok 'rate(event_lag[5m])' event_lag)"
+check "rbtok: bare name inside a promql fence is a citation" yes "$(rbtok $'```promql\nevent_lag\n```' event_lag)"
+check "rbtok: same bare name in an untagged fence is NOT" no "$(rbtok $'```\nevent_lag\n```' event_lag)"
+check_has "wiring: citations loop skips non-metric-shaped undeclared tokens" "1" "$(grep -c '|| runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue' "$PROBE")"
+check "NEG rbtok: prose after a closed promql fence is NOT a citation" no "$(rbtok $'```promql\nup\n```\nevent_lag' event_lag)"
 
 # --- the probe really consumes these functions (wiring, not just definitions) --
 check_has "wiring: invariants-ratified registry branch calls registry_run" "1" "$(grep -c '^  registry_run$' "$PROBE")"

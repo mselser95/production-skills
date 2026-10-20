@@ -2051,6 +2051,27 @@ extract_real_lanes() {   # extract_real_lanes [dir]
         }
       }' | sort -u
 }
+# A RUNBOOK token that shares a declared series prefix is a METRIC CITATION only
+# if it is metric-shaped. Measured on perps: /outboxz health-check JSON keys
+# (`event_broker`, `event_drain`, `snapshot_stream`) share the `event_`/`snapshot_`
+# prefixes of declared series and were reported as non-existent series, and the
+# repo deleted operator-facing keys from its runbook to pass. Rule (documented,
+# deliberately narrow): a token that is NOT itself declared counts as a citation
+# iff (1) it ends in a Prometheus suffix (_total _seconds _bytes _count _sum
+# _bucket _ratio _state _info), or (2) it is used as a selector/function arg in
+# PromQL: directly followed by `{` or `[`, or directly preceded by `(`, or it sits
+# inside a ```promql fenced block. Exact declared names are checked by the caller
+# before this is consulted. An undeclared real-looking name still FAILS.
+runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook>
+  local t="$1" f="$2"
+  case "$t" in
+    *_total|*_seconds|*_bytes|*_count|*_sum|*_bucket|*_ratio|*_state|*_info) return 0 ;;
+  esac
+  if grep -qE -- "(^|[^a-zA-Z0-9_])${t}[{[]|[(]${t}([^a-zA-Z0-9_]|\$)" "$f"; then return 0; fi
+  awk -v t="$t" '/^[[:space:]]*```/ { if (inb) inb=0; else if ($0 ~ /```[[:space:]]*promql/) inb=1; next }
+    inb { n=split($0, a, /[^a-zA-Z0-9_]+/); for (i=1;i<=n;i++) if (a[i]==t) { found=1; exit } }
+    END { exit found?0:1 }' "$f"
+}
 # lane_tagonly_stats <lane> <go test -v output> <pkgs...>
 # A lane is a build tag; its package ALSO holds untagged tests that run with or without it, so
 # "go test -tags=<lane> exits 0" proves nothing about the lane (perps replaygen: 16 tag-only
@@ -4716,6 +4737,8 @@ if [[ -f docs/RUNBOOK.md && -f observability/emitted-metrics.yaml ]]; then
       # commands. A gate that invents a citation and then reports it unresolved
       # sends someone to fix a document that was correct.
       [[ "$m" == *_ ]] && continue
+      # Not declared and not metric-shaped (a health-check JSON key, prose): not a citation.
+      [[ " ${declared_series[*]-} " == *" $m "* ]] || runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue
       cited=$((cited+1))
       # NOT `printf ... | grep -qx "$m"`. Under this file's `set -o pipefail` that
       # pipeline is the SIGPIPE race the artifact-provenance row above describes --
