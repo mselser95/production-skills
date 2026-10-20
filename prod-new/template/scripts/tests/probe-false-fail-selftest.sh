@@ -55,7 +55,7 @@ lift grepx.sh    '/^grep_x() {/,/^}/p' 'stripped'
 lift stamp.sh    '/^revision_stamp_kind() {/,/^}/p' 'ldflags'
 lift codelines.sh '/^code_lines_only() {/,/^}/p' 'grep -vE'
 lift tracer.sh   '/^tracer_call_sites() {/,/^}/p' 'cmd/'
-lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'jsonstr'
+lift rbtok.sh    '/^runbook_token_is_series_ref() {/,/^}/p' 'defined'
 lift lanetag.sh  '/^lane_tagonly_stats() {/,/^}/p' 'comm -23'
 lift laneverdict.sh '/^lane_verdict() {/,/^}/p' 'no tag-only tests'
 lift lanerow.sh  '/^lane_row_verdict() {/,/^}/p' 'gating env'
@@ -481,11 +481,27 @@ rbtok() {   # rbtok <body> <token> -> yes/no
 }
 check "rbtok: JSON key event_broker is NOT a citation" no "$(rbtok '{"event_broker":"ok","event_drain":"ok"}' event_broker)"
 check "rbtok: JSON key with spaces before colon is NOT a citation" no "$(rbtok '  "event_broker"   : "ok"' event_broker)"
-check "rbtok: perps-style multi-line json fence keys are NOT citations" no "$(rbtok $'```json\n{\n  "event_broker": "ok",\n  "snapshot_stream": "ok"\n}\n```' snapshot_stream)"
-check "rbtok: quoted string VALUE in a json fence is NOT a citation" no "$(rbtok $'```json\n{"check": "event_broker"}\n```' event_broker)"
+check "rbtok: quoted string VALUE in a json fence IS a citation (json-fence special-casing removed)" yes "$(rbtok $'```json\n{"check": "event_broker"}\n```' event_broker)"
+# perps-shape: real falcon-xyz-perps-service docs/RUNBOOK.md (origin/main) lines 31-36: backticked prose definitions, no json fence, no `"tok":`
+rbperps=$'   - `event_broker`: the broker connection\'s status;\n   - `event_drain`: connected and the events stream passing its check (as of\n     its last re-check), whether or not this replica leads;\n   - `snapshot_stream`: an error only after a failed check, at a term\'s start\n     or at a re-check.'
+check "rbtok: perps-shape backticked definition event_broker is NOT a citation" no "$(rbtok "$rbperps" event_broker)"
+check "rbtok: perps-shape backticked definition event_drain is NOT a citation" no "$(rbtok "$rbperps" event_drain)"
+check "rbtok: perps-shape backticked definition snapshot_stream is NOT a citation" no "$(rbtok "$rbperps" snapshot_stream)"
+check "rbtok: backticked key with spaces before colon is NOT a citation" no "$(rbtok '- `event_broker`  : ok' event_broker)"
+check "rbtok: mismatched delimiters (quote open, backtick close) are NOT a key" yes "$(rbtok '"event_broker`: ok' event_broker)"
+check "rbtok: JSON key with string value, key token is NOT a citation" no "$(rbtok '"event_broker": "ok"' event_broker)"
+check "rbtok: undeclared token in prose IS a citation" yes "$(rbtok 'we also watch event_made_up_total here' event_made_up_total)"
+check "rbtok: key defined once + bare mention elsewhere -> NOT cited (file-level definition)" no "$(rbtok $'- `event_broker`: the status\nread which of `event_broker` / x fails\nand watch event_broker' event_broker)"
+check "rbtok: key defined AFTER the bare mention -> NOT cited (order independent)" no "$(rbtok $'watch event_broker\n"event_broker": "ok"' event_broker)"
+check "rbtok: key defined + dotted form + JSON value of the defined token -> NOT cited" no "$(rbtok $'`event_drain`: ok\n`event_drain.broker.state`\n{"check": "event_drain"}' event_drain)"
+check "rbtok: token only mentioned, never a key -> cited" yes "$(rbtok 'the `event_drain` check is slow' event_drain)"
+check "rbtok: backticked mention, colon only after other text, never a key -> cited" yes "$(rbtok 'read `event_drain` first: it fails' event_drain)"
+check "rbtok: dotted form of a never-defined token -> cited" yes "$(rbtok '(`snapshot_publisher.stream.state`)' snapshot_publisher)"
+check "rbtok: JSON value of an undeclared, never-key token -> cited even beside another defined key" yes "$(rbtok '{"event_broker": "event_foo_total"}' event_foo_total)"
+check "rbtok: the defined key does not shelter a DIFFERENT token (event_foo_total cited, event_broker not)" no "$(rbtok '{"expr": "event_foo_total", "event_broker": 1}' event_broker)"
+check "rbtok: JSON value {\"expr\": \"tok\"} never a key -> cited" yes "$(rbtok '{"expr": "event_foo_total"}' event_foo_total)"
 check "rbtok: quoted string value OUTSIDE a json fence IS a citation" yes "$(rbtok 'set "event_broker" to ok' event_broker)"
 check "rbtok: quoted string value in a non-json fence IS a citation" yes "$(rbtok $'```yaml\nname: "event_broker"\n```' event_broker)"
-check "rbtok: json fence closed, later prose mention IS a citation" yes "$(rbtok $'```json\n{"event_broker": "ok"}\n```\nwatch event_broker' event_broker)"
 check "rbtok: prose mention IS a citation" yes "$(rbtok 'watch event_drain_backlog today' event_drain_backlog)"
 check "rbtok: bash fence grep IS a citation" yes "$(rbtok $'```bash\ncurl :9090/metrics | grep event_drain_backlog\n```' event_drain_backlog)"
 check "rbtok: yaml fence expr IS a citation" yes "$(rbtok $'```yaml\nexpr: event_drain_backlog > 100\n```' event_drain_backlog)"
@@ -503,13 +519,9 @@ check "rbtok: bare name inside a promql fence is a citation" yes "$(rbtok $'```p
 check "rbtok: bare name in an untagged fence IS a citation" yes "$(rbtok $'```\nevent_lag\n```' event_lag)"
 check "rbtok: longer identifier containing the token is NOT an occurrence (prefix side)" no "$(rbtok 'xevent_lag and "event_lag_x": 1' event_lag)"
 check "rbtok: longer identifier containing the token is NOT an occurrence (suffix side)" no "$(rbtok 'event_lagx event_lag_x' event_lag)"
-check "rbtok: ANY citing occurrence wins over a JSON-key occurrence" yes "$(rbtok $'{"event_broker": "ok"}\nalso event_broker' event_broker)"
 check "rbtok: two keys on one line, token only as key -> NOT a citation" no "$(rbtok '{"event_drain": 1, "event_broker": 2}' event_broker)"
 check "rbtok: closing quote without opening quote is NOT a key (IS a citation)" yes "$(rbtok 'event_broker": ok' event_broker)"
 check "rbtok: opening quote without closing quote is NOT a key (IS a citation)" yes "$(rbtok '"event_broker: ok' event_broker)"
-check "rbtok: json fence state resets at the closing fence (later quoted value IS a citation)" yes "$(rbtok $'```json\n{"a": 1}\n```\nset "event_broker" now' event_broker)"
-check "rbtok: later occurrence on the SAME line as a key occurrence is still examined" yes "$(rbtok '{"event_broker": 1} then event_broker' event_broker)"
-check "rbtok: json fence, opening quote only (malformed) IS a citation" yes "$(rbtok $'```json\n"event_broker: x\n```' event_broker)"
 check "rbtok: absent token is NOT a citation" no "$(rbtok 'nothing here' event_broker)"
 check_has "wiring: citations loop skips non-metric-shaped undeclared tokens" "1" "$(grep -c '|| runbook_token_is_series_ref "$m" docs/RUNBOOK.md || continue' "$PROBE")"
 

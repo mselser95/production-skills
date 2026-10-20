@@ -32,7 +32,7 @@ here would be a threshold nobody derived.
 | `observability-provenance-selftest.sh` | 33 |
 | `policy-coverage-selftest.sh` | 7 |
 | `probe-excludes-selftest.sh` | 6 |
-| `probe-false-fail-selftest.sh` | 164 |
+| `probe-false-fail-selftest.sh` | 174 |
 | `probe-wiring-selftest.sh` | 13 |
 | `prove-mutation-selftest.sh` | 18 |
 | `provenance-headers-selftest.sh` | 12 |
@@ -45,4 +45,4 @@ here would be a threshold nobody derived.
 | `probe-self-gate-selftest.sh` | 29 |
 | `template-workflow-pins-selftest.sh` | 565 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1603** |
+| **total** | **1613** |

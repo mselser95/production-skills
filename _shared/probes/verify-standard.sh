@@ -2090,21 +2090,23 @@ extract_real_lanes() {   # extract_real_lanes [dir]
         }
       }' | sort -u
 }
-# A RUNBOOK token that shares a declared series prefix is a METRIC CITATION unless
-# the occurrence is a JSON object key. Measured on perps: /outboxz health-check JSON
-# keys (`event_broker`, `event_drain`, `snapshot_stream`) share the `event_`/`snapshot_`
-# prefixes of declared series and were reported as non-existent series, and the repo
-# deleted operator-facing keys from its runbook to pass. Rule (a DENY-list, evaluated
-# PER OCCURRENCE; a first allow-list of metric suffixes / PromQL shapes let real
-# undeclared citations pass silently -- prose, bash/yaml fences, recording rules,
-# `_ms`/`_created`/`_percent` -- and its `(` rule was file-global): an occurrence is
-# NOT a citation only when it is (a) a quoted JSON key `"tok":` (optional spaces
-# before the colon) anywhere, or (b) a quoted string `"tok"` inside a ```json fence.
-# Every other occurrence is a citation, and the token is cited if ANY occurrence is.
+# A RUNBOOK token that shares a declared series prefix is a METRIC CITATION unless the
+# runbook DEFINES it as its own check key. Measured on perps: /outboxz health-check keys
+# (`event_broker`, `event_drain`, `snapshot_stream`) share the `event_`/`snapshot_`
+# prefixes of declared series, were reported as non-existent series, and the repo
+# deleted operator-facing keys from its runbook to pass; its real RUNBOOK then defined
+# them in backticked prose ("`event_broker`: the broker connection's status") and
+# mentioned them elsewhere (`event_broker` / `event_drain` fails).
+# Rule: a runbook may define its own check keys; a key-defined name is a term of the
+# runbook, not a series. A token is DEFINED iff ANY occurrence is a KEY: wrapped in
+# matching double quotes or matching backticks, then optional spaces, then `:`
+# ("tok": or `tok`:). A defined token is never a citation, whatever its other
+# occurrences. A token never defined as a key is evaluated PER OCCURRENCE (whole-token
+# boundaries) and cited if ANY occurrence exists: prose, backticked mentions, JSON string
+# VALUES ({"expr": "tok"}), dotted forms (tok.a.b), bash/yaml fences. No fence tracking.
 # Exact declared names are checked by the caller before this is consulted.
 runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook>
   awk -v t="$1" '
-    /^[[:space:]]*```/ { if (fence != "") fence = ""; else { fence = $0; sub(/^[[:space:]]*```[[:space:]]*/, "", fence); fence = (fence == "" ? "-" : tolower(fence)) } next }
     {
       line = $0; off = 0; L = length(t)
       while ((p = index(line, t)) > 0) {
@@ -2112,15 +2114,13 @@ runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook
         rest = substr(line, p + L)
         after = substr(rest, 1, 1)
         if (before !~ /[a-zA-Z0-9_]/ && after !~ /[a-zA-Z0-9_]/) {
-          quoted = (before == "\"" && after == "\"")
-          key = quoted && (rest ~ /^"[[:space:]]*:/)
-          jsonstr = quoted && (fence ~ /^json/)
-          if (!key && !jsonstr) { found = 1; exit }
+          if (((before == "\"" && after == "\"") || (before == "`" && after == "`")) && (rest ~ /^["`][[:space:]]*:/)) defined = 1
+          else found = 1
         }
         off += p + L - 1; line = rest
       }
     }
-    END { exit found ? 0 : 1 }' "$2"
+    END { exit (found && !defined) ? 0 : 1 }' "$2"
 }
 # lane_tagonly_stats <lane> <go test -v output> <pkgs...>
 # A lane is a build tag; its package ALSO holds untagged tests that run with or without it, so
