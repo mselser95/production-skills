@@ -414,15 +414,30 @@ done
 
 # n/a branches: only drivable from a repo-shaped root (own=1); in-repo (own=0) the
 # root is the template, so build a scratch repo from it. Skipped where own=1 already.
+# guard_wait <pid> <secs>: wait for <pid>, killing it (and its children) only if it is still
+# running after <secs>. The bound guards a true hang, not speed: the nested run replays the
+# whole suite, whose duration scales with host load, so the default is generous and
+# ACCEPTANCE_AUDIT_SELFTEST_WATCHDOG overrides it. A killed pid returns rc 143 (SIGTERM).
+guard_wait() {
+  local pid="$1" secs="$2" wd grc
+  ( sleep "$secs"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  wait "$pid"; grc=$?
+  pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  return "$grc"
+}
 nested() { # nested <name> <want-rc> <want-substr> <TEMPLATE_DIR>
   local name="$1" wrc="$2" want="$3" td="$4" out rc pid wd
   out="$tmp/nested.out"
   ( cd "$tmp/nrepo" && TEMPLATE_DIR="$td" HOME="$tmp/nhome" bash scripts/tests/acceptance-audit-selftest.sh > "$out" 2>&1 ) & pid=$!
-  ( sleep 60; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
-  wait "$pid"; rc=$?; pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  guard_wait "$pid" "${ACCEPTANCE_AUDIT_SELFTEST_WATCHDOG:-600}"; rc=$?
   if [[ "$rc" -eq "$wrc" && "$(cat "$out")" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
   else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; sed 's/^/       /' "$out"; fi
 }
+# the watchdog still kills a genuine hang (short bound; the fixture would otherwise run 120s)
+sleep 120 & hpid=$!
+hs=$SECONDS; guard_wait "$hpid" 1; hrc=$?; hel=$((SECONDS-hs))
+if [[ "$hrc" -eq 143 && "$hel" -lt 30 ]]; then pass=$((pass+1)); echo "  ok   watchdog kills a hung child (rc=143 after ${hel}s)"
+else bad=$((bad+1)); echo "  FAIL watchdog kills a hung child (rc=$hrc after ${hel}s)"; kill "$hpid" 2>/dev/null; fi
 if [[ "$own" = 0 ]]; then
   ncases=$pass   # the nested copy runs exactly the cases above (it skips this block)
   mkdir -p "$tmp/nrepo"; cp -R "$root/." "$tmp/nrepo/"; mkdir -p "$tmp/nrepo/scripts/tests"
