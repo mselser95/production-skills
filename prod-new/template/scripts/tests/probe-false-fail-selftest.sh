@@ -618,7 +618,7 @@ check "rbtok: _total suffix is a citation" yes "$(rbtok 'see foo_requests_total'
 # metric-shaped tokens get no key exemption (a metric documented as a key must still resolve)
 check "rbtok: _total as a JSON key IS a citation (metric-shaped, no key exemption)" yes "$(rbtok '{"foo_requests_total": 1}' foo_requests_total)"
 check "rbtok: undeclared {\"event_ghost_total\": 5} IS a citation" yes "$(rbtok '{"event_ghost_total": 5}' event_ghost_total)"
-check "rbtok: undeclared backticked key `event_ghost_total`: 5 IS a citation" yes "$(rbtok '- `event_ghost_total`: 5' event_ghost_total)"
+check 'rbtok: undeclared backticked key `event_ghost_total`: 5 IS a citation' yes "$(rbtok '- `event_ghost_total`: 5' event_ghost_total)"
 check "rbtok: key-defined non-metric event_broker is a term (not cited)" no "$(rbtok '- `event_broker`: the status' event_broker)"
 check "rbtok: perps:196 metric-shaped definition-list key snapshot_publisher_stream_state IS a citation" yes "$(rbtok '  - `snapshot_publisher_stream_state`: `unchecked`' snapshot_publisher_stream_state)"
 check "rbtok: RESIDUAL HOLE -- suffix-less gauge documented only as key is a term" no "$(rbtok '- `queue_depth`: 3' queue_depth)"
