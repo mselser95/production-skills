@@ -2139,6 +2139,7 @@ runbook_token_is_series_ref() {   # runbook_token_is_series_ref <token> <runbook
 # generators all SKIP without REPLAYGEN_OUT, the package's untagged tests passed, row said PASS).
 # Tag-only tests = `go test -list .` WITH the tag minus WITHOUT it, per package. Prints one line:
 #   <tag-only-total> <ran(pass+fail)> <skipped> <failed><TAB><first skip message>
+#   (when tag-only-total is 0 and a tagged TestMain exists, the message is "testmain-suppressed")
 # or, when either `go test -list` exits non-zero (a build break must not read as "0 tag-only"):
 #   list-failed<TAB><tail of its output>
 # Reads the -v output the lane run already produced, so nothing is run twice.
@@ -2148,27 +2149,47 @@ lane_tagonly_stats() {
   local lane="$1" out="$2"; shift 2
   local tl="${TMPDIR:-/tmp}/lts.$$" lo lrc lp mode
   mkdir -p "$tl"
-  # Listed PER PACKAGE: a package whose files are ALL tagged exits non-zero ("build constraints
-  # exclude all Go files") WITHOUT the tag -- that is an empty untagged listing, not a failure;
-  # any other non-zero exit (a build break) is a failed listing, never "0 tag-only tests".
+  # Listed in ONE `go test -list . <all pkgs>` call per tag state (a per-package loop cost 2-3x the
+  # row's runtime on a 10-package lane); the output carries test names then `ok <pkg>` per package,
+  # so the awk below attributes names to packages. Only when that combined call exits non-zero does
+  # it fall back to PER PACKAGE listing: a package whose files are ALL tagged exits non-zero
+  # ("build constraints exclude all Go files") WITHOUT the tag -- that is an empty untagged listing,
+  # not a failure; any other non-zero exit (a build break) is a failed listing, never "0 tag-only tests".
+  local parse='/^(Test|Example|Benchmark|Fuzz)[A-Za-z0-9_]*$/ {b[++n]=$0; next}
+        /^ok[ \t]/ {split($0, a, /[ \t]+/); for (i=1;i<=n;i++) print a[2] "\t" b[i]; n=0}'
   for mode in with without; do
     : > "$tl/$mode"
-    for lp in "$@"; do
-      if [[ $mode == with ]]; then lo=$(go test -tags="$lane" -list . "$lp" 2>&1); lrc=$?
-      else lo=$(go test -list . "$lp" 2>&1); lrc=$?; fi
-      if (( lrc != 0 )) && ! grep -q 'build constraints exclude all Go files' <<<"$lo"; then
-        printf 'list-failed\t%s\n' "$(printf '%s\n' "$lo" | grep . | tail -n 3 | tr '\n' ' ' | cut -c1-160)"; rm -rf "$tl"; return 0
-      fi
-      printf '%s\n' "$lo" | awk -F'\t' '/^(Test|Example|Benchmark|Fuzz)[A-Za-z0-9_]*$/ {b[++n]=$0; next}
-        /^ok[ \t]/ {split($0, a, /[ \t]+/); for (i=1;i<=n;i++) print a[2] "\t" b[i]; n=0}' >> "$tl/$mode"
-    done
+    if [[ $mode == with ]]; then lo=$(go test -tags="$lane" -list . "$@" 2>&1); lrc=$?
+    else lo=$(go test -list . "$@" 2>&1); lrc=$?; fi
+    if (( lrc == 0 )); then
+      printf '%s\n' "$lo" | awk -F'\t' "$parse" >> "$tl/$mode"
+    else
+      for lp in "$@"; do
+        if [[ $mode == with ]]; then lo=$(go test -tags="$lane" -list . "$lp" 2>&1); lrc=$?
+        else lo=$(go test -list . "$lp" 2>&1); lrc=$?; fi
+        if (( lrc != 0 )) && ! grep -q 'build constraints exclude all Go files' <<<"$lo"; then
+          printf 'list-failed\t%s\n' "$(printf '%s\n' "$lo" | grep . | tail -n 3 | tr '\n' ' ' | cut -c1-160)"; rm -rf "$tl"; return 0
+        fi
+        printf '%s\n' "$lo" | awk -F'\t' "$parse" >> "$tl/$mode"
+      done
+    fi
     sort -u "$tl/$mode" -o "$tl/$mode"
   done
   # Only Test* functions count: Benchmark*/Example*/Fuzz* are listed by -list but a plain
   # `go test -v` never runs them (an Example without an Output comment is only compiled), so
   # counting them would make "ran 0 skipped 0" look like a pass.
   comm -23 "$tl/with" "$tl/without" | awk -F'\t' '$2 ~ /^Test/' > "$tl/only"
-  printf '%s\n' "$out" | awk -v onlyf="$tl/only" '
+  # A tagged TestMain that exits before m.Run suppresses `-list` (nothing is listed): with zero
+  # tag-only tests, flag it so the verdict can name the cause instead of "only benchmarks/helpers".
+  local tm=0 tf
+  if [[ ! -s "$tl/only" ]]; then
+    for lp in "$@"; do
+      while IFS= read -r tf; do
+        if grep -q '^//go:build' "$tf" && grep -q 'func TestMain(' "$tf"; then tm=1; break 2; fi
+      done < <(find "${lp%/...}" -name '*_test.go' 2>/dev/null)
+    done
+  fi
+  printf '%s\n' "$out" | awk -v onlyf="$tl/only" -v tm="$tm" '
     BEGIN { while ((getline l < onlyf) > 0) { only[l] = 1; total++ } }
     /^=== / { prev = ""; next }
     # a subtest result line (printed AFTER its parent'"'"'s --- line, indented one level per depth):
@@ -2190,7 +2211,7 @@ lane_tagonly_stats() {
         if (skp[i]) { sk++; if (first == "") first = (msg[i] != "" ? msg[i] : nm[i] " skipped") }
         else { ran++; if (st[i] == "FAIL:") fl++ } }
       n = 0; prev = ""; delete st; delete nm; delete msg; delete top; delete idx; delete par; delete skp; delete nk; delete nks }
-    END { printf "%d %d %d %d\t%s\n", total, ran, sk, fl, substr(first, 1, 120) }'
+    END { printf "%d %d %d %d\t%s\n", total, ran, sk, fl, (total == 0 && tm == 1 ? "testmain-suppressed" : substr(first, 1, 120)) }'
   rm -rf "$tl"
 }
 # lane_verdict <lane> <rc> <go test -v output> <lane_tagonly_stats line>
@@ -2215,7 +2236,9 @@ lane_verdict() {
   fi
   cnt=${st%%$'\t'*}; msg=${st#*$'\t'}
   read -r tot ran skip _ <<<"$cnt"
-  if (( ${tot:-0} == 0 )); then
+  if (( ${tot:-0} == 0 )) && [[ "$msg" == testmain-suppressed ]]; then
+    printf 'FAIL\tlane '"'"'-tags=%s'"'"': no tag-only tests listed under -tags=%s: listing suppressed by TestMain (it exits before tests are listed) -- make TestMain skip via t.Skip/flag instead of os.Exit\n' "$lane" "$lane"
+  elif (( ${tot:-0} == 0 )); then
     printf 'FAIL\tlane '"'"'-tags=%s'"'"': no tag-only tests under -tags=%s: a lane holding only benchmarks/helpers proves nothing\n' "$lane" "$lane"
   elif (( ${ran:-0} == 0 && ${skip:-0} == 0 )); then
     printf 'FAIL\tlane '"'"'-tags=%s'"'"': listed %s tag-only tests but none ran\n' "$lane" "$tot"

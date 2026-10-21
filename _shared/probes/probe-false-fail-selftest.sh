@@ -540,6 +540,29 @@ check "lane: a log printed after the skip keeps a file:line header, never a bare
 d="$TMP/ln-listfail"; lane_fix "$d" '	_ = 1'; printf 'package p\nfunc broken( {\n' > "$d/z.go"
 r="$(lane_stats "$d")"; check "lane: go test -list failing -> list-failed marker, not a zero count" "list-failed" "${r%%	*}"
 
+# three-level nesting (TestTagged -> a -> b -> c): the leaf skips, so every ancestor is skipped (NA, not ran)
+lane_fix "$TMP/ln-nested3" '	t.Run("a", func(t *testing.T) {
+		t.Run("b", func(t *testing.T) {
+			t.Run("c", func(t *testing.T) { t.Skip("deep3 off") })
+		})
+	})'
+check "lane: depth-3 subtests all skipped -> parent counts as skipped" "1 0 1 0	b_test.go:8: deep3 off" "$(lane_stats "$TMP/ln-nested3")"
+# a package whose files are ALL tagged exits non-zero WITHOUT the tag ("build constraints exclude all
+# Go files"): the combined `go test -list` fails, the per-package fallback must read it as empty.
+d="$TMP/ln-alltagged"; rm -rf "$d"; mkdir -p "$d/u" "$d/t"; printf 'module lanefix\n\ngo 1.21\n' > "$d/go.mod"
+printf 'package u\nimport "testing"\nfunc TestUntagged(t *testing.T) {}\n' > "$d/u/a_test.go"
+printf '//go:build lane\n\npackage u\nimport "testing"\nfunc TestTaggedU(t *testing.T) {}\n' > "$d/u/b_test.go"
+printf '//go:build lane\n\npackage t\nimport "testing"\nfunc TestAllTagged(t *testing.T) {}\n' > "$d/t/c_test.go"
+r="$( cd "$d" && o=$(go test -v -tags=lane ./u ./t -count=1 2>&1); lane_tagonly_stats lane "$o" ./u ./t )"
+check "lane: package with ALL files tagged (real go) counts its tests as tag-only" "2 2 0 0	" "$r"
+# a tagged TestMain that os.Exit(0)s suppresses -list: zero tag-only tests, and the verdict names TestMain
+d="$TMP/ln-testmain"; lane_fix "$d" '	_ = 1'
+printf '//go:build lane\n\npackage p\nimport ("os"; "testing")\nfunc TestMain(m *testing.M) { os.Exit(0) }\n' > "$d/m_test.go"
+r="$(lane_stats "$d")"; check "lane: TestMain os.Exit(0) suppresses listing -> stats flag it" "0 0 0 0	testmain-suppressed" "$r"
+lane_verdict lane 0 "ok  	p	0.1s" "$r" > "$TMP/tmv"
+check "lane: TestMain-gated lane -> FAIL" FAIL "$(cut -f1 "$TMP/tmv")"
+check "lane: TestMain-gated lane reason names TestMain" 1 "$(grep -c 'listing suppressed by TestMain (it exits before tests are listed) -- make TestMain skip via t.Skip/flag instead of os.Exit' "$TMP/tmv")"
+
 # lane_verdict: the row's per-lane decision (verdict<TAB>reason)
 lv() { lane_verdict lane "$1" "$2" "$3" | cut -f1; }
 lvr() { lane_verdict lane "$1" "$2" "$3" | cut -f2; }
