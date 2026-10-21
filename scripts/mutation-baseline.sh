@@ -32,7 +32,16 @@
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.." || exit 2
 
-BASELINE="${MUTATION_BASELINE_FILE:-benchmarks/mutation-baseline.md}"   # env overrides: selftest only
+# MUTATION_BASELINE_FILE / MUTATION_BASELINE_SUITES are honoured ONLY with
+# MUTATION_BASELINE_SELFTEST=1 (set by scripts/tests/mutation-baseline-selftest.sh). A stray
+# export would otherwise make `make mutation` pass over fake suites.
+if [[ "${MUTATION_BASELINE_SELFTEST:-}" != 1 ]]; then
+  if [[ -n "${MUTATION_BASELINE_FILE:-}${MUTATION_BASELINE_SUITES:-}" ]]; then
+    echo "mutation-baseline: WARNING MUTATION_BASELINE_FILE/MUTATION_BASELINE_SUITES are set but ignored (selftest-only)" >&2
+  fi
+  unset MUTATION_BASELINE_FILE MUTATION_BASELINE_SUITES
+fi
+BASELINE="${MUTATION_BASELINE_FILE:-benchmarks/mutation-baseline.md}"
 
 # Counts come from RUNNING each selftest, never from grepping it for `check`
 # calls: a case that is present in the source and never reached is exactly what

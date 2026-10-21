@@ -117,13 +117,10 @@ func f() {}' log.go
 check "NEG slog: a concatenated string continuation line is not an import" no "$(imp "$d" log/slog)"
 d="$TMP/imp-callarg"; mkgo "$d" 'package x
 import "fmt"
-func f() {
-	fmt.Println(
-		"a",
-		"log/slog"
-	)
-}' log.go
-check "NEG slog: a multi-line call argument after an import is not an import" no "$(imp "$d" log/slog)"
+var s =
+	"log/slog"
+func f() { fmt.Println(s) }' log.go
+check "NEG slog: a bare string line after a single-line import is not an import" no "$(imp "$d" log/slog)"
 d="$TMP/imp-block-then-concat"; mkgo "$d" 'package x
 import (
 	"fmt"
@@ -137,7 +134,7 @@ var pkgs = []string{
 	"log/slog",
 }
 func f() {}' log.go
-check "NEG slog: a valid multi-line slice element is not an import" no "$(imp "$d" log/slog)"
+check "slice element: guards the regex end-of-line anchor (not the context check)" no "$(imp "$d" log/slog)"
 # The probe wiring: zap-only repos must get an explicit NA, never a slog FAIL.
 check "probe: zap-only repo emits explicit NA rows (not FAIL, not PASS)" 2 "$(grep -cE 'row "observability:(logs_correlate|log_handler_installed)" NA "zap: ' "$PROBE")"
 

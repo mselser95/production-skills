@@ -12,6 +12,7 @@ TMP=$(mktemp -d) || exit 2
 trap 'rm -rf "$TMP"' EXIT
 printf '#!/usr/bin/env bash\necho "fake selftest: 3 case(s) passed"\n' > "$TMP/a-selftest.sh"
 printf '#!/usr/bin/env bash\necho "fake selftest: 4 case(s) passed"\n' > "$TMP/b-selftest.sh"
+export MUTATION_BASELINE_SELFTEST=1
 export MUTATION_BASELINE_SUITES="$TMP/a-selftest.sh $TMP/b-selftest.sh" MUTATION_BASELINE_FILE="$TMP/base.md"
 
 CASES=0; FAILED=0
@@ -34,6 +35,17 @@ grep -v '^| \*\*total\*\*' "$TMP/good.md" > "$TMP/base.md"
 check "NEG: missing total line -> FAIL" 1 "$(run)"
 sed -e 's/^| `a-selftest.sh` | 3 |/| `a-selftest.sh` | 5 |/' -e 's/^| \*\*total\*\* | \*\*7\*\* |/| **total** | **9** |/' "$TMP/good.md" > "$TMP/base.md"
 check "a consistent baseline whose row FELL still FAILs (existing gate kept)" 1 "$(run)"
+
+# Overrides without the test-mode flag are ignored (the real defaults are used) and a warning is
+# printed. Runs a copy of the script in a throwaway root holding one marked suite, so the real
+# suites (this one included) are never re-run.
+FR="$TMP/fakeroot"; mkdir -p "$FR/scripts" "$FR/scripts/tests" "$FR/benchmarks"
+cp "$MB" "$FR/scripts/mutation-baseline.sh"
+printf '#!/usr/bin/env bash\necho "real-default suite: 2 case(s) passed"\n' > "$FR/scripts/tests/real-selftest.sh"
+env -u MUTATION_BASELINE_SELFTEST bash "$FR/scripts/mutation-baseline.sh" --write >"$TMP/out2" 2>&1
+check "NEG: overrides without the flag -> warning printed" 1 "$(grep -c 'set but ignored' "$TMP/out2")"
+check "NEG: overrides without the flag -> real defaults used" 1 "$(grep -c 'real-selftest.sh' "$FR/benchmarks/mutation-baseline.md")"
+check "NEG: overrides without the flag -> fake suites not recorded" 0 "$(grep -c 'a-selftest.sh' "$FR/benchmarks/mutation-baseline.md")"
 
 if (( FAILED > 0 )); then echo "mutation-baseline selftest: $FAILED of $CASES case(s) FAILED"; exit 1; fi
 echo "mutation-baseline selftest: $CASES case(s) passed"
