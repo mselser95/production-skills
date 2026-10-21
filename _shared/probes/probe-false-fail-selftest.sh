@@ -384,6 +384,60 @@ func main() {
 	_, _ = tp, err
 }' main.go
 check "NEG tracer: trailing // comment mentioning tracer: does NOT count" 0 "$(tsites "$d")"
+# One left-to-right scanner (strings, raw strings, runes, block + line comments).
+# provenance: candidate (pinning: true) -- ttl 2027-01-20
+d="$TMP/tr-sc-pos"; mkgo "$d/cmd/app" 'package main
+func main() {
+	c := C{URL: "http://h", Tracer: t}; _ = c
+}' main.go
+check "tracer: strip-order POS c := C{URL: \"http://h\", Tracer: t} counts" 1 "$(tsites "$d")"
+d="$TMP/tr-sc-rune"; mkdir -p "$d/cmd/app"; cat > "$d/cmd/app/main.go" <<'GOEOF'
+package main
+func main() {
+	q := '"'; c := C{URL: "http://h", Tracer: t}; _, _ = q, c
+}
+GOEOF
+check "tracer: rune of a double quote does not swallow the real site" 1 "$(tsites "$d")"
+d="$TMP/tr-sc-rawq"; mkgo "$d/cmd/app" 'package main
+func main() {
+	q := `say "hi`; c := C{URL: "http://h", Tracer: t}; _, _ = q, c
+}' main.go
+check "tracer: raw string holding a double quote does not swallow the real site" 1 "$(tsites "$d")"
+d="$TMP/tr-sc-neg-blk-mid"; mkgo "$d/cmd/app" 'package main
+func main() {
+	x := run(/* tracer: */ y); _ = x
+}' main.go
+check "NEG tracer: inline /* tracer: */ block comment does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-sc-neg-blk-trail"; mkgo "$d/cmd/app" 'package main
+func main() {
+	x := run(y) /* tracer: */; _ = x
+}' main.go
+check "NEG tracer: trailing /* tracer: */ block comment does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-sc-blk-real"; mkgo "$d/cmd/app" 'package main
+func main() {
+	_ = New(Tracer: t) /* tracer) */
+}' main.go
+check "tracer: only the real site counts beside a /* tracer) */ comment" 1 "$(tsites "$d")"
+d="$TMP/tr-sc-neg-rawml"; mkgo "$d/cmd/app" 'package main
+func main() {
+	doc := `usage:
+  withTracer(x)
+done`
+	_ = doc
+}' main.go
+check "NEG tracer: withTracer(x) inside a multi-line raw string does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-sc-neg-blkml"; mkgo "$d/cmd/app" 'package main
+/*
+  Tracers: x
+*/
+func main() {}' main.go
+check "NEG tracer: Tracers: x inside a multi-line block comment does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-sc-reset"; mkgo "$d/cmd/app" 'package main
+func a() { s := `open
+}' a.go
+printf '%s\n' 'package main
+var _ = New(Tracer: t)' > "$d/cmd/app/b.go"
+check "tracer: an unterminated raw string does not leak into the next file" 1 "$(tsites "$d")"
 d="$TMP/tr-neg-escq"; mkgo "$d/cmd/app" 'package main
 func main() {
 	log.Printf("q\" tracer: %v", err)

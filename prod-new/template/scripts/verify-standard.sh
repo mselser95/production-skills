@@ -3392,22 +3392,43 @@ inbound_route_sites() {
 # Still NOT a call site (so a decorative tracer still FAILs): `tp := NewTracerProvider()`
 # + `_ = tp`, `tracer := x` (the `:=`/`var`/`=` LHS is dropped before matching), a
 # `func` declaration, a `case tracer:` arm, a string literal ("init tracer: %w"),
-# and any commented-out line or trailing `// ...` comment (stripped after the
-# literals, so a `//` inside a string is already gone).
+# and any commented-out line, trailing `// ...` or `/* ... */` comment (one scanner
+# strips literals and comments together, so a `//` inside a string is already gone).
 tracer_call_sites() {
-  # Literals are stripped BEFORE matching (a `log.Fatalf("tracer: %v", err)` or
-  # `fmt.Errorf("init tracer: %w", err)` is prose, not wiring), and so is the
-  # LHS of a declaration / multi-assign (`tp, tracer, err := setup()` declares,
-  # it does not pass). `case tracer:` is a switch arm, not a field.
+  # Literals and comments are removed BEFORE matching by ONE left-to-right scanner
+  # per line (a `log.Fatalf("tracer: %v", err)` is prose, not wiring; neither is
+  # `run(/* tracer: */ y)`). Sequential strip passes were order-dependent:
+  # `q := '"'; c := C{URL: "http://h", Tracer: t}` lost its real site to the rune.
+  # State: "..." (backslash escapes), `...` raw (spans lines), '...' rune
+  # (escapes), /* */ block comment (spans lines), // line comment. Raw/block state
+  # is carried across the lines of one file and reset per file. Then the LHS of a
+  # declaration / multi-assign is dropped (`tp, tracer, err := setup()` declares,
+  # it does not pass); `case tracer:` is a switch arm, not a field.
+  # (No code_lines_only here: it would drop a `//`-leading line INSIDE a raw
+  # string or block comment and desynchronise the state; the scanner blanks
+  # whole-line comments itself.)
   grep -rn --include='*.go' --exclude='*_test.go' '' cmd/ 2>/dev/null \
-    | code_lines_only \
     | awk '{
         if (!match($0, /^[^:]+:[0-9]+:/)) next
         pre = substr($0, 1, RLENGTH); c = substr($0, RLENGTH + 1)
-        gsub(/"([^"\\]|\\.)*"/, "\"\"", c)
-        gsub(/`[^`]*`/, "``", c)
-        gsub(/\047([^\047\\]|\\.)+\047/, "\047\047", c)
-        sub(/\/\/.*/, "", c)
+        file = pre; sub(/:[0-9]+:$/, "", file)
+        if (file != curfile) { curfile = file; raw = 0; blk = 0 }
+        out = ""; n = length(c); i = 1
+        while (i <= n) {
+          ch = substr(c, i, 1); two = substr(c, i, 2)
+          if (raw) { if (ch == "`") { raw = 0; out = out " " } i++; continue }
+          if (blk) { if (two == "*/") { blk = 0; out = out " "; i += 2 } else i++; continue }
+          if (two == "//") break
+          if (two == "/*") { blk = 1; i += 2; continue }
+          if (ch == "`") { raw = 1; i++; continue }
+          if (ch == "\"" || ch == "\047") {
+            q = ch; i++
+            while (i <= n && substr(c, i, 1) != q) { if (substr(c, i, 1) == "\\") i++; i++ }
+            i++; out = out " "; continue
+          }
+          out = out ch; i++
+        }
+        c = out
         c = tolower(c)
         if (c ~ /^[ \t]*func[ \t]/) next
         if (c ~ /^[ \t]*(case|default)([ \t]|:)/) next
