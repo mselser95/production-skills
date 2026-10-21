@@ -475,6 +475,39 @@ func main() {
 	var a, tracer, b []int = f()
 }' main.go
 check "NEG tracer: var a, tracer, b []int = f() (var branch only) does NOT count" 0 "$(tsites "$d")"
+# provenance: candidate (pinning: true) -- ttl 2027-01-20
+d="$TMP/tr-callarg"; mkgo "$d/cmd/app" 'package main
+func main() {
+	c, _ := temporalx.Dial(ctx, cfg, otel.GetTracerProvider())
+	_ = c
+}' main.go
+check "tracer: a tracer-provider CALL passed as last argument counts" 1 "$(tsites "$d")"
+d="$TMP/tr-callarg-mid"; mkgo "$d/cmd/app" 'package main
+func main() {
+	c, _ := temporalx.Dial(ctx, otel.GetTracerProvider(), cfg)
+	_ = c
+}' main.go
+check "tracer: a tracer-provider CALL passed as a middle argument counts" 1 "$(tsites "$d")"
+d="$TMP/tr-neg-callstmt"; mkgo "$d/cmd/app" 'package main
+func main() {
+	otel.GetTracerProvider()
+}' main.go
+check "NEG tracer: a bare tracer-provider call statement does NOT count" 0 "$(tsites "$d")"
+d="$TMP/tr-raw-comment"; mkgo "$d/cmd/app" 'package main
+var s = `
+// x`
+var c = C{Tracer: t}' main.go
+check "tracer: a //-leading line inside a raw string is not dropped (no code_lines_only)" 1 "$(tsites "$d")"
+d="$TMP/tr-raw-before-slashes"; mkgo "$d/cmd/app" 'package main
+func f() {
+	q := `http://h`; c := C{Tracer: t}; _, _ = q, c
+}' main.go
+check "tracer: // inside a raw string is not a comment (raw state checked first)" 1 "$(tsites "$d")"
+d="$TMP/tr-blk-before-slashes"; mkgo "$d/cmd/app" 'package main
+func f() {
+	/* see http://x */ Tracer: t
+}' main.go
+check "tracer: // inside a block comment is not a line comment (blk state checked first)" 1 "$(tsites "$d")"
 check "wiring: tracing row counts via tracer_call_sites" 1 "$(grep -c '^tracer_sites=\$(tracer_call_sites' "$PROBE")"
 
 # ===== integration-real-lane: a lane whose TAG-ONLY tests all skip is not green ======
@@ -686,6 +719,11 @@ check "lockregen: slash-namespaced root test/all IS reachable" 1 "$(lrg 'lint:\n
 check "lockregen: slash-namespaced non-root is NOT reachable" 0 "$(lrg 'build:\n\ttrue\nweb/other:\n\tgo mod tidy\n')"
 check "lockregen: .DEFAULT_GOAL root IS reachable" 1 "$(lrg '.DEFAULT_GOAL := mine\nfoo:\n\ttrue\nmine:\n\tgo mod tidy\n')"
 check "lockregen: without .DEFAULT_GOAL the same target is NOT reachable" 0 "$(lrg 'foo:\n\ttrue\nmine:\n\tgo mod tidy\n')"
+check "lockregen: .DEFAULT_GOAL ?= x root IS reachable" 1 "$(lrg '.DEFAULT_GOAL ?= mine\nfoo:\n\ttrue\nmine:\n\tgo mod tidy\n')"
+check "lockregen: override .DEFAULT_GOAL := x root IS reachable" 1 "$(lrg 'override .DEFAULT_GOAL := mine\nfoo:\n\ttrue\nmine:\n\tgo mod tidy\n')"
+rm -rf "$lrd/fx"; mkdir -p "$lrd/fx"; printf 'build:\n\tgo mod tidy\n' > "$lrd/fx/Makefile"
+check "lockregen: no workflow files at all (empty _wf under set -u) still analyses" 1 "$( cd "$lrd/fx" && lockfile_makefile_regen '(go mod tidy)' | grep -c . )"
+check "wiring: lockregen expands _wf empty-safe for bash 4.0-4.3 under set -u" 1 "$(grep -c '\${_wf\[@\]+"\${_wf\[@\]}"} Makefile' "$PROBE")"
 check "lockregen: continuation-line prerequisite IS an edge" 1 "$(lrg 'build: a \\\n  tidy\na:\n\ttrue\ntidy:\n\tgo mod tidy\n')"
 rm -rf "$lrd/fx"; mkdir -p "$lrd/fx"; printf 'build:\n\tgo mod tidy\n' > "$lrd/fx/Makefile"; chmod 000 "$lrd/fx/Makefile"
 check "lockregen: awk failure (unreadable Makefile) exits non-zero" fail "$( cd "$lrd/fx" && { lockfile_makefile_regen '(go mod tidy)' >/dev/null 2>&1 && echo ok || echo fail; } )"

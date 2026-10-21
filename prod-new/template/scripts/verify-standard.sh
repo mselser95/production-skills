@@ -3458,7 +3458,7 @@ tracer_call_sites() {
         if (match(c, /:=/)) c = substr(c, RSTART + 2)
         else if (c ~ /^[ \t]*var[ \t][^=]*=/) sub(/^[ \t]*var[ \t][^=]*=/, "", c)
         else if (c ~ /^[ \t]*[a-z0-9_.,* \t]+=[^=]/) sub(/^[ \t]*[a-z0-9_.,* \t]+=/, "", c)
-        if (c ~ /(set|with)tracers?(provider)?\(/ || c ~ /tracers?(provider)?:([^=]|$)/ || c ~ /interceptor\(.*tracer/ || c ~ /tracers?(provider)?\)/ || c ~ /[(,][ \t]*[a-z0-9_.]*tracers?(provider)?,/) print pre c
+        if (c ~ /(set|with)tracers?(provider)?\(/ || c ~ /tracers?(provider)?:([^=]|$)/ || c ~ /interceptor\(.*tracer/ || c ~ /tracers?(provider)?\)/ || c ~ /[(,][ \t]*[a-z0-9_.]*tracers?(provider)?,/ || c ~ /[(,][ \t]*[a-z0-9_.]*tracers?(provider)?\(\)[ \t]*[,)]/) print pre c
       }'
 }
 tracer_sites=$(tracer_call_sites | wc -l | tr -d ' ')
@@ -3974,7 +3974,7 @@ lockfile_makefile_regen() {
     FILENAME != "Makefile" { l = $0; sub(/#.*/, "", l); scan_make(l, ""); next }
     acc != "" { $0 = acc $0; acc = "" }
     !/^\t/ && /\\[ \t]*$/ { sub(/\\[ \t]*$/, " "); acc = $0; next }
-    /^\.DEFAULT_GOAL[ \t]*:?:?=/ { l = $0; sub(/#.*/, "", l); sub(/^[^=]*=[ \t]*/, "", l); sub(/[ \t].*$/, "", l); addroot(l); next }
+    /^(override[ \t]+)?\.DEFAULT_GOAL[ \t]*[:?+]*=/ { l = $0; sub(/#.*/, "", l); sub(/^[^=]*=[ \t]*/, "", l); sub(/[ \t].*$/, "", l); addroot(l); next }
     /^\t/ {
       l = $0; sub(/#.*/, "", l)
       if (cur == "") next
@@ -4006,7 +4006,7 @@ lockfile_makefile_regen() {
       for (qi = 1; qi <= qn; qi++) { n = split(adj[queue[qi]], a, " "); for (i = 1; i <= n; i++) if (!(a[i] in seen)) { seen[a[i]] = 1; queue[++qn] = a[i] } }
       for (x = 1; x <= nrec; x++) { gn = split(recg[x], gg, " "); for (y = 1; y <= gn; y++) if (gg[y] in seen) { printf "%d:%s\n", recn[x], rect[x]; break } }
     }
-  ' "${_wf[@]}" Makefile
+  ' ${_wf[@]+"${_wf[@]}"} Makefile
 }
 
 # --- dependency lockfile: committed AND not regenerated in CI ---------------
