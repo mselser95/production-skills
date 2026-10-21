@@ -13,7 +13,7 @@ here would be a threshold nobody derived.
 
 | selftest | cases |
 |---|---|
-| `acceptance-audit-selftest.sh` | 139 |
+| `acceptance-audit-selftest.sh` | 140 |
 | `acceptance-coverage-selftest.sh` | 25 |
 | `acceptance-gap-selftest.sh` | 9 |
 | `agent-dispatch-guard-selftest.sh` | 19 |
@@ -34,7 +34,7 @@ here would be a threshold nobody derived.
 | `probe-excludes-selftest.sh` | 6 |
 | `probe-false-fail-selftest.sh` | 266 |
 | `probe-wiring-selftest.sh` | 13 |
-| `prove-mutation-selftest.sh` | 18 |
+| `prove-mutation-selftest.sh` | 22 |
 | `provenance-headers-selftest.sh` | 12 |
 | `row-vacuity-sweep-selftest.sh` | 19 |
 | `sbom-ordering-selftest.sh` | 10 |
@@ -47,4 +47,4 @@ here would be a threshold nobody derived.
 | `template-vendored-list-selftest.sh` | 5 |
 | `template-workflow-pins-selftest.sh` | 573 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1730** |
+| **total** | **1735** |
