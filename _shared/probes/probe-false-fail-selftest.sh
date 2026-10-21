@@ -601,8 +601,21 @@ check "lockregen: build: tidy prerequisite IS reachable" 1 "$(lrg 'build: tidy\n
 check "lockregen: check-fast recipe calling \$(MAKE) tidy IS reachable" 1 "$(lrg 'check-fast:\n\t$(MAKE) tidy\n\ntidy:\n\tgo mod tidy\n')"
 check "lockregen: transitive prerequisite chain IS reachable" 1 "$(lrg 'test: gen\n\tgo test ./...\ngen: tidy\n\ttrue\ntidy:\n\tgo mod tidy\n')"
 check "lockregen: target a workflow runs via make IS reachable" 1 "$(lrg 'build:\n\ttrue\n\nrelease-prep:\n\tgo mod tidy\n' 'make release-prep')"
-check "lockregen: target no workflow runs and nothing depends on is NOT reachable" 0 "$(lrg 'build:\n\ttrue\n\nrelease-prep:\n\tgo mod tidy\n' 'make build')"
+check "lockregen: target no workflow runs and nothing depends on is NOT reachable" 0 "$(lrg 'build:\n\ttrue\n\nprep-release:\n\tgo mod tidy\n' 'make build')"
+check "lockregen: release-prefixed target (release-prep) IS a root, reachable" 1 "$(lrg 'build:\n\ttrue\n\nrelease-prep:\n\tgo mod tidy\n' 'make build')"
 check "lockregen: commented tidy call is ignored" 0 "$(lrg 'build: tidy\n\ttrue\ntidy:\n\t# go mod tidy\n')"
+check "lockregen: root with NO prerequisites running tidy IS reachable" 1 "$(lrg 'setup:\n\ttrue\ntest:\n\tgo mod tidy\n')"
+check "lockregen: inline 'build: ; go mod tidy' IS reachable" 1 "$(lrg 'build: ; go mod tidy\n')"
+check "lockregen: recipe owned by the 2nd name of a multi-name rule IS reachable" 1 "$(lrg 'build: fmt-deps\n\ttrue\ntidy fmt-deps:\n\tgo mod tidy\n')"
+check "lockregen: prerequisites of the 2nd name of a multi-name rule are edges" 1 "$(lrg 'build: fmt-deps\n\ttrue\ntidy fmt-deps: dep\n\ttrue\ndep:\n\tgo mod tidy\n')"
+check "lockregen: slash-namespaced root test/all IS reachable" 1 "$(lrg 'lint:\n\ttrue\ntest/all:\n\tgo mod tidy\n')"
+check "lockregen: slash-namespaced non-root is NOT reachable" 0 "$(lrg 'build:\n\ttrue\nweb/other:\n\tgo mod tidy\n')"
+check "lockregen: .DEFAULT_GOAL root IS reachable" 1 "$(lrg '.DEFAULT_GOAL := mine\nfoo:\n\ttrue\nmine:\n\tgo mod tidy\n')"
+check "lockregen: without .DEFAULT_GOAL the same target is NOT reachable" 0 "$(lrg 'foo:\n\ttrue\nmine:\n\tgo mod tidy\n')"
+check "lockregen: continuation-line prerequisite IS an edge" 1 "$(lrg 'build: a \\\n  tidy\na:\n\ttrue\ntidy:\n\tgo mod tidy\n')"
+rm -rf "$lrd/fx"; mkdir -p "$lrd/fx"; printf 'build:\n\tgo mod tidy\n' > "$lrd/fx/Makefile"; chmod 000 "$lrd/fx/Makefile"
+check "lockregen: awk failure (unreadable Makefile) exits non-zero" fail "$( cd "$lrd/fx" && { lockfile_makefile_regen '(go mod tidy)' >/dev/null 2>&1 && echo ok || echo fail; } )"
+chmod 600 "$lrd/fx/Makefile"
 # end-to-end through the real row (lifted block, `row` stubbed to print "STATUS|detail")
 lift lockrow.sh '/^_lock_files=""$/,/^# --- chaos engineering/p' 'dependency-lockfile'
 sed -i.bak '$d' "$TMP/lockrow.sh" && rm -f "$TMP/lockrow.sh.bak"
@@ -617,6 +630,18 @@ check_has "lockrow: developer-only PASS carries the developer-only note" "develo
 check "lockrow: build: tidy -> FAIL" FAIL "$(lrrow 'build: tidy\n\tgo build ./...\n\ntidy:\n\t@go mod tidy\n' | cut -d'|' -f1)"
 check "lockrow: check-fast calls \$(MAKE) tidy -> FAIL" FAIL "$(lrrow 'check-fast:\n\t$(MAKE) tidy\n\ntidy:\n\tgo mod tidy\n' | cut -d'|' -f1)"
 check "lockrow: workflow run: go mod tidy -> FAIL" FAIL "$(lrrow 'build:\n\tgo build ./...\n' 'go mod tidy' | cut -d'|' -f1)"
+
+check "lockrow: root with no prerequisites running tidy -> FAIL" FAIL "$(lrrow 'setup:\n\ttrue\ntest:\n\tgo mod tidy\n' | cut -d'|' -f1)"
+check "lockrow: inline build: ; go mod tidy -> FAIL" FAIL "$(lrrow 'build: ; go mod tidy\n' | cut -d'|' -f1)"
+check "lockrow: tidy owned by 2nd name of multi-name rule reached via build -> FAIL" FAIL "$(lrrow 'build: fmt-deps\n\ttrue\ntidy fmt-deps:\n\tgo mod tidy\n' | cut -d'|' -f1)"
+check "lockrow: only pnpm install --frozen-lockfile -> PASS" PASS "$(lrrow 'build:\n\tpnpm install --frozen-lockfile\n' | cut -d'|' -f1)"
+check "lockrow: only pnpm install --frozen-lockfile -> NO developer-only note" 0 "$(lrrow 'tidy:\n\tpnpm install --frozen-lockfile\nbuild:\n\ttrue\n' | grep -c developer-only)"
+lrrow_bad() {   # unreadable Makefile -> the row must not PASS
+  rm -rf "$lrd/e2e"; mkdir -p "$lrd/e2e"
+  printf 'module x\n\ngo 1.22\n' > "$lrd/e2e/go.mod"; : > "$lrd/e2e/go.sum"; printf 'build:\n\ttrue\n' > "$lrd/e2e/Makefile"; chmod 000 "$lrd/e2e/Makefile"
+  ( cd "$lrd/e2e" && row() { printf '%s|%s' "$2" "$3"; }; . "$TMP/lockrow.sh" ); chmod 600 "$lrd/e2e/Makefile"
+}
+check "lockrow: awk failure (unreadable Makefile) -> FAIL, never PASS" FAIL "$(lrrow_bad 2>/dev/null | cut -d'|' -f1)"
 
 # --- the probe really consumes these functions (wiring, not just definitions) --
 check "wiring: invariants-ratified registry branch calls registry_run" 1 "$(grep -c '^  registry_run$' "$PROBE")"

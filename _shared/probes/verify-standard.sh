@@ -3901,7 +3901,12 @@ fi   # @shard-end
 # all/default/build/test/check/ci/verify/lint/release/install (plus -suffixed
 # variants such as check-fast), and any target a workflow passes to `make`.
 # Edges: prerequisites, and `$(MAKE) X` / `make X` inside a recipe. Transitive.
-# Simple on purpose: no variable expansion, no include, no line continuations.
+# Names followed by -, _ or / (check-fast, test/all) count as roots too; so does
+# a `.DEFAULT_GOAL := x`. Roots are seeded from EVERY rule name (tgt[]), not only
+# from targets with an edge, so `test:\n\tgo mod tidy` is a root. Multi-name rules
+# (`a b: c`) give every name the recipe and the prerequisites. A `\` continuation
+# on a rule line is joined. Simple on purpose: no variable expansion, no include.
+# Exit status is awk's: a non-zero status means the Makefile was NOT analysed.
 lockfile_makefile_regen() {
   [[ -f Makefile ]] || return 0
   local _wf=() _f
@@ -3910,7 +3915,7 @@ lockfile_makefile_regen() {
     function addroot(t) { if (t != "" && !(t in root)) { root[t] = 1 } }
     function tok_targets(rest, from,   n, i, a) {
       sub(/[;&|].*$/, "", rest); n = split(rest, a, /[ \t]+/)
-      for (i = 1; i <= n; i++) if (a[i] != "" && a[i] !~ /^-/ && a[i] !~ /[=$]/) edge(from, a[i])
+      for (i = 1; i <= n; i++) if (a[i] != "" && a[i] !~ /^-/ && a[i] !~ /[=$]/) edges(from, a[i])
     }
     function edge(f, t) { adj[f] = adj[f] " " t }
     function scan_make(line, from,   rest) {
@@ -3921,7 +3926,11 @@ lockfile_makefile_regen() {
         else tok_targets(rest, from)
       }
     }
+    function edges(fs, t,   nn, z, w) { nn = split(fs, w, " "); for (z = 1; z <= nn; z++) edge(w[z], t) }
     FILENAME != "Makefile" { l = $0; sub(/#.*/, "", l); scan_make(l, ""); next }
+    acc != "" { $0 = acc $0; acc = "" }
+    !/^\t/ && /\\[ \t]*$/ { sub(/\\[ \t]*$/, " "); acc = $0; next }
+    /^\.DEFAULT_GOAL[ \t]*:?:?=/ { l = $0; sub(/#.*/, "", l); sub(/^[^=]*=[ \t]*/, "", l); sub(/[ \t].*$/, "", l); addroot(l); next }
     /^\t/ {
       l = $0; sub(/#.*/, "", l)
       if (cur == "") next
@@ -3936,26 +3945,24 @@ lockfile_makefile_regen() {
       sub(/\|.*$/, "", rest)
       n = split(names, nm, /[ \t]+/); cur = ""
       for (k = 1; k <= n; k++) {
-        if (nm[k] == "" ) continue
-        if (cur == "") cur = nm[k]
-        if (nm[k] ~ /^\./) continue
+        if (nm[k] == "" || nm[k] ~ /^\./) continue
+        cur = cur " " nm[k]; tgt[nm[k]] = 1
         if (first == "") first = nm[k]
         m = split(rest, pr, /[ \t]+/)
         for (q = 1; q <= m; q++) if (pr[q] != "" && pr[q] !~ /[$%]/) edge(nm[k], pr[q])
       }
-      if (cur ~ /^\./) cur = ""
       if (inl != "" && cur != "") { scan_make(inl, cur); if (inl ~ pat) { nrec++; recn[nrec] = FNR; rect[nrec] = $0; recg[nrec] = cur } }
       next
     }
     /^[^\t#]/ { cur = "" }
     END {
       addroot(first)
-      for (t in adj) if (t ~ /^(all|default|build|test|check|ci|verify|lint|release|install)([-_].*)?$/) addroot(t)
+      for (t in tgt) if (t ~ /^(all|default|build|test|check|ci|verify|lint|release|install)([-_\/].*)?$/) addroot(t)
       for (r in root) { if (!(r in seen)) { seen[r] = 1; queue[++qn] = r } }
       for (qi = 1; qi <= qn; qi++) { n = split(adj[queue[qi]], a, " "); for (i = 1; i <= n; i++) if (!(a[i] in seen)) { seen[a[i]] = 1; queue[++qn] = a[i] } }
-      for (x = 1; x <= nrec; x++) if (recg[x] in seen) printf "%d:%s\n", recn[x], rect[x]
+      for (x = 1; x <= nrec; x++) { gn = split(recg[x], gg, " "); for (y = 1; y <= gn; y++) if (gg[y] in seen) { printf "%d:%s\n", recn[x], rect[x]; break } }
     }
-  ' "${_wf[@]}" Makefile 2>/dev/null
+  ' "${_wf[@]}" Makefile
 }
 
 # --- dependency lockfile: committed AND not regenerated in CI ---------------
@@ -4001,14 +4008,19 @@ else
   # (see lockfile_makefile_regen); a standalone developer `tidy:` target that
   # nothing depends on is not the build rewriting the lockfile.
   _regen_pat='(go mod tidy|go get -u|npm install|yarn install|pnpm install|bundle update|cargo update|poetry update)'
+  _mk_bad=""
+  _mk_out=$(lockfile_makefile_regen "$_regen_pat" 2>/dev/null) || _mk_bad=1
   _regen=$( { grep -hnE "^[^#]*${_regen_pat}" .github/workflows/*.y*ml 2>/dev/null
-              lockfile_makefile_regen "$_regen_pat"; } \
+              [[ -n "$_mk_out" ]] && printf '%s\n' "$_mk_out"; } \
            | grep -vE 'frozen-lockfile|--locked|npm ci|--frozen' | head -2 | tr '\n' ' ')
   _regen_dev=""
-  if [[ -z "$_regen" ]] && grep -qE "^[^#]*${_regen_pat}" Makefile 2>/dev/null; then
+  if [[ -z "$_regen" && -z "$_mk_bad" ]] && grep -E "^[^#]*${_regen_pat}" Makefile 2>/dev/null \
+       | grep -qvE 'frozen-lockfile|--locked|npm ci|--frozen'; then
     _regen_dev=" (a regenerating Makefile target exists but is developer-only: nothing CI or the build path runs reaches it)"
   fi
-  if [[ -n "$_regen" ]]; then
+  if [[ -n "$_mk_bad" && -z "$_regen" ]]; then
+    row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) but could not analyse Makefile (awk failed) -- whether the build regenerates it is unproven"
+  elif [[ -n "$_regen" ]]; then
     row "dependency-lockfile" FAIL "lockfile committed ($_lock_files) but CI/Makefile REGENERATES it: $(printf '%s' "$_regen" | cut -c1-110) -- a lockfile the build rewrites pins nothing"
   else
     # Enforcement: explicit flag, or a toolchain whose default is readonly.
