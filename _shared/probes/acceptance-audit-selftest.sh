@@ -414,22 +414,30 @@ done
 
 # n/a branches: only drivable from a repo-shaped root (own=1); in-repo (own=0) the
 # root is the template, so build a scratch repo from it. Skipped where own=1 already.
-# guard_wait <pid> <secs>: wait for <pid>, killing it (and its children) only if it is still
-# running after <secs>. The bound guards a true hang, not speed: the nested run replays the
-# whole suite, whose duration scales with host load, so the default is generous and
-# ACCEPTANCE_AUDIT_SELFTEST_WATCHDOG overrides it. A killed pid returns rc 143 (SIGTERM).
+# kill_tree <pid> [sig]: signal <pid> and every descendant (portable: walks `pgrep -P`; macOS has
+# no setsid). The parent is stopped first so it cannot respawn children while we walk.
+kill_tree() {
+  local pid="$1" sig="${2:-TERM}" c
+  kill -STOP "$pid" 2>/dev/null
+  for c in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$c" "$sig"; done
+  kill -"$sig" "$pid" 2>/dev/null; kill -CONT "$pid" 2>/dev/null
+}
+# guard_wait <pid> <secs>: wait for <pid>, killing it AND ITS WHOLE PROCESS TREE only if it is
+# still running after <secs>. The bound guards a true hang, not speed: the nested run replays the
+# whole suite, whose duration scales with host load, so the default is generous (300s, under the
+# 10-minute rule) and ACCEPTANCE_AUDIT_SELFTEST_WATCHDOG overrides it. A killed pid returns rc 143.
 guard_wait() {
   local pid="$1" secs="$2" wd grc
-  ( sleep "$secs"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  ( sleep "$secs"; kill_tree "$pid" ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; grc=$?
-  pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  kill_tree "$wd" KILL; wait "$wd" 2>/dev/null
   return "$grc"
 }
 nested() { # nested <name> <want-rc> <want-substr> <TEMPLATE_DIR>
   local name="$1" wrc="$2" want="$3" td="$4" out rc pid wd
   out="$tmp/nested.out"
   ( cd "$tmp/nrepo" && TEMPLATE_DIR="$td" HOME="$tmp/nhome" bash scripts/tests/acceptance-audit-selftest.sh > "$out" 2>&1 ) & pid=$!
-  guard_wait "$pid" "${ACCEPTANCE_AUDIT_SELFTEST_WATCHDOG:-600}"; rc=$?
+  guard_wait "$pid" "${ACCEPTANCE_AUDIT_SELFTEST_WATCHDOG:-300}"; rc=$?
   if [[ "$rc" -eq "$wrc" && "$(cat "$out")" == *"$want"* ]]; then pass=$((pass+1)); echo "  ok   $name"
   else bad=$((bad+1)); echo "  FAIL $name (rc=$rc want $wrc, wanted '$want')"; sed 's/^/       /' "$out"; fi
 }
@@ -438,6 +446,12 @@ sleep 120 & hpid=$!
 hs=$SECONDS; guard_wait "$hpid" 1; hrc=$?; hel=$((SECONDS-hs))
 if [[ "$hrc" -eq 143 && "$hel" -lt 30 ]]; then pass=$((pass+1)); echo "  ok   watchdog kills a hung child (rc=143 after ${hel}s)"
 else bad=$((bad+1)); echo "  FAIL watchdog kills a hung child (rc=$hrc after ${hel}s)"; kill "$hpid" 2>/dev/null; fi
+# a hung suite with its own nested child: the guard must take the whole tree, not just the pid
+mk="aa-selftest-marker-$$-$RANDOM"
+( bash -c "exec -a $mk sleep 117" & wait ) >/dev/null 2>&1 & gpid=$!
+sleep 1; guard_wait "$gpid" 1; grc=$?; sleep 1
+if [[ -z "$(pgrep -f "$mk" 2>/dev/null)" ]]; then pass=$((pass+1)); echo "  ok   watchdog leaves no descendant of a hung child"
+else bad=$((bad+1)); echo "  FAIL watchdog leaves no descendant of a hung child (rc=$grc)"; pkill -f "$mk" 2>/dev/null; fi
 if [[ "$own" = 0 ]]; then
   ncases=$pass   # the nested copy runs exactly the cases above (it skips this block)
   mkdir -p "$tmp/nrepo"; cp -R "$root/." "$tmp/nrepo/"; mkdir -p "$tmp/nrepo/scripts/tests"

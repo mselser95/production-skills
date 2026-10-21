@@ -43,15 +43,31 @@ mkpatch other.txt 'note' 'changed' "$tmp/survives.patch"
 mkpatch check.sh 'exit 0' 'exit 3' "$tmp/breaks.patch"
 printf 'garbage\n' > "$tmp/bad.patch"
 
+# kill_tree <pid> [sig]: signal <pid> and all descendants (portable `pgrep -P` walk; macOS has no
+# setsid). Parent is stopped first so it cannot respawn children mid-walk.
+kill_tree() {
+  local pid="$1" sig="${2:-TERM}" c
+  kill -STOP "$pid" 2>/dev/null
+  for c in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$c" "$sig"; done
+  kill -"$sig" "$pid" 2>/dev/null; kill -CONT "$pid" 2>/dev/null
+}
+# guard_wait <pid> <secs>: wait for <pid>; kill its whole tree only if still running after <secs>.
+# The watchdog is itself torn down with its `sleep`, so nothing leaks. Killed pid returns rc 143.
+guard_wait() {
+  local pid="$1" secs="$2" wd grc
+  ( sleep "$secs"; kill_tree "$pid" ) >/dev/null 2>&1 & wd=$!
+  wait "$pid"; grc=$?
+  kill_tree "$wd" KILL; wait "$wd" 2>/dev/null
+  return "$grc"
+}
+
 expect_case() { # name want_rc want_prefix -- args...
   local name="$1" want_rc="$2" want_prefix="$3"; shift 3
   local out rc
   # Bounded: a hang must be a FAIL, not a stuck suite. Portable watchdog --
   # macOS ships no `timeout`.
   bash "$probe" "$@" >"$tmp/out" 2>/dev/null & local pid=$!
-  ( sleep 20; kill "$pid" 2>/dev/null ) & local dog=$!
-  wait "$pid"; rc=$?
-  kill "$dog" 2>/dev/null; wait "$dog" 2>/dev/null
+  guard_wait "$pid" "${PROVE_MUTATION_SELFTEST_WATCHDOG:-60}"; rc=$?
   out="$(cat "$tmp/out")"
   CASES=$((CASES + 1))
   if [[ $rc -ne $want_rc || "$out" != "$want_prefix"* ]]; then
@@ -83,6 +99,21 @@ expect_case interrupted  2 "ERROR" "$tmp/detected.patch" -- bash -c 'grep -q val
 sed -i.bak 's/value=1/value=9/' lib.txt && rm -f lib.txt.bak && git commit -qam red
 expect_case baseline-red 2 "ERROR" "$tmp/survives.patch" -- ./check.sh
 git reset -q --hard HEAD~1
+
+# The watchdog must not leak its `sleep`: a unique bound, a normal run, then no sleeper with it.
+wdb=7391
+before="$(pgrep -f "sleep $wdb" 2>/dev/null | wc -l | tr -d ' ')"
+PROVE_MUTATION_SELFTEST_WATCHDOG=$wdb expect_case no-leak 1 "GREEN" "$tmp/survives.patch" -- ./check.sh
+sleep 1
+after="$(pgrep -f "sleep $wdb" 2>/dev/null | wc -l | tr -d ' ')"
+CASES=$((CASES + 1))
+if [[ "$before" != "$after" ]]; then echo "FAIL watchdog leaked sleepers: before=$before after=$after"; FAILS=$((FAILS + 1)); fi
+# A fired guard takes the whole tree: hung pid with a marked grandchild, none may survive.
+mk="pm-selftest-marker-$$-$RANDOM"
+( bash -c "exec -a $mk sleep 118" & wait ) >/dev/null 2>&1 & gpid=$!
+sleep 1; guard_wait "$gpid" 1; sleep 1
+CASES=$((CASES + 1))
+if [[ -n "$(pgrep -f "$mk" 2>/dev/null)" ]]; then echo "FAIL guard left a descendant of the hung pid"; pkill -f "$mk" 2>/dev/null; FAILS=$((FAILS + 1)); fi
 
 if (( CASES == 0 )); then echo "prove-mutation-selftest: ZERO cases ran -- refusing to pass"; exit 1; fi
 if (( FAILS )); then echo "prove-mutation-selftest: $FAILS of $CASES checks failed"; exit 1; fi
