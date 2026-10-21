@@ -4014,8 +4014,11 @@ else
               [[ -n "$_mk_out" ]] && printf '%s\n' "$_mk_out"; } \
            | grep -vE 'frozen-lockfile|--locked|npm ci|--frozen' | head -2 | tr '\n' ' ')
   _regen_dev=""
-  if [[ -z "$_regen" && -z "$_mk_bad" ]] && grep -E "^[^#]*${_regen_pat}" Makefile 2>/dev/null \
-       | grep -qvE 'frozen-lockfile|--locked|npm ci|--frozen'; then
+  _dev_hits=""
+  if [[ -z "$_regen" && -z "$_mk_bad" ]]; then
+    _dev_hits=$(grep -E "^[^#]*${_regen_pat}" Makefile 2>/dev/null | grep -vE 'frozen-lockfile|--locked|npm ci|--frozen')
+  fi
+  if [[ -n "$_dev_hits" ]]; then
     _regen_dev=" (a regenerating Makefile target exists but is developer-only: nothing CI or the build path runs reaches it)"
   fi
   if [[ -n "$_mk_bad" && -z "$_regen" ]]; then
