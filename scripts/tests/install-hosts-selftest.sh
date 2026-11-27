@@ -34,7 +34,15 @@ run() { local sc="$1"; shift
   env HOME="$HM" CLAUDE_CONFIG_DIR="$CL" CODEX_HOME="$CX" bash "$sc" "$@" >"$T/out" 2>"$T/err"; RC=$?; }
 norm() { sed -e "s|$H|<H>|g" "$1"; } # normalise only the temp path
 listing() { ( cd "$1" && find . | sort ); }
-modes() { ( cd "$1" && find . -type f -exec stat -f '%Sp %N' {} + 2>/dev/null | sort ); }
+# modes: permission bits per file, via python (stat -f is BSD-only: GNU stat -f prints filesystem counters).
+modes() { python3 -I -c 'import os,sys
+r=sys.argv[1]
+for d,_,fs in os.walk(r):
+    for f in fs:
+        p=os.path.join(d,f)
+        if not os.path.islink(p): print("%04o %s" % (os.stat(p).st_mode & 0o7777, os.path.relpath(p,r)))' "$1" | sort; }
+# contents: POSIX cksum (one process per batch) so a rewrite with the same name and mode is seen too.
+contents() { ( cd "$1" && find . -type f -exec cksum {} + | sort -k3 ); }
 hasre() { grep -qE "$1" "$2"; }
 
 echo "homes: HOME=$T/h*/home CLAUDE_CONFIG_DIR=$T/h*/claude CODEX_HOME=$T/h*/codex (real home: $REAL_HOME)"
@@ -68,8 +76,10 @@ c_default_identical() {
   [[ "$(modes "$CL1")" == "$(modes "$CL")" ]] || return 1
   [[ "$(listing "$H1/codex")" == "$(listing "$H/codex")" && "$(listing "$H/codex")" == "." ]] || return 1
   # --verify on both
+  # verify each installer on the home it just installed (no third and fourth full install)
+  local H2="$H" HM2="$HM" CL2="$CL" CX2="$CX"
   H="$H1"; CL="$CL1"; CX="$H1/codex"; HM="$H1/home"; run "$ORIG" --verify; rc1=$RC; norm "$T/out" > "$T/o1"; norm "$T/err" > "$T/e1"
-  newhomes; run "$NEW"; run "$NEW" --verify; rc2=$RC; norm "$T/out" > "$T/o2"; norm "$T/err" > "$T/e2"
+  H="$H2"; HM="$HM2"; CL="$CL2"; CX="$CX2"; run "$NEW" --verify; rc2=$RC; norm "$T/out" > "$T/o2"; norm "$T/err" > "$T/e2"
   [[ $rc1 == 0 && $rc2 == 0 ]] && cmp -s "$T/o1" "$T/o2" && cmp -s "$T/e1" "$T/e2"
 }
 check "default run + --verify identical to the original installer (tree, modes, manifest, stdout, stderr)" c_default_identical
@@ -113,10 +123,10 @@ check "--host codex: nine skills, references dereferenced, no symlinks, manifest
 c_codex_verify_ok() { H="$FH"; HM="$FHM"; CL="$FCL"; CX="$FCX"; run "$NEW" --verify --host codex; [[ $RC == 0 ]] && grep -q '^TCB verified: ' "$T/out"; }
 check "--verify --host codex -> 0 and says TCB verified" c_codex_verify_ok
 
-c_roles() {
-  H="$FH"; HM="$FHM"; CL="$FCL"; CX="$FCX"
-  env HOME="$HM" CODEX_HOME="$CX" CLAUDE_CONFIG_DIR="$CL" PROD_CODEX_MODEL_SCOUT="test-model-x" bash "$NEW" --host codex >/dev/null 2>&1 || return 1
-  python3 -I - "$S/agents" "$CX/agents" "$CX/prod-skills.manifest" <<'PY' || return 1
+c_roles() { # the mini tree carries the real agents, so every role is converted from its real source
+  newhomes
+  env HOME="$HM" CODEX_HOME="$CX" CLAUDE_CONFIG_DIR="$CL" PROD_CODEX_MODEL_SCOUT="test-model-x" bash "$MNEW" --host codex >/dev/null 2>&1 || return 1
+  python3 -I - "$M/agents" "$CX/agents" "$CX/prod-skills.manifest" <<'PY' || return 1
 import sys, os, re, tomllib
 src, dst, man = sys.argv[1:4]
 mf = open(man).read()
@@ -189,10 +199,10 @@ c_usage() {
 check "unknown host / missing value -> exit 2 usage, nothing installed" c_usage
 
 c_isolation() {
-  newhomes; run "$MNEW" --host claude; local b; b="$(listing "$CL"; modes "$CL")"
+  newhomes; run "$MNEW" --host claude; local b; b="$(listing "$CL"; modes "$CL"; contents "$CL")"
   [[ "$(listing "$CX")" == "." ]] || return 1
-  run "$MNEW" --host codex; [[ "$(listing "$CL"; modes "$CL")" == "$b" ]] || return 1
-  b="$(listing "$CX"; modes "$CX")"; run "$MNEW" --host claude; [[ "$(listing "$CX"; modes "$CX")" == "$b" ]] || return 1
+  run "$MNEW" --host codex; [[ "$(listing "$CL"; modes "$CL"; contents "$CL")" == "$b" ]] || return 1
+  b="$(listing "$CX"; modes "$CX"; contents "$CX")"; run "$MNEW" --host claude; [[ "$(listing "$CX"; modes "$CX"; contents "$CX")" == "$b" ]] || return 1
   run "$MNEW" --verify --host both; [[ $RC == 0 ]]
 }
 check "a codex run leaves the Claude home untouched, and vice versa" c_isolation
@@ -232,6 +242,7 @@ probe_deref()      { newhomes; run "$1" --host codex; [[ -z "$(find "$CX" -type 
 probe_default()    { newhomes; run "$1"; [[ "$(listing "$CX")" == "." && -s "$CL/prod-skills.manifest" ]]; }
 probe_restrict()   { newhomes; run "$1" --host codex; grep -q 'must not spawn other agents' "$CX/agents/prod-scout.toml" && grep -q 'must not edit' "$CX/agents/prod-scout.toml"; }
 probe_isolation()  { newhomes; run "$1" --host claude; local b; b="$(listing "$CL")"; run "$1" --host codex; [[ "$(listing "$CL")" == "$b" ]]; }
+probe_isolation_cx() { newhomes; run "$1" --host codex; local b; b="$(listing "$CX")"; run "$1" --host claude; [[ "$(listing "$CX")" == "$b" ]]; }
 red() { # red <label> <probe> <old> <new>
   mutate "$3" "$4" || { bad=$((bad+1)); echo "FAIL - mutation $1: ERROR (pattern did not apply)"; return; }
   if ! "$2" "$MNEW" ; then bad=$((bad+1)); echo "FAIL - mutation $1: probe fails on the REAL installer"; return; fi
@@ -248,6 +259,8 @@ red "default host changed to both" probe_default 'host=claude; mode=""' 'host=bo
 red "role restriction block dropped" probe_restrict "  printf '\\n## Host restrictions (Codex)" "  : printf '\\n## Host restrictions (Codex)"
 red "claude tree modified by a codex run" probe_isolation \
   '  install_host || exit $?' '  install_host || exit $?; [[ $h == codex ]] && touch "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stray"'
+red "codex tree modified by a claude run" probe_isolation_cx \
+  '  install_host || exit $?' '  install_host || exit $?; [[ $h == claude ]] && touch "${CODEX_HOME:-$HOME/.codex}/stray"'
 
 # --- nothing escaped to the real home -----------------------------------------
 c_home_clean() { # every run had HOME under $T; the only things ever created there are the default-root case's
