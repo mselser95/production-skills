@@ -82,7 +82,7 @@ Gates
 | 0.1 | Runner, host adapters, stub host, report, lint, selftest, `make eval` | Sonnet | `benchmarks/eval/{run.sh,hosts,lib,report.py,lint.sh,selftest.sh,README.md}`, `Makefile` | delivered → Opus NO-OK → fixes in progress |
 | 0.2 | prod-review corpus: 6 tasks (4 seeded bugs, 2 clean), 2 held-out | Sonnet | `benchmarks/eval/corpus/prod-review/**` | delivered → Opus NO-OK → fixes in progress |
 | 0.3 | Opus validation of 0.1 + 0.2 | Opus | read-only | round 1: NO-OK (below); round 2 pending |
-| 3.1 | `skill-weight` gate: 500-line cap, eager-context ratchet (+5 %), 64 KB ceiling with expiring waivers | Sonnet | `_shared/probes/skill-weight*.sh`, `benchmarks/skill-weight-baseline.md`, `registries/waivers.yaml`, wiring | in progress (branch `budget/skill-weight`, worktree `.wt/weight`) |
+| 3.1 | `skill-weight` gate: 500-line cap, eager-context ratchet (+5 %), 64 KB ceiling with expiring waivers | Sonnet | `_shared/probes/skill-weight*.sh`, `benchmarks/skill-weight-baseline.md`, `registries/waivers.yaml`, wiring | delivered → Opus NO-OK → round 2 in progress (branch `budget/skill-weight`, worktree `.wt/weight`) |
 | 0.4 | Live pilot prod-review, both hosts, n=3 | orchestrator | `benchmarks/eval/results/` | pending |
 
 ### Opus validation round 1 of the eval harness — NO-OK (2026-11-27)
@@ -152,6 +152,52 @@ Order: after the eval harness lands (it is the measuring stick), start with the 
 languages for prod-review (cheapest, proves the harness), then the adapter split of
 verify-standard, then the Rust and Python templates.
 
+### Scope additions by the user, 2026-11-27 (after Phase 5)
+
+- **Frontend is ALWAYS React** (not only the default): React + TypeScript in the pnpm monorepo,
+  whatever the backend language. No other frontend framework is scaffolded or supported.
+- **Research good AND secure practices for every stack before building its template.** One notes
+  file per stack under `notes/`, from primary sources, each practice written as something a gate can
+  check: `practices-go.md`, `practices-rust.md`, `practices-python.md`,
+  `practices-react-frontend.md`, `practices-postgres-timescale.md`. These are INPUT to the
+  templates and to the per-language adapters; a practice enters the standard only with a gate and a
+  mutation that turns it red. Status: five research agents dispatched 2026-11-27.
+
+### Phase 6 — databases (added by the user 2026-11-27)
+
+Default database for every scaffolded service: **PostgreSQL 18**. **TimescaleDB on top** when the
+service has time-series data. A priori no other store is scaffolded.
+Hard requirement: the database is BORN with probing and metrics, so it can be monitored from the
+first commit:
+1. Init ships: least-privilege roles (owner / migrator / app / read-only / monitoring), secure
+   auth + TLS defaults, the statistics extensions and settings needed for monitoring, timeouts.
+2. A metrics exporter and liveness/readiness probes for the database wired into the scaffold's
+   observability (same registries as the service: emitted metrics, alerts, runbook entries).
+3. A must-have metric set (availability, connections, replication lag, WAL/archiving, wraparound
+   distance, autovacuum, locks, slow queries, disk growth, backup age; for Timescale: chunks,
+   compression backlog, background-job failures, continuous-aggregate lag) with an alert each.
+4. A CI test against a throwaway container proving the probes answer and the exporter serves the
+   declared metrics after init — so monitoring cannot rot silently — plus a mutation that turns it
+   red (drop the monitoring role / disable the extension).
+5. Migrations with a safe-DDL linter as a gate, typed queries per backend language, real Postgres
+   in tests (no mocks of the database), a restore test.
+6. Works for the three backend languages (Phase 5) and is covered by eval corpus tasks.
+Open question to settle from the research notes: whether TimescaleDB supports PostgreSQL 18 today,
+and from which version — if not, the scaffold pins the newest supported pair and records a dated
+liability instead of pretending.
+
+### Opus validation of the skill-weight gate — round 1: CHANGES REQUIRED (2026-11-27)
+
+Worktree `.wt/weight`, uncommitted. All nine numbers matched an independent hand count; 19 of 23
+mutations RED. Blocker: partial blindness is silent — rewording a SKILL.md opening paragraph
+(semicolon-joined conditional, unbackticked reference, sentence moved to the next paragraph)
+halves the measured set with exit 0, because a shrink never fails. Under-measurement: later-step
+unconditional reads are invisible (prod-bootstrap really loads ~256 KB, not 80 KB).
+Decision for round 2: measure TWO sets — EAGER (opening paragraph, hardened) and REACHABLE (every
+`references/` mention anywhere, no prose parsing, an upper bound) — and ratchet the FILE LIST of
+each in both directions, so any change in what a skill loads is a reviewed diff of the baseline.
+REACHABLE ceiling 128 KB. Fresh Sonnet implementer dispatched.
+
 ### Open / blocked
 
 - Unknown from the Codex binary, to resolve from official docs in Phase 4: agent-role TOML schema,
@@ -168,5 +214,6 @@ verify-standard, then the Rust and Python templates.
 3. Phase 4: `_shared/hosts.md`, dual installer, host-vocabulary probe, per-host smoke.
 4. Phase 1: greenfield concept in prod-spec, monorepo + React + DS + Playwright template, dim 28.
 5. Phase 5: Go + Rust + Python (see above) — corpus first, then verify-standard adapters, then templates.
+   Phase 6: PostgreSQL 18 + TimescaleDB, born monitored (see above) — after the research notes land.
 6. Phase 2: papers loop.
 7. `make check-fast` runtime: `gate-hygiene-fitness.sh` is superlinear in file length (70 lines 4 s, 130 lines 14 s, 190 lines 79 s, measured 2026-11-27); 100 s idle, 30+ min under load.
