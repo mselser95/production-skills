@@ -439,6 +439,7 @@ os.chmod(os.path.join(r, "_shared", "probes", "n.sh"), 0o644)
 skill_md(r, "prod-review", P0, "run `references/probes/n.sh`")
 rec(r)
 case("a non-executable .sh is counted as read context", r, 0, "references/probes/n.sh " + NOTE)
+case("...and the note says to chmod +x it", r, 0, "it is not executable: `chmod +x` it if the skill runs it")
 r = mk("fake-outside")
 os.makedirs(os.path.join(r, "elsewhere"))
 fill(os.path.join(r, "elsewhere", "o.sh"), 800, "o")
@@ -455,8 +456,36 @@ fill(sk(r, "prod-review", "references", "probes", "own.sh"), 800, "o")
 os.chmod(sk(r, "prod-review", "references", "probes", "own.sh"), 0o755)
 skill_md(r, "prod-review", P0, "run `references/probes/own.sh`")
 rec(r)
-case("installed-copy layout: an executable .sh really in the skill's own references/probes is a probe", r, 0,
+case("installed-copy layout (no _shared/probes): an executable .sh really in the skill's own references/probes is a probe", r, 0,
      "(+ probes 800 not gated)", (NOTE,))
+# the exploit: in the SOURCE repo (_shared/probes exists) a REAL executable .sh under the skill's references/probes
+# is an ordinary reference: counted, and over the ceiling it FAILS without a liability
+r = mk("own-real-src")
+genuine(r, "g.sh", 100, "prod-ops")
+os.makedirs(sk(r, "prod-review", "references", "probes"))
+fill(sk(r, "prod-review", "references", "probes", "big.sh"), 130000, "#")
+os.chmod(sk(r, "prod-review", "references", "probes", "big.sh"), 0o755)
+skill_md(r, "prod-review", P0, "step 4: read `references/probes/big.sh`")
+rec(r)
+case("source repo: a REAL executable .sh under the skill's own references/probes is counted, with a note, and over the ceiling it FAILS without a liability", r, 1,
+     ("over the 128000-byte ceiling", "references/probes/big.sh " + NOTE))
+# an executable NON-.sh really in _shared/probes is counted (suffix check)
+r = mk("probe-py")
+genuine(r, "p.py", 900, "prod-ops")
+skill_md(r, "prod-ops", P0, "run `references/probes/p.py`")
+rec(r)
+case("an executable non-.sh file in _shared/probes is counted, not a probe", r, 0, "references/probes/p.py " + NOTE)
+# an executable .sh whose real path is in ANOTHER directory named probes is counted
+r = mk("other-probes")
+os.makedirs(os.path.join(r, "elsewhere", "probes"))
+fill(os.path.join(r, "elsewhere", "probes", "o.sh"), 800, "o")
+os.chmod(os.path.join(r, "elsewhere", "probes", "o.sh"), 0o755)
+os.makedirs(sk(r, "prod-review", "references", "probes"))
+os.symlink("../../../elsewhere/probes/o.sh", sk(r, "prod-review", "references", "probes", "o.sh"))
+skill_md(r, "prod-review", P0, "run `references/probes/o.sh`")
+rec(r)
+case("an executable .sh whose real path is in another directory named probes is counted", r, 0,
+     "references/probes/o.sh " + NOTE)
 r = mk("dotdot")
 genuine(r, "p.sh", 900, "prod-ops")
 skill_md(r, "prod-ops", P0, "run `references/probes/../a.md`")
@@ -483,6 +512,19 @@ for label, txt in (("`references`", "every file in the `references` folder"), ("
         else:
             skill_md(r, "prod-ops", P0, "step 7: %s." % txt)
         case("%s in the %s text fails, naming the files explicitly" % (label, where), r, 1, "name the files explicitly")
+# the same directory by another spelling: angle-bracket target, titled link, capitalised token
+for label, txt in (("link target <references>", "see [all](<references>)"), ("link target with a title", 'see [all](references "t")'),
+                   ("link target <prod-ops/references/> with a title", 'see [all](<prod-ops/references/> "t")'),
+                   ("capitalised `References`", "every file in `References`")):
+    r = mk("bareref2")
+    skill_md(r, "prod-ops", P0, "step 7: %s." % txt)
+    case("%s fails, naming the files explicitly" % label, r, 1, "name the files explicitly")
+# ...and these are NOT the bare directory: a widened rule would fail them
+for label, txt in (("`references.md`", "see `references.md` here"), ("`references-old`", "see `references-old` here"),
+                   ("`my_references`", "see `my_references` here"), ("heading ## References", "## References\n\nbody text")):
+    r = mk("notbare")
+    skill_md(r, "prod-ops", P0, "step 7: %s." % txt if not txt.startswith("##") else txt)
+    case("%s is not the bare directory and passes" % label, r, 0, "skill-weight: ok")
 r = mk("prose2")
 skill_md(r, "prod-ops", P0, "the references directory and the references folder hold files; see `references/verification-probes.md` and `references/preferences.md`.")
 fill(sk(r, "prod-ops", "references", "verification-probes.md"), 400, "v")

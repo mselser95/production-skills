@@ -20,9 +20,12 @@
 #   PROBES     A PROBE is a script a skill RUNS: the model reads its output, not its
 #              source. A mention is a probe only if ALL hold: it is under
 #              references/probes/ with no `.`/`..` segment; its REAL path (links
-#              resolved) is inside this repo's _shared/probes/ (or, in an installed
-#              copy, the skill's own references/probes/); and it is an executable
-#              regular file named *.sh. Anything else under references/probes/ is an
+#              resolved) is inside a probe HOME; and it is an executable regular
+#              file named *.sh. Two homes, by layout: <root>/_shared/probes/ always;
+#              the skill's own references/probes/ ONLY when <root>/_shared/probes
+#              does not exist (an installed copy, where those are real files). In
+#              the source repo every entry there is a link into _shared/probes/, so
+#              a real file there is an ordinary reference: counted. Anything else under references/probes/ is an
 #              ordinary reference, counted, with a note. A probe mentioned in the
 #              read-first paragraph FAILS ("read first" is not "run"). Probes stay
 #              in the FILE LISTS of whichever set mentions them (adding or removing
@@ -38,7 +41,7 @@
 #   (a) SKILL.md has <= 500 lines (agentskills.io/specification).
 #   (b) every references/ mention resolves to a readable file. A dangling mention,
 #       a directory (`references/probes/`), the bare `references/`, a backticked
-#       token or link target that is just `references` (or ends in `/references`),
+#       token or link target (plain, <angle-bracketed> or titled, any case) that is just `references` (or ends in `/references`),
 #       and any glob (`references/*.md`, `{a,b}`, `?`, `[x]`) FAIL, in both sets,
 #       with an order to name the files explicitly: a directory or glob orders
 #       every file in it read, which cannot be measured. A mention with a `.` or

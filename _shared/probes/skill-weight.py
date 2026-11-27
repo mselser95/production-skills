@@ -22,8 +22,11 @@ REF_RE = re.compile(r"(?<![A-Za-z0-9_])references/[A-Za-z0-9_./-]*")
 GLOB = "*?[{"  # a glob mention orders every file it matches read, exactly as a directory does
 GLOB_TAIL_RE = re.compile(r"[^\s`'\")<>]*")
 PROBES = "references/probes/"  # where a skill's RUN scripts are linked; the path alone does not make a probe
-# `references` as a whole backticked token or a link target, with or without a leading <dir>/ and a trailing /
-DIR_TOKEN_RE = re.compile(r"`((?:[^`\s]*/)?references/?)`|\]\(((?:[^)\s]*/)?references/?)\)")
+# `references` as a whole backticked token or a link target (plain, <angle-bracketed> or followed by a
+# title), with or without a leading <dir>/ and a trailing /, any case (same directory on a
+# case-insensitive filesystem). `references.md`, `my_references` and a heading do not match.
+DIR_TOKEN_RE = re.compile(r"`((?:[^`\s]*/)?references/?)`"
+                          r"|\]\(\s*<?((?:[^)\s>]*/)?references/?)>?(?:\s+[\"'][^)]*)?\s*\)", re.I)
 WRAP_RE = re.compile(r"(references/[A-Za-z0-9_./-]*-)[ \t]*\n[ \t]*")  # path wrapped after a hyphen
 TICK_RE = re.compile(r"`(references/[^`\s]+)`")
 HEADER = ["skill", "SKILL.md lines", "SKILL.md bytes", "eager bytes", "reachable bytes",
@@ -66,16 +69,28 @@ def dotted(ref):
 def is_probe(root, skill, ref, real):
     """A PROBE is a script the skill RUNS, so its source is not read context. All must hold:
     the mention is under references/probes/ with no `.`/`..` segment; its REAL path (links
-    resolved) is inside the repo's _shared/probes/ or the skill's own references/probes/; and it
-    is an executable regular file named *.sh. Anything else under references/probes/ is an
-    ordinary reference and is counted."""
+    resolved) is inside a probe HOME; and it is an executable regular file named *.sh.
+    Probe homes: the repo's _shared/probes/ always; the skill's own references/probes/ ONLY
+    when <root>/_shared/probes does not exist (an INSTALLED copy, where those are real files).
+    In the source repo every entry there is a link into _shared/probes/, so a real file
+    there is never legitimate: it is an ordinary reference and is counted."""
     if not ref.startswith(PROBES) or dotted(ref):
         return False
     if not (os.path.isfile(real) and os.access(real, os.X_OK) and real.endswith(".sh")):
         return False
-    homes = [os.path.realpath(os.path.join(root, "_shared", "probes")),
-             os.path.realpath(os.path.join(root, skill, "references", "probes"))]
+    shared = os.path.join(root, "_shared", "probes")
+    homes = [os.path.realpath(shared)]
+    if not os.path.isdir(shared):
+        homes.append(os.path.realpath(os.path.join(root, skill, "references", "probes")))
     return any(real.startswith(h + os.sep) for h in homes)
+
+
+def probe_note(skill, ref, real):
+    """Why a mention under references/probes/ is counted, actionably."""
+    base = "note: %s %s is not an executable .sh under _shared/probes: counted as read context" % (skill, ref)
+    if os.path.isfile(real) and real.endswith(".sh") and not os.access(real, os.X_OK):
+        base += " (it is not executable: `chmod +x` it if the skill runs it)"
+    return base
 
 
 def eager_paragraph(text):
@@ -159,7 +174,7 @@ def measure(root, skills=SKILLS):
                     reach_bytes += n
                     if ref.startswith(PROBES) and ref not in noted:
                         noted.add(ref)
-                        notes.append("note: %s %s is not an executable .sh under _shared/probes: counted as read context" % (s, ref))
+                        notes.append(probe_note(s, ref, real))
         for ref in unresolved:
             hint = ""
             if ref.endswith("/") or any(c in ref for c in GLOB):

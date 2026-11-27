@@ -12,8 +12,10 @@
 # and carry three extra keys: `skill`, `set` (eager | reachable; default eager)
 # and `ceiling_bytes`. The skill's EAGER set may exceed the 64000-byte ceiling,
 # or its REACHABLE set the 128000-byte ceiling, up to ceiling_bytes until
-# `expires`; one entry per (skill, set). Bytes are the GATED bytes: files under
-# references/probes/ are scripts the skill runs, listed but not counted.
+# `expires`; one entry per (skill, set). Bytes are the GATED bytes: a PROBE (an
+# executable *.sh whose real path is in _shared/probes/, or, in an installed copy
+# with no _shared/probes, really in the skill's own references/probes/) is listed
+# but not counted; any other file under references/probes/ is counted.
 # ceiling_bytes is the measured size + 5 % rounded up to the next 1000, so the
 # ratchet (+5 %) and ceiling_bytes bound a waived skill, whichever is lower. check-registries.sh ignores the
 # extra keys; the entry must be removed once the set is under its ceiling
