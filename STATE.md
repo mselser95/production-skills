@@ -113,6 +113,41 @@ Decisions taken for round 2:
 - Grader extracts citations anywhere and classifies DEFECT vs NON-DEFECT; fixtures ship the
   context artifacts to both arms.
 
+### Eval harness — Opus rounds 2 and 3, and the redesign (2026-11-27)
+
+Round 2 (CHANGES REQUIRED): round-1 blockers closed; new ones — lazy/shotgun reviews earned
+credit, a faithful skill review failed clean-01, Claude "read-only" could run arbitrary programs,
+2 held-out tasks could not support a verdict. Fixed: seatbelt write confinement, corpus grown to
+12 tasks (6 dev / 6 held-out), two-level bootstrap, Linux-portable hermetic gate wired in CI.
+Paid probes (haiku, < USD 0.01 each) then exposed three more grader rules that real output broke.
+
+Round 3 (CHANGES REQUIRED), fresh validator:
+- The prose grader agreed with hand labels on only 20 of 37 realistic reviews (54 %), in patterned
+  ways (lowercase labels after a citation, neutral sub-headings, findings under "Summary", the
+  skill's own WARNING = "smell" convention).
+- The answer key was reachable inside the sandbox (repo `.git` object store, other copies, the
+  profile file in the agent's home); the secret deny-list missed `~/.claude-*`, the docker socket
+  and more; Codex's own sandbox does not restrict reads.
+- Two authors' context artifacts were inconsistent, failing a faithful skill review on clean-01.
+- Good: all 12 tasks hold (4 new defects reproduced, no defect found in any clean task), report
+  statistics match an independent recomputation exactly, 27 of 29 mutations RED.
+
+DECISION — stop patching, change the design:
+1. **Structured output instead of parsing prose.** The agent must return findings as JSON under a
+   schema (`claude --json-schema`, `codex --output-schema`): file, line range, class
+   (defect / missing_test / not_validated / note). The grader compares data only; `severity` is
+   ignored because WARNING means different things to different reviewers. All heading/label
+   heuristics are deleted.
+2. **Allowlist sandbox, identical for both hosts.** Deny reads of all of `/Users`, `/tmp`,
+   `/var/folders`, docker and agent sockets; re-allow only the cell's dirs and the tool install
+   roots. Codex runs inside the same `sandbox-exec` profile with its own sandbox disabled.
+3. **Two verdicts, never pooled:** recall on seeded tasks and false-positive rate on clean tasks.
+4. Context artifacts normalised by one rule across all 12 tasks; seeded-vs-clean tells removed.
+Lesson recorded: three times a REAL model output broke a rule the synthetic tests called fine.
+The pilot therefore includes a calibration step — hand-label real outputs from both arms and both
+hosts and report grader agreement — before any number is used to decide a merge.
+Status: two fresh Sonnet implementers dispatched (corpus/grader; harness/sandbox). Round 4 next.
+
 ### Findings to act on (not yet scheduled)
 
 - `make check-fast` takes ~100 s here (RUNBOOK claims 10 s); the pre-commit hook runs it on every
@@ -218,7 +253,11 @@ it as is. Do not schedule any OpenRouter work unless asked again.
 - Unknown from the Codex binary, to resolve from official docs in Phase 4: agent-role TOML schema,
   `skills.config` keys, hook stdin JSON contract.
 - Not yet verified: whether `skill-optimizer run` works with the current Codex auth.
-- Nothing is blocked on human input right now.
+- Pending user decision (asked 2026-11-27): the user said "push all this to main". Not done: this
+  session may not push to master or merge, and no code branch has an Opus OK yet. Options offered:
+  PRs to master per branch as each is approved (default, in progress); a PR of `goal/state`; or
+  draft PRs of unvalidated code. Also found today: `probe-wiring.sh` has a load-dependent false
+  FAIL (`grep -q` under pipefail) — fix in progress on branch `fix/grepq-under-pipefail`.
 
 ### Queue (next iterations)
 
