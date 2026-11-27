@@ -1,21 +1,35 @@
 #!/usr/bin/env bash
 # db-pin-check.sh — static gate for the database image pair.
 #
-#   db-pin-check.sh [lockfile] [--compose <file>...]
+#   db-pin-check.sh [lockfile] [--compose <file>...] [--non-db-build <service>...]
 #
 # Reads db/image.lock (default: ../db/image.lock next to this script) and,
-# optionally, compose files / Dockerfiles. No network, no Docker. The only
-# external process is one `date` call (and none when DB_PIN_TODAY is set), so
-# the cost is constant and well under a second.
+# optionally, compose files / Dockerfiles. No network, no Docker. The lock is
+# read in pure bash; each compose file is PARSED (not grepped) by one
+# `python3 -B db_pin_compose.py` call (PyYAML; rules are in that file's
+# docstring); a Dockerfile (basename Dockerfile*, *.Dockerfile) is read by its
+# FROM lines. One `date` call (none when DB_PIN_TODAY is set). Constant cost,
+# well under a second. The runtime facts the lock records are checked against
+# the real images by scripts/db-pin-verify-live.sh, which needs Docker and is
+# NOT part of this gate.
 #
 # FAILS (exit 1) when:
 #   LOCK-PARSE   the lock has a line that is not `key = value`, an unknown or
 #                duplicate key, or a required key is missing
 #   LATEST       any image reference (lock or compose) uses `latest`, has no tag
-#   DIGEST       a digest is not `sha256:` + 64 lowercase hex, or a compose
-#                reference has a tag without a digest, or a database image in
-#                compose differs from the lock's tag/digest
+#   DIGEST       a digest is not `sha256:` + 64 lowercase hex (an inline
+#                `#...` after it included), two of the six lock digests are
+#                equal, or a reference has a tag without a digest
+#   PIN          (compose / Dockerfile) a database image differs from the
+#                lock's tag AND INDEX digest (a per-platform digest is refused),
+#                the file runs no lock image at all (zero is a FAIL, not a
+#                WARN), or it has build:/extends:/include:/a `$` variable the
+#                parser cannot resolve offline (see db_pin_compose.py)
 #   MAJOR        the PostgreSQL major is not 18 (server_version, tag, -pgNN)
+#   FORMAT       server_version / extversion are not strict numeric versions,
+#                postgres.tag does not start with the server_version, the
+#                Timescale tag is not `<extversion>-pg<major>`, or a
+#                data_directory is not the official image's layout
 #   PAIR         the Timescale entry's recorded PostgreSQL minor differs from
 #                the plain PostgreSQL entry's minor, unless the lock carries
 #                `pair_exception_until = YYYY-MM-DD` and a non-empty
@@ -29,7 +43,8 @@
 # with DB_PIN_WARN_DAYS / DB_PIN_FAIL_DAYS. "Today" is DB_PIN_TODAY (YYYY-MM-DD)
 # when set, else `date -u +%F`.
 #
-# Exit: 0 ok · 1 failed · 2 nothing checked (lock missing or empty).
+# Exit: 0 ok · 1 failed · 2 nothing checked (lock missing or empty, `--compose`
+# without a file, PyYAML or python3 missing when a compose file is given).
 set -uo pipefail
 
 warn_days="${DB_PIN_WARN_DAYS:-180}"
@@ -37,15 +52,26 @@ fail_days="${DB_PIN_FAIL_DAYS:-365}"
 
 lock=""
 compose=()
+nodb=()
 mode="lock"
+compose_flag=0
 while (($#)); do
   case "$1" in
-    --compose) mode="compose" ;;
+    --compose) mode="compose"; compose_flag=1 ;;
+    --non-db-build)
+      if (($# < 2)); then echo "FAIL USAGE: --non-db-build needs a service name" >&2; exit 2; fi
+      nodb+=("$2"); shift ;;
     -*) echo "FAIL USAGE: unknown option $1" >&2; exit 1 ;;
     *) if [[ $mode == compose ]]; then compose+=("$1"); elif [[ -z $lock ]]; then lock="$1"; else compose+=("$1"); fi ;;
   esac
   shift
 done
+if ((compose_flag == 1 && ${#compose[@]} == 0)); then
+  echo "FAIL USAGE: --compose needs at least one file — nothing checked" >&2
+  exit 2
+fi
+self_src="${BASH_SOURCE[0]}"; [[ $self_src == */* ]] || self_src="./$self_src"
+self_dir="${self_src%/*}"
 if [[ -z $lock ]]; then
   here="${BASH_SOURCE[0]%/*}"; [[ $here == "${BASH_SOURCE[0]}" ]] && here="."
   lock="$here/../db/image.lock"
@@ -117,7 +143,10 @@ check_tag() { # label tag
   if [[ -z $2 ]]; then fail LATEST "$1: no tag"
   elif [[ $2 == latest || $2 == *latest* ]]; then fail LATEST "$1: tag '$2' is a floating tag"; fi
 }
-check_digest() { digest_ok "$2" || fail DIGEST "$1: malformed digest '$2'"; }
+check_digest() {
+  if [[ $2 == *'#'* ]]; then fail DIGEST "$1: '$2' has trailing text after the digest (an inline comment is part of the value; Docker would refuse it)"
+  else digest_ok "$2" || fail DIGEST "$1: malformed digest '$2'"; fi
+}
 pg_major() { [[ $1 =~ ^([0-9]+)\. ]] && echo "${BASH_REMATCH[1]}"; }
 
 # ---- lock checks -----------------------------------------------------------
@@ -127,12 +156,43 @@ for p in postgres timescaledb; do
 done
 
 pg_sv="$(g postgres.server_version)"; ts_sv="$(g timescaledb.pg_server_version)"
+ts_ev="$(g timescaledb.extversion)"
 for pair in "postgres.server_version:$pg_sv" "timescaledb.pg_server_version:$ts_sv"; do
   maj="$(pg_major "${pair#*:}")"
   [[ $maj == 18 ]] || fail MAJOR "${pair%%:*} '${pair#*:}' is not PostgreSQL 18"
+  [[ ${pair#*:} =~ ^[0-9]+\.[0-9]+$ ]] || fail FORMAT "${pair%%:*} '${pair#*:}' is not <major>.<minor> (digits only)"
 done
-[[ $(g postgres.tag) =~ ^18\. ]] || fail MAJOR "postgres.tag '$(g postgres.tag)' is not an 18.x tag"
-[[ $(g timescaledb.tag) == *-pg18 || $(g timescaledb.tag) == *-pg18-* ]] || fail MAJOR "timescaledb.tag '$(g timescaledb.tag)' is not a -pg18 tag"
+[[ $ts_ev =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail FORMAT "timescaledb.extversion '$ts_ev' is not <a>.<b>.<c> (digits only)"
+# The plain image's tag is `<server_version>-alpine`: it must START with the
+# recorded server_version, delimited, so 18.6-alpine beside 18.7 and 18.x fail.
+# (With the major pinned to 18 above this also makes the tag an 18.x tag.)
+pg_tag="$(g postgres.tag)"
+[[ $pg_tag == "$pg_sv" || $pg_tag == "$pg_sv"-* ]] || fail FORMAT "postgres.tag '$pg_tag' does not start with postgres.server_version '$pg_sv'"
+# The Timescale tag is `<extversion>-pg<major>` exactly (2.32.1-pg18), not a
+# floating `2-pg18`, not a `-pg18-oss` variant the lock did not observe.
+ts_maj="$(pg_major "$ts_sv")"
+[[ $(g timescaledb.tag) == "$ts_ev-pg$ts_maj" ]] || fail FORMAT "timescaledb.tag '$(g timescaledb.tag)' is not '$ts_ev-pg$ts_maj' (<extversion>-pg<major>)"
+# data_directory: the official postgres image moved PGDATA to
+# /var/lib/postgresql/<major>/docker from major 18 on (docker-library/postgres
+# change for 18, so a volume can be mounted one level up and pg_upgrade --link
+# works). The timescale image is built FROM the same layout.
+for pair in "postgres:$pg_sv" "timescaledb:$ts_sv"; do
+  maj="$(pg_major "${pair#*:}")"
+  if [[ -n $maj ]] && ((maj >= 18)); then
+    [[ $(g "${pair%%:*}.data_directory") == "/var/lib/postgresql/$maj/docker" ]] || fail FORMAT "${pair%%:*}.data_directory '$(g "${pair%%:*}.data_directory")' is not /var/lib/postgresql/$maj/docker"
+  fi
+done
+# The six digests are six different objects: an index digest equal to a
+# platform digest, or the Timescale digest pasted into postgres.digest, is a
+# copy-paste, not a pin.
+dnames=(postgres.digest postgres.digest.linux/amd64 postgres.digest.linux/arm64 timescaledb.digest timescaledb.digest.linux/amd64 timescaledb.digest.linux/arm64)
+dvals=()
+for dn in "${dnames[@]}"; do dvn="v_${dn//[.\/]/_}"; dvals+=("${!dvn-}"); done
+for ((di = 0; di < ${#dnames[@]}; di++)); do
+  for ((dj = di + 1; dj < ${#dnames[@]}; dj++)); do
+    if [[ -n ${dvals[di]} && ${dvals[di]} == "${dvals[dj]}" ]]; then fail DIGEST "${dnames[di]} and ${dnames[dj]} are the same digest"; fi
+  done
+done
 
 if [[ $pg_sv != "$ts_sv" ]]; then
   ex_until="$(g pair_exception_until)"; ex_reason="$(g pair_exception_reason)"
@@ -159,10 +219,13 @@ else
 fi
 
 # ---- compose / Dockerfile references ---------------------------------------
+# A compose file is parsed by db_pin_compose.py. A Dockerfile is read here by
+# its FROM lines (stage names are remembered so `FROM db` is not an image).
 norm_repo() { local r="$1"; r="${r#index.docker.io/}"; r="${r#docker.io/}"; r="${r#library/}"; echo "$r"; }
+db_refs=0
 check_ref() { # file ref
   local f="$1" ref="$2" name tag="" dg="" repo
-  if [[ $ref == *'$'* ]]; then fail LATEST "$f: '$ref' is a variable — cannot be proven pinned"; return; fi
+  if [[ $ref == *'$'* ]]; then fail PIN "$f: '$ref' is a variable — cannot be proven pinned"; return; fi
   name="$ref"
   if [[ $ref == *@* ]]; then name="${ref%%@*}"; dg="${ref#*@}"; fi
   repo="$name"
@@ -173,38 +236,66 @@ check_ref() { # file ref
   elif ! digest_ok "$dg"; then fail DIGEST "$f: '$ref' has a malformed digest"; fi
   local p=""
   case "$(norm_repo "$repo")" in postgres) p=postgres ;; timescale/timescaledb) p=timescaledb ;; esac
-  if [[ -n $p && -n $dg ]]; then
-    [[ $tag == "$(g $p.tag)" ]] || fail DIGEST "$f: '$ref' tag differs from lock ($(g $p.tag))"
-    if [[ $dg != "$(g $p.digest)" && $dg != "$(g $p.digest.linux/amd64)" && $dg != "$(g $p.digest.linux/arm64)" ]]; then
-      fail DIGEST "$f: '$ref' digest is not the lock's $p digest"
+  if [[ -n $p ]]; then
+    db_refs=$((db_refs + 1))
+    if [[ -n $dg ]]; then
+      [[ $tag == "$(g $p.tag)" ]] || fail PIN "$f: '$ref' tag differs from lock ($(g $p.tag))"
+      if [[ $dg == "$(g $p.digest.linux/amd64)" || $dg == "$(g $p.digest.linux/arm64)" ]]; then
+        fail PIN "$f: '$ref' uses a per-platform digest; pin the INDEX digest of the lock"
+      elif [[ $dg != "$(g $p.digest)" ]]; then
+        fail PIN "$f: '$ref' digest is not the lock's $p digest"
+      fi
     fi
   fi
 }
+is_dockerfile() { local b="${1##*/}"; [[ $b == [Dd]ockerfile* || $b == *.[Dd]ockerfile ]]; }
+
+pin_args=(--pin "postgres=$(g postgres.tag)@$(g postgres.digest)" --pin "timescale/timescaledb=$(g timescaledb.tag)@$(g timescaledb.digest)")
+for pd in postgres.digest.linux/amd64 postgres.digest.linux/arm64 timescaledb.digest.linux/amd64 timescaledb.digest.linux/arm64; do
+  pin_args+=(--platform-digest "$(g $pd)")
+done
+for nb in ${nodb[@]+"${nodb[@]}"}; do pin_args+=(--non-db-build "$nb"); done
+
 checked_refs=0
 for f in ${compose[@]+"${compose[@]}"}; do
   if [[ ! -r $f ]]; then fail USAGE "cannot read $f"; continue; fi
-  stages=" scratch "
-  n_before=$checked_refs
-  while IFS= read -r line || [[ -n $line ]]; do
-    line="${line%%#*}"
-    if [[ $line =~ ^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*(.+)$ ]]; then
-      r="${BASH_REMATCH[2]}"; r="${r%"${r##*[![:space:]]}"}"; r="${r#[\"\']}"; r="${r%[\"\']}"
-      check_ref "$f" "$r"; checked_refs=$((checked_refs + 1))
-    elif [[ $line =~ ^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(.+)$ ]]; then
-      set -f; read -r -a toks <<< "${BASH_REMATCH[1]}"; set +f
-      r=""; as=""; i=0
-      while ((i < ${#toks[@]})); do
-        t="${toks[$i]}"
-        if [[ $t == --* ]]; then :
-        elif [[ -z $r ]]; then r="$t"
-        elif [[ $t == [Aa][Ss] ]]; then as="${toks[$((i + 1))]-}"; break; fi
-        i=$((i + 1))
-      done
-      if [[ -n $r && $stages != *" $r "* ]]; then check_ref "$f" "$r"; checked_refs=$((checked_refs + 1)); fi
-      [[ -n $as ]] && stages="$stages$as "
+  if is_dockerfile "$f"; then
+    stages=" scratch "
+    db_before=$db_refs
+    while IFS= read -r line || [[ -n $line ]]; do
+      line="${line%%#*}"
+      if [[ $line =~ ^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(.+)$ ]]; then
+        set -f; read -r -a toks <<< "${BASH_REMATCH[1]}"; set +f
+        r=""; as=""; i=0
+        while ((i < ${#toks[@]})); do
+          t="${toks[$i]}"
+          if [[ $t == --* ]]; then :
+          elif [[ -z $r ]]; then r="$t"
+          elif [[ $t == [Aa][Ss] ]]; then as="${toks[$((i + 1))]-}"; break; fi
+          i=$((i + 1))
+        done
+        if [[ -n $r && $stages != *" $r "* ]]; then check_ref "$f" "$r"; checked_refs=$((checked_refs + 1)); fi
+        [[ -n $as ]] && stages="$stages$as "
+      fi
+    done < "$f"
+    ((db_refs == db_before)) && fail PIN "$f: no FROM runs a lock image — the database is not in this file"
+  else
+    command -v python3 >/dev/null 2>&1 || { echo "FAIL PARSER: python3 is not available — $f cannot be parsed, so it is not proven pinned"; exit 2; }
+    pout="$(python3 -B "$self_dir/db_pin_compose.py" "${pin_args[@]}" "$f" 2>&1)"; prc=$?
+    if ((prc == 2)); then echo "$pout"; echo "FAIL PARSER: $f could not be checked (exit 2)"; exit 2; fi
+    refs_line=""; nfail=0
+    while IFS= read -r pl; do
+      if [[ $pl == "REFS "* ]]; then refs_line="${pl#REFS }"
+      elif [[ $pl == FAIL* ]]; then echo "$pl"; nfail=$((nfail + 1)); fi
+    done <<< "$pout"
+    if [[ -z $refs_line ]]; then
+      echo "$pout" | tail -n 5
+      echo "FAIL PARSER: the compose helper gave no verdict for $f"; exit 2
     fi
-  done < "$f"
-  ((checked_refs == n_before)) && warn COMPOSE "$f: no image reference found"
+    ((prc == 1 && nfail == 0)) && nfail=1 && echo "FAIL PIN: $f: helper failed without a finding"
+    fails=$((fails + nfail))
+    checked_refs=$((checked_refs + refs_line))
+  fi
 done
 
 if ((fails > 0)); then echo "FAIL $fails"; exit 1; fi

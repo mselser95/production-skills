@@ -2,11 +2,13 @@
 #
 # Line oriented: `key = value`, `#` comments, no YAML. Read by scripts/db-pin-check.sh.
 #
-# The two entries are tested TOGETHER. TimescaleDB 2.32.0 only supports
-# PostgreSQL <= 18.6 (per the research; not re-verified here), so a bump of one
-# half alone is an outage vector. Never use `latest`; never a tag without the
-# digest. Compose/Dockerfiles reference `repo:tag@sha256:<digest>` using the
-# multi-arch INDEX digest below.
+# The two entries are tested TOGETHER: a bump of one half alone is an outage
+# vector. (An earlier note said "TimescaleDB 2.32.0 only supports PostgreSQL
+# <= 18.6"; that came from research and its source was never cited, so it is
+# NOT relied on here. The pair rule below is what the gate enforces.)
+# Never use `latest`; never a tag without the digest. Compose/Dockerfiles
+# reference `repo:tag@sha256:<digest>` using the multi-arch INDEX digest below;
+# a per-platform digest is refused by the gate.
 #
 # Policy: PostgreSQL 18 by default; TimescaleDB only when there is time-series
 # data. NOT PostgreSQL 19 yet: re-evaluate once Timescale supports it AND a
@@ -14,20 +16,28 @@
 #
 # Staleness: verified_utc older than 180 days -> WARN (exit 0); 365 -> FAIL.
 #
-# HOW TO BUMP: pick new tags; run the reproduce commands below for each; confirm
-# the bundled PostgreSQL minor of the Timescale image equals the plain image's
-# minor; replace tags, digests, versions and verified_utc in ONE change.
+# HOW TO BUMP (the same four steps are in the README):
+#   1. Edit this file: new tags, index + per-platform digests, versions.
+#   2. Run the live verifier: bash scripts/db-pin-verify-live.sh [--pull]
+#      (needs Docker; starts each image and compares server_version,
+#      data_directory and the Timescale default_version with this file).
+#   3. Update verified_utc, run bash scripts/db-pin-check.sh (offline gate).
+#   4. Only then change the compose files / Dockerfiles to the same refs.
 # Escape hatch: pair_exception_until = YYYY-MM-DD plus pair_exception_reason
 # allow a minor mismatch until that date (inclusive), then the gate goes red.
 #
-# Reproduce (index and per-platform digests):
+# Reproduce the digests (index and per-platform):
 #   docker buildx imagetools inspect postgres:18.7-alpine
 #   docker buildx imagetools inspect timescale/timescaledb:2.32.1-pg18
-# Reproduce (observed versions; throwaway container, no ports/volumes):
-#   docker run -d --name pinchk-x --cpus 1 --memory 1g -e POSTGRES_PASSWORD=x <image>@<digest>
-#   docker exec pinchk-x psql -U postgres -Atc "select version(); show data_directory;"
-#   docker exec pinchk-x psql -U postgres -Atc "CREATE EXTENSION IF NOT EXISTS timescaledb; SELECT extversion FROM pg_extension WHERE extname='timescaledb';"
-# Observed on linux/arm64 (the image's own linux/arm64 variant) on the date below.
+#
+# WHAT WAS OBSERVED, AND WHERE. The runtime facts below (server_version,
+# data_directory, extversion) were observed on linux/arm64 ONLY; linux/amd64 was
+# not run. Re-verify on the platform you deploy with scripts/db-pin-verify-live.sh,
+# which prints the platform it ran.
+#
+# LIMITATION, not solved here: both images are Alpine (musl). Moving existing
+# data to a glibc-based image (Debian tags) changes collation behaviour and can
+# silently corrupt text indexes: that move needs a reindex, not just a tag change.
 
 verified_utc = 2026-11-27
 
