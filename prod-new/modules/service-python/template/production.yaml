@@ -1,0 +1,84 @@
+# production.yaml -- this unit's production contract (Python service).
+#
+# SEMANTIC FACTS ONLY: every threshold and obligation is derived from the org tier policy
+# (production-skills _shared/tier-policy.yaml). <OWNER>/<SERVICE> are slots prod-new
+# substitutes at scaffold time. Same schema as the Go service template, with one addition:
+# service.language (the language is a unit attribute; the Go template's default is go).
+#
+# Test ids below are pytest node ids relative to this directory. The per-language
+# named-test runner that cashes them is a later task (the design's T16); until it exists
+# they are claims read by people, not yet executed by the probe.
+
+version: v1
+
+service:
+  name: <SERVICE>
+  language: python
+  tier: 1
+  tier_note: >
+    Example tier for the scaffold's own units-ledger capability: T1 (data-correctness
+    invariants). A real service replaces this with its own ratified answer to prod-new's
+    Phase 1 question 2.
+  policy: production-skills (single source, main)
+
+# Ratified invariants resolve to verification/ratified/. None are ratified yet for this
+# scaffold: the property tests in tests/unit/test_ledger_properties.py assert the
+# candidates (conservation, idempotency) and carry `derived` provenance from the
+# capability clauses below until a human ratifies them.
+invariants: []
+
+capabilities:
+  - id: units_ledger
+    class: source_of_truth
+    durability: none (in-memory event log behind the EventStore port; process lifetime only)
+    package: src/<PACKAGE>/domain, src/<PACKAGE>/app
+    verified:
+      conservation: tests/unit/test_ledger_properties.py::test_any_sequence_conserves_and_never_goes_negative
+      idempotency: tests/unit/test_ledger_properties.py::test_reapplying_an_admitted_event_changes_nothing
+      no_overdraft: tests/unit/test_ledger.py::test_an_uncovered_withdrawal_raises_and_leaves_the_state_alone
+      amount_exactness: tests/unit/test_ledger_properties.py::test_format_then_parse_is_the_identity
+      recovery_rebuild_from_log: tests/unit/test_ledger_properties.py::test_replaying_the_admitted_log_rebuilds_the_state
+      journal_before_state: tests/unit/test_ledger_service.py::test_a_failing_journal_leaves_the_state_unchanged
+      write_authn: tests/unit/test_http_api.py::test_writes_without_the_exact_bearer_token_are_refused_and_do_nothing
+    semantics:
+      consistency: single-writer, immediately consistent (one lock in app.LedgerService
+        serialises the read-modify-write of the in-memory state)
+  - id: health_metrics_surface
+    class: external_read
+    package: src/<PACKAGE>/adapters/inbound
+    verified:
+      observability_contract_checked: tests/contract/test_observability_contract.py::test_a_real_scrape_matches_the_metrics_manifest_both_ways
+    semantics:
+      contract: observability/emitted-metrics.yaml (series) + observability/spans.yaml (spans)
+
+implemented:
+  zones_enforced: tests/architecture/test_boundaries.py::test_the_dependency_direction_holds
+  clean_shutdown: tests/unit/test_main.py::test_run_serves_until_stopped_then_releases_the_port
+
+driven:
+  composition_root: <PACKAGE>.__main__.build
+  config: <PACKAGE>.platform.config.load
+  metrics: <PACKAGE>.platform.observability.MetricsRecorder
+  shutdown: <PACKAGE>.__main__.run
+
+out_of_scope:
+  - deployment_resource_limits: >
+      This scaffold ships no image or deployment manifest yet. The decline lapses the moment
+      a Dockerfile or manifest is added.
+
+scalability:
+  # fsync_per_event | group_commit | no_durable_writes.
+  durability_trade: no_durable_writes
+
+auto_recovery:
+  # The in-memory log is lost on restart: recovery is "start again empty", bounded by boot.
+  recovery_bound: 30s
+
+data_lifecycle:
+  retention_policy: process-lifetime-only
+  deletion_mechanism: no_subject_data
+
+gates:
+  cheap: "make check-fast"
+  presubmit: "make verify"
+  advisory: "make test-advisory"
