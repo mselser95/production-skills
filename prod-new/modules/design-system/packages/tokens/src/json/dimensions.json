@@ -1,0 +1,117 @@
+{
+  "$description": "Dimensions and non-colour semantics. Theme independent.",
+  "fontSize": {
+    "$type": "dimension",
+    "2xs": { "$value": "0.6875rem" },
+    "xs": { "$value": "0.75rem" },
+    "sm": { "$value": "0.875rem" },
+    "md": { "$value": "1rem" },
+    "lg": { "$value": "1.125rem" },
+    "xl": { "$value": "1.25rem" },
+    "2xl": { "$value": "1.5rem" },
+    "3xl": { "$value": "1.875rem" },
+    "4xl": { "$value": "2.25rem" },
+    "5xl": { "$value": "3rem" }
+  },
+  "lineHeight": {
+    "$type": "number",
+    "none": { "$value": 1 },
+    "tight": { "$value": 1.2 },
+    "snug": { "$value": 1.35 },
+    "normal": { "$value": 1.5 },
+    "relaxed": { "$value": 1.65 }
+  },
+  "letterSpacing": {
+    "$type": "dimension",
+    "tight": { "$value": "-0.02em" },
+    "normal": { "$value": "0em" },
+    "wide": { "$value": "0.02em" },
+    "caps": { "$value": "0.08em" }
+  },
+  "space": {
+    "$type": "dimension",
+    "inset": {
+      "xs": { "$value": "{spacing.1}" },
+      "sm": { "$value": "{spacing.2}" },
+      "md": { "$value": "{spacing.4}" },
+      "lg": { "$value": "{spacing.6}" },
+      "xl": { "$value": "{spacing.8}" }
+    },
+    "stack": {
+      "xs": { "$value": "{spacing.1}" },
+      "sm": { "$value": "{spacing.3}" },
+      "md": { "$value": "{spacing.6}" },
+      "lg": { "$value": "{spacing.10}" },
+      "xl": { "$value": "{spacing.16}" }
+    },
+    "inline": {
+      "xs": { "$value": "{spacing.1}" },
+      "sm": { "$value": "{spacing.2}" },
+      "md": { "$value": "{spacing.4}" },
+      "lg": { "$value": "{spacing.6}" }
+    }
+  },
+  "radius": {
+    "$type": "dimension",
+    "none": { "$value": "0rem" },
+    "sm": { "$value": "0.25rem" },
+    "md": { "$value": "0.5rem" },
+    "lg": { "$value": "0.75rem" },
+    "xl": { "$value": "1rem" },
+    "full": { "$value": "9999px" }
+  },
+  "borderWidth": {
+    "$type": "dimension",
+    "thin": { "$value": "1px" },
+    "medium": { "$value": "2px" },
+    "thick": { "$value": "4px" }
+  },
+  "controlHeight": {
+    "$type": "dimension",
+    "sm": { "$value": "2rem" },
+    "md": { "$value": "2.5rem" },
+    "lg": { "$value": "3rem" },
+    "xl": { "$value": "3.5rem" }
+  },
+  "breakpoint": {
+    "$type": "dimension",
+    "compact": { "$value": "360px" },
+    "medium": { "$value": "768px" },
+    "expanded": { "$value": "1280px" }
+  },
+  "zIndex": {
+    "$type": "number",
+    "base": { "$value": 0 },
+    "raised": { "$value": 10 },
+    "sticky": { "$value": 100 },
+    "dropdown": { "$value": 200 },
+    "overlay": { "$value": 300 },
+    "modal": { "$value": 400 },
+    "toast": { "$value": 500 },
+    "tooltip": { "$value": 600 }
+  },
+  "motion": {
+    "duration": {
+      "$type": "duration",
+      "instant": { "$value": "0ms" },
+      "fast": { "$value": "120ms" },
+      "base": { "$value": "200ms" },
+      "slow": { "$value": "320ms" },
+      "slower": { "$value": "480ms" }
+    },
+    "easing": {
+      "$type": "cubicBezier",
+      "standard": { "$value": [0.2, 0, 0, 1] },
+      "enter": { "$value": [0, 0, 0, 1] },
+      "exit": { "$value": [0.3, 0, 1, 1] },
+      "linear": { "$value": [0, 0, 1, 1] }
+    }
+  },
+  "shadow": {
+    "$type": "shadow",
+    "sm": { "$value": { "color": "{palette.alpha.black.10}", "offsetX": "0px", "offsetY": "1px", "blur": "2px", "spread": "0px" } },
+    "md": { "$value": { "color": "{palette.alpha.black.10}", "offsetX": "0px", "offsetY": "4px", "blur": "8px", "spread": "-1px" } },
+    "lg": { "$value": { "color": "{palette.alpha.black.20}", "offsetX": "0px", "offsetY": "12px", "blur": "24px", "spread": "-4px" } },
+    "xl": { "$value": { "color": "{palette.alpha.black.20}", "offsetX": "0px", "offsetY": "24px", "blur": "48px", "spread": "-8px" } }
+  }
+}
