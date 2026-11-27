@@ -1,0 +1,19 @@
+# Checked-in manifest of every tracing span this service emits.
+#
+# Contract: tests/contract/test_observability_contract.py compares this file with the
+# span(...) call sites in src/, in both directions, and checks that `emitted_by` names a
+# file that really contains the span name. Same schema as the reference service template.
+#
+# No exporter is wired yet: call sites and this manifest are contract-checked, export is a
+# later step.
+
+- name: svc.deposit
+  emitted_by: src/<PACKAGE>/app/ledger_service.py (LedgerService.deposit)
+  attrs: [event_type]
+  note: >
+    Wraps the full deposit command: parse, decide, journal, advance the state.
+
+- name: svc.withdraw
+  emitted_by: src/<PACKAGE>/app/ledger_service.py (LedgerService.withdraw)
+  attrs: [event_type]
+  note: Same pipeline as svc.deposit, for the withdrawal command.
