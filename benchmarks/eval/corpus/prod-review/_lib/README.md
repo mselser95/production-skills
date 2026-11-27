@@ -52,10 +52,12 @@ A finding is SPECIFIC when `line_end - line_start + 1 <= 12`.
 - Each `task.json` carries `"kind": "seeded" | "clean"`; the report gives a verdict per kind.
 
 ## Modification rule (`expected.diffhash`)
-`tree_hash` covers: every TRACKED file (content, including context files and any non-Go file; a
-deleted tracked file counts), the porcelain status of tracked paths, and UNTRACKED files ending
-`.go .mod .sum .yaml .yml`. It ignores untracked host droppings: `.claude/`, `.codex/`, `.agents/`,
-`CLAUDE.md`, `AGENTS.md`, and any untracked file with another extension. Regenerate after touching a
+`tree_hash` covers: every TRACKED file (content, including context files and any file type; a
+deleted tracked file counts), the porcelain status of tracked paths, and EVERY untracked file in any
+language or with no extension. Not counted: paths the fixture's own `.gitignore` ignores (git omits
+them from the status: Rust `target/`, Python `__pycache__/`) and untracked host droppings:
+`.claude/`, `.codex/`, `.agents/`, `CLAUDE.md`, `AGENTS.md`. A fixture whose normal build or test run
+writes files into the work tree must therefore ignore them in a tracked `.gitignore`. Regenerate after touching a
 fixture or setup patch: `_lib/regen_expected.sh <task-dir>` (copies `fixture/` to a scratch repo,
 commits, runs `fixture.setup.sh`, hashes).
 

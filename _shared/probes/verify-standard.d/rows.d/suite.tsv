@@ -1,0 +1,6 @@
+id	dimension	group	bucket	scope	property	source
+build	1	suite	tool-run	unit	The unit compiles, and every package of it builds, with the toolchain's own build command.	1007
+race	1	suite	tool-run	unit	The test suite passes with the toolchain's data-race detector enabled.	1173
+tests	1	suite	tool-run	unit	The unit's whole test suite passes in one run, with no failing or skipped-as-failure test.	1187
+coverage	1	suite	tool-run	unit	Measured line coverage of the unit meets the floor the repository declares.	1224
+coverage-ratchet	1	suite	tool-run	unit	No package's measured coverage has dropped below its recorded per-package floor.	1278

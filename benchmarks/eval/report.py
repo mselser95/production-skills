@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """report.py <results.jsonl> [--markdown]
 
-Group key = (skill, host, model, sandbox, split, kind, arm). Models, splits, sandbox
-modes (seatbelt|codex|off|n/a) and task KINDS (task.json "kind": seeded, clean, ...)
+Group key = (skill, host, model, sandbox, split, language, kind, arm). Models, splits, sandbox
+modes (seatbelt|codex|off|n/a), task LANGUAGES (task.json "language": go, rust, python) and task KINDS (task.json "kind": seeded, clean, ...)
 are never pooled: every block below is printed per kind and there is NO verdict
 across kinds (a skill that finds more real defects but raises more false positives
-must not net to zero). A row without "kind" is an error (file:line), never a default.
+must not net to zero). Nothing is pooled across languages either: every block and both named
+verdicts are per language. A row without "kind" or without "language" is an error (file:line),
+never a default.
 
 Per group: n rows, success rate with a Wilson 95% interval (labelled REP-LEVEL,
 OPTIMISTIC: reps of one task are not independent), pass^k (share of tasks whose
@@ -15,7 +17,7 @@ tokens and seconds SPENT (all rows, failed attempts included) per RESOLVED task
 counted ("N no usage"), never treated as 0, and the MEAN PER ROW of metrics.false_positives
 and metrics.found (descriptive; rows that do not carry the metric are left out, n/a if none).
 
-Per (skill, host, model, sandbox, split, kind) the VERDICT comes from a task-clustered paired
+Per (skill, host, model, sandbox, split, language, kind) the VERDICT comes from a task-clustered paired
 estimate: per task d_t = mean(pass | skill) - mean(pass | bare) over tasks that
 have rows in BOTH arms; effect = mean(d_t); 95% interval = percentile bootstrap,
 TWO-LEVEL: resample tasks with replacement, then inside each resampled task
@@ -26,13 +28,13 @@ the estimate is printed but the verdict is "insufficient tasks (n=k)".
 helps = interval entirely > 0, hurts = entirely < 0, else no evidence.
 
 For the kinds named exactly `seeded` and `clean` two further lines are printed per
-(skill, host, model, sandbox, split): `recall (seeded)` (the paired estimate on seeded
+(skill, host, model, sandbox, split, language): `recall (seeded)` (the paired estimate on seeded
 tasks) and `false-positive control (clean)` (the same estimate on clean tasks; a clean
 task passes when no false defect is raised, so a positive number still means the skill
 helps). Each carries its own interval and verdict, and `insufficient tasks (n=k)` when
-fewer than 5 paired tasks OF THAT KIND exist.
+fewer than 5 paired tasks OF THAT KIND AND LANGUAGE exist.
 
-A line that is not a JSON object, or a row without "kind", is an error (file:line, exit 1):
+A line that is not a JSON object, or a row without "kind" or "language", is an error (file:line, exit 1):
 never dropped.
 Exit: 0 ok | 1 unparseable line | 2 no rows.
 """
@@ -75,6 +77,11 @@ def load(path):
                 continue
             if not isinstance(r.get("kind"), str) or not r["kind"].strip():
                 print("%s:%d: row has no \"kind\" (a results file from before per-kind reporting? re-run the cells)" % (path, i),
+                      file=sys.stderr)
+                bad += 1
+                continue
+            if not isinstance(r.get("language"), str) or not r["language"].strip():
+                print("%s:%d: row has no \"language\" (a results file from before per-language reporting? re-run the cells)" % (path, i),
                       file=sys.stderr)
                 bad += 1
                 continue
@@ -152,9 +159,9 @@ def verdict(lo, hi, m):
     return "no evidence"
 
 
-def diff_for(cells, key6, warns, notes, label):
-    """paired skill-vs-bare estimate for one (skill, host, model, sandbox, split, kind) -> (cols, verdict)"""
-    a, b = cells.get(key6 + ("skill",)), cells.get(key6 + ("bare",))
+def diff_for(cells, key7, warns, notes, label):
+    """paired skill-vs-bare estimate for one (skill, host, model, sandbox, split, language, kind) -> (cols, verdict)"""
+    a, b = cells.get(key7 + ("skill",)), cells.get(key7 + ("bare",))
     if not a or not b:
         return ["n/a", "n/a", "0"], "insufficient tasks (n=0): one arm missing"
     if a["reps"] != b["reps"]:
@@ -186,9 +193,9 @@ def main(argv):
         return 2
     groups = defaultdict(list)
     for r in rows:
-        groups[(r.get("skill"), r.get("host"), r.get("model") or "-", r.get("sandbox") or "n/a", r.get("split"), r["kind"], r.get("arm"))].append(r)
+        groups[(r.get("skill"), r.get("host"), r.get("model") or "-", r.get("sandbox") or "n/a", r.get("split"), r["language"], r["kind"], r.get("arm"))].append(r)
 
-    head = ["skill", "host", "model", "sandbox", "split", "kind", "arm", "n", "success", "95% CI rep-level (optimistic)",
+    head = ["skill", "host", "model", "sandbox", "split", "language", "kind", "arm", "n", "success", "95% CI rep-level (optimistic)",
             "pass^k", "tok spent/resolved", "s spent/resolved", "false_pos/row", "found/row"]
     table, cells, warns = [], {}, []
     for key in sorted(groups, key=lambda k: tuple(str(x) for x in k)):
@@ -202,20 +209,20 @@ def main(argv):
                      (fmt(c["tok"]) + (" (%d no usage)" % c["nousage"] if c["nousage"] else "")), fmt(c["sec"], 1),
                      fmt(c["fp"], 2), fmt(c["found"], 2)])
 
-    dhead = ["skill", "host", "model", "sandbox", "split", "kind", "skill-bare (paired, per-task)", "95% CI (task bootstrap)", "tasks", "verdict"]
+    dhead = ["skill", "host", "model", "sandbox", "split", "language", "kind", "skill-bare (paired, per-task)", "95% CI (task bootstrap)", "tasks", "verdict"]
     diffs, notes = [], []
-    seen = sorted({k[:6] for k in cells}, key=lambda k: tuple(str(x) for x in k))
-    for k6 in seen:
-        cols, v = diff_for(cells, k6, warns, notes, "/".join(map(str, k6)))
-        diffs.append([str(x) for x in k6] + cols + [v])
+    seen = sorted({k[:7] for k in cells}, key=lambda k: tuple(str(x) for x in k))
+    for k7 in seen:
+        cols, v = diff_for(cells, k7, warns, notes, "/".join(map(str, k7)))
+        diffs.append([str(x) for x in k7] + cols + [v])
 
     summary = []   # the two named lines; only for kinds named exactly seeded / clean
-    for k5 in sorted({k[:5] for k in cells}, key=lambda k: tuple(str(x) for x in k)):
+    for k6 in sorted({k[:6] for k in cells}, key=lambda k: tuple(str(x) for x in k)):
         for kind, name in SUMMARY:
-            if k5 + (kind,) + ("skill",) not in cells and k5 + (kind,) + ("bare",) not in cells:
+            if k6 + (kind,) + ("skill",) not in cells and k6 + (kind,) + ("bare",) not in cells:
                 continue
-            cols, v = diff_for(cells, k5 + (kind,), [], [], "")
-            summary.append("%s: %s  %s  %s  tasks=%s  %s" % (name, "/".join(map(str, k5)), cols[0], cols[1], cols[2], v))
+            cols, v = diff_for(cells, k6 + (kind,), [], [], "")
+            summary.append("%s: %s  %s  %s  tasks=%s  %s" % (name, "/".join(map(str, k6)), cols[0], cols[1], cols[2], v))
 
     def emit(h, t):
         if md:

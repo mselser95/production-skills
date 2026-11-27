@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Deliver published events to the handlers subscribed to their topic, synchronously or in one background goroutine.
+tier: 2
+services: [events]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [go build ./..., go vet ./..., go test ./...]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new module dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml

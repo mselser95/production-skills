@@ -1,0 +1,57 @@
+id	dimension	group	bucket	scope	property	source
+advisory-lane	10	static	neutral	repo	The advisory test lane target exists and its recipe actually runs commands.	147
+cheap-gate	10	static	neutral	repo	The fast gate target exists and its recipe actually runs commands.	147
+ops:CODEOWNERS	10	static	neutral	unit	The ownership file is present and assigns at least one owner.	148
+ops:RUNBOOK.md	10	static	neutral	unit	The runbook file is present and non-empty.	148
+ops:SLO.md	10	static	neutral	unit	The SLO document is present and non-empty.	148
+ops:alerts.md	10	static	neutral	unit	The alerts document is present and non-empty.	148
+loc-ratio (informational)	1	static	tool-run	unit	The ratio of test code to production code is reported (informational, never blocking).	1315
+lint	1	static	tool-run	unit	Static analysis reports no finding at the configured level.	1329
+fitness-functions	1	static	test-exec	unit	The repository's architectural fitness tests run and pass.	1368
+domain-boundaries:role_matches_topology	24	static	source-grep	unit	Each source module's declared domain role agrees with the topology file and no module imports across a forbidden domain edge.	1422
+probe-self:no-pipe-into-grep-q	-	static	source-grep	repo	The verification probe itself contains no construct that can report a false match (producer piped into a quiet matcher, global field-separator change).	1516
+property-tests	3	static	test-exec	unit	Property-based tests exist and are executed in this run.	1865
+mutation-baseline (TREND)	2	static	neutral	unit	A mutation-testing baseline artifact exists for the unit (trend row).	1956
+scenario-matrix	4	static	neutral	repo	The failure-mode scenario matrix is present and each scenario names the test or check that covers it.	2000
+scalability:partition_key	12	static	neutral	unit	The spec declares the partition key for horizontal scale, or ratifies a single-writer decline.	2879
+scalability:durability_trade	12	static	neutral	unit	The spec declares its durability trade-off from the closed vocabulary.	2894
+auto-recovery:recovery_bound	13	static	neutral	unit	The spec states a bound on recovery time, or ratifies a manual-intervention decline.	2920
+published-contract:policy	14	static	neutral	unit	The spec states the compatibility policy for the published contract, or ratifies that nothing is published.	2970
+data-lifecycle:retention	15	static	neutral	unit	The spec declares a retention policy for stored data, or ratifies a decline.	2999
+data-lifecycle:deletion_mechanism	15	static	neutral	unit	The spec names the mechanism that deletes personal data, from a closed vocabulary.	3015
+observability:logs_correlate	8	static	source-grep	unit	Log records carry the trace correlation identifiers.	3280
+observability:log_handler_installed	8	static	source-grep	unit	The structured log handler is installed by the production entry point.	3309
+tracing-wired-in-prod	8	static	source-grep	unit	A tracer is initialised and driven on the production start path, not only defined.	3554
+observability:trace_propagation	8	static	source-grep	unit	Inbound and outbound calls propagate the caller trace context.	3625
+mechanisms-driven	16	static	source-grep	unit	Every implemented mechanism is invoked by something on the production path, not merely present.	3718
+vuln-scan	9	static	tool-run	unit	The dependency vulnerability scanner runs and reports no reachable known vulnerability.	3929
+dependency-lockfile	23	static	tool-run	unit	Dependencies are pinned in a committed lockfile that CI enforces and does not regenerate.	4043
+chaos-experiments-declared	20	static	neutral	unit	Chaos experiments are declared with a hypothesis and an abort condition.	4105
+delivery-progressive	17	static	neutral	unit	Delivery is progressive and has a rehearsed rollback.	4154
+sast-blocking	18	static	tool-run	unit	A semantic dataflow security scan runs and its findings block the merge.	4201
+write-surface-authn	9	static	source-grep	unit	Every state-changing entry point is behind an authentication check.	4232
+workflow-definitions-valid	10	static	neutral	repo	Every CI workflow definition parses and references only things that exist.	4273
+secret-scan-all-triggers	9	static	neutral	repo	The secret scan runs on every trigger that can introduce a commit.	4292
+sbom	9	static	neutral	repo	A software bill of materials is produced for the shipped artifact.	4532
+artifact-provenance	9	static	neutral	repo	The shipped artifact carries signed build provenance.	4621
+nightly-trends	10	static	neutral	repo	A scheduled run exists and records trend data over time.	4657
+slo-objectives-ratified	22	static	neutral	unit	Service-level objectives are defined and ratified by a human.	4837
+deployment-resource-limits	10	static	neutral	unit	Every deployed workload declares CPU and memory limits.	4890
+runbook-citations-resolve	10	static	neutral	unit	Every metric series the runbook cites exists among the declared series, and at least one is cited.	5122
+registries	10	static	neutral	repo	The liability registries are present.	5130
+registries-expiry-gated	10	static	neutral	repo	The registry checker runs and an expired entry fails the build.	5135
+contract-artifacts	-	static	neutral	repo	The context and change-plan artifacts for the work exist and are populated.	5194
+ratification-packages	-	static	neutral	repo	Every ratified invariant has a ratification package backing it.	5211
+ratification-citations	-	static	neutral	repo	Every citation in a ratification package resolves to something that exists.	5217
+candidate-lane-segregated	3	static	test-exec	repo	Tests marked as unratified candidates are kept out of the blocking lane.	5320
+provenance-headers	-	static	source-grep	unit	Every test function this change adds carries a provenance header.	5415
+ci-runs-fuzz	10	static	neutral	repo	CI workflows run every fuzz target the standard requires.	5537
+ci-runs-integration-lane	10	static	neutral	repo	CI workflows run the real-dependency integration lane.	5582
+changed-line-coverage	1	static	tool-run	unit	The lines this change adds or edits are covered by tests at the declared threshold.	5608
+operational-determinism	11	static	source-grep	unit	The shipped artifact can carry a non-empty build revision and builds reproducibly.	5662
+load-baseline	25	static	source-grep	unit	A load or soak harness exists and records the arrival rate at which the system stops keeping up.	5839
+error-handling-fitness	7	static	source-grep	unit	Error handlers do not swallow, ignore or only log a critical failure.	5977
+simulation-advisory	27	static	source-grep	unit	A deterministic simulation lane is present (advisory, cannot fail).	6094
+crash-only-state-identity	7	static	test-exec	unit	After a forced kill and restart the persisted state is identical to before the kill.	6126
+differential-observability	8	static	source-grep	unit	An alert exists whose client-side signal is a series the service itself does not emit.	6165
+row-derivation	-	static	neutral	repo	The probe could derive its own list of declared rows (the not-probed guard is armed).	6299

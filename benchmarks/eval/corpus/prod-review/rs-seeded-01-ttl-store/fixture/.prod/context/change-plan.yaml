@@ -1,0 +1,41 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+
+files:
+  - path: src/error.rs
+    action: modify
+    zone: shell
+
+  - path: src/store.rs
+    action: modify
+    zone: orchestration
+
+new_states: []
+new_effects: []
+new_dependencies: []
+
+recovery: []
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Add Store::put_bounded, which purges expired entries and refuses a new key when the store is full, plus a StoreError::Full variant.
+    files: [src/error.rs, src/store.rs]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one crate, no new dependencies
+    acceptance: []
+    depends_on: []

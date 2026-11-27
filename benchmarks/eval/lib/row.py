@@ -79,7 +79,7 @@ def main():
             valid = False
 
     row = {
-        "task": a.task_id, "skill": a.skill, "split": task.get("split"), "kind": task.get("kind"), "output_valid": valid,
+        "task": a.task_id, "skill": a.skill, "split": task.get("split"), "kind": task.get("kind"), "language": task.get("language"), "output_valid": valid,
         "arm": a.arm, "host": a.host, "model": a.model or None, "rep": a.rep,
         "pass": bool(ok), "metrics": metrics,
         "tokens_in": num("tokens_in"), "tokens_out": num("tokens_out"),
