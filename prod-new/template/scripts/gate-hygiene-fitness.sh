@@ -32,6 +32,9 @@
 #                           dies 141, pipefail propagates 141, and the caller
 #                           reads "not found" -- so the check inverts EXACTLY
 #                           when it succeeds. Capture first, match the variable.
+#                           FAILING since 2026-11-27 (it was advisory): see the
+#                           note above `grepq_pipe` for the incident. `a || grep
+#                           -q p` is not a pipe and is not flagged.
 #   BASH-N-AS-VALIDATION    `bash -n` presented as having validated a script.
 #                           It parses and executes nothing; a script that dies
 #                           on its first line passes it.
@@ -84,20 +87,26 @@ guarded='(\|\||&&|if |while |until |\$\(|`)'
 # argument for the rule it enforces two lines down.
 prefix_assign='^[[:space:]]*([A-Za-z_][A-Za-z_0-9]*)=[^[:space:];&|]+[[:space:]]+([^;&|]*)$'
 pkill_x='pkill[[:space:]]+(-[a-zA-Z0-9]+[[:space:]]+)*-[a-zA-Z]*x'
-grepq_pipe='\|[[:space:]]*grep[[:space:]]+(-[a-zA-Z]*[[:space:]]+)*-[a-zA-Z]*q'
+grepq_pipe='(^|[^|])\|[[:space:]]*grep[[:space:]]+(-[a-zA-Z]*[[:space:]]+)*-[a-zA-Z]*q'
 findings=0
-# ADVISORIES are reported and do NOT affect the exit code. Exactly one rule is
-# advisory, and the reason is a measurement rather than a preference:
-# GREPQ-UNDER-PIPEFAIL is LATENT, not broken. Whether the writer takes SIGPIPE
-# depends on whether it is still writing when grep exits, so a small `printf`
-# never trips it and a `docker ps` can. Measured on this template: 11 call
-# sites in its own selftests, every one of them working today. Failing the
-# cheap gate over those would be the fire-on-correct-code trap this file's
-# header refuses -- a gate that fires on correct code is widened until it is
-# gone. So they are counted, named, and printed on every run, including the
-# clean one, so the number cannot go quietly to zero attention.
-advisories=0
-advise() { printf '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4" >&2; advisories=$((advisories+1)); }
+# GREPQ-UNDER-PIPEFAIL WAS ADVISORY until 2026-11-27, and the reason it gave was
+# "latent, not broken": whether the writer takes SIGPIPE depends on whether it is
+# still writing when grep exits, so a small `printf` rarely trips it. That was
+# measured, and it was true, and it is exactly why it was dangerous: a race is
+# not a defect that stays latent, it is one that waits for load. On 2026-11-27 the
+# pre-commit hook's `make check-fast` FAILED TWICE in probe-wiring.sh with
+# "declared exception 'prod-new/template/scripts/kill-durability.sh' names a probe
+# that does not exist" -- the file existed; `printf '%s\n' "${PROBES[@]}" | grep
+# -qxF -- "$e"` lost the race on a loaded machine, took 141, and pipefail turned
+# the match into a miss. It passed 3/3 when idle, which is what "latent" looks
+# like from the outside. Reproduced with a list larger than the pipe buffer: 50 of
+# 50 iterations false-FAIL (probe-wiring-selftest.sh case 13).
+#
+# So it FAILS now. The call sites that had accumulated were fixed in the same
+# change (capture the output, match the variable), leaving zero, so promoting it
+# costs nothing today and a new one is refused when written. The regex also no
+# longer reads `||` as a pipe: `grep -q a <<<"$x" || grep -q b <<<"$x"` has no
+# writer to kill, and two advisories of the four were exactly that.
 report() { printf '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4"; findings=$((findings+1)); }
 
 for f in "${files[@]}"; do
@@ -189,7 +198,7 @@ for f in "${files[@]}"; do
     # positives it was written to remove.
     unquoted=$(printf '%s' "$line" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
     if (( uses_pipefail )) && [[ "$unquoted" =~ $grepq_pipe ]]; then
-      advise "$f" "$n" "GREPQ-UNDER-PIPEFAIL" "grep -q kills the writer with SIGPIPE (141); pipefail turns the MATCH into a false. Capture the output and match the variable"
+      report "$f" "$n" "GREPQ-UNDER-PIPEFAIL" "grep -q kills the writer with SIGPIPE (141); pipefail turns the MATCH into a false. Capture the output and match the variable"
     fi
 
     # COMMAND POSITION ONLY. The bare match caught the words wherever they
@@ -215,12 +224,9 @@ for f in "${files[@]}"; do
   done < "$f"
 done
 
-if (( advisories )); then
-  printf 'gate-hygiene-fitness: %d advisory (GREPQ-UNDER-PIPEFAIL) -- latent, not failing. See this file'"'"'s header for why.\n' "$advisories" >&2
-fi
 if (( findings )); then
   printf 'gate-hygiene-fitness: %d finding(s) across %d shell file(s).\n' "$findings" "${#files[@]}" >&2
   printf 'Each is a shape measured reporting SUCCESS while doing nothing (see _shared/preamble.md §4b).\n' >&2
   exit 1
 fi
-printf 'gate-hygiene-fitness: clean -- %d shell file(s), 0 failing findings, %d advisory.\n' "${#files[@]}" "$advisories"
+printf 'gate-hygiene-fitness: clean -- %d shell file(s), 0 findings.\n' "${#files[@]}"

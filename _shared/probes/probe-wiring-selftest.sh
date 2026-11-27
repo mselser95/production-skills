@@ -161,5 +161,43 @@ out=$( cd "$d" && bash "$mut" 2>&1 ); rc=$?
 if (( rc == 2 )) && grep -qF 'contains a backtick' <<<"$out"; then printf '  ok    %-58s\n' "backtick in an exception reason -> 2"; ok=$((ok+1))
 else printf '  FAIL  %-58s rc=%s\n' "backtick in an exception reason -> 2" "$rc"; printf '%s\n' "$out" | sed 's/^/          /' | head -5; failed=$((failed+1)); fi
 
+# 13. A VALID EXCEPTION MUST NOT BE READ AS STALE WHEN THE PROBE LIST IS LONG.
+#     Found 2026-11-27: the pre-commit hook failed twice with "declared exception
+#     'prod-new/template/scripts/kill-durability.sh' names a probe that does not
+#     exist" while the file was on disk. The check was
+#       printf '%s\n' "${PROBES[@]}" | grep -qxF -- "$e"
+#     under pipefail: grep -q exits on its first hit, printf is still writing,
+#     takes SIGPIPE (141), and pipefail turned the MATCH into "not found". It
+#     depends on who wins a scheduling race, so it was rare when idle and common
+#     under load -- which is why it passed alone. A fixture cannot control the
+#     scheduler, so it controls the other variable: a list far larger than the
+#     pipe buffer with the match at the TOP, which makes the old code lose the
+#     race every time (measured: 50/50 iterations false-FAIL on the old code).
+#     The exception loop is LIFTED from the probe by anchor, not copied, so a
+#     regression in the probe is a regression here; running the whole probe 50
+#     times would cost minutes of forks for the same pipeline.
+lift=$(awk '!on && (/^probe_lines=/ || /^for e in "\$\{!EXCEPT\[@\]\}"; do/) {on=1} on {print} on && /^done/ {exit}' "$PROBE")
+big=()
+for ((i = 0; i < 1500; i++)); do printf -v pad '%0200d' "$i"; big+=("_shared/probes/zz-$pad-selftest.sh"); done
+iters=50; bad_iters=0; first_bad=""
+for ((i = 0; i < iters; i++)); do
+  # EXCEPT, PROBE_DIR and PROBES are read by the lifted code in the eval
+  # shellcheck disable=SC2034
+  out=$( (
+    set -uo pipefail
+    declare -A EXCEPT=([_shared/probes/aa-valid-exception.sh]="declared")
+    PROBE_DIR=_shared/probes
+    PROBES=(_shared/probes/aa-valid-exception.sh "${big[@]}")
+    eval "$lift"
+    echo reached
+  ) 2>&1 ); rc=$?
+  if (( rc != 0 )) || [[ "$out" != reached ]]; then bad_iters=$((bad_iters + 1)); first_bad=${first_bad:-"rc=$rc: ${out:0:80}"}; fi
+done
+if [[ -n "$lift" ]] && (( bad_iters == 0 )); then
+  printf '  ok    %-58s\n' "valid exception, 1500-probe list, $iters x -> never stale"; ok=$((ok+1))
+else
+  printf '  FAIL  %-58s %s/%s bad (lifted %s lines) %s\n' "valid exception read as stale on a long list" "$bad_iters" "$iters" "$(wc -l <<<"$lift" | tr -d ' ')" "$first_bad"; failed=$((failed+1))
+fi
+
 echo "$ok ok, $failed failed"
 (( failed == 0 )) || exit 1
