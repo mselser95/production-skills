@@ -182,9 +182,16 @@ first commit:
 5. Migrations with a safe-DDL linter as a gate, typed queries per backend language, real Postgres
    in tests (no mocks of the database), a restore test.
 6. Works for the three backend languages (Phase 5) and is covered by eval corpus tasks.
-Open question to settle from the research notes: whether TimescaleDB supports PostgreSQL 18 today,
-and from which version — if not, the scaffold pins the newest supported pair and records a dated
-liability instead of pretending.
+DECIDED 2026-11-27 (user confirmed): stay on **PostgreSQL 18**, do not move to 19 yet.
+- Research says TimescaleDB supports PG 18 from 2.23 (latest seen 2.32.1), PG 19.0 was announced
+  2026-11-19, Docker `latest` now points to 19, and Timescale has no official PG 19 support.
+  NOT independently verified — confirm against the real images and support matrix before pinning.
+- The scaffold pins PG minor + Timescale version as ONE tested pair in a single place, by digest,
+  never `latest` (2.32.0 works only up to PG 18.6; 18.7 needs 2.32.1).
+- Dated liability to re-evaluate PG 19 when BOTH hold: Timescale declares PG 19 support, and a
+  19.x minor (>= 19.1) exists.
+- Rejected: PG 19 without Timescale as the default and 18 only when Timescale is needed — it
+  doubles the combinations to test and monitor.
 
 ### Opus validation of the skill-weight gate — round 1: CHANGES REQUIRED (2026-11-27)
 
