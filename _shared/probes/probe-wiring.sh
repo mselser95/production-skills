@@ -124,6 +124,7 @@ declare -A EXCEPT=(
   # the target repo (prod-implement/references/probes/), so it has no Makefile
   # invoker here. Its verdicts are proven by prove-mutation-selftest.sh, which
   # `make selftests` runs via the *-selftest.sh glob.
+  [prod-new/modules/db-postgres/scripts/db-pin-verify-live.sh]="opt-in verifier, needs Docker and the images (the offline gate is db-pin-check.sh); a human runs it when bumping the image pair (README); proven by db-pin-verify-live-selftest.sh with a fake docker"
   [_shared/probes/prove-mutation.sh]="agent tool run by prod-implementer in target repos; proven here by prove-mutation-selftest.sh"
   [_shared/probes/gate-run.sh]="agent tool run inside target repos by prod-implementer/mechanic/author; proven by gate-run-selftest.sh"
   [_shared/probes/brand-strings.sh]="scans a generated tree for a user-supplied brand denylist; this repo has neither; run in scaffolded repos, proven here by brand-strings-selftest.sh"

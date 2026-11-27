@@ -72,9 +72,12 @@ GATES=(
   "row-vacuity|bash _shared/probes/row-vacuity-sweep.sh"
   "row-catalogue|bash _shared/probes/row-catalogue.sh"
   "liability-registries|bash _shared/probes/check-registries.sh"
-  "gate-hygiene|bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts"
+  "gate-hygiene|bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts prod-new/modules/*/scripts"
   "gates-are-driven|bash _shared/probes/probe-wiring.sh"
   "gates-are-driven-scripts|bash _shared/probes/probe-wiring.sh scripts"
+  "gates-are-driven-modules|rc=0; n=0; for d in prod-new/modules/*/scripts; do [ -d \"\$d\" ] || continue; bash _shared/probes/probe-wiring.sh \"\$d\" || rc=1; n=\$((n+1)); done; [ \"\$n\" -gt 0 ] && [ \"\$rc\" = 0 ]"
+  "db-image-pin|bash prod-new/modules/db-postgres/scripts/db-pin-check.sh prod-new/modules/db-postgres/db/image.lock --compose prod-new/modules/db-postgres/db/compose.yml prod-new/modules/db-postgres/db/compose.timescale.yml"
+  "db-test-ci-wired|bash prod-new/modules/db-postgres/scripts/db-ci-wired.sh .github/workflows/pr.yaml"
   "template-version|bash scripts/template-digest.sh"
   "mutation-trend|bash scripts/mutation-baseline.sh"
   "gap-report-consistent|bash scripts/gap-report-consistency.sh"
@@ -128,8 +131,12 @@ if [[ -r Makefile ]] && grep -qE '^gates:' Makefile; then
   while IFS= read -r line; do
     [[ "$line" == "bash scripts/run-once.sh "* ]] || continue
     rest=${line#bash scripts/run-once.sh }
+    # a wrapper records a label instead of its argv: `--as '<label>' <id> -- ...`
+    as=""
+    if [[ "$rest" == "--as '"* ]]; then tmp=${rest#--as \'}; as=${tmp%%\' *}; rest=${tmp#*\' }; fi
     [[ "$rest" == *" -- "* ]] || continue
     rid=${rest%% -- *}; rcmd=${rest#* -- }
+    [[ -z "$as" ]] || rcmd=$as
     for g in "${GATES[@]}"; do
       [[ "${g%%|*}" == "$rid" ]] || continue
       [[ "${g#*|}" == "$rcmd" ]] || drifted+=("$rid: make gates runs [$rcmd], GATES holds [${g#*|}]")

@@ -29,7 +29,7 @@ PROBES := _shared/probes
 # executes once per CI run and leaves one line in .evidence/results.tsv that
 # `make evidence` attests to instead of running the gate again (scripts/run-once.sh).
 RUN := bash scripts/run-once.sh
-.PHONY: help check-fast verify selftests selftests-run lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline eval eval-live
+.PHONY: help check-fast verify selftests selftests-run lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline eval eval-live db-test
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -43,6 +43,7 @@ help:
 	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
 	@echo "skill-weight-baseline  re-record benchmarks/skill-weight-baseline.md (the file-list and +5 % ratchet of the EAGER and REACHABLE sets; deliberate, never part of a gate run)"
 	@echo "eval        skill-eval harness: selftest + corpus lint (hermetic, no agent, not in check-fast)"
+	@echo "db-test     Docker, ~1 min: db-postgres bootstrap test, plain then timescale (not in check-fast; CI job db)"
 	@echo "eval-live   PAID: every corpus task x claude,codex x skill,bare x N reps; needs EVAL_LIVE=1 (make eval-live EVAL_LIVE=1 N=3)"
 
 # ---- the cheap gate -------------------------------------------------------
@@ -138,7 +139,7 @@ gates:
 # single-suite selftest shipped a PREFIX-ASSIGN-EXPAND that only the consumer's
 # gate-hygiene-fitness.sh caught, because nothing in this repo ran it over the
 # files it vendors. Findings fail; the latent GREPQ advisories are printed.
-	@$(RUN) gate-hygiene -- bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts
+	@$(RUN) gate-hygiene -- bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts prod-new/modules/*/scripts
 # And the wiring of that step itself: probe-wiring over the template's scripts
 # reports gate-hygiene-fitness.sh as an orphan the moment the line above is
 # deleted. Every other template script is a declared exception (run downstream).
@@ -148,6 +149,21 @@ gates:
 # and instantiate-template.sh are gates by any reasonable reading, and they lived
 # outside the only check that asks whether a gate is driven.
 	@$(RUN) gates-are-driven-scripts -- bash $(PROBES)/probe-wiring.sh scripts
+# The modules' scripts (prod-new/modules/*/scripts), one probe-wiring run per module
+# because the tool takes ONE directory: db-pin-check.sh was an orphan gate until this
+# loop existed. Zero module dirs is an error, not a pass. db-pin-verify-live.sh needs
+# Docker and is a declared exception in probe-wiring.sh. ONE recorded gate: the loop
+# is the command string (--as, because the argv is `bash -c <loop>`), byte-equal to
+# the GATES entry of the same id in scripts/evidence-record.sh.
+	@$(RUN) --as 'rc=0; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d" || rc=1; n=$$((n+1)); done; [ "$$n" -gt 0 ] && [ "$$rc" = 0 ]' gates-are-driven-modules -- bash -c 'rc=0; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d" || rc=1; n=$$((n+1)); done; [ "$$n" -gt 0 ] && [ "$$rc" = 0 ]'
+# The database image pin: the lock is read offline (no network, no Docker). A broken
+# lock, or a broken gate (its selftest runs in `make selftests`), goes red here; the
+# module's compose files are checked against the lock in the same invocation.
+	@$(RUN) db-image-pin -- bash prod-new/modules/db-postgres/scripts/db-pin-check.sh prod-new/modules/db-postgres/db/image.lock --compose prod-new/modules/db-postgres/db/compose.yml prod-new/modules/db-postgres/db/compose.timescale.yml
+# probe-wiring counts a Makefile target as an invoker even when nothing calls the
+# target, so it cannot see that `db-test` (the only runner of db-bootstrap-test.sh)
+# is driven by no workflow. This is that missing half, for this one target.
+	@$(RUN) db-test-ci-wired -- bash prod-new/modules/db-postgres/scripts/db-ci-wired.sh .github/workflows/pr.yaml
 # And the ratified invariants: an invariant nothing runs is precisely the shape
 # the three of them exist to refuse.
 	@$(RUN) gates-are-driven-ratified -- bash $(PROBES)/probe-wiring.sh verification/ratified
@@ -167,6 +183,13 @@ gates:
 # to every scaffold unnoticed. This reads them: remote scripts must be pinned to a
 # commit (or checksummed) and tools must not install at @latest/@main.
 	@$(RUN) template-workflow-pins -- bash scripts/template-workflow-pins.sh
+
+# The database module's bootstrap test: starts a REAL PostgreSQL per variant (Docker,
+# ~30 s each), so it is in no aggregate target. The pr.yaml job `db` runs it.
+# Sequential, first failure stops the target (make aborts on a non-zero recipe line).
+db-test:
+	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain
+	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant timescale
 
 # ---- the full gate --------------------------------------------------------
 verify: check-fast selftests invariants tcb mutation
@@ -245,7 +268,7 @@ selftests-run:
 	@set -e; n=0; ran=" "; \
 	  for ts in $(TEMPLATE_SELFTESTS); do [ -f "$$ts" ] || { echo "selftests: $$ts is missing: a vendored selftest nothing runs here is first exercised in someone else's CI" >&2; exit 2; }; done; \
 	  for rs in $(REQUIRED_SELFTESTS); do [ -f "$$rs" ] || { echo "selftests: $$rs is missing: it was run by name in CI and must stay" >&2; exit 2; }; done; \
-	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
+	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh prod-new/modules/*/scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
 	    [ -f "$$t" ] || continue; \
 	    printf '  %-52s ' "$$(basename $$t)"; \
 	    if tl=$$($(RUN) --quiet --count "selftest:$$t" -- bash "$$t"); then echo "ok"; else echo "FAIL"; printf '%s\n' "$$tl"; exit 1; fi; \

@@ -1,0 +1,10 @@
+# compose.timescale.yml — override: the Timescale image instead of plain
+# PostgreSQL. Use only when there is time-series data.
+#
+#   docker compose -f compose.yml -f compose.timescale.yml up -d
+services:
+  db:
+    image: timescale/timescaledb:2.32.1-pg18@sha256:70e6526ad8e31e3f4833f2c5863b50b92d7a6bee4d432ad1f660e2c6dd956d94
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.timescale.conf"]
+    volumes:
+      - ./bootstrap/timescale/30-timescaledb.sql:/docker-entrypoint-initdb.d/30-timescaledb.sql:ro
