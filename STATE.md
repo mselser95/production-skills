@@ -271,3 +271,37 @@ it as is. Do not schedule any OpenRouter work unless asked again.
    Phase 6: PostgreSQL 18 + TimescaleDB, born monitored (see above) — after the research notes land.
 6. Phase 2: papers loop.
 7. `make check-fast` runtime: `gate-hygiene-fitness.sh` is superlinear in file length (70 lines 4 s, 130 lines 14 s, 190 lines 79 s, measured 2026-11-27); 100 s idle, 30+ min under load.
+
+## Checkpoint 2026-11-27 17:10 (session d1e79d60)
+
+Merged to master: #14, #15, #16, #18. Open PRs (all from master unless noted):
+
+| PR | Branch | What | Opus |
+|---|---|---|---|
+| 17 | budget/skill-weight | skill weight gate | OK round 5 (0be3926) |
+| 19 | ci/gate-cache | content-cached lint | review running |
+| 20 | mod/assemble | module assembler | none yet; follow-up fix in progress (excludes, root collisions, strict slots) |
+| 21 | mod/db-image-lock | PG 18.7 + Timescale 2.32.1 pin | none |
+| 22 | eval/corpus-rust-python | Rust/Python eval tasks | none |
+| 23 | mod/brand-strings | brand denylist gate | none |
+| 24 | mod/ds-tokens | DS tokens + theme contract | none |
+| 25 | fix/hygiene-gate-tests | hygiene gate tests | none |
+| 26 | eval/corpus-go-more | +8 Go eval tasks | none |
+| 27 | eval/sandbox-allowlist | Claude under allowlist seatbelt | none; Codex-under-same-profile in progress on this branch |
+| 28 | mod/hosts-codex | install.sh --host claude/codex/both | none |
+| 29 | mod/row-catalogue | verify-standard row catalogue | none |
+
+In progress (uncommitted in worktrees): T18 service-rust (staged, committing; stacked on mod/assemble),
+T20 service-python, T22 db bootstrap (stacked on mod/db-image-lock).
+
+Rules learned today: heavy gates only in a 2-CPU Linux container as non-root, one at a time
+(`container-commit.sh` pattern: staged diff → container check-fast → commit → bundle → push);
+implementer briefs reference `notes/brief-machine-rules.md`; one task per agent; run
+`gate-hygiene-fitness.sh` on every new shell file before hand-back (it now FAILS on
+`producer | grep -q` under pipefail).
+
+Next: Opus reviews of 20–29 (two or three at a time); eval path = Codex sandbox → Opus on #27 →
+calibrated pilot of prod-review; T19/T21 (unit gates + CI for Rust/Python), T23 (db exporter +
+metrics), T24 (migrations), T28 monorepo-root (owns root files two services collide on), T29
+web-react, T30/T31 DS components, T34 Playwright e2e; checks < 15 s (wire gate-run-cached, CI
+cache restore, evidence attests instead of re-running). Phase 2 papers loop not started.
