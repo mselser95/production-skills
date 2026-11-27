@@ -14,13 +14,16 @@ MAX_LINES, RATCHET_PCT = 500, 5
 CEILINGS = {"eager": 64000, "reachable": 128000}
 SETS = ("eager", "reachable")
 ANCHOR = "Read `references/preamble.md` first"
+FORMAT_ERR = "baseline format is older than this probe: re-record with `make skill-weight-baseline`"
 RERECORD = "re-record with `make skill-weight-baseline` if intended"
 # One regex, whole body, any form (backticked, bare, ./, link target, <skill>/ prefix).
 # `*` not `+`: a bare `references/` (the whole directory) must match, not vanish.
 REF_RE = re.compile(r"(?<![A-Za-z0-9_])references/[A-Za-z0-9_./-]*")
 GLOB = "*?[{"  # a glob mention orders every file it matches read, exactly as a directory does
 GLOB_TAIL_RE = re.compile(r"[^\s`'\")<>]*")
-PROBES = "references/probes/"  # scripts a skill RUNS: listed and summed, never gated
+PROBES = "references/probes/"  # where a skill's RUN scripts are linked; the path alone does not make a probe
+# `references` as a whole backticked token or a link target, with or without a leading <dir>/ and a trailing /
+DIR_TOKEN_RE = re.compile(r"`((?:[^`\s]*/)?references/?)`|\]\(((?:[^)\s]*/)?references/?)\)")
 WRAP_RE = re.compile(r"(references/[A-Za-z0-9_./-]*-)[ \t]*\n[ \t]*")  # path wrapped after a hyphen
 TICK_RE = re.compile(r"`(references/[^`\s]+)`")
 HEADER = ["skill", "SKILL.md lines", "SKILL.md bytes", "eager bytes", "reachable bytes",
@@ -46,10 +49,33 @@ def refs_in(text):
             end = GLOB_TAIL_RE.match(text, end).end()
             path = text[m.start():end]
         else:
-            path = m.group(0).rstrip(".")
+            raw = m.group(0)
+            last = raw.rsplit("/", 1)[-1]
+            # a last segment made only of dots is `.` or `..`, not sentence punctuation: keep it
+            path = raw if last and not last.strip(".") else raw.rstrip(".")
             end = m.start() + len(path)
         out.append((m.start(), end, path))
     return out
+
+
+def dotted(ref):
+    """True when a mention has a `.` or `..` segment: it names its file indirectly."""
+    return any(seg in (".", "..") for seg in ref.split("/"))
+
+
+def is_probe(root, skill, ref, real):
+    """A PROBE is a script the skill RUNS, so its source is not read context. All must hold:
+    the mention is under references/probes/ with no `.`/`..` segment; its REAL path (links
+    resolved) is inside the repo's _shared/probes/ or the skill's own references/probes/; and it
+    is an executable regular file named *.sh. Anything else under references/probes/ is an
+    ordinary reference and is counted."""
+    if not ref.startswith(PROBES) or dotted(ref):
+        return False
+    if not (os.path.isfile(real) and os.access(real, os.X_OK) and real.endswith(".sh")):
+        return False
+    homes = [os.path.realpath(os.path.join(root, "_shared", "probes")),
+             os.path.realpath(os.path.join(root, skill, "references", "probes"))]
+    return any(real.startswith(h + os.sep) for h in homes)
 
 
 def eager_paragraph(text):
@@ -113,18 +139,27 @@ def measure(root, skills=SKILLS):
             if p not in mentioned:
                 mentioned.append(p)
         seen, reach, unresolved = {os.path.realpath(md)}, ["SKILL.md"], []
-        reach_bytes, rprobes = size, 0
+        reach_bytes, rprobes, notes, noted = size, 0, [], set()
+        for m in DIR_TOKEN_RE.finditer(text):
+            tok = m.group(1) or m.group(2)
+            problems[s].append("mentioned %s names the whole references directory, which orders every file in it read and cannot be measured: name the files explicitly" % tok)
         for ref in sorted(mentioned):
+            if dotted(ref):
+                problems[s].append("mentioned %s has a `.` or `..` segment: name the file by its direct path" % ref)
+                continue
             real, n = resolve(root, s, ref)
             if real is None:
                 unresolved.append(ref)
             elif real not in seen:
                 seen.add(real)
                 reach.append(ref)
-                if ref.startswith(PROBES):
+                if is_probe(root, s, ref, real):
                     rprobes += n
                 else:
                     reach_bytes += n
+                    if ref.startswith(PROBES) and ref not in noted:
+                        noted.add(ref)
+                        notes.append("note: %s %s is not an executable .sh under _shared/probes: counted as read context" % (s, ref))
         for ref in unresolved:
             hint = ""
             if ref.endswith("/") or any(c in ref for c in GLOB):
@@ -132,7 +167,7 @@ def measure(root, skills=SKILLS):
             problems[s].append("mentioned %s does not resolve to a readable file (dangling link, directory or typo)%s" % (ref, hint))
         # Defence in depth: the anchor paragraph itself mentions references/preamble.md, so a
         # skill with no mention at all already fails "no paragraph contains" below.
-        if len(reach) == 1 and not unresolved:
+        if len(reach) == 1 and not unresolved and not any(dotted(r) for r in mentioned):
             problems[s].append("no references/ mention found -- every skill mentions at least references/preamble.md, so the rule went blind")
         para = eager_paragraph(text)
         eager, eager_bytes, eprobes = ["SKILL.md"], size, 0
@@ -146,16 +181,19 @@ def measure(root, skills=SKILLS):
                 problems[s].append("the eager rule matched no reference -- every skill orders at least references/preamble.md, so the rule went blind (or the opening paragraph lost its read-first order)")
             eseen = {os.path.realpath(md)}
             for ref in erefs:
+                if dotted(ref):
+                    continue  # already failed above; never resolved, so it cannot displace a file
                 real, n = resolve(root, s, ref)
                 if real is not None and real not in eseen:
                     eseen.add(real)
                     eager.append(ref)
-                    if ref.startswith(PROBES):
+                    if is_probe(root, s, ref, real):
                         eprobes += n
+                        problems[s].append("the read-first paragraph orders %s, a probe: \"read first\" is not \"run\"; move the mention to the step that runs it" % ref)
                     else:
                         eager_bytes += n
         rows[s] = dict(lines=lines, size=size, eager=eager, eager_bytes=eager_bytes,
-                       eager_probes=eprobes, reachable=reach, reachable_bytes=reach_bytes,
+                       eager_probes=eprobes, notes=notes, reachable=reach, reachable_bytes=reach_bytes,
                        reachable_probes=rprobes)
     return rows, problems, found
 
@@ -184,9 +222,9 @@ def write_baseline(root, rows, path, skills=SKILLS):
                 "Generated by `_shared/probes/skill-weight.sh --write` (`make skill-weight-baseline`). Do not hand-edit:\n"
                 "the last line is a checksum of the table, and `skill-weight.sh` fails when they disagree.\n"
                 "EAGER = SKILL.md + the references its opening paragraph orders read first. REACHABLE = SKILL.md + every\n"
-                "references/ file it names explicitly. Files under references/probes/ are scripts the skill RUNS, not reads:\n"
-                "they stay in the file lists but their bytes are the `probe bytes` columns, outside `eager bytes` /\n"
-                "`reachable bytes`, which are the gated numbers. approx tokens = gated bytes/4. The probe fails when a\n"
+                "references/ file it names explicitly. A PROBE (an executable .sh whose real path is in _shared/probes/) is a\n"
+                "script the skill RUNS, not reads: it stays in the file lists but its bytes are the `probe bytes` columns,\n"
+                "outside `eager bytes` / `reachable bytes`, which are the gated numbers. approx tokens = gated bytes/4. The probe fails when a\n"
                 "skill's file list changes in either direction, or when a set's gated bytes exceed its row by more than\n"
                 "%d %%. Read the diff of this file as the review of what a skill loads.\n\n" % RATCHET_PCT)
         f.write("\n".join(tl) + "\n\n")
@@ -212,6 +250,10 @@ def load_baseline(path, skills=SKILLS):
         errs.append("baseline has no `checksum:` line -- re-record with --write")
     elif ck != checksum(tl):
         errs.append("hand-edited baseline: its table does not match its checksum; re-record with --write")
+    for st in tl:
+        cells = [c.strip() for c in st.strip("|").split("|")]
+        if cells[0] == "skill" and cells != HEADER:
+            return {}, [FORMAT_ERR]
     for st in tl:
         cells = [c.strip() for c in st.strip("|").split("|")]
         if cells[0] == "skill" or all(re.fullmatch(r":?-+:?", c) for c in cells):
@@ -290,6 +332,7 @@ def run(mode, root, baseline_path=None, registry=None, today=None, skills=SKILLS
     base, base_errs = load_baseline(baseline_path, skills)
     liab, liab_errs, reg_err = load_liabilities(registry)
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
+    fmt_bad = FORMAT_ERR in base_errs
     notes, over_live, totals = [], 0, {"eager": 0, "reachable": 0}
     ptotals = {"eager": 0, "reachable": 0}
     for s in skills:
@@ -300,7 +343,9 @@ def run(mode, root, baseline_path=None, registry=None, today=None, skills=SKILLS
             b, lst = r[st + "_bytes"], r[st]
             totals[st] += b
             ptotals[st] += r[st + "_probes"]
-            if base is None:
+            if fmt_bad:
+                pass  # one line says it all; per-skill "absent"/"malformed" lines would bury it
+            elif base is None:
                 if st == "eager":
                     problems[s].append("no readable benchmarks/skill-weight-baseline.md -- run `make skill-weight-baseline`")
             elif s not in base:
@@ -351,6 +396,9 @@ def run(mode, root, baseline_path=None, registry=None, today=None, skills=SKILLS
             out.append("  ok    %-16s %3d lines, eager %d file(s) %d bytes (~%d tok) (+ probes %d not gated), reachable %d file(s) %d bytes (~%d tok) (+ probes %d not gated)"
                   % (s, r["lines"], len(r["eager"]), r["eager_bytes"], tokens(r["eager_bytes"]), r["eager_probes"],
                      len(r["reachable"]), r["reachable_bytes"], tokens(r["reachable_bytes"]), r["reachable_probes"]))
+    for s in skills:
+        if s in rows:
+            notes.extend(rows[s]["notes"])
     for n in notes:
         out.append("  " + n)
     if fails:

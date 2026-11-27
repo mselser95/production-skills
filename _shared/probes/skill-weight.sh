@@ -17,24 +17,35 @@
 #              link target, with or without a <skill>/ prefix): one regex over the
 #              whole body, no sentence or paragraph parsing. Files are
 #              de-duplicated by real path, symlinks dereferenced.
-#   PROBES     Files under references/probes/ are scripts a skill RUNS: the model
-#              reads their output, not their source. They stay in the FILE LISTS of
-#              whichever set mentions them (adding or removing a probe mention is a
-#              reviewed baseline diff) and are REPORTED as a sub-total ("+ probes N
-#              not gated"), but their bytes are EXCLUDED from the gated byte total,
-#              the +5 % byte ratchet and the ceiling, in both sets. Routine churn in
-#              a script nobody reads must not turn the gate red.
+#   PROBES     A PROBE is a script a skill RUNS: the model reads its output, not its
+#              source. A mention is a probe only if ALL hold: it is under
+#              references/probes/ with no `.`/`..` segment; its REAL path (links
+#              resolved) is inside this repo's _shared/probes/ (or, in an installed
+#              copy, the skill's own references/probes/); and it is an executable
+#              regular file named *.sh. Anything else under references/probes/ is an
+#              ordinary reference, counted, with a note. A probe mentioned in the
+#              read-first paragraph FAILS ("read first" is not "run"). Probes stay
+#              in the FILE LISTS of whichever set mentions them (adding or removing
+#              a probe mention is a reviewed baseline diff) and are REPORTED as a
+#              sub-total ("+ probes N not gated"), but their bytes are EXCLUDED from
+#              the gated byte total, the +5 % byte ratchet and the ceiling, in both
+#              sets. Routine churn in a script nobody reads must not turn the gate
+#              red. Why executable: a skill that says to run `references/probes/x.sh`
+#              runs it directly, so a script without its exec bit is a defect, and
+#              the gate reports it rather than silently excusing its bytes.
 #
 # CHECKS, per skill
 #   (a) SKILL.md has <= 500 lines (agentskills.io/specification).
 #   (b) every references/ mention resolves to a readable file. A dangling mention,
-#       a directory (`references/probes/`), the bare `references/` and any glob
-#       (`references/*.md`, `{a,b}`, `?`, `[x]`) FAIL, in both sets, with an order
-#       to name the files explicitly: a directory or glob orders every file in it
-#       read, which cannot be measured. The eager rule matched something (the
-#       "no references/ mention found" check is defence in depth: the anchor
-#       paragraph itself mentions references/preamble.md, so a skill with no
-#       mention at all already fails (c) first).
+#       a directory (`references/probes/`), the bare `references/`, a backticked
+#       token or link target that is just `references` (or ends in `/references`),
+#       and any glob (`references/*.md`, `{a,b}`, `?`, `[x]`) FAIL, in both sets,
+#       with an order to name the files explicitly: a directory or glob orders
+#       every file in it read, which cannot be measured. A mention with a `.` or
+#       `..` segment FAILS too ("name the file by its direct path"). The eager rule
+#       must also match at least one reference; the "no references/ mention found"
+#       check is defence in depth, since the anchor paragraph itself mentions
+#       references/preamble.md, so a skill with no mention at all already fails (c).
 #   (c) EAGER RULE: the backticked `references/<path>` tokens of the first
 #       blank-line-delimited paragraph containing
 #       "Read `references/preamble.md` first", minus CONDITIONAL units. A UNIT ends
@@ -83,7 +94,9 @@
 #       to read another is measured as the one file.
 #   (c) Executed probes are listed but not gated (see PROBES above): a script the
 #       skill runs costs its output, not its source. A skill that instead READS a
-#       probe's source is mis-measured low.
+#       probe's source is mis-measured low. A footnote glued to an unbackticked
+#       path (`references/a.md[^1]`) reads as a glob and FAILS, on purpose; after a
+#       closing backtick it is fine.
 #   Nor can it see a file named by a path the regex does not match (one assembled
 #   in prose), whether a model obeys the order, reads a file partly, or reads more
 #   than named. Tokens are gated bytes/4, an approximation. The baseline checksum

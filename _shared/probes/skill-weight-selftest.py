@@ -316,11 +316,29 @@ if got == str(want):
     ok("REACHABLE counts each file once (mentions and a symlink alias): %s" % got)
 else:
     bad("each file once", "want %d got %s" % (want, got))
-# ---- probes: scripts a skill RUNS are listed and summed, never gated -----------------
+# ---- probes: a PROBE is an executable .sh whose real path is under _shared/probes -----
+def genuine(r, name, size, skill="prod-ops", link=True):
+    """An executable script in <root>/_shared/probes, linked from the skill's references/probes."""
+    d = os.path.join(r, "_shared", "probes")
+    os.makedirs(d, exist_ok=True)
+    real = os.path.join(d, name)
+    fill(real, size, "s")
+    os.chmod(real, 0o755)
+    if link:
+        os.makedirs(sk(r, skill, "references", "probes"), exist_ok=True)
+        put_link(sk(r, skill, "references", "probes", name), "../../../_shared/probes/" + name)
+    return real
+
+
+def put_link(path, target):
+    if os.path.lexists(path):
+        os.unlink(path)
+    os.symlink(target, path)
+
+
 def probe_fixture(name, eager_probe=False, size=900, body="run `references/probes/p.sh`"):
     r = mk(name)
-    os.makedirs(sk(r, "prod-ops", "references", "probes"), exist_ok=True)
-    fill(sk(r, "prod-ops", "references", "probes", "p.sh"), size, "s")
+    genuine(r, "p.sh", size)
     para = P0 + (" Then run `references/probes/p.sh`." if eager_probe else "")
     skill_md(r, "prod-ops", para, body)
     return r
@@ -331,25 +349,21 @@ rec(r)
 row = baseline_row(r, "prod-ops")
 want = os.path.getsize(sk(r, "prod-ops", "SKILL.md")) + 1000 + 500 + 500 + 500
 if row[6] == "900" and row[5] == "0" and row[4] == str(want) and "references/probes/p.sh" in row[10]:
-    ok("a probe mention is in the file list and the sub-total, not in the gated bytes")
+    ok("a genuine probe mention is in the file list and the sub-total, not in the gated bytes")
 else:
     bad("probes accounting", "want gated %d, probes 900: %s" % (want, row))
-case("a recorded probe passes the check", r, 0, ("skill-weight: ok", "(+ probes 900 not gated)"))
-fill(sk(r, "prod-ops", "references", "probes", "p.sh"), 1350, "s")
+case("a recorded probe passes the check", r, 0, ("skill-weight: ok", "reachable 6 file(s)", "(+ probes 900 not gated)"))
+genuine(r, "p.sh", 1350, link=False)
 case("growing a mentioned probe by 50 % does NOT fail", r, 0, "skill-weight: ok")
-fill(sk(r, "prod-ops", "references", "probes", "p.sh"), 900000, "s")
+genuine(r, "p.sh", 900000, link=False)
 case("a probe growing 1000x does not fail either (not gated, no ceiling)", r, 0, "skill-weight: ok")
+# BEFORE: an EAGER probe was blessed (listed, sub-totalled, not gated). AFTER: it FAILS.
 r = probe_fixture("probes-eager", eager_probe=True)
-rec(r)
-row = baseline_row(r, "prod-ops")
-if row[5] == "900" and "references/probes/p.sh" in row[9] and row[3] == str(int(row[2]) + 2000):
-    ok("an EAGER probe is in the EAGER file list and sub-total, not in the gated EAGER bytes")
-else:
-    bad("eager probes accounting", str(row))
+case("a genuine probe in the read-first paragraph FAILS: read first is not run", r, 1,
+     "orders references/probes/p.sh, a probe")
 r = probe_fixture("probes-new")
 rec(r)
-os.makedirs(sk(r, "prod-ops", "references", "probes"), exist_ok=True)
-fill(sk(r, "prod-ops", "references", "probes", "q.sh"), 100, "q")
+genuine(r, "q.sh", 100)
 skill_md(r, "prod-ops", P0, "run `references/probes/p.sh` and `references/probes/q.sh`")
 case("adding a NEW probe mention fails the file-list ratchet, naming it", r, 1,
      "REACHABLE file list changed (ADDED references/probes/q.sh)")
@@ -363,9 +377,10 @@ rec(r)
 B = int(baseline_row(r, "prod-ops")[4])
 fill(sk(r, "prod-ops", "references", "a.md"), 500 + B * 55 // 1000, "a")  # +5.5 % of the gated reachable bytes
 case("with a probe in the set, a non-probe reference growing 5.5 % still fails", r, 1, "REACHABLE set grew to")
+# BEFORE: a 130000-byte plain file under references/probes/ was "a probe" and passed. AFTER: a genuine probe does.
 r = probe_fixture("probes-ceil", size=130000)
 rec(r)
-case("a set over the ceiling only when probes are counted passes with no liability", r, 0,
+case("a set over the ceiling only when a genuine probe is counted passes with no liability", r, 0,
      ("skill-weight: ok", "(+ probes 130000 not gated)"), ("over the 128000-byte ceiling",))
 waivers(r, ("w1", "prod-ops", "reachable", 140000, "2099-01-01"))
 case("...and a reachable liability for it is stale", r, 1, "stale liability w1")
@@ -379,6 +394,137 @@ fill(sk(r, "prod-ops", "references", "d.md"), 1000, "d")
 rec(r)
 case("the set drops under its ceiling and is re-recorded: the liability is stale", r, 1, "stale liability w1")
 
+# the not-gated numbers come from the right set: a probe in a later step is REACHABLE only
+r = probe_fixture("probes-sets", size=777)
+rec(r)
+case("(+ probes N not gated): eager 0 and reachable 777, separately", r, 0,
+     ("eager 4 file(s)", "(+ probes 0 not gated), reachable 6 file(s)", "(+ probes 777 not gated)"))
+rc, out, err = sw.run("check", r, skills=SUB)
+if any("skill-weight: ok" in l and "eager total" in l and "(+ probes 0 not gated), reachable total" in l
+       and l.rstrip().count("(+ probes 777 not gated)") == 1 for l in out):
+    ok("the summary line shows eager probes 0 and reachable probes 777")
+else:
+    bad("summary probes", "\n".join(out)[-300:])
+
+# anything under references/probes/ that is not a genuine probe is read context, counted, with a note
+NOTE = "is not an executable .sh under _shared/probes: counted as read context"
+r = mk("fake-copy")
+os.makedirs(sk(r, "prod-review", "references", "probes"))
+fill(sk(r, "prod-review", "references", "probes", "big.md"), 70000, "B")
+skill_md(r, "prod-review", P0, "step 4: read `references/probes/big.md`")
+rec(r)
+case("a 70 KB markdown copied under references/probes is counted (REACHABLE over the ceiling is not hidden), with a note", r, 0,
+     ("reachable 6 file(s)", "(+ probes 0 not gated)", "references/probes/big.md " + NOTE))
+r = mk("fake-eager")
+os.makedirs(sk(r, "prod-review", "references", "probes"))
+fill(sk(r, "prod-review", "references", "probes", "big.md"), 70000, "B")
+skill_md(r, "prod-review", P0 + " Also `references/probes/big.md`.".replace("Also", "Then read"), "body")
+rec(r)
+case("...and in the read-first paragraph it is counted in EAGER, over 64000 FAILS with no liability", r, 1,
+     ("EAGER set 72", "over the 64000-byte ceiling"))
+r = mk("fake-link")
+os.makedirs(sk(r, "prod-review", "references", "probes"))
+fill(os.path.join(r, "_shared-doc.md"), 3000, "L")
+os.symlink("../../../_shared-doc.md", sk(r, "prod-review", "references", "probes", "doc.md"))
+skill_md(r, "prod-review", P0, "see `references/probes/doc.md`")
+rec(r)
+case("a symlink under references/probes to a markdown file is counted", r, 0, ("references/probes/doc.md " + NOTE,))
+if baseline_row(r, "prod-review")[6] == "0":
+    ok("...and its bytes are in the gated total, probes sub-total 0")
+else:
+    bad("symlink md", str(baseline_row(r, "prod-review")))
+r = mk("fake-noexec")
+genuine(r, "n.sh", 800, "prod-review")
+os.chmod(os.path.join(r, "_shared", "probes", "n.sh"), 0o644)
+skill_md(r, "prod-review", P0, "run `references/probes/n.sh`")
+rec(r)
+case("a non-executable .sh is counted as read context", r, 0, "references/probes/n.sh " + NOTE)
+r = mk("fake-outside")
+os.makedirs(os.path.join(r, "elsewhere"))
+fill(os.path.join(r, "elsewhere", "o.sh"), 800, "o")
+os.chmod(os.path.join(r, "elsewhere", "o.sh"), 0o755)
+os.makedirs(sk(r, "prod-review", "references", "probes"))
+os.symlink("../../../elsewhere/o.sh", sk(r, "prod-review", "references", "probes", "o.sh"))
+skill_md(r, "prod-review", P0, "run `references/probes/o.sh`")
+rec(r)
+case("an executable .sh whose real path is outside _shared/probes and the skill's own probes is counted", r, 0,
+     "references/probes/o.sh " + NOTE)
+r = mk("own-real")
+os.makedirs(sk(r, "prod-review", "references", "probes"))
+fill(sk(r, "prod-review", "references", "probes", "own.sh"), 800, "o")
+os.chmod(sk(r, "prod-review", "references", "probes", "own.sh"), 0o755)
+skill_md(r, "prod-review", P0, "run `references/probes/own.sh`")
+rec(r)
+case("installed-copy layout: an executable .sh really in the skill's own references/probes is a probe", r, 0,
+     "(+ probes 800 not gated)", (NOTE,))
+r = mk("dotdot")
+genuine(r, "p.sh", 900, "prod-ops")
+skill_md(r, "prod-ops", P0, "run `references/probes/../a.md`")
+case("references/probes/../a.md FAILS: name the file by its direct path", r, 1, "name the file by its direct path")
+r = mk("dotdot2")
+skill_md(r, "prod-ops", P0, "run `references/probes/../c.md` and also `references/c.md`")
+case("a `..` mention fails and does not displace references/c.md in the de-dup: c.md stays REACHABLE", r, 1,
+     "name the file by its direct path", ("REACHABLE file list changed",))
+for label, txt in (("`references/.`", "`references/.`"), ("`references/..`", "`references/..`"),
+                   ("`references/./a.md`", "`references/./a.md`")):
+    r = mk("dots")
+    skill_md(r, "prod-ops", P0, "see %s here" % txt)
+    case("%s FAILS as a direct-path violation, not 'outside backticks'" % label, r, 1,
+         "name the file by its direct path", ("outside backticks",))
+
+# a bare `references` (no trailing slash) as a token or link target orders the directory read
+for label, txt in (("`references`", "every file in the `references` folder"), ("`prod-review/references`", "see `prod-review/references`"),
+                   ("`./references`", "see `./references`"), ("link target (references)", "see [all](references)"),
+                   ("link target (prod-ops/references/)", "see [all](prod-ops/references/)")):
+    for where in ("opening", "later"):
+        r = mk("bareref")
+        if where == "opening":
+            skill_md(r, "prod-ops", P0.replace("Output formats:", "Output formats: %s;" % txt, 1), "body")
+        else:
+            skill_md(r, "prod-ops", P0, "step 7: %s." % txt)
+        case("%s in the %s text fails, naming the files explicitly" % (label, where), r, 1, "name the files explicitly")
+r = mk("prose2")
+skill_md(r, "prod-ops", P0, "the references directory and the references folder hold files; see `references/verification-probes.md` and `references/preferences.md`.")
+fill(sk(r, "prod-ops", "references", "verification-probes.md"), 400, "v")
+fill(sk(r, "prod-ops", "references", "preferences.md"), 400, "v")
+rec(r)
+case("prose 'the references directory' and names merely containing 'probes' / 'references' pass", r, 0, "skill-weight: ok")
+# a non-probe NAMED with 'probes' is counted in the gated bytes (probe detection is not a substring test)
+if baseline_row(r, "prod-ops")[6] == "0" and int(baseline_row(r, "prod-ops")[4]) > 3600:
+    ok("references/verification-probes.md is counted in the gated bytes, not in the probes sub-total")
+else:
+    bad("probes substring", str(baseline_row(r, "prod-ops")))
+# ...and an executable .sh really in _shared/probes, reached through a path that merely CONTAINS probes/
+# (references/lib/probes/q.sh), is not under references/probes/: counted, not excused
+r = mk("probes-nested")
+genuine(r, "q.sh", 900, link=False)
+os.makedirs(sk(r, "prod-ops", "references", "lib", "probes"), exist_ok=True)
+put_link(sk(r, "prod-ops", "references", "lib", "probes", "q.sh"), "../../../../_shared/probes/q.sh")
+skill_md(r, "prod-ops", P0, "run `references/lib/probes/q.sh`.")
+rec(r)
+if baseline_row(r, "prod-ops")[6] == "0" and int(baseline_row(r, "prod-ops")[4]) > 900:
+    ok("probe detection is the references/probes/ prefix, not any path containing probes/")
+else:
+    bad("probes nested", str(baseline_row(r, "prod-ops")))
+
+# glob characters, each on its own: a mention with `{` or `[` fails
+for label, txt in (("`{,.orig}` brace", "`references/a.md{,.orig}`"), ("`[a-z]*` class", "`references/[a-z]*.md`")):
+    r = mk("glob2")
+    skill_md(r, "prod-ops", P0, "step 7: %s." % txt)
+    case("%s FAILS" % label, r, 1, "name the files explicitly")
+# footnote marker: a backticked path followed by [^1] is a clean mention; a bare path with [^1] is a glob and fails (deliberate)
+r = mk("foot")
+skill_md(r, "prod-ops", P0, "step 7: `references/a.md`[^1].\n\n[^1]: why")
+case("`references/a.md`[^1] (footnote after the closing backtick) passes", r, 0, "skill-weight: ok")
+r = mk("foot2")
+skill_md(r, "prod-ops", P0, "step 7: references/a.md[^1].\n\n[^1]: why")
+case("references/a.md[^1] (unbackticked, footnote glued on) FAILS as a glob: the safe side, on purpose", r, 1, "name the files explicitly")
+
+# a baseline in the old column layout is ONE line
+r = mk("oldfmt")
+edit_baseline(r, lambda L: [l.replace("| reachable probe bytes |", "| of which probes |") for l in L])
+case("a baseline in an older column format fails with one line, no per-skill noise", r, 1,
+     ("baseline format is older than this probe: re-record with `make skill-weight-baseline`",), ("malformed", "absent from"))
 
 # ---- file-list ratchet ---------------------------------------------------------------
 r = mk("adde")

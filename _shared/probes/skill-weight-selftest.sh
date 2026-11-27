@@ -2,7 +2,7 @@
 # skill-weight-selftest.sh — every rule in skill-weight.sh shown firing on a
 # temp fixture where its property is false, plus the real repo passing.
 #
-# Thin wrapper. The rule cases (about 75) run IN-PROCESS in skill-weight-selftest.py,
+# Thin wrapper. The rule cases run IN-PROCESS in skill-weight-selftest.py,
 # which imports the core's run() with an injectable clock and builds each fixture
 # tree itself: milliseconds per case. This file keeps only what can be proven
 # through the shell wrapper: exit codes 0/1/2, --write then accept, --write
@@ -68,11 +68,13 @@ wiring() { # wiring <dir with Makefile and .github/workflows/pr.yaml> : prints w
   { [[ -n "$gl" ]] && grep -vq -- '--write' <<<"$gl"; } || miss="$miss gates-line"
   grep -Eq '^[[:space:]]*bash _shared/probes/skill-weight-selftest\.sh[[:space:]]*$' "$d/.github/workflows/pr.yaml" || miss="$miss ci-selftest"
   grep -Eq '^[[:space:]]*bash _shared/probes/skill-weight\.sh[[:space:]]*$' "$d/.github/workflows/pr.yaml" || miss="$miss ci-probe"
+  grep -Eq '^[[:space:]]*"[A-Za-z0-9_-]+\|bash _shared/probes/skill-weight\.sh"[[:space:]]*$' "$d/scripts/evidence-record.sh" || miss="$miss evidence-gates"
   printf '%s' "${miss# }"
 }
-w="$tmp/wire"; mkdir -p "$w/.github/workflows"
+w="$tmp/wire"; mkdir -p "$w/.github/workflows" "$w/scripts"
+cp "$real_root/scripts/evidence-record.sh" "$w/scripts/evidence-record.sh"
 cp "$real_root/Makefile" "$w/Makefile"; cp "$real_root/.github/workflows/pr.yaml" "$w/.github/workflows/pr.yaml"
-m="$(wiring "$real_root")"; if [[ -z "$m" ]]; then ok_ "the repo's gates: recipe and pr.yaml both run skill-weight.sh / its selftest"; else bad_ "repo wiring" "missing: $m"; fi
+m="$(wiring "$real_root")"; if [[ -z "$m" ]]; then ok_ "the repo's gates: recipe, pr.yaml and scripts/evidence-record.sh GATES all carry skill-weight.sh"; else bad_ "repo wiring" "missing: $m"; fi
 grep -v 'bash $(PROBES)/skill-weight.sh$' "$real_root/Makefile" >"$w/Makefile"
 m="$(wiring "$w")"; if [[ "$m" == "gates-line" ]]; then ok_ "wiring: gates: line removed (the --write target does not count) is caught"; else bad_ "wiring gates" "got [$m]"; fi
 cp "$real_root/Makefile" "$w/Makefile"
@@ -81,8 +83,16 @@ m="$(wiring "$w")"; if [[ "$m" == "ci-probe" ]]; then ok_ "wiring: pr.yaml probe
 grep -v 'bash _shared/probes/skill-weight-selftest.sh$' "$real_root/.github/workflows/pr.yaml" >"$w/.github/workflows/pr.yaml"
 m="$(wiring "$w")"; if [[ "$m" == "ci-selftest" ]]; then ok_ "wiring: pr.yaml selftest line removed is caught"; else bad_ "wiring ci selftest" "got [$m]"; fi
 
+cp "$real_root/.github/workflows/pr.yaml" "$w/.github/workflows/pr.yaml"
+grep -v 'skill-weight\.sh"' "$real_root/scripts/evidence-record.sh" >"$w/scripts/evidence-record.sh"
+m="$(wiring "$w")"; if [[ "$m" == "evidence-gates" ]]; then ok_ "wiring: the GATES entry in scripts/evidence-record.sh removed is caught"; else bad_ "wiring evidence" "got [$m]"; fi
+
 # ---- the real repo, and the core's hygiene -------------------------------------
 run_case "the real repo passes" 0 "skill-weight: ok" "$real_root"
+# Decision pin: prod-review tells the agent to RUN references/probes/acceptance-gap.sh directly,
+# so the real script must carry its exec bit and be counted as a probe, not as read context.
+out="$(bash "$probe" "$real_root" 2>&1)"
+if [[ -x "$real_root/_shared/probes/acceptance-gap.sh" && "$out" != *"is not an executable .sh"* && "$out" == *"(+ probes "* ]]; then ok_ "the real repo: every probe a skill runs is executable and counted as a probe (no 'counted as read context' note)"; else bad_ "real probes executable" "$(oneline "$out")"; fi
 out="$(python3 -I -W error "$core" check "$real_root" 2>&1)"; rc=$?
 if [[ $rc -eq 0 && "$out" == *"skill-weight: ok"* && "$out" != *Warning* && "$out" != *Traceback* && "$out" != *"Exception ignored"* ]]; then ok_ "the core runs clean under python3 -I -W error on the real repo"; else bad_ "python -W error" "rc=$rc: $(oneline "$out")"; fi
 out="$(python3 -I - "$tmp/pyc" "$core" "$driver" <<'PY' 2>&1
