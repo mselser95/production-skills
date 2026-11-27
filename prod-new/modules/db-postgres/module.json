@@ -1,0 +1,11 @@
+{
+  "id": "db-postgres",
+  "summary": "PostgreSQL 18 image pin: one tested PostgreSQL + TimescaleDB pair, pinned by digest, with a static gate.",
+  "contributes": [
+    { "path": "db/image.lock", "role": "the tested image pair (tags, per-platform digests, observed versions, verification date)" },
+    { "path": "scripts/db-pin-check.sh", "role": "static gate: no latest, digest on every reference, PG 18, pair rule, staleness" },
+    { "path": "scripts/tests/db-pin-check-selftest.sh", "role": "hermetic selftest and mutation proof of the gate" }
+  ],
+  "requires": [],
+  "liabilities": ["pg19-reevaluate"]
+}
