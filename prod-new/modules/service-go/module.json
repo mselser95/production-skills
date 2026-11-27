@@ -1,0 +1,35 @@
+{
+  "id": "service-go",
+  "requires": [],
+  "conflicts": [],
+  "source": "../../template",
+  "slots": {
+    "SERVICE": "service name; replaced literally in file contents and in paths (cmd/<SERVICE>)",
+    "OWNER": "GitHub owner (user or org) of the repository; replaced literally"
+  },
+  "unit_kind": "service",
+  "placement": {
+    ".github/**": "root",
+    "CODEOWNERS": "root",
+    "AGENTS.md": "root",
+    ".gitignore": "root",
+    "registries/**": "root",
+    ".prod/**": "root",
+    "docs/**": "root",
+    "scripts/**": "root",
+    "production.yaml": "unit",
+    "go.mod": "unit",
+    "go.sum": "unit",
+    "Makefile": "unit",
+    ".golangci.yml": "unit",
+    ".dockerignore": "unit",
+    "README.md": "unit",
+    "cmd/**": "unit",
+    "internal/**": "unit",
+    "docker/**": "unit",
+    "verification/**": "unit",
+    "regressions/**": "unit",
+    "benchmarks/**": "unit",
+    "observability/**": "unit"
+  }
+}
