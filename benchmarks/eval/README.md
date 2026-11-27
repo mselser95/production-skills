@@ -27,29 +27,39 @@ the copy) and the copy is deleted on every exit path. Limits: a TOCTOU window; a
 rotated right before a SIGKILL is lost; a concurrent interactive `codex` can invalidate the
 refresh token, so use `CODEX_API_KEY` unattended. No credential: exit 78, row `error:"auth"`.
 
-**Confinement (`agent_mode`).** Codex: `-s workspace-write`, an OS sandbox (writes only in
-the workdir plus the per-cell GOCACHE `--add-dir`); its default blocks outbound network
-(from Codex's documented defaults, NOT verified here). Claude: macOS seatbelt
-(`sandbox-exec`, profile per cell from `lib/seatbelt.py`) denies every file write except the
-isolated home, GOCACHE, a per-cell TMPDIR and, only in `workspace-write`, the workdir.
-The profile also DENIES READS of `~/.ssh .aws .gnupg .config/gh .docker .kube .netrc`, the real
-`~/.claude*` / `~/.codex`, `~/Library/Keychains`, `<repo>/benchmarks/eval/corpus` and the task
-dir (the answer key). Sandbox ON: `Read Glob Grep Bash` unrestricted (`dontAsk`; `workspace-write`
-adds Edit/Write with `acceptEdits`), no pattern list. Sandbox OFF (opt-out): the narrow
-allowlist (`go version|build|vet|test`, `git status|diff|log|show`; `gofmt` in
-`workspace-write`) plus deny patterns for `go test -exec`, `go build -o`, `git -c` etc. are
-the only confinement (wildcard-before-flag matching is unconfirmed).
-No `sandbox-exec`, a non-macOS host, or a profile that will not run fails the cell
-(`error:"sandbox"`, exit 3), never a silent unconfined run. **Live Claude runs are macOS-only
-unless you opt out with `EVAL_CLAUDE_NO_SANDBOX=1`** (loud warning, row `sandbox:"off"`);
-a Linux confinement is future work. Rows carry
-`sandbox: seatbelt|codex|off|n/a`; reports never pool different values. **Claude's network
-is NOT blocked** (seatbelt cannot filter by host; only WebFetch/WebSearch are denied) and the
-agent holds its own API credential. Threat model: with unrestricted Bash and an open network,
-anything the agent can READ it can send out, so the read-deny list is the control (a path
-missing from it is exposed). Fixtures are authored and reviewed here, so the residual risk is
-a model following injected text in a fixture; a hostile fixture could exfiltrate the session
-credential on the Claude side.
+**Confinement (`agent_mode`).** On macOS BOTH hosts run under ONE seatbelt profile (`sandbox-exec -f`,
+generated per cell by `lib/seatbelt.py`, same `agent_mode` semantics), so their rows are comparable
+(`sandbox:"seatbelt"`). Codex's own sandbox is switched off there (`-s danger-full-access`, it cannot
+nest a seatbelt in ours; `-c approval_policy=never`): `danger-full-access` is in its argv ONLY with the
+outer wrapper. Its real binary lives in the real Codex home beside `auth.json`: only its `bin/` dir is
+re-allowed (`--reallow-read`, after the denies; trial-found), the rest of that home stays denied. **Writes** are denied except in the isolated home, GOCACHE, a per-cell
+TMPDIR and, only in `workspace-write`, the workdir. **User data is default-deny for reads too**:
+read and write of `/Users /Volumes /tmp /var/folders /var/run` and of any `*docker.sock` are denied,
+plus unix-socket connects under those roots and to docker/agent sockets (trial-found, keep: a file
+deny does NOT block `connect()` on a unix socket, and a `remote unix-socket` rule takes ONE filter,
+several silently stop blocking: one rule per path), then re-allowed by real path: home, GOCACHE,
+TMPDIR (read+write), the workdir (read; write only in `workspace-write`), the install root of the
+`claude` binary (the dir of its real file: the versions dir of the CLI under the user's home; for
+`codex`, its `bin/` dir) and
+the Go toolchain / git exec path only if a denied root hides them. The repo (`.git`, `corpus/`,
+`results/`) and the real config/auth dirs are denied again afterwards; the task dir is only kept
+from re-allows (never named). The profile sits in its own `sbx.XXXXXX` dir beside the cell home
+(never re-allowed) and names no task. `stat` (metadata only, literals, no listing) of the cell's ancestor dirs is allowed (CLIs canonicalise their home). A re-allow covering something denied fails closed
+(`error:"sandbox"`). Sandbox ON: `Read Glob Grep Bash` unrestricted (`dontAsk`; `workspace-write`
+adds Edit/Write), no pattern list. Sandbox OFF (opt-out): only a narrow allowlist (`go
+version|build|vet|test`, `git status|diff|log|show`) plus escape-flag deny patterns (`go test
+-exec`, `git -c`...) confines it. No `sandbox-exec`, a non-macOS host, or a profile that will not
+run fails the cell (`error:"sandbox"`, exit 3), never a silent unconfined run. **Live runs are
+macOS-only unless you opt out with `EVAL_NO_SANDBOX=1` (host-neutral; `EVAL_CLAUDE_NO_SANDBOX=1` is a Claude
+alias). Claude: loud warning, row `sandbox:"off"`, unconfined. Codex: runs under its OWN `-s workspace-write`
+(writes confined; **reads unconfined**: answer key and user files readable), warning, row `sandbox:"codex"`. Rows carry `sandbox: seatbelt|codex|off|n/a`; reports never pool different values.
+**Threat model.** With unrestricted Bash and an open network, anything the agent can READ it can
+send out. Readable by design: the workdir, the cell's home/GOCACHE/TMPDIR, the CLI's install dir
+(its versions dir) and system dirs (`/usr /opt /Library /etc`); a secret there, or outside the
+denied roots (a share not under `/Volumes`), is exposed. **TCP is NOT blocked for either host**
+(seatbelt cannot filter by host; Claude's WebFetch/WebSearch are denied) and the model's own credential
+is in the cell (Claude: the process environment; Codex: its `auth.json` copy in the isolated home, or
+`CODEX_API_KEY`), so a hostile fixture could exfiltrate it.
 
 **Structured output.** If `corpus/<skill>/_lib/output.schema.json` exists, `run.sh` passes it as the
 adapter's 9th argument (empty = none; the stub ignores it) and the agent must answer with ONE JSON

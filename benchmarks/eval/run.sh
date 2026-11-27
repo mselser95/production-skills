@@ -106,8 +106,9 @@ now() { python3 -I -B -c 'import time;print(time.time())'; }
 # which confinement this row ran under; a report never pools different values
 case "$host" in
   claude) sandbox=seatbelt
-          if [[ "${EVAL_CLAUDE_NO_SANDBOX:-0}" == 1 ]]; then sandbox=off; echo "run.sh: WARNING: EVAL_CLAUDE_NO_SANDBOX=1, this claude cell runs UNCONFINED (sandbox:off)" >&2; fi ;;
-  codex) sandbox=codex ;;
+          if [[ "${EVAL_CLAUDE_NO_SANDBOX:-0}" == 1 || "${EVAL_NO_SANDBOX:-0}" == 1 ]]; then sandbox=off; echo "run.sh: WARNING: EVAL_NO_SANDBOX=1 / EVAL_CLAUDE_NO_SANDBOX=1, this claude cell runs UNCONFINED (sandbox:off)" >&2; fi ;;
+  codex) sandbox=seatbelt
+         if [[ "${EVAL_NO_SANDBOX:-0}" == 1 ]]; then sandbox=codex; echo "run.sh: WARNING: EVAL_NO_SANDBOX=1, this codex cell runs under Codex's OWN sandbox: reads are unconfined (sandbox:codex)" >&2; fi ;;
   *) sandbox="n/a" ;;
 esac
 err="" host_rc=-1 timed_out=0 grade_rc=-1 can_grade=0 auth_fail=0 t0="$(now)"
