@@ -34,6 +34,13 @@ svc="${2:-svc}"
 owner="${3:-mselser95}"
 [[ -n "$dest" ]] || { echo "usage: instantiate-template.sh <dest-dir> [service] [owner]" >&2; exit 2; }
 
+# ONE value grammar, shared with scripts/assemble.py (keep the two regexes identical):
+# a value reaches sed and paths, so `/`, `&`, `\` and `..` must never get that far.
+valid_value() { local LC_ALL=C re='^[A-Za-z0-9][A-Za-z0-9._-]*$'; [[ "$1" =~ $re ]]; }
+for v in "$svc" "$owner"; do
+  valid_value "$v" || { echo "instantiate: value $(printf '%q' "$v") is outside the value grammar [A-Za-z0-9][A-Za-z0-9._-]*" >&2; exit 2; }
+done
+
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 tpl="$root/prod-new/template"
 [[ -d "$tpl" ]] || { echo "instantiate: no template at $tpl" >&2; exit 2; }
