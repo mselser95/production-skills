@@ -107,6 +107,10 @@ findings=0
 # costs nothing today and a new one is refused when written. The regex also no
 # longer reads `||` as a pipe: `grep -q a <<<"$x" || grep -q b <<<"$x"` has no
 # writer to kill, and two advisories of the four were exactly that.
+# The one-pass sed output lives in a temp file; remove it on every way out
+# (normal end, early exit, INT/TERM -- bash runs the EXIT trap for those).
+strip_tmp=""
+trap '[[ -n "$strip_tmp" ]] && rm -f "$strip_tmp"' EXIT
 report() { printf '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4"; findings=$((findings+1)); }
 
 for f in "${files[@]}"; do
@@ -129,8 +133,18 @@ for f in "${files[@]}"; do
   grep -qE '^[[:space:]]*set[[:space:]].*pipefail' "$f" && uses_pipefail=1
 
   n=0
+  # The quote-stripped text of the WHOLE file, one sed process per file (not one
+  # per line), read in lockstep with the source on fd 3. sed is line-for-line, so
+  # line N there is line N here; it is read BEFORE the comment `continue` below so
+  # a skipped line cannot shift the pairing. If sed refuses the file (an illegal
+  # byte sequence aborts it mid-stream), the file is stripped line by line instead,
+  # which is what this gate did before and reports the same.
+  strip_tmp=$(mktemp "${TMPDIR:-/tmp}/hygiene-fitness.XXXXXX") || exit 2
+  per_line=0
+  sed "s/'[^']*'//g; s/\"[^\"]*\"//g" "$f" > "$strip_tmp" 2>/dev/null || per_line=1
   while IFS= read -r line; do
     n=$((n+1))
+    if (( ! per_line )); then IFS= read -r unquoted <&3 || unquoted=""; fi
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
 
     # `-[a-zA-Z0-9]+`, not `-[a-zA-Z]+`: the first version of this rule could
@@ -196,7 +210,10 @@ for f in "${files[@]}"; do
     # never shrinks, and the loop spins forever. Killed at 2 minutes on the first
     # run. A stripping step that cannot terminate is worse than the false
     # positives it was written to remove.
-    unquoted=$(printf '%s' "$line" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
+    # (`unquoted` came from the one-pass sed on fd 3, unless sed refused the file.)
+    if (( per_line )); then
+      unquoted=$(printf '%s' "$line" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
+    fi
     if (( uses_pipefail )) && [[ "$unquoted" =~ $grepq_pipe ]]; then
       report "$f" "$n" "GREPQ-UNDER-PIPEFAIL" "grep -q kills the writer with SIGPIPE (141); pipefail turns the MATCH into a false. Capture the output and match the variable"
     fi
@@ -221,7 +238,8 @@ for f in "${files[@]}"; do
     if [[ "$line" =~ (^|[\;\&\|\(]|if|then|\!)[[:space:]]*bash[[:space:]]+-n[[:space:]] ]]; then
       report "$f" "$n" "BASH-N-AS-VALIDATION" "parses and executes nothing; run the gate, then break what it guards and watch it go red"
     fi
-  done < "$f"
+  done < "$f" 3< "$strip_tmp"
+  rm -f "$strip_tmp"
 done
 
 if (( findings )); then
