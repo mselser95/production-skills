@@ -1,0 +1,33 @@
+[package]
+name = "svc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+publish = false
+description = "<SERVICE>: a units ledger service (zones: domain, app, adapter, platform)"
+repository = "https://github.com/<OWNER>/<SERVICE>"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "svc"
+path = "src/main.rs"
+
+[dependencies]
+# Signal handling for graceful shutdown (SIGINT + SIGTERM). Platform zone only.
+ctrlc = { version = "=3.5.3", features = ["termination"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+float_arithmetic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+as_conversions = "deny"

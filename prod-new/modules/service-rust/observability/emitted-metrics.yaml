@@ -1,0 +1,55 @@
+# Checked-in manifest of every metric series this service emits.
+#
+# Contract: tests/observability_contract.rs diffs this file against the
+# literal names passed to `counter_inc(` / `gauge_set(` in src/, in both
+# directions. A metric in code but not here fails; a metric here that no code
+# emits fails. Names start `svc_`; counters end `_total`.
+#
+# Fields:
+#   name   - the series name (exactly as emitted)
+#   type   - counter | gauge
+#   labels - closed label set, [] if none
+#   note   - anything an alert-rule author needs to know
+
+- name: svc_build_info
+  type: gauge
+  labels: [revision, config_digest]
+  note: >
+    Standard build_info convention: the value is ALWAYS 1 and the signal lives
+    in the labels. `revision` is the git SHA baked in at build time,
+    `config_digest` fingerprints this process's resolved config. Both are
+    bounded by deploy: one value per running process.
+
+- name: svc_units_conserved_violations_total
+  type: counter
+  labels: []
+  note: >
+    Ratified invariant units_conserved. Must stay 0 in production;
+    app::Ledger checks State::conservation_holds after every command and
+    increments this the instant it disagrees (and saves nothing). The
+    deliberate-violation proof is the app test
+    a_corrupt_store_fires_the_violation_counter_and_saves_nothing.
+
+- name: svc_events_total
+  type: counter
+  labels: [kind, outcome]
+  note: >
+    One increment per command. kind is deposit|withdraw; outcome is
+    applied|duplicate|rejected. Both label sets are closed.
+
+- name: svc_balance_units
+  type: gauge
+  labels: []
+  note: Balance in minor units after the last command that reached the store.
+
+- name: svc_last_applied_unix_seconds
+  type: gauge
+  labels: []
+  note: Unix time of the last applied event; a flat line means writes stopped.
+
+- name: svc_http_requests_total
+  type: counter
+  labels: [route, code]
+  note: >
+    One increment per HTTP reply. route is healthz|metrics|balance|deposit|
+    withdraw|other; code is the class 2xx|4xx|5xx.

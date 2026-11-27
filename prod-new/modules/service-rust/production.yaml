@@ -1,0 +1,99 @@
+# production.yaml -- this unit's production contract (Rust service).
+#
+# Semantic facts only; thresholds and obligations are derived from the org
+# tier policy (production-skills _shared/tier-policy.yaml). <OWNER>/<SERVICE>
+# are slots substituted at scaffold time. Every value below is a working
+# example a real service replaces with its own answers.
+
+version: v1
+
+service:
+  name: <SERVICE>
+  language: rust
+  tier: 1
+  tier_note: >
+    Example tier for the scaffold's units-ledger capability: T1 (a
+    data-correctness invariant, nothing irreversible-external-effect). A real
+    service replaces this with its own ratified answer to Phase 1 question 2.
+  policy: production-skills (single source, main)
+
+# Ratified invariants resolve to verification/ratified/. None is ratified yet:
+# units_conserved and duplicate_event_single_effect exist as executable
+# property tests (tests/ledger_properties.rs) in the candidate lane and wait
+# for a human ratification. Listing them here before then would be a claim the
+# standard's probe cannot cash.
+invariants: []
+
+capabilities:
+  - id: units_ledger
+    class: source_of_truth
+    package: src/domain, src/app
+  - id: health_metrics_surface
+    class: external_read
+    package: src/adapter/http
+
+# Mechanisms proven by a named test: "<file> <test fn>".
+implemented:
+  zone_boundaries: tests/architecture.rs every_zone_imports_only_what_its_direction_allows
+  observability_contract: tests/observability_contract.rs counters_match_the_manifest_both_ways
+  conservation_property: tests/ledger_properties.rs conservation_holds_over_generated_event_sequences
+  graceful_shutdown: tests/http_e2e.rs serves_the_ledger_and_stops_gracefully
+
+# Mechanisms paired with the symbol that must survive linking into the binary.
+driven:
+  tracing_recorder: svc::platform::telemetry::Recorder
+  graceful_shutdown: svc::platform::shutdown::install
+  config_single_reader: svc::platform::config::Config::from_env
+
+out_of_scope:
+  - compatibility: >
+      This scaffold publishes no wire format to a reader it does not own beyond
+      a plain-text and tiny JSON HTTP surface it also owns the consumers of.
+      This decline lapses when a second consumer appears: pin the shape then.
+  - write_surface_authn: >
+      The HTTP write routes (POST /deposit, /withdraw) are unauthenticated and
+      bind 127.0.0.1 by default. This decline lapses the moment the listen
+      address is anything but loopback.
+  - deployment_resource_limits: >
+      Nothing ships this scaffold yet, so there is no deployment artifact to
+      carry a memory or CPU limit. Lapses with the first deployment.
+  - chaos_engineering: >
+      Not deployed, so there is no production steady state to hold a
+      hypothesis about. Lapses on the first deployment.
+  - delivery: >
+      Nothing ships this scaffold yet: no environment, rollout or rollback to
+      rehearse. Lapses on the first deployment.
+  - consistency_verification: >
+      Single writer, immediately consistent: one in-memory state behind one
+      lock. Lapses when a second writer appears.
+  - backup_restore_test: >
+      The only store is process memory; there is nothing to back up or
+      restore. Lapses when a durable store is wired.
+  - partition_key: >
+      One ledger, one balance: there is no key to partition on. Lapses when
+      state gains a per-account (or per-tenant) key.
+  - published_contract: >
+      This scaffold publishes nothing to a consumer it does not own. Lapses
+      when an outbound sink is wired.
+  - authz_invariants: >
+      There is no subject (no account holder, tenant or personal data) to
+      authorize. Lapses when state gains a subject.
+
+scalability:
+  # no_durable_writes: state is process memory, so there is no fsync to trade.
+  durability_trade: no_durable_writes
+
+load_baseline:
+  margin_target: 3x
+
+auto_recovery:
+  recovery_bound: 30s
+
+data_lifecycle:
+  retention_policy: process-lifetime
+  deletion_mechanism: no_subject_data
+
+gates:
+  cheap: "make check-fast"
+  presubmit: "make verify"
+  advisory: "make test-advisory"
