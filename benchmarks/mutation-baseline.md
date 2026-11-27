@@ -18,12 +18,13 @@ here would be a threshold nobody derived.
 | `acceptance-gap-selftest.sh` | 9 |
 | `agent-dispatch-guard-selftest.sh` | 19 |
 | `agents-budget-selftest.sh` | 16 |
+| `brand-strings-selftest.sh` | 32 |
 | `candidate-lane-selftest.sh` | 46 |
 | `check-registries-selftest.sh` | 65 |
 | `coverage-ratchet-selftest.sh` | 9 |
 | `diagnostic-evidence-selftest.sh` | 4 |
 | `fuzz-row-selftest.sh` | 8 |
-| `gate-hygiene-fitness-selftest.sh` | 9 |
+| `gate-hygiene-fitness-selftest.sh` | 23 |
 | `gate-run-selftest.sh` | 17 |
 | `integration-lane-selftest.sh` | 35 |
 | `load-rows-selftest.sh` | 60 |
@@ -37,6 +38,7 @@ here would be a threshold nobody derived.
 | `probe-wiring-selftest.sh` | 14 |
 | `prove-mutation-selftest.sh` | 22 |
 | `provenance-headers-selftest.sh` | 12 |
+| `row-catalogue-selftest.sh` | 34 |
 | `row-vacuity-sweep-selftest.sh` | 19 |
 | `sbom-ordering-selftest.sh` | 10 |
 | `shard-selftest.sh` | 41 |
@@ -45,8 +47,10 @@ here would be a threshold nobody derived.
 | `skills-static-selftest.sh` | 21 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| `mutation-baseline-selftest.sh` | 11 |
+| `evidence-record-selftest.sh` | 106 |
+| `mutation-baseline-selftest.sh` | 31 |
+| `run-once-selftest.sh` | 137 |
 | `template-vendored-list-selftest.sh` | 5 |
 | `template-workflow-pins-selftest.sh` | 573 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1912** |
+| **total** | **2255** |
