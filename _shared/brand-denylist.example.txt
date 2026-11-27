@@ -1,0 +1,14 @@
+# brand-denylist.example.txt -- a NEUTRAL, invented list: it exists so the
+# brand-strings selftest and the docs have something to point at. It names no
+# real company or product, and this repo never will.
+#
+# HOW A USER POINTS THE GATE AT THEIR REAL LIST: keep the real list OUTSIDE
+# this repo (uncommitted), one entry per line, and either
+#   - set  BRAND_DENYLIST=/path/to/your/list.txt  (usually in your per-user,
+#     uncommitted config.sh), or
+#   - pass --denylist /path/to/your/list.txt  to _shared/probes/brand-strings.sh.
+# Format: one entry per line; '#' comments and blank lines are ignored; matching
+# is case-insensitive and by substring; an entry under 3 characters is refused.
+acmecorp
+examplebrand
+fooindustries
