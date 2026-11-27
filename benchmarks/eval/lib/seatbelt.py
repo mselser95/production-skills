@@ -1,87 +1,127 @@
 #!/usr/bin/env python3
 """seatbelt.py <workdir> <home> <gocache> <tmpdir> <read-only|workspace-write>
-              [--real-home H] [--repo R] [--task-dir T] [--deny-read P]...   -> sandbox-exec profile on stdout
+              [--deny-root P]... [--allow-read P]... [--deny-read P]... [--protect P]...   -> sandbox-exec profile on stdout
 
 WHY. Claude Code has no OS sandbox of its own here (Codex does). A tool
 allowlist is a prefix match: `go test -exec <prog>`, `go build -o /anywhere`,
 `git diff --output=/path` run or write outside the workdir. This profile is the
-actual control: reads and exec stay open (the agent must read Go's toolchain,
-git, ...), every file WRITE is denied except the paths below.
+actual control. The agent has unrestricted Bash and an open network, so anything
+it can READ it can send out: a list of secret paths to deny is never complete
+(other clones of the repo, the git object store with the hidden grader, shell
+history, other tools' config dirs, the profile file itself ...). So user data is
+DEFAULT-DENY and the cell re-allows only what it needs.
 
-Writable: the isolated host home, the per-cell GOCACHE, the per-cell TMPDIR,
-the workdir ONLY in workspace-write mode (in read-only mode the workdir is not
-writable), and /dev/null /dev/tty /dev/dtracehelper. Network is NOT filtered
-(seatbelt cannot filter by host): the agent holds its own API credential.
-
-READS. The agent has unrestricted Bash and an open network, so anything it can
-read it can send out: the read-deny list below is the control for secrets and
-for the answer key. Reads stay open otherwise (toolchain, git, system libs, the
-claude install). With --real-home: ssh, aws, gnupg, gh, gcloud, netrc, npmrc,
-docker, kube, the real ~/.claude* and ~/.codex, ~/Library/Keychains. With --repo:
-<repo>/benchmarks/eval/corpus. With --task-dir: the task dir (grader, reference).
-A writable/cell path under a denied path is refused (exit 2): fail closed.
-Paths are resolved to real paths (/var -> /private/var) because seatbelt
-matches the resolved path.
+Profile, in this order (Seatbelt uses the LAST matching rule):
+  1. (allow default); every file WRITE denied except /dev/null /dev/tty /dev/dtracehelper.
+  2. file-read* AND file-write* denied on the DENIED ROOTS: /Users /Volumes /tmp /private/tmp
+     /var/folders /private/var/folders (`--deny-root P` repeated REPLACES this list: tests use a
+     fake tree), and on /var/run + /private/var/run (sockets: docker, agents) always, plus every
+     path ending in docker.sock. Unix-socket connect is denied under the denied roots too.
+  3. re-allowed, by real path: READ+WRITE on home, GOCACHE, TMPDIR; READ on the workdir (WRITE
+     only in workspace-write); READ on each `--allow-read P` that lies under a denied root (the
+     CLI's install root, the Go toolchain, git's exec path); unix-socket connect inside the
+     three RW dirs.
+  4. `--deny-read P` (the repo, the task dir, auth dirs): denied again AFTER the re-allows, and a
+     docker.sock / agent socket rule last of all.
+Fail closed (exit 2): a re-allowed path that IS or CONTAINS a denied root, a `--deny-read` path or a
+`--protect` path (the profile's own dir): the re-allow would re-open what is denied. Paths are
+resolved with realpath (/var -> /private/var) because seatbelt matches the resolved path. No
+environment variable is read here. TCP is NOT filtered (the CLI must reach its API).
 """
 import os
 import sys
 
 sys.dont_write_bytecode = True
 
+DEFAULT_ROOTS = ("/Users", "/Volumes", "/private/tmp", "/tmp", "/private/var/folders", "/var/folders")
+RUNTIME_DENY = ("/private/var/run", "/var/run")
+SOCK_RE = r'(docker\.sock|agent[^/]*\.sock|S\.gpg-agent[^/]*|S\.ssh-agent[^/]*|/Listeners)$'
+USAGE = ("usage: seatbelt.py <workdir> <home> <gocache> <tmpdir> <read-only|workspace-write> "
+         "[--deny-root P]... [--allow-read P]... [--deny-read P]... [--protect P]...")
 
-HOME_SECRETS = (".ssh", ".aws", ".gnupg", ".config/gh", ".config/gcloud", ".netrc", ".npmrc", ".docker", ".kube",
-                ".claude", ".claude.json", ".codex", "Library/Keychains")
+
+def bad(p):
+    return '"' in p or "\\" in p or "\n" in p
+
+
+def within(p, root):
+    return p == root or p.startswith(root.rstrip("/") + "/")
+
+
+def forms(p):
+    """the path as given (absolute) and its real path: seatbelt matches the real one, humans give the other"""
+    a = os.path.abspath(p)
+    return sorted({a, os.path.realpath(p)})
 
 
 def main():
     if len(sys.argv) < 6 or sys.argv[5] not in ("read-only", "workspace-write"):
-        print("usage: seatbelt.py <workdir> <home> <gocache> <tmpdir> <read-only|workspace-write> [--real-home H] [--repo R] [--task-dir T] [--deny-read P]...", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return 2
     workdir, home, gocache, tmpdir, mode = sys.argv[1:6]
-    deny = []
     rest = sys.argv[6:]
     if len(rest) % 2:
         print("seatbelt.py: option without a value", file=sys.stderr)
         return 2
+    roots, allow_read, deny_read, protect = [], [], [], []
     for flag, val in zip(rest[0::2], rest[1::2]):
-        if flag == "--real-home":
-            deny += [os.path.join(val, h) for h in HOME_SECRETS]
-        elif flag == "--repo":
-            deny.append(os.path.join(val, "benchmarks", "eval", "corpus"))
-        elif flag in ("--task-dir", "--deny-read"):
-            deny.append(val)
+        if flag == "--deny-root":
+            roots.append(val)
+        elif flag == "--allow-read":
+            allow_read.append(val)
+        elif flag == "--deny-read":
+            deny_read.append(val)
+        elif flag == "--protect":
+            protect.append(val)
         else:
             print("seatbelt.py: unknown option %s" % flag, file=sys.stderr)
             return 2
-    denied = []
-    for d in deny:
-        r = os.path.realpath(d)
-        if '"' in r or "\\" in r:
-            print("seatbelt.py: refusing a path with a quote/backslash: %r" % r, file=sys.stderr)
+    roots = roots or list(DEFAULT_ROOTS)
+    droots = sorted({f for r in roots for f in forms(r)})
+    runtime = sorted({f for r in RUNTIME_DENY for f in forms(r)})
+    extras = sorted({f for r in deny_read for f in forms(r)})
+    prot = sorted({f for r in protect for f in forms(r)})
+    for p in droots + runtime + extras + prot + [workdir, home, gocache, tmpdir] + allow_read:
+        if bad(p) or bad(os.path.realpath(p)):
+            print("seatbelt.py: refusing a path with a quote/backslash/newline: %r" % p, file=sys.stderr)
             return 2
-        denied.append(r)
-    allowed = [home, gocache, tmpdir] + ([workdir] if mode == "workspace-write" else [])
-    subs = []
-    for p in allowed:
+
+    rw = [home, gocache, tmpdir] + ([workdir] if mode == "workspace-write" else [])
+    for p in [home, gocache, tmpdir, workdir]:
         os.makedirs(p, exist_ok=True)
+    ro = [workdir]
+    for p in allow_read:   # emitted only when something denies it; otherwise the re-allow is noise
         r = os.path.realpath(p)
-        if '"' in r or "\\" in r:
-            print("seatbelt.py: refusing a path with a quote/backslash: %r" % r, file=sys.stderr)
-            return 2
-        subs.append('(subpath "%s")' % r)
-    for p in [workdir, home, gocache, tmpdir]:
+        if any(within(r, d) for d in droots):
+            ro.append(p)
+    # fail closed: nothing re-allowed may be, or contain, something that stays denied
+    guarded = [("denied root", d) for d in droots + runtime] + [("denied path", d) for d in extras] + [("protected path", d) for d in prot]
+    for p in set(rw + ro + [workdir, home, gocache, tmpdir]):
         r = os.path.realpath(p)
-        for d in denied:
-            if r == d or r.startswith(d.rstrip("/") + "/"):
-                print("seatbelt.py: cell path %s lies under denied-read path %s" % (r, d), file=sys.stderr)
+        for what, d in guarded:
+            if within(d, r) or (within(r, d) and what != "denied root"):
+                print("seatbelt.py: %s lies %s %s %s; refusing to re-allow it" % (
+                    r, "at or above" if within(d, r) else "under", what, d), file=sys.stderr)
                 return 2
-    print("(version 1)")
-    print("(allow default)")
-    print("(deny file-write*)")
-    print("(allow file-write* %s" % " ".join(subs))
-    print('  (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))')
-    for d in denied:
-        print('(deny file-read* (subpath "%s"))' % d)
+
+    def subs(paths):
+        return " ".join('(subpath "%s")' % os.path.realpath(p) for p in dict.fromkeys(paths))
+
+    out = ["(version 1)", "(allow default)", "(deny file-write*)",
+           '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))']
+    out.append("(deny file-read* file-write* %s)" % " ".join('(subpath "%s")' % d for d in droots + runtime))
+    # a `remote unix-socket` form takes ONE filter (several are not OR-ed, found by trial): one rule per path
+    out += ['(deny network-outbound (remote unix-socket (subpath "%s")))' % d for d in droots]
+    out.append("(allow file-read* file-write* %s)" % subs(rw[:3]))
+    out += ['(allow network-outbound (remote unix-socket (subpath "%s")))' % os.path.realpath(p) for p in rw[:3]]
+    if mode == "workspace-write":
+        out.append("(allow file-write* %s)" % subs([workdir]))
+    out.append("(allow file-read* %s)" % subs(ro))
+    for d in extras:
+        out.append('(deny file-read* file-write* (subpath "%s"))' % d)
+    out.append('(deny file-read* file-write* (regex #"%s"))' % SOCK_RE)
+    out.append('(deny network-outbound (remote unix-socket (path-regex #"%s")))' % SOCK_RE)
+    print("\n".join(out))
     return 0
 
 

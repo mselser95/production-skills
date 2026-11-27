@@ -20,7 +20,7 @@ note() { # name ok(0/1) detail
 # Darwin only; a case that needs one is guarded with `darwin_only <id>`, which on any other
 # platform prints `SKIP <id> (darwin-only)` and returns 1. The ONE declaration of which cases
 # those are is the next line; the accounting at the bottom fails on any drift, on either platform.
-DARWIN_ONLY_DECLARED="15a 15b 15i 15n 15o"
+DARWIN_ONLY_DECLARED="15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x"
 PLATFORM="$(uname)"; DO_SEEN="" DO_SKIPPED=""
 darwin_only() {
   DO_SEEN="$DO_SEEN $1"
@@ -338,7 +338,10 @@ note "13i make eval runs selftest, libtests and lint" $ok "recipe: $mk_eval"
 # ---- 14: the real adapters against FAKE claude/codex binaries ------------------
 # Nothing here touches the real ~/.claude*, ~/.codex or keychain: every home,
 # auth dir and keychain command is injected and points under $tmp.
-fb="$tmp/fakebin"; frec="$tmp/frec"; mkdir -p "$fb" "$frec" "$tmp/outside"
+# frec (the fakes' record/canned-output dir) IS the fakes' own dir: a sandboxed fake binary can read only its own
+# install root (default-deny reads), and the canned output a case leaves for it (claude.out) must be readable there:
+# do NOT move it back under $tmp (15u proves a file there is unreadable to the fake, one in its install dir is readable).
+fb="$tmp/fakebin"; frec="$fb"; mkdir -p "$fb" "$tmp/outside"
 realhome="$tmp/callerhome"; realcodex="$tmp/realcodex"; realclaude="$tmp/realclaude"; mkdir -p "$realhome" "$realcodex" "$realclaude"
 mkdir -p "$realhome/.ssh" "$realhome/.claude"; echo SSH-CANARY >"$realhome/.ssh/canary"; echo CFG-CANARY >"$realhome/.claude/canary"
 corpusfile="$(find "$here/corpus" -name task.json | sort | head -1)"
@@ -381,14 +384,19 @@ an=0
 # adapter <host> <mode> <env-assignments...> : fresh home+workdir, hostile caller env, fake CLIs first on PATH
 adapter() {
   local h="$1" m="$2"; shift 2; an=$((an + 1))
-  AH="$tmp/ahome$an"; AW="$tmp/awork$an"; AG="$tmp/agocache$an"; mkdir -p "$AH" "$AW" "$AG"; echo "do the thing" >"$tmp/ap.txt"; echo "workdir file" >"$AW/README.md"
+  # ABASE=<dir> (default $tmp) puts the cell dirs elsewhere; AGIT=1 makes the workdir a git repo with one commit and one uncommitted edit
+  local base="$tmp" gitw="" denyroots="" a rest=(); for a in "$@"; do case "$a" in ABASE=*) base="${a#ABASE=}" ;; AGIT=*) gitw="${a#AGIT=}" ;; DENYROOTS=*) denyroots="${a#DENYROOTS=}" ;; *) rest+=("$a") ;; esac; done
+  set -- ${rest[@]+"${rest[@]}"}
+  AH="$base/ahome$an"; AW="$base/awork$an"; AG="$base/agocache$an"; mkdir -p "$AH" "$AW" "$AG"; echo "do the thing" >"$tmp/ap.txt"; echo "workdir file" >"$AW/README.md"
+  if [[ -n "$gitw" ]]; then ( cd "$AW" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 && git init -q . && git add -A \
+    && git -c user.name=e -c user.email=e@e.invalid -c commit.gpgsign=false commit -q -m i && echo more >>README.md ) >/dev/null 2>&1; fi
   rm -f "${frec:?}/codex.argv" "${frec:?}/codex.env" "${frec:?}/codex.cwd" "${frec:?}/codex.hadauth" "${frec:?}/codex.stdin"
   ( cd "$tmp" && env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u CODEX_API_KEY \
       ${nosb_default[@]+"${nosb_default[@]}"} PATH="$fb:$PATH" HOME="$realhome" OLDPWD=/some/repo CLAUDECODE=1 CLAUDE_EFFORT=high CLAUDE_CODE_SESSION_ID=sess-x \
       CLAUDE_CODE_MESSAGING_TOKEN=msgtok CLAUDE_CODE_CHILD_SESSION=1 EVAL_CANARY=canary-var \
       EVAL_GOCACHE="$AG" EVAL_CODEX_REAL_HOME="$realcodex" EVAL_CLAUDE_AUTH_DIR="$realclaude" \
       "$@" \
-      bash ${ADAPTER_SH_FLAGS:-} "$here/hosts/$h.sh" "$AW" "$AH" "$tmp/ap.txt" "$tmp/aout.txt" "$tmp/ausage.json" "" 0.5 "$m" "${ADAPTER_SCHEMA:-}" ) >"$tmp/adapter.out" 2>"$tmp/adapter.err"
+      bash ${ADAPTER_SH_FLAGS:-} "$here/hosts/$h.sh" "$AW" "$AH" "$tmp/ap.txt" "$tmp/aout.txt" "$tmp/ausage.json" "" 0.5 "$m" "${ADAPTER_SCHEMA:-}" ${denyroots:+--deny-roots "$denyroots"} ) >"$tmp/adapter.out" 2>"$tmp/adapter.err"
   return $?
 }
 argafter() { awk -v f="$2" 'p {print; exit} $0 == f {p=1}' "$1"; }   # the argv line following a flag
@@ -497,8 +505,9 @@ if darwin_only 15a; then
 rm -f "$tmp/outside/canary"   # earlier sandbox-OFF cases (14d/14e) legitimately wrote it
 adapter claude read-only "$TOK"; arc=$?; th="$AH/claude.touch"
 if [[ $arc -eq 0 ]] && grep -qx 'outside=denied' "$th" && grep -qx 'home=written' "$th" && grep -qx 'work=denied' "$th" \
-   && grep -qx 'gocache=written' "$th" && grep -qx 'tmp=written' "$th" && [[ ! -e "$tmp/outside/canary" ]]; then ok=0; else ok=1; fi
-note "15a read-only: seatbelt denies writes outside AND in the workdir; home, GOCACHE, TMPDIR writable" $ok "rc=$arc touch: $(tr '\n' ' ' <"$th" 2>&1) $(head -c 200 "$tmp/adapter.err")"
+   && grep -qx 'gocache=written' "$th" && grep -qx 'tmp=written' "$th" && [[ ! -e "$tmp/outside/canary" ]] \
+   && [[ -z "$(find "$AH" \( -name '*.sb' -o -name '.eval-seatbelt*' -o -name 'sbx.*' \) | head -1)" ]]; then ok=0; else ok=1; fi
+note "15a read-only: seatbelt denies writes outside AND in the workdir; home, GOCACHE, TMPDIR writable; no profile file under the agent's home" $ok "rc=$arc touch: $(tr '\n' ' ' <"$th" 2>&1) $(head -c 200 "$tmp/adapter.err")"
 fi
 if darwin_only 15b; then
 adapter claude workspace-write "$TOK"; arc=$?; th="$AH/claude.touch"
@@ -520,6 +529,165 @@ o2="$(argafter "$av" --allowedTools)|$(argafter "$av" --disallowedTools)|$(argaf
 if [[ "$o1" == "Read Glob Grep Bash|Edit Write NotebookEdit WebFetch WebSearch|dontAsk" && "$o2" == "Read Glob Grep Edit Write Bash|NotebookEdit WebFetch WebSearch|acceptEdits" ]]; then ok=0; else ok=1; fi
 note "15o sandbox ON: unrestricted Bash, no Bash(...) patterns, no escape-flag denies (read-only and workspace-write)" $ok "ro=$o1 ww=$o2"
 fi
+runclaude() { # runclaude <task> <outfile> [env...] -> row file; kept home in $KT
+  KT="$tmp/kt$((++kn))"; mkdir -p "$KT"; local task="$1" res="$2"; shift 2
+  env -u CODEX_API_KEY ${nosb_default[@]+"${nosb_default[@]}"} PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$KT" EVAL_KEEP=1 CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_SKILLS_ROOT="$skills" "$@" \
+    bash "$here/run.sh" --task "$task" --arm bare --host claude --rep 1 --out "$res" >/dev/null 2>"$tmp/runclaude.err"
+}
+kn=0
+# ---- 15p-15v: user data is DEFAULT-DENY (fake claude, REAL sandbox-exec) ----
+# 15p-15s run against a FAKE tree: the adapter's selftest-only --deny-roots (adapter arg DENYROOTS=) points the denied roots at $FT instead of the
+# user's real /Users, so the canaries are ours. The probe host records what it can and cannot do.
+FT="$tmp/ft"; DR="$tmp/aaa-decoy:$FT"; mkdir -p "$tmp/aaa-decoy"   # the decoy root sorts FIRST: a rule honouring only its first filter would miss $FT
+FHOME="$FT/u/me"; FREPO="$FT/dev/repo"; FREPO2="$FT/dev2/repo-copy"; FCELLS="$FT/cells"; SK="$tmp/sk"
+fbs="$tmp/fakebin-sb"; REAL_USER_HOME="$HOME"
+mkdir -p "$fbs" "$FHOME/.ssh" "$FHOME/.claude-sfx" "$FHOME/.config/tool" "$FREPO/benchmarks/eval/corpus/x" "$FREPO/benchmarks/eval/results" "$FT/dev2" "$FCELLS" "$SK"
+echo SSH-CANARY >"$FHOME/.ssh/id"; echo HIST-CANARY >"$FHOME/.claude-sfx/history.jsonl"; echo CRED-FILE-CANARY >"$FHOME/.config/tool/creds"
+echo GITCFG-CANARY >"$FHOME/.gitconfig"; echo ZSH-CANARY >"$FHOME/.zsh_history"
+echo 'hidden grader' >"$FREPO/benchmarks/eval/corpus/x/grade.sh"; echo '{}' >"$FREPO/benchmarks/eval/results/r.jsonl"
+( cd "$FREPO" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 && git init -q . && git add -A \
+  && git -c user.name=e -c user.email=e@e.invalid -c commit.gpgsign=false commit -q -m seed ) >/dev/null 2>&1
+cp -R "$FREPO" "$FREPO2"
+GITOBJ='HEAD:benchmarks/eval/corpus/x/grade.sh'
+if GIT_CONFIG_GLOBAL=/dev/null git --git-dir="$FREPO/.git" cat-file -p "$GITOBJ" >/dev/null 2>&1; then gsetup=0; else gsetup=1; fi
+note "15p0 setup: the fake repo is a real git repo whose object store yields the hidden file outside the sandbox" $gsetup "git cat-file failed on $FREPO"
+# sockets: docker.sock under the denied root, docker.sock OUTSIDE every denied root (only the socket rule can stop it), a control
+cat >"$tmp/sockd.py" <<'PY'
+import socket, sys, threading, time
+def serve(p):
+    s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(5)
+    while True:
+        c, _ = s.accept()
+        try:
+            c.send(b"hi")
+        except OSError:   # a client that already hung up must not kill the server
+            pass
+        c.close()
+for p in sys.argv[1:]:
+    threading.Thread(target=serve, args=(p,), daemon=True).start()
+print("READY", flush=True)
+time.sleep(300)
+PY
+echo TMP-CANARY >"$tmp/ftmp-canary"; echo INST-CANARY >"$fbs/install-canary"
+SOCK_IN="$FT/docker.sock"; SOCK_ROOT="$FT/plain.sock"; SOCK_OUT="$SK/docker.sock"; SOCK_CTL="$SK/ctl.sock"
+python3 -I -B "$tmp/sockd.py" "$SOCK_IN" "$SOCK_ROOT" "$SOCK_OUT" "$SOCK_CTL" >"$tmp/sockd.out" 2>&1 &
+SOCKD=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do grep -q READY "$tmp/sockd.out" 2>/dev/null && break; sleep 0.1; done
+sk_probe='import socket,sys
+s=socket.socket(socket.AF_UNIX)
+try:
+    s.connect(sys.argv[1]); print("connected")
+except OSError:
+    print("refused")'
+ok=0; for s in "$SOCK_IN" "$SOCK_ROOT" "$SOCK_OUT" "$SOCK_CTL"; do [[ "$(python3 -I -B -c "$sk_probe" "$s" 2>/dev/null)" == connected ]] || ok=1; done
+note "15q0 setup: all four unix sockets answer outside the sandbox" $ok "sockd: $(head -c 200 "$tmp/sockd.out")"
+cat >"$fbs/sandbox-exec" <<FAKE
+#!/usr/bin/env bash
+# records which profile the adapter generated, then runs the REAL sandbox-exec
+if [ "\$1" = -f ]; then printf '%s' "\$2" >"$frec/sbx.profile"; cp "\$2" "$frec/sbx.copy"; fi
+exec /usr/bin/sandbox-exec "\$@"
+FAKE
+cat >"$fbs/claude" <<FAKE
+#!/usr/bin/env bash
+R="\$CLAUDE_CONFIG_DIR"; cat >/dev/null
+out="\$R/probe.out"; : >"\$out"
+p() { echo "\$1=\$2" >>"\$out"; }
+r() { if cat "\$2" >/dev/null 2>&1; then p "\$1" read; else p "\$1" denied; fi; }
+w() { if touch "\$2" 2>/dev/null; then p "\$1" written; else p "\$1" denied; fi; }
+sk() { v="\$(python3 -I -B -c '$sk_probe' "\$2" 2>/dev/null)"; p "\$1" "\${v:-error}"; }
+r ssh "$FHOME/.ssh/id"; r history "$FHOME/.claude-sfx/history.jsonl"; r toolcfg "$FHOME/.config/tool/creds"; r gitconfig "$FHOME/.gitconfig"
+r zhist "$FHOME/.zsh_history"; r corpus "$FREPO/benchmarks/eval/corpus/x/grade.sh"; r results "$FREPO/benchmarks/eval/results/r.jsonl"
+r repocopy "$FREPO2/benchmarks/eval/corpus/x/grade.sh"; r githeadfile "$FREPO/.git/HEAD"
+if ls "$FHOME" >/dev/null 2>&1; then p lshome listed; else p lshome denied; fi
+if git --git-dir="$FREPO/.git" cat-file -p "$GITOBJ" >/dev/null 2>&1; then p gitobj read; else p gitobj denied; fi
+if git --git-dir="$FREPO2/.git" cat-file -p "$GITOBJ" >/dev/null 2>&1; then p gitobj2 read; else p gitobj2 denied; fi
+prof="\$(cat "$frec/sbx.profile" 2>/dev/null)"; if [ -n "\$prof" ]; then p profknown yes; else p profknown no; fi
+if [ -n "\$prof" ] && cat "\$prof" >/dev/null 2>&1; then p profile read; else p profile denied; fi
+if [ -n "\$prof" ] && ls "\$(dirname "\$prof")" >/dev/null 2>&1; then p profdir listed; else p profdir denied; fi
+if ls "$REAL_USER_HOME" >/dev/null 2>&1; then p realhome listed; else p realhome denied; fi
+sk sockin "$SOCK_IN"; sk sockroot "$SOCK_ROOT"; sk sockout "$SOCK_OUT"; sk sockctl "$SOCK_CTL"
+r workfile "\$PWD/README.md"; r tmpfile "$tmp/ftmp-canary"; r installfile "\$(dirname "\$0")/install-canary"
+if git status --short >/dev/null 2>&1; then p gitstatus ok; else p gitstatus failed; fi
+git diff >"\$R/diff.out" 2>/dev/null; if grep -q more "\$R/diff.out"; then p gitdiff ok; else p gitdiff failed; fi
+w home "\$R/canary"; w gocache "\$GOCACHE/canary"; w tmp "\$TMPDIR/canary"; w work "\$PWD/canary"
+printf '%s\n' "\$PWD" "\$HOME" "\$TMPDIR" "\$GOCACHE" "\$CLAUDE_CONFIG_DIR" "\$CLAUDE_CODE_TMPDIR" "\$@" >"\$R/names.txt"
+echo '{"result":"OK","is_error":false,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":2}}'
+FAKE
+chmod +x "$fbs/sandbox-exec" "$fbs/claude"
+TID=zq7taskid; ttask="$(TASK_KIND=seeded mktask "$tmp/tcorp" prod-review "$TID" dev good)"
+pvg() { grep -qx "$2" "$1/probe.out"; }   # pvg <home> <name=value>
+pvs() { tr '\n' ' ' <"$1/probe.out" 2>/dev/null; }
+if darwin_only 15p; then
+adapter claude read-only "$TOK" ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$fbs:$fb:$PATH" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask"; arc=$?; PH="$AH"; ok=1
+if [[ $arc -eq 0 ]] && pvg "$PH" ssh=denied && pvg "$PH" history=denied && pvg "$PH" toolcfg=denied && pvg "$PH" gitconfig=denied && pvg "$PH" zhist=denied \
+   && pvg "$PH" corpus=denied && pvg "$PH" results=denied && pvg "$PH" repocopy=denied && pvg "$PH" githeadfile=denied && pvg "$PH" lshome=denied \
+   && pvg "$PH" gitobj=denied && pvg "$PH" gitobj2=denied && pvg "$PH" profknown=yes && pvg "$PH" profile=denied && pvg "$PH" profdir=denied \
+   && [[ "$(cat "$frec/sbx.profile")" != "$PH"/* ]]; then ok=0; fi
+note "15p default-deny: the fake home's secrets/history/config, the repo (corpus, results, .git object store), a repo copy and the sandbox profile (and its dir) are unreadable; the home is not listable" $ok "rc=$arc probe: $(pvs "$PH") $(head -c 200 "$tmp/adapter.err")"
+fi
+if darwin_only 15q; then
+ok=1; if [[ $arc -eq 0 ]] && pvg "$PH" sockctl=connected && pvg "$PH" sockin=refused && pvg "$PH" sockroot=refused && pvg "$PH" sockout=refused; then ok=0; fi
+note "15q a unix socket cannot be connected to when named docker.sock (under a denied root AND outside every root) or when it lies under a denied root under any name; a control socket outside the roots can" $ok "probe: $(pvs "$PH")"
+fi
+if darwin_only 15r; then
+ok=1; if [[ $arc -eq 0 ]] && pvg "$PH" workfile=read && pvg "$PH" gitstatus=ok && pvg "$PH" gitdiff=ok && pvg "$PH" home=written && pvg "$PH" gocache=written && pvg "$PH" tmp=written; then ok=0; fi
+note "15r the cell still works: workdir readable, git status/diff run there, home/GOCACHE/TMPDIR writable" $ok "probe: $(pvs "$PH")"
+fi
+if darwin_only 15s; then
+ok=1; pvg "$PH" work=denied && ok=0
+adapter claude workspace-write "$TOK" ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$fbs:$fb:$PATH" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask"; arc=$?
+if [[ $arc -eq 0 ]] && pvg "$AH" work=written && pvg "$AH" ssh=denied && [[ $ok -eq 0 ]]; then ok=0; else ok=1; fi
+note "15s workdir write: denied in read-only, allowed in workspace-write (secrets still denied)" $ok "ww probe: $(pvs "$AH")"
+fi
+if darwin_only 15t; then
+# through run.sh: the cell's dirs must say nothing about the task (id, kind, skill) and nor must the profile
+runclaude "$ttask" "$tmp/r15t.jsonl" PATH="$fbs:$fb:$PATH"; rc=$?
+tprobe="$(find "$KT" -name names.txt | head -1)"; hits=""
+if [[ -n "$tprobe" ]]; then hits="$(grep -Eio "$TID|seeded|clean" "$tprobe" "$frec/sbx.copy" | head -3 | tr '\n' ' ')"; fi
+if [[ $rc -eq 0 && -n "$tprobe" && -s "$frec/sbx.copy" && -z "$hits" ]]; then ok=0; else ok=1; fi
+note "15t temp dir names, pwd/HOME/TMPDIR/GOCACHE/argv and the profile never contain the task id, kind or 'seeded'/'clean'" $ok "rc=$rc hits: $hits names: $(head -c 300 "$tprobe" 2>/dev/null | tr '\n' ' ')"
+fi
+kill "$SOCKD" 2>/dev/null
+if darwin_only 15u; then
+# the DEFAULT roots, against the caller's real home: only its path is used, its contents are never read or printed
+adapter claude read-only "$TOK" AGIT=1 PATH="$fbs:$fb:$PATH" EVAL_TASK_DIR="$ttask"; arc=$?
+fbsrp="$(python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$fbs")"; tmprp="$(python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$tmp")"
+if [[ $arc -eq 0 ]] && pvg "$AH" realhome=denied && pvg "$AH" workfile=read && pvg "$AH" gitstatus=ok && pvg "$AH" corpus=denied \
+   && pvg "$AH" tmpfile=denied && pvg "$AH" installfile=read && [[ -s "$tmp/ftmp-canary" ]] \
+   && grep -qF "(subpath \"$fbsrp\")" "$frec/sbx.copy" && ! grep -qF "(subpath \"$tmprp\")" "$frec/sbx.copy"; then ok=0; else ok=1; fi
+note "15u default roots: ls of the caller's real home fails while a workdir read and git status work; a file under the denied temp tree is unreadable to the fake host and the same kind of file in its install dir is readable; only the install dir (not its parent) is re-allowed" $ok "rc=$arc probe: $(pvs "$AH") $(head -c 200 "$tmp/adapter.err")"
+fi
+if darwin_only 15v; then
+# the real CLI must START under the generated profile (no model call: --version). The adapter's own
+# resolution (real path of `claude`, its dir re-allowed) is replayed here against the same seatbelt.py.
+if cl="$(command -v claude)" && [[ -n "$cl" ]]; then
+  vroot="$tmp/vcell"; mkdir -p "$vroot/work" "$vroot/home"
+  real="$(python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$cl")"
+  python3 -I -B "$here/lib/seatbelt.py" "$vroot/work" "$vroot/home" "$vroot/gocache" "$vroot/tmp" read-only --allow-read "$(dirname "$real")" \
+    --deny-read "$(cd "$here/../.." && pwd)" >"$vroot/p.sb"; prc=$?
+  vout="$( (cd "$vroot/work" && env -i PATH="$PATH" HOME="$vroot/home" CLAUDE_CONFIG_DIR="$vroot/home" TMPDIR="$vroot/tmp" /usr/bin/sandbox-exec -f "$vroot/p.sb" "$real" --version) 2>&1)"; vrc=$?
+  if [[ $prc -eq 0 && $vrc -eq 0 && "$vout" == *Claude* ]]; then ok=0; else ok=1; fi
+  note "15v the real claude binary starts under the generated profile (claude --version exits 0)" $ok "prc=$prc vrc=$vrc out: $(echo "$vout" | head -c 200)"
+else
+  printf '  SKIP  15v (no claude on PATH; not counted)\n'
+fi
+fi
+if darwin_only 15w; then
+# no environment variable can weaken the roots: the old hook name and any other EVAL_SEATBELT_* are inert
+adapter claude read-only "$TOK" AGIT=1 PATH="$fbs:$fb:$PATH" EVAL_TASK_DIR="$ttask" EVAL_SEATBELT_DENY_ROOTS="$FT" EVAL_SEATBELT_DENY_ROOT="$FT" EVAL_SEATBELT_ROOTS=/nonexistent EVAL_SEATBELT_OFF=1; arc=$?
+if [[ $arc -eq 0 ]] && pvg "$AH" realhome=denied && pvg "$AH" tmpfile=denied && grep -qF '(subpath "/Users")' "$frec/sbx.copy" && ! grep -qF "$FT" "$frec/sbx.copy"; then ok=0; else ok=1; fi
+note "15w EVAL_SEATBELT_DENY_ROOTS (and any EVAL_SEATBELT_*) exported in the caller's environment has NO effect on the generated profile" $ok "rc=$arc probe: $(pvs "$AH")"
+fi
+if darwin_only 15x; then
+# the CLI's install dir is re-allowed for READ; if it would contain a denied path (the real auth/config dir) the profile is refused
+mkdir -p "$tmp/inst/auth"; cp "$fbs/claude" "$tmp/inst/claude"; chmod +x "$tmp/inst/claude"
+adapter claude read-only "$TOK" PATH="$tmp/inst:$fbs:$fb:$PATH" EVAL_CLAUDE_AUTH_DIR="$tmp/inst/auth"; arc=$?
+if [[ $arc -eq 79 && ! -e "$AH/probe.out" ]] && grep -q 'lies at or above' "$tmp/adapter.err" 2>/dev/null; then ok=0; else ok=1; fi
+note "15x install dir that contains the real auth/config dir: the profile is refused (exit 79), the host never starts" $ok "rc=$arc $(head -c 300 "$tmp/adapter.err")"
+adapter claude read-only "$TOK" PATH="$tmp/inst:$fbs:$fb:$PATH"; arc=$?
+if [[ $arc -eq 0 && -e "$AH/probe.out" ]]; then ok=0; else ok=1; fi
+note "15x2 control: the same install dir with the auth dir elsewhere starts normally" $ok "rc=$arc $(head -c 300 "$tmp/adapter.err")"
+fi
 adapter claude read-only "$TOK" EVAL_CLAUDE_NO_SANDBOX=0 PATH="$fb:$nosb"; arc=$?
 if [[ $arc -eq 79 && ! -e "$AH/claude.argv" ]]; then ok=0; else ok=1; fi
 note "15c no sandbox-exec -> adapter exits 79 and the host never starts (no silent unconfined run)" $ok "rc=$arc $(head -c 160 "$tmp/adapter.err")"
@@ -534,12 +702,6 @@ done
 if [[ -z "$missing" ]]; then ok=0; else ok=1; fi
 note "15e escape-flag deny patterns are present in --disallowedTools" $ok "missing:$missing"
 # through run.sh: rows carry sandbox:<mode>; agent_mode really selects the permission mode (N3)
-runclaude() { # runclaude <task> <outfile> [env...] -> row file; kept home in $KT
-  KT="$tmp/kt$((++kn))"; mkdir -p "$KT"; local task="$1" res="$2"; shift 2
-  env -u CODEX_API_KEY ${nosb_default[@]+"${nosb_default[@]}"} PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$KT" EVAL_KEEP=1 CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_SKILLS_ROOT="$skills" "$@" \
-    bash "$here/run.sh" --task "$task" --arm bare --host claude --rep 1 --out "$res" >/dev/null 2>"$tmp/runclaude.err"
-}
-kn=0
 mkdir -p "$tmp/mcorp"; wtask="$(mktask "$tmp/mcorp" prod-review t-ww dev good)"
 python3 -I -B - "$wtask/task.json" <<'PY'
 import json, sys
