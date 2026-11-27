@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """seatbelt.py <workdir> <home> <gocache> <tmpdir> <read-only|workspace-write>
-              [--deny-root P]... [--allow-read P]... [--deny-read P]... [--reallow-read P]... [--protect P]...   -> sandbox-exec profile on stdout
+              [--deny-root P]... [--allow-read P]... [--deny-read P]... [--reallow-read P]... [--protect P]... [--readonly-file P]...   -> sandbox-exec profile on stdout
 
 WHY. Claude Code has no OS sandbox of its own here (Codex does). A tool
 allowlist is a prefix match: `go test -exec <prog>`, `go build -o /anywhere`,
@@ -29,6 +29,9 @@ Profile, in this order (Seatbelt uses the LAST matching rule):
      ~/.codex/packages/...): READ re-allowed AFTER the denies, for that one dir only; siblings and
      parents stay denied. Refused (exit 2) if P is, or contains, a `--protect` path or a
      `--deny-read` path, or if it is at or above a denied root.
+  6. `--readonly-file P` (a staged credential inside the RW home): `(deny file-write* (literal P))` last of
+     all, so the file stays READABLE but cannot be written, truncated, unlinked, renamed over, replaced by a
+     symlink or created anew under that name (proved by selftest 14v3). P is taken as dirname-realpath + basename.
 Fail closed (exit 2): a re-allowed path that IS or CONTAINS a denied root, a `--deny-read` path or a
 `--protect` path (the profile's own dir): the re-allow would re-open what is denied. Paths are
 resolved with realpath (/var -> /private/var) because seatbelt matches the resolved path. No
@@ -43,7 +46,7 @@ DEFAULT_ROOTS = ("/Users", "/Volumes", "/private/tmp", "/tmp", "/private/var/fol
 RUNTIME_DENY = ("/private/var/run", "/var/run")
 SOCK_RE = r'(docker\.sock|agent[^/]*\.sock|S\.gpg-agent[^/]*|S\.ssh-agent[^/]*|/Listeners)$'
 USAGE = ("usage: seatbelt.py <workdir> <home> <gocache> <tmpdir> <read-only|workspace-write> "
-         "[--deny-root P]... [--allow-read P]... [--deny-read P]... [--reallow-read P]... [--protect P]...")
+         "[--deny-root P]... [--allow-read P]... [--deny-read P]... [--reallow-read P]... [--protect P]... [--readonly-file P]...")
 
 
 def bad(p):
@@ -69,7 +72,7 @@ def main():
     if len(rest) % 2:
         print("seatbelt.py: option without a value", file=sys.stderr)
         return 2
-    roots, allow_read, deny_read, protect, reallow = [], [], [], [], []
+    roots, allow_read, deny_read, protect, reallow, rofiles = [], [], [], [], [], []
     for flag, val in zip(rest[0::2], rest[1::2]):
         if flag == "--deny-root":
             roots.append(val)
@@ -81,6 +84,8 @@ def main():
             reallow.append(val)
         elif flag == "--protect":
             protect.append(val)
+        elif flag == "--readonly-file":
+            rofiles.append(val)
         else:
             print("seatbelt.py: unknown option %s" % flag, file=sys.stderr)
             return 2
@@ -89,7 +94,7 @@ def main():
     runtime = sorted({f for r in RUNTIME_DENY for f in forms(r)})
     extras = sorted({f for r in deny_read for f in forms(r)})
     prot = sorted({f for r in protect for f in forms(r)})
-    for p in droots + runtime + extras + prot + [workdir, home, gocache, tmpdir] + allow_read + reallow:
+    for p in droots + runtime + extras + prot + [workdir, home, gocache, tmpdir] + allow_read + reallow + rofiles:
         if bad(p) or bad(os.path.realpath(p)):
             print("seatbelt.py: refusing a path with a quote/backslash/newline: %r" % p, file=sys.stderr)
             return 2
@@ -163,6 +168,8 @@ def main():
                         ranc.append(d)
                     d = os.path.dirname(d)
         out.append("(allow file-read-metadata %s)" % " ".join('(literal "%s")' % d for d in ranc))
+    for p in rofiles:   # the entry itself (never resolved through a symlink): read stays allowed, every write to the name is denied
+        out.append('(deny file-write* (literal "%s"))' % os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(p))), os.path.basename(p)))
     out.append('(deny file-read* file-write* (regex #"%s"))' % SOCK_RE)
     out.append('(deny network-outbound (remote unix-socket (path-regex #"%s")))' % SOCK_RE)
     print("\n".join(out))

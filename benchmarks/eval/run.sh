@@ -18,6 +18,7 @@
 #        EVAL_SKILLS_ROOT     where <skill>/ dirs live (default: repo root)
 #        EVAL_REPO_ROOT       repo whose git history yields skill_sha/harness_sha (tests)
 # Exit:  0 a row was written | 2 bad usage / task unreadable (no row possible)
+#        a workspace-write task: the grader is REFUSED (row error "grader-unconfined", pass:false, exit 0)
 #        3 a row was written but the cell cannot run on this machine (error "auth" or "sandbox"): a live loop must STOP
 set -uo pipefail
 export PYTHONDONTWRITEBYTECODE=1
@@ -147,6 +148,13 @@ fi
 t1="$(now)"
 
 # the grader runs OUTSIDE the agent's view: cwd is the temp root, not the workdir
+if [[ $can_grade -eq 1 && "$agent_mode" == workspace-write ]]; then
+  # The grader runs OUTSIDE any sandbox, on the workdir. A workspace-write agent writes that tree: a grader that builds
+  # or tests it (`go test`) would execute agent-written code unconfined, with the user's privileges. REFUSED (the
+  # sandboxed grader is a later task); the host has already run, so this belongs in a loop's pre-flight, not here.
+  can_grade=0; err="grader-unconfined"
+  echo "run.sh: refusing to run the grader of $task_id (agent_mode workspace-write): it would execute agent-written files unconfined (error: grader-unconfined)" >&2
+fi
 if [[ $can_grade -eq 1 ]]; then
   (cd "$tmp" && python3 -I -B "$here/lib/limited.py" 120 -- bash "$task/grade.sh" "$workdir" "$outf") >"$gradeo" 2>"$gradee" &
   child=$!; wait "$child"; grade_rc=$?; child=""

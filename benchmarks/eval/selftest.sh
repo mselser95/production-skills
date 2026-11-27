@@ -20,7 +20,7 @@ note() { # name ok(0/1) detail
 # Darwin only; a case that needs one is guarded with `darwin_only <id>`, which on any other
 # platform prints `SKIP <id> (darwin-only)` and returns 1. The ONE declaration of which cases
 # those are is the next line; the accounting at the bottom fails on any drift, on either platform.
-DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14t 14u 14u2 14v 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x 15y"
+DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14s3 14t 14u 14u2 14v 14v2 14v3 14v4 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x 15y 15z1 15z2 15z3 15z4 19x2"
 PLATFORM="$(uname)"; DO_SEEN="" DO_SKIPPED=""
 darwin_only() {
   DO_SEEN="$DO_SEEN $1"
@@ -353,6 +353,7 @@ t() { if touch "\$2" 2>/dev/null; then echo "\$1=written"; else echo "\$1=denied
 { t outside "$tmp/outside/canary"; t home "\$R/canary"; t work "\$PWD/canary"; t gocache "\$GOCACHE/canary"; t tmp "\$TMPDIR/canary"; } >"\$R/claude.touch"
 r() { if cat "\$2" >/dev/null 2>&1; then echo "\$1=read"; else echo "\$1=denied"; fi; }
 { r ssh "$realhome/.ssh/canary"; r claudecfg "$realhome/.claude/canary"; r taskdir "$good/grade.sh"; r corpus "$corpusfile"; r workfile "\$PWD/README.md"; } >"\$R/claude.read"
+if [ -f "$frec/forge" ]; then echo '{"result":"FORGED","is_error":false,"total_cost_usd":99,"usage":{"input_tokens":999999,"output_tokens":999999}}' >"\$R/.eval-claude.json"; fi
 if [ -f "$frec/claude.out" ]; then cat "$frec/claude.out"; else
 echo '{"result":"OK","is_error":false,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":2}}'; fi
 FAKE
@@ -365,6 +366,15 @@ else cat >/dev/null; fi
 lastf=""; prev=""; for a in "\$@"; do if [ "\$prev" = -o ]; then lastf="\$a"; fi; prev="\$a"; done
 if [ -n "\$lastf" ] && [ -f "$frec/codex.last" ]; then cat "$frec/codex.last" >"\$lastf"; fi
 if [ -f "\$CODEX_HOME/auth.json" ]; then echo yes >"$frec/codex.hadauth"; else echo no >"$frec/codex.hadauth"; fi
+if [ -f "\$CODEX_HOME/auth.json" ]; then python3 -I -B -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode&0o777))' "\$CODEX_HOME/auth.json" >"$frec/codex.authmode"; cat "\$CODEX_HOME/auth.json" >"$frec/codex.authcopy"; fi
+echo \$\$ >"$frec/codex.pid"
+if [ -f "$frec/hang" ]; then echo ready >"$frec/ready.fifo"; exec sleep 30; fi
+if [ -f "$frec/fail" ]; then exit 7; fi
+if [ -f "$frec/forge" ]; then   # the agent forges every file the OLD adapter read its answer and usage from (selftest 19x)
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"FORGED"}}' '{"type":"turn.completed","usage":{"input_tokens":999999,"output_tokens":999999}}' >"\$CODEX_HOME/.eval-codex.jsonl"
+  echo FORGED >"\$CODEX_HOME/.eval-codex-last.txt"
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"FORGED2"}}' >"\$CODEX_HOME/f.tmp"; mv -f "\$CODEX_HOME/f.tmp" "\$CODEX_HOME/.eval-codex.jsonl"
+fi
 if [ -f "$frec/rotate" ]; then echo '{"canary":"ROTATED-CANARY"}' >"\$CODEX_HOME/auth.json"; fi
 if [ -f "$frec/changereal" ]; then echo '{"canary":"OTHER-PROCESS-CANARY"}' >"$realcodex/auth.json"; fi
 if [ -f "$frec/changesame" ]; then echo '{"canary":"ORIG-CANAXX"}' >"$realcodex/auth.json"; fi
@@ -492,12 +502,16 @@ if [[ $arc -eq 0 && "$(cat "$frec/codex.hadauth")" == yes && ! -e "$AH/auth.json
 note "14l codex: auth copy exists for the run, is gone after, real file untouched, nothing printed" $ok "rc=$arc had=$(cat "$frec/codex.hadauth" 2>&1)"
 if grep -q 'CODEX_API_KEY' "$frec/codex.env"; then ok=1; else ok=0; fi
 note "14m codex: no API key variable when the auth.json route is used" $ok "env had CODEX_API_KEY"
-: >"$frec/rotate"
+# 14n BEFORE: a token rotated by the CLI inside its copy was written back to the real auth.json (atomic, 600).
+# AFTER (the model controls the cell home, so nothing may be copied out of it): the same rotation leaves the real file
+# byte-identical and the copy is scrubbed. This runs under EVAL_NO_SANDBOX=1, so it also proves the write-back is gone there.
+sum16() { shasum -a 256 <"$1" | cut -c1-16; }
+: >"$frec/rotate"; s_before="$(sum16 "$realcodex/auth.json")"
 adapter codex read-only; arc=$?
-perm="$(python3 -I -B -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$realcodex/auth.json")"
-if [[ $arc -eq 0 && ! -e "$AH/auth.json" && "$(cat "$realcodex/auth.json")" == *ROTATED-CANARY* && "$perm" == 0o600 \
+s_after="$(sum16 "$realcodex/auth.json")"
+if [[ $arc -eq 0 && ! -e "$AH/auth.json" && "$s_before" == "$s_after" && "$(cat "$realcodex/auth.json")" != *ROTATED-CANARY* \
    && -z "$(find "$realcodex" -name '.auth.*' | head -1)" ]]; then ok=0; else ok=1; fi
-note "14n codex: a rotated token is written back atomically (600) and the copy removed" $ok "rc=$arc perm=$perm"
+note "14n codex: a copy rotated or rewritten inside the cell is NOT written back (real auth.json sha $s_before -> $s_after), the copy is scrubbed" $ok "rc=$arc before=$s_before after=$s_after"
 rm -f "$frec/rotate"; echo '{"canary":"ORIG-CANARY"}' >"$realcodex/auth.json"
 adapter codex read-only CODEX_API_KEY=apikey-canary; arc=$?
 if [[ $arc -eq 0 && "$(cat "$frec/codex.hadauth")" == no && "$(grep -c '^CODEX_API_KEY=apikey-canary$' "$frec/codex.env")" == 1 ]]; then ok=0; else ok=1; fi
@@ -509,6 +523,58 @@ env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" TMPDIR=
 if [[ $rc -eq 0 && "$(nrows "$tmp/r14p.jsonl")" == 1 && -n "$(find "$keeptmp" -mindepth 1 -maxdepth 1 -name 'eval-cell.*' | head -1)" \
    && -z "$(find "$keeptmp" -name auth.json | head -1)" && "$(cat "$frec/codex.hadauth")" == yes ]]; then ok=0; else ok=1; fi
 note "14p EVAL_KEEP=1 keeps the cell dir but never the credential copy" $ok "rc=$rc left: $(find "$keeptmp" -name 'auth.json' | head -2 | tr '\n' ' ')"
+
+# 14n2: the staged copy is a fresh 0600 file with the real file's bytes; the real file is untouched
+echo '{"canary":"ORIG-CANARY"}' >"$realcodex/auth.json"; chmod 600 "$realcodex/auth.json"; s_before="$(sum16 "$realcodex/auth.json")"
+adapter codex read-only; arc=$?
+if [[ $arc -eq 0 && "$(cat "$frec/codex.authmode")" == 0o600 ]] && cmp -s "$frec/codex.authcopy" "$realcodex/auth.json" && [[ "$(sum16 "$realcodex/auth.json")" == "$s_before" && ! -e "$AH/auth.json" ]]; then ok=0; else ok=1; fi
+note "14n2 codex: the staged auth copy is mode 0600 with the real file's bytes, scrubbed after, real file untouched" $ok "rc=$arc mode=$(cat "$frec/codex.authmode" 2>&1)"
+# 14n3: a real auth.json that is a symlink (or not a regular file) is REFUSED, never followed: exit 78, host never starts, no copy
+symreal="$tmp/symreal"; mkdir -p "$symreal"; echo SYMLINK-TARGET-CANARY >"$tmp/symtarget"; ln -s "$tmp/symtarget" "$symreal/auth.json"
+adapter codex read-only EVAL_CODEX_REAL_HOME="$symreal"; arc=$?
+if [[ $arc -eq 78 && ! -e "$frec/codex.argv" && ! -e "$AH/auth.json" && ! -L "$AH/auth.json" ]] && ! grep -rq SYMLINK-TARGET-CANARY "$AH" "$tmp/adapter.out" "$tmp/adapter.err"; then ok=0; else ok=1; fi
+note "14n3 codex staging: a symlinked real auth.json is refused (exit 78, nothing staged, target content never copied)" $ok "rc=$arc $(head -c 160 "$tmp/adapter.err")"
+dirreal="$tmp/dirreal"; mkdir -p "$dirreal/auth.json"
+adapter codex read-only EVAL_CODEX_REAL_HOME="$dirreal"; arc=$?
+if [[ $arc -eq 78 && ! -e "$frec/codex.argv" && ! -e "$AH/auth.json" ]]; then ok=0; else ok=1; fi
+note "14n4 codex staging: a real auth.json that is not a regular file is refused (exit 78)" $ok "rc=$arc"
+# 14n5: scrub after a FAILING cli, and on SIGTERM to the adapter (the EXIT trap path; run.sh:75 is only a backstop)
+: >"$frec/fail"; adapter codex read-only; arc=$?; rm -f "$frec/fail"
+if [[ $arc -eq 7 && "$(cat "$frec/codex.hadauth")" == yes && ! -e "$AH/auth.json" ]] && cmp -s "$realcodex/auth.json" <(echo '{"canary":"ORIG-CANARY"}'); then ok=0; else ok=1; fi
+note "14n5 codex: the copy is scrubbed after a failing CLI (exit 7 propagated), real file untouched" $ok "rc=$arc"
+rm -f "$frec/ready.fifo" "$frec/codex.pid"; mkfifo "$frec/ready.fifo"; exec 7<>"$frec/ready.fifo"; : >"$frec/hang"
+mkdir -p "$tmp/sigh" "$tmp/sigw" "$tmp/sigg"; echo "do the thing" >"$tmp/ap.txt"
+( cd "$tmp" && exec env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" EVAL_GOCACHE="$tmp/sigg" EVAL_CODEX_REAL_HOME="$realcodex" \
+  bash "$here/hosts/codex.sh" "$tmp/sigw" "$tmp/sigh" "$tmp/ap.txt" "$tmp/sigout.txt" "$tmp/sigusage.json" "" 0.5 read-only "" ) >"$tmp/sig.out" 2>"$tmp/sig.err" &
+sigpid=$!
+if read -r -t 20 -u 7 _ready; then sig_staged="$([[ -f "$tmp/sigh/auth.json" ]] && echo yes || echo no)"; else sig_staged=never-started; fi
+kill -TERM "$sigpid" 2>/dev/null; wait "$sigpid"; sigrc=$?; exec 7<&-; rm -f "$frec/hang"
+cxpid="$(cat "$frec/codex.pid" 2>/dev/null)"; if [[ -n "$cxpid" ]] && kill -0 "$cxpid" 2>/dev/null; then sig_alive=yes; kill -TERM "$cxpid" 2>/dev/null; else sig_alive=no; fi
+if [[ "$sig_staged" == yes && $sigrc -eq 143 && ! -e "$tmp/sigh/auth.json" && "$sig_alive" == no && -z "$(find "$tmp" -maxdepth 1 -name 'sbx.*' | head -1)" ]]; then ok=0; else ok=1; fi
+note "14n6 codex: SIGTERM to the adapter mid-run kills the CLI and scrubs the staged copy (rc 143, adapter dir removed)" $ok "staged-during-run=$sig_staged rc=$sigrc cli-alive=$sig_alive left: $(ls "$tmp/sigh" 2>&1 | tr '\n' ' ')"
+# 19x (portable): the answer and the usage come from the stream the ADAPTER captured, never from a file in the agent-writable home.
+# BEFORE: <home>/.eval-codex.jsonl, .eval-codex-last.txt and .eval-claude.json were read back, so a rename-over forged tokens, cost and answer.
+echo '{"canary":"ORIG-CANARY"}' >"$realcodex/auth.json"; : >"$frec/forge"
+adapter codex read-only CODEX_API_KEY=k; arc=$?
+cxo="$(cat "$tmp/aout.txt" 2>&1)"; cxu="$(cat "$tmp/ausage.json" 2>&1)"
+adapter claude read-only CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_CLAUDE_NO_SANDBOX=1; brc=$?
+clo="$(cat "$tmp/aout.txt" 2>&1)"; clu="$(cat "$tmp/ausage.json" 2>&1)"; rm -f "$frec/forge"
+if [[ $arc -eq 0 && $brc -eq 0 && "$cxo" == OK && "$cxu" == *'"tokens_in": 5'* && "$cxu" == *'"tokens_out": 1'* && "$clo" == OK && "$clu" == *'"cost_usd": 0.001'* && "$clu" != *999999* ]] \
+   && [[ -s "$AH/.eval-claude.json" ]]; then ok=0; else ok=1; fi
+note "19x answer and usage come from the adapter-captured stdout: forged <home>/.eval-codex.jsonl|.eval-codex-last.txt|.eval-claude.json change neither tokens, cost nor the graded answer" $ok "codex out=$cxo usage=$cxu | claude out=$clo usage=$clu"
+# W3: a workspace-write task's grader would run unconfined on agent-written files: refused (row error grader-unconfined), grader never runs
+wwcorp="$tmp/wwcorp"; wwt="$(mktask "$wwcorp" prod-review t-wwg dev always0)"; printf '#!/usr/bin/env bash\ntouch "%s"\necho "{\\"found\\":1}"; exit 0\n' "$tmp/grader-ran" >"$wwt/grade.sh"
+python3 -I -B - "$wwt/task.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); t["agent_mode"] = "workspace-write"; json.dump(t, open(sys.argv[1], "w"))
+PY
+rm -f "$tmp/grader-ran"
+bash "$here/run.sh" --task "$wwt" --arm bare --host stub --rep 1 --out "$tmp/rww.jsonl" >/dev/null 2>"$tmp/rww.err"; rc=$?
+rort="$(mktask "$wwcorp" prod-review t-rog dev always0)"; printf '#!/usr/bin/env bash\ntouch "%s"\necho "{\\"found\\":1}"; exit 0\n' "$tmp/grader-ran-ro" >"$rort/grade.sh"; rm -f "$tmp/grader-ran-ro"
+bash "$here/run.sh" --task "$rort" --arm bare --host stub --rep 1 --out "$tmp/rro.jsonl" >/dev/null 2>&1; rc2=$?
+if [[ $rc -eq 0 && "$(rowval "$tmp/rww.jsonl" error)" == grader-unconfined && "$(rowval "$tmp/rww.jsonl" pass)" == false && ! -e "$tmp/grader-ran" && "$(cat "$tmp/rww.err")" == *grader-unconfined* \
+   && $rc2 -eq 0 && "$(rowval "$tmp/rro.jsonl" error)" != grader-unconfined && -e "$tmp/grader-ran-ro" ]]; then ok=0; else ok=1; fi
+note "19y run.sh refuses to run the grader of a workspace-write task (error:grader-unconfined, pass:false, grader never ran); a read-only task is graded as before" $ok "rc=$rc row: $(cut -c1-220 "$tmp/rww.jsonl" 2>&1) ran=$([[ -e "$tmp/grader-ran" ]] && echo yes || echo no)"
 
 # ---- 15: Claude is confined by a real seatbelt sandbox (fake claude, REAL sandbox-exec) ----
 # A PATH without sandbox-exec: every other tool on PATH is symlinked in.
@@ -636,6 +702,13 @@ r workfile "\$PWD/README.md"; r tmpfile "$tmp/ftmp-canary"; r installfile "\$(di
 if git status --short >/dev/null 2>&1; then p gitstatus ok; else p gitstatus failed; fi
 git diff >"\$R/diff.out" 2>/dev/null; if grep -q more "\$R/diff.out"; then p gitdiff ok; else p gitdiff failed; fi
 w home "\$R/canary"; w gocache "\$GOCACHE/canary"; w tmp "\$TMPDIR/canary"; w work "\$PWD/canary"
+w outsideroots "$tmp/outside/canary"; r realrepo "$corpusfile"   # outside the (test) denied roots: only the baseline / the adapter's --deny-read stop these
+if [ "\$TMPDIR" = "\$R/tmp" ]; then p tmpdir_env ok; else p tmpdir_env "wrong:\$TMPDIR"; fi
+a() { n="\$1"; shift; if "\$@" >/dev/null 2>&1; then p "\$n" written; else p "\$n" denied; fi; }
+if [ -f "$frec/forge-cl" ]; then
+  echo '{"result":"FORGED","is_error":false,"total_cost_usd":99,"usage":{"input_tokens":999999,"output_tokens":999999}}' >"\$R/f.tmp"; mv -f "\$R/f.tmp" "\$R/.eval-claude.json"
+  if [ -n "\$prof" ]; then d="\$(dirname "\$prof")"; a sbxforge1 sh -c 'echo FORGED >"\$1"' _ "\$d/result.json"; a sbxforge2 sh -c 'echo FORGED >"\$1/x"' _ "\$d"; fi
+fi
 printf '%s\n' "\$PWD" "\$HOME" "\$TMPDIR" "\$GOCACHE" "\$CLAUDE_CONFIG_DIR" "\$CLAUDE_CODE_TMPDIR" "\$@" >"\$R/names.txt"
 echo '{"result":"OK","is_error":false,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":2}}'
 FAKE
@@ -697,6 +770,31 @@ if cl="$(command -v claude)" && [[ -n "$cl" ]]; then
 else
   printf '  SKIP  15v (no claude on PATH; not counted)\n'
 fi
+fi
+# 15z1-15z4: claude, test roots that do NOT cover the repo (the adapters' own deny rules are what stop it)
+if darwin_only 15z1; then
+# M1: a write outside every denied root: only the baseline `(deny file-write*)` stops it
+rm -f "$tmp/outside/canary"
+adapter claude read-only "$TOK" ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$fbs:$fb:$PATH" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask"; arc=$?; Z1="$AH"
+if [[ $arc -eq 0 && ! -e "$tmp/outside/canary" ]] && pvg "$Z1" outsideroots=denied && pvg "$Z1" home=written; then ok=0; else ok=1; fi
+note "15z1 a write outside every denied root (a user-writable dir the roots do not cover) is denied by the baseline deny file-write*; the cell's own dirs stay writable" $ok "rc=$arc probe: $(pvs "$Z1")"
+fi
+if darwin_only 15z2; then
+# M2: the repo is outside the (test) denied roots: the adapter's own --deny-read <repo> is what stops the read
+if [[ -n "${Z1:-}" ]] && pvg "$Z1" realrepo=denied && pvg "$Z1" workfile=read; then ok=0; else ok=1; fi
+note "15z2 claude: the repo is outside the denied roots yet unreadable (the adapter's --deny-read repo), the workdir stays readable" $ok "probe: $(pvs "${Z1:-$tmp}")"
+fi
+if darwin_only 15z3; then
+# M3: --protect <task dir> makes the generator refuse a re-allow that would cover it (here: the task dir contains the cell)
+adapter claude read-only "$TOK" ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$fbs:$fb:$PATH" DENYROOTS="$DR" EVAL_TASK_DIR="$FCELLS"; arc=$?
+if [[ $arc -eq 79 && ! -e "$AH/probe.out" ]] && grep -q 'refus' "$tmp/adapter.err"; then ok=0; else ok=1; fi
+note "15z3 claude: a task dir that CONTAINS the cell's dirs is refused by the profile generator (--protect on the task dir), host never starts (exit 79)" $ok "rc=$arc $(head -c 200 "$tmp/adapter.err")"
+fi
+if darwin_only 15z4; then
+# W2: TMPDIR is exported into the sandboxed process and is the cell tmp. (/bin/bash 3.2 here-docs ignore TMPDIR and write /tmp, which the
+# profile denies: known noise, README.) Not fixable by an env var, so only the export is asserted.
+if [[ -n "${Z1:-}" ]] && pvg "$Z1" tmpdir_env=ok && pvg "$Z1" tmp=written; then ok=0; else ok=1; fi
+note "15z4 TMPDIR in the sandboxed process is the per-cell tmp and writable" $ok "probe: $(pvs "${Z1:-$tmp}")"
 fi
 if darwin_only 15w; then
 # no environment variable can weaken the roots: the old hook name and any other EVAL_SEATBELT_* are inert
@@ -816,7 +914,28 @@ if [ -n "\$prof" ] && cat "\$prof" >/dev/null 2>&1; then p profile read; else p 
 r homeauth "\$R/auth.json"; r workfile "\$PWD/README.md"
 if git status --short >/dev/null 2>&1; then p gitstatus ok; else p gitstatus failed; fi
 w home "\$R/canary"; w gocache "\$GOCACHE/canary"; w tmp "\$TMPDIR/canary"; w work "\$PWD/canary"
+w outsideroots "$tmp/outside/canary"; r realrepo "$corpusfile"   # outside the (test) denied roots: only the baseline / the adapter's --deny-read stop these
+if [ "\$TMPDIR" = "\$R/tmp" ]; then p tmpdir_env ok; else p tmpdir_env "wrong:\$TMPDIR"; fi
+p seenauth "\$(head -c 20 "\$R/auth.json" 2>/dev/null)"   # what THIS cell's staged credential holds at start (fake content only)
+a() { n="\$1"; shift; if "\$@" >/dev/null 2>&1; then p "\$n" written; else p "\$n" denied; fi; }
 if [ -f "$frec/rotate-cx" ]; then echo '{"canary":"ROTATED-CX"}' >"\$R/auth.json"; fi
+if [ -f "$frec/write-auth-cx" ]; then echo '{"tokens":"ATTACKER-CHOSEN"}' >"\$R/auth.json"; fi   # attack (a)
+if [ -f "$frec/link-auth-cx" ]; then rm -f "\$R/auth.json"; ln -s "$FHOME/.ssh/id" "\$R/auth.json"; fi   # attack (b)
+if [ -f "$frec/ro-probe-cx" ]; then   # every way to change the staged file's content or its directory entry
+  echo X >"\$R/x-ro"; r ro_read "\$R/auth.json"
+  a ro_mvover mv -f "\$R/x-ro" "\$R/auth.json"; a ro_lnsf ln -sf "\$R/x-ro" "\$R/auth.json"
+  a ro_redirect sh -c 'echo EVIL >"\$1"' _ "\$R/auth.json"; a ro_append sh -c 'echo EVIL >>"\$1"' _ "\$R/auth.json"; a ro_trunc sh -c ': >"\$1"' _ "\$R/auth.json"
+  a ro_hardlink ln "\$R/auth.json" "\$R/hl"; a ro_chmod chmod 666 "\$R/auth.json"
+  a ro_mvaway mv "\$R/auth.json" "\$R/gone"; a ro_rm rm -f "\$R/auth.json"
+fi
+if [ -f "$frec/forge-cx" ]; then   # forge the old result files AND try the adapter's capture dir (profile dir): all must fail or be ignored
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":999999,"output_tokens":999999}}' >"\$R/f.tmp"; mv -f "\$R/f.tmp" "\$R/.eval-codex.jsonl"
+  echo FORGED >"\$R/.eval-codex-last.txt"
+  if [ -n "\$prof" ]; then d="\$(dirname "\$prof")"
+    a sbxforge1 sh -c 'echo FORGED >"\$1"' _ "\$d/events.jsonl"; a sbxforge2 sh -c 'echo FORGED >"\$1/x"' _ "\$d"
+    echo FORGED >"\$R/f2.tmp"; a sbxforge3 mv -f "\$R/f2.tmp" "\$d/events.jsonl"
+  fi
+fi
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
 echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
 FAKE
@@ -868,13 +987,68 @@ else
 fi
 fi
 if darwin_only 14v; then
-# credential lifecycle under the profile: the sandboxed process rotates the copy in its home; the write-back and the scrub still happen
-cp "$CXR/auth.json" "$tmp/cxauth.orig"; : >"$frec/rotate-cx"
+# 14v BEFORE: "a token rotated by the sandboxed process is written back (600) and the copy scrubbed" -- the agent chose what was
+# written into the user's real login. AFTER: whatever the sandboxed process leaves in its copy, the real auth.json is byte-identical
+# afterwards and the copy is scrubbed. Also: TMPDIR is exported into the sandboxed process (the cell tmp).
+s_before="$(sum16 "$CXR/auth.json")"; : >"$frec/rotate-cx"
 CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
-rm -f "$frec/rotate-cx"; perm="$(python3 -I -B -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$CXR/auth.json")"
-if [[ $arc -eq 0 && ! -e "$AH/auth.json" && "$(cat "$CXR/auth.json")" == *ROTATED-CX* && "$perm" == 0o600 && -z "$(find "$CXR" -name '.auth.*' | head -1)" ]]; then ok=0; else ok=1; fi
-cp "$tmp/cxauth.orig" "$CXR/auth.json"
-note "14v codex under the profile: a token rotated by the sandboxed process is written back (600) and the copy scrubbed" $ok "rc=$arc perm=$perm $(head -c 200 "$tmp/adapter.err")"
+rm -f "$frec/rotate-cx"; s_after="$(sum16 "$CXR/auth.json")"
+if [[ $arc -eq 0 && ! -e "$AH/auth.json" && "$s_before" == "$s_after" && "$(cat "$CXR/auth.json")" != *ROTATED-CX* && -z "$(find "$CXR" -name '.auth.*' | head -1)" ]] && pvg "$AH" tmpdir_env=ok; then ok=0; else ok=1; fi
+note "14v codex under the profile: a copy rotated by the sandboxed process is NOT written back (real sha $s_before -> $s_after), the copy is scrubbed, TMPDIR is the cell tmp" $ok "rc=$arc $(pvs "$AH" | head -c 200) $(head -c 200 "$tmp/adapter.err")"
+fi
+if darwin_only 14v2; then
+# 14v2 attack (a): the agent writes attacker-chosen JSON into $HOME/auth.json
+: >"$frec/write-auth-cx"; s_before="$(sum16 "$CXR/auth.json")"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+rm -f "$frec/write-auth-cx"; s_after="$(sum16 "$CXR/auth.json")"
+if [[ $arc -eq 0 && "$s_before" == "$s_after" && ! -e "$AH/auth.json" ]] && ! grep -q ATTACKER-CHOSEN "$CXR/auth.json"; then ok=0; else ok=1; fi
+note "14v2 attack (a) echo '{\"tokens\":\"ATTACKER-CHOSEN\"}' >\$HOME/auth.json under the profile: real auth.json byte-identical ($s_before -> $s_after), copy scrubbed" $ok "rc=$arc before=$s_before after=$s_after"
+fi
+if darwin_only 14v4; then
+# 14v4 attack (b): ln -s <the user's ssh key stand-in> $HOME/auth.json; then the NEXT cell must not see it
+: >"$frec/link-auth-cx"; s_before="$(sum16 "$CXR/auth.json")"; want_seen="seenauth=$(head -c 20 "$CXR/auth.json")"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+rm -f "$frec/link-auth-cx"; s_mid="$(sum16 "$CXR/auth.json")"; link_left="$([[ -e "$AH/auth.json" || -L "$AH/auth.json" ]] && echo yes || echo no)"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc2=$?
+s_after="$(sum16 "$CXR/auth.json")"
+if [[ $arc -eq 0 && $arc2 -eq 0 && "$s_before" == "$s_mid" && "$s_before" == "$s_after" && "$link_left" == no && ! -L "$CXR/auth.json" ]] && grep -qxF "$want_seen" "$AH/probe.out" \
+   && ! grep -rqs 'SSH-CANARY' "$AH" "$CXR/auth.json"; then ok=0; else ok=1; fi
+note "14v4 attack (b) ln -s <ssh key stand-in> \$HOME/auth.json: real auth.json byte-identical after cell 1 and cell 2 ($s_before -> $s_mid -> $s_after), the link is gone, the next cell holds the fresh copy and no ssh canary" $ok "rc=$arc/$arc2 link_left=$link_left next-cell: $(grep seenauth "$AH/probe.out" 2>&1)"
+fi
+if darwin_only 14v3; then
+# 14v3 the opt-in read-only staged copy (EVAL_CODEX_AUTH_READONLY=1): readable, and no write/replace/rename/unlink/link/chmod works on it
+: >"$frec/ro-probe-cx"; s_before="$(sum16 "$CXR/auth.json")"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR" EVAL_CODEX_AUTH_READONLY=1; arc=$?
+ROH="$AH"; ro_ok=1; if [[ $arc -eq 0 ]] && pvg "$ROH" ro_read=read && pvg "$ROH" ro_mvover=denied && pvg "$ROH" ro_lnsf=denied && pvg "$ROH" ro_redirect=denied && pvg "$ROH" ro_append=denied \
+   && pvg "$ROH" ro_trunc=denied && pvg "$ROH" ro_hardlink=denied && pvg "$ROH" ro_chmod=denied && pvg "$ROH" ro_mvaway=denied && pvg "$ROH" ro_rm=denied \
+   && grep -q '^(deny file-write\* (literal "[^"]*/auth.json"))$' "$frec/sbx.copy"; then ro_ok=0; fi
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc2=$?   # control: default (writable)
+rm -f "$frec/ro-probe-cx"; s_after="$(sum16 "$CXR/auth.json")"
+if [[ $ro_ok -eq 0 && $arc2 -eq 0 && "$s_before" == "$s_after" ]] && pvg "$AH" ro_redirect=written && pvg "$AH" ro_rm=written; then ok=0; else ok=1; fi
+note "14v3 EVAL_CODEX_AUTH_READONLY=1: the staged auth.json stays readable but mv-over, ln -sf, > , >> , truncate, ln, chmod, mv-away and rm all fail under the profile; default (control) leaves it writable; real file untouched" $ok "rc=$arc/$arc2 ro: $(pvs "$ROH") | default: $(pvs "$AH")"
+fi
+# 19x2: under the profile the capture dir (stdout/stderr files of the adapter) cannot be written, and forged old result files change nothing
+if darwin_only 19x2; then
+: >"$frec/forge-cx"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+rm -f "$frec/forge-cx"; cxo="$(cat "$tmp/aout.txt" 2>&1)"; cxu="$(cat "$tmp/ausage.json" 2>&1)"
+if [[ $arc -eq 0 && "$cxo" == OK && "$cxu" == *'"tokens_in": 5'* && "$cxu" == *'"tokens_out": 1'* ]] && pvg "$AH" sbxforge1=denied && pvg "$AH" sbxforge2=denied && pvg "$AH" sbxforge3=denied; then ok=0; else ok=1; fi
+note "19x2 codex under the profile: forged <home>/.eval-codex.jsonl (mv-over) and -last.txt change nothing; writes/renames into the adapter's capture dir are denied; answer OK, tokens 5/1" $ok "rc=$arc out=$cxo usage=$cxu probe: $(pvs "$AH")"
+: >"$frec/forge-cl"
+adapter claude read-only "$TOK" ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$fbs:$fb:$PATH" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask"; arc=$?
+rm -f "$frec/forge-cl"; clo="$(cat "$tmp/aout.txt" 2>&1)"; clu="$(cat "$tmp/ausage.json" 2>&1)"
+if [[ $arc -eq 0 && "$clo" == OK && "$clu" == *'"cost_usd": 0.001'* && "$clu" != *999999* ]] && pvg "$AH" sbxforge1=denied && pvg "$AH" sbxforge2=denied; then ok=0; else ok=1; fi
+note "19x2 claude under the profile: forged <home>/.eval-claude.json (mv-over) changes nothing; the capture dir is not writable; answer OK, cost 0.001" $ok "rc=$arc out=$clo usage=$clu probe: $(pvs "$AH")"
+fi
+if darwin_only 14s3; then
+# codex M1/M2/M3: a write OUTSIDE the denied roots (baseline deny file-write*), the repo outside them (the adapter's --deny-read), the task dir PROTECTED
+rm -f "$tmp/outside/canary"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+if [[ $arc -eq 0 && ! -e "$tmp/outside/canary" ]] && pvg "$AH" outsideroots=denied && pvg "$AH" realrepo=denied && pvg "$AH" workfile=read && pvg "$AH" home=written; then ok=0; else ok=1; fi
+note "14s3 codex, test roots not covering the repo: a write outside every denied root is denied (baseline deny file-write*) and the repo's own file is unreadable (the adapter's --deny-read)" $ok "rc=$arc probe: $(pvs "$AH")"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$FCELLS" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+if [[ $arc -eq 79 && ! -e "$AH/probe.out" && ! -e "$AH/auth.json" ]] && grep -q 'refus' "$tmp/adapter.err"; then ok=0; else ok=1; fi
+note "14s3b codex: a task dir that CONTAINS the cell's dirs is refused by the profile generator (--protect on the task dir), host never starts" $ok "rc=$arc $(head -c 200 "$tmp/adapter.err")"
 fi
 # 14w-14z: no usable sandbox (both platforms: fake uname / PATH without sandbox-exec)
 CXSB=1 adapter codex read-only CODEX_API_KEY=k PATH="$fu:$fb:$PATH"; arc=$?
@@ -1121,8 +1295,9 @@ adapter claude read-only CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_CLAUDE_NO_
 if [[ $arc -eq 0 ]] && ! grep -qx -- --json-schema "$av"; then ok=0; else ok=1; fi
 note "19b claude without a schema file: no --json-schema" $ok "rc=$arc $(tr '\n' '|' <"$av")"
 ADAPTER_SCHEMA="$sch" adapter codex read-only CODEX_API_KEY=k; arc=$?; xv="$frec/codex.argv"
-if [[ $arc -eq 0 && "$(argafter "$xv" --output-schema)" == "$sch" && "$(argafter "$xv" -o)" == "$AH/.eval-codex-last.txt" ]]; then ok=0; else ok=1; fi
-note "19c codex with a schema file: --output-schema <that path> and -o <last-message file>" $ok "rc=$arc $(tr '\n' '|' <"$xv")"
+# 19c BEFORE: --output-schema <path> AND -o <home>/.eval-codex-last.txt (read back). AFTER: --output-schema only; no -o, no file in the cell is read back.
+if [[ $arc -eq 0 && "$(argafter "$xv" --output-schema)" == "$sch" ]] && ! grep -qx -- -o "$xv" && ! grep -q 'eval-codex' "$xv"; then ok=0; else ok=1; fi
+note "19c codex with a schema file: --output-schema <that path>, and NO -o / no result file in the cell" $ok "rc=$arc $(tr '\n' '|' <"$xv")"
 adapter codex read-only CODEX_API_KEY=k; arc=$?; xv="$frec/codex.argv"
 if [[ $arc -eq 0 ]] && ! grep -qx -- --output-schema "$xv" && ! grep -qx -- -o "$xv"; then ok=0; else ok=1; fi
 note "19d codex without a schema file: neither --output-schema nor -o" $ok "rc=$arc $(tr '\n' '|' <"$xv")"
@@ -1141,10 +1316,11 @@ if [[ $arc -eq 0 && "$(cat "$tmp/aout.txt")" == "just prose" ]]; then ok=0; else
 note "19g claude prose, structured_output null: the prose is passed through (the row will say output_valid:false)" $ok "rc=$arc out: $(head -c 200 "$tmp/aout.txt")"
 rm -f "$frec/claude.out"
 printf '%s\n' '{"findings":[{"id":3}]}' >"$frec/codex.last"
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"jsonl text that must lose"}}' >"$frec/codex.jsonl"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[{\"id\":5}]}"}}' >"$frec/codex.jsonl"
 ADAPTER_SCHEMA="$sch" adapter codex read-only CODEX_API_KEY=k; arc=$?
-if [[ $arc -eq 0 && "$(jdoc "$tmp/aout.txt")" == '{"findings": [{"id": 3}]}' ]]; then ok=0; else ok=1; fi
-note "19h codex: the -o last-message file is the document (preferred over the JSONL item)" $ok "rc=$arc out: $(head -c 200 "$tmp/aout.txt")"
+# 19h BEFORE: the -o last-message file was the document, preferred over the JSONL item. AFTER: a -o file (decoy {"id":3}, written if -o were passed) is never read; the stream's item is the document.
+if [[ $arc -eq 0 && "$(jdoc "$tmp/aout.txt")" == '{"findings": [{"id": 5}]}' ]]; then ok=0; else ok=1; fi
+note "19h codex: the stream's last agent_message is the document; a decoy last-message file is never read" $ok "rc=$arc out: $(head -c 200 "$tmp/aout.txt")"
 rm -f "$frec/codex.last"; printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[{\"id\":4}]}"}}' >"$frec/codex.jsonl"
 ADAPTER_SCHEMA="$sch" adapter codex read-only CODEX_API_KEY=k; arc=$?
 if [[ $arc -eq 0 && "$(jdoc "$tmp/aout.txt")" == '{"findings": [{"id": 4}]}' ]]; then ok=0; else ok=1; fi
@@ -1189,12 +1365,13 @@ runclaude "$jt" "$tmp/r19g.jsonl"
 if [[ "$(rowval "$tmp/r19g.jsonl" output_valid)" == true && "$(rowval "$tmp/r19g.jsonl" pass)" == true && "$(argafter "$(find "$KT" -name claude.argv | head -1)" --json-schema)" == "$compact" ]]; then ok=0; else ok=1; fi
 note "19q run.sh -> claude adapter: schema passed, structured document graded, row output_valid:true" $ok "row: $(cut -c1-300 "$tmp/r19g.jsonl" 2>&1)"
 rm -f "$frec/claude.out"
-printf '%s\n' '{"found":1,"findings":[]}' >"$frec/codex.last"
+printf '%s\n' '{"found":0,"findings":[]}' >"$frec/codex.last"   # decoy: never read now
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"found\":1,\"findings\":[]}"}}' >"$frec/codex.jsonl"
 env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$jt" --arm bare --host codex --rep 1 --out "$tmp/r19h.jsonl" >/dev/null 2>&1; rc=$?
-rm -f "$frec/codex.last"
+rm -f "$frec/codex.last" "$frec/codex.jsonl"
 if [[ $rc -eq 0 && "$(rowval "$tmp/r19h.jsonl" output_valid)" == true && "$(rowval "$tmp/r19h.jsonl" pass)" == true && "$(argafter "$frec/codex.argv" --output-schema)" == "$(cd "$scorp" && pwd)/prod-review/_lib/output.schema.json" ]]; then ok=0; else ok=1; fi
-note "19r run.sh -> codex adapter: --output-schema is the skill's _lib/output.schema.json, -o document graded" $ok "rc=$rc row: $(cut -c1-300 "$tmp/r19h.jsonl" 2>&1)"
+note "19r run.sh -> codex adapter: --output-schema is the skill's _lib/output.schema.json, the stream's document graded (BEFORE: the -o file)" $ok "rc=$rc row: $(cut -c1-300 "$tmp/r19h.jsonl" 2>&1)"
 # lint
 mktask "$tmp/l-nokind" prod-review t-nokind heldout good >/dev/null
 python3 -I -B - "$tmp/l-nokind/prod-review/t-nokind/task.json" <<'PY'
