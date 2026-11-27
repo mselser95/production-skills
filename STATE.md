@@ -205,6 +205,14 @@ Decision for round 2: measure TWO sets — EAGER (opening paragraph, hardened) a
 each in both directions, so any change in what a skill loads is a reviewed diff of the baseline.
 REACHABLE ceiling 128 KB. Fresh Sonnet implementer dispatched.
 
+### OpenRouter — researched, NOT being built (user decision 2026-11-27)
+
+Notes in `notes/openrouter-integration.md`. Findings: Claude Code works through it only for Claude
+models (Anthropic does not support routing Claude Code to non-Claude models through any gateway);
+Codex is documented to work but needs the stateless Responses endpoint, untested on 0.172; per-key
+spend limits are real. The user asked how it could be added, read the options, and said to leave
+it as is. Do not schedule any OpenRouter work unless asked again.
+
 ### Open / blocked
 
 - Unknown from the Codex binary, to resolve from official docs in Phase 4: agent-role TOML schema,
