@@ -283,6 +283,10 @@ jobs:
       # (HEAD, clean, or dirty plus a content hash) and this run's id, and with no
       # conflicting duplicate; anything else it executes itself, and the record names
       # which gates were `executed` and which `attested`, with the results-file line.
+      # The recorded command is the argv that actually ran (no free-form label), a dry
+      # `make -n` records nothing, and `probe-selftests` has no aggregate line: it is
+      # derived from one line per suite of THIS run, so it cannot be attested while a
+      # suite is missing. EVIDENCE_RUN_ID (job env above) is what enables recording at all.
       # What still executes here: mutation-trend (it reads the suite counts the
       # selftests step recorded), ratified-invariants, tcb-integrity (it needs the
       # installer step above), and any gate the single pass did not cover.

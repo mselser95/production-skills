@@ -29,7 +29,7 @@ PROBES := _shared/probes
 # executes once per CI run and leaves one line in .evidence/results.tsv that
 # `make evidence` attests to instead of running the gate again (scripts/run-once.sh).
 RUN := bash scripts/run-once.sh
-.PHONY: help check-fast verify selftests selftests-run lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline eval eval-live db-test
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline eval eval-live db-test
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -152,10 +152,11 @@ gates:
 # The modules' scripts (prod-new/modules/*/scripts), one probe-wiring run per module
 # because the tool takes ONE directory: db-pin-check.sh was an orphan gate until this
 # loop existed. Zero module dirs is an error, not a pass. db-pin-verify-live.sh needs
-# Docker and is a declared exception in probe-wiring.sh. ONE recorded gate: the loop
-# is the command string (--as, because the argv is `bash -c <loop>`), byte-equal to
-# the GATES entry of the same id in scripts/evidence-record.sh.
-	@$(RUN) --as 'rc=0; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d" || rc=1; n=$$((n+1)); done; [ "$$n" -gt 0 ] && [ "$$rc" = 0 ]' gates-are-driven-modules -- bash -c 'rc=0; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d" || rc=1; n=$$((n+1)); done; [ "$$n" -gt 0 ] && [ "$$rc" = 0 ]'
+# Docker and is a declared exception in probe-wiring.sh. ONE recorded gate: the argv is
+# `bash -c <loop>` and what is recorded is that argv (run-once.sh quotes what it runs),
+# so the text after `--` is byte-equal to the GATES entry of the same id in
+# scripts/evidence-record.sh once $(PROBES) and `$$` are resolved.
+	@$(RUN) gates-are-driven-modules -- bash -c 'rc=0; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d" || rc=1; n=$$((n+1)); done; [ "$$n" -gt 0 ] && [ "$$rc" = 0 ]'
 # The database image pin: the lock is read offline (no network, no Docker). A broken
 # lock, or a broken gate (its selftest runs in `make selftests`), goes red here; the
 # module's compose files are checked against the lock in the same invocation.
@@ -259,16 +260,21 @@ TEMPLATE_SELFTESTS = prod-new/template/scripts/tests/changed-line-coverage-selft
 # or the target exits 2 -- so deleting, renaming or un-globbing one is loud, and the
 # workflow no longer needs a second, repeated execution to notice.
 REQUIRED_SELFTESTS = $(PROBES)/skills-static-selftest.sh $(PROBES)/load-rows-selftest.sh $(PROBES)/tests/probe-self-gate-selftest.sh $(PROBES)/check-registries-selftest.sh $(PROBES)/non-vacuity-selftest.sh $(PROBES)/sbom-ordering-selftest.sh $(PROBES)/agents-budget-selftest.sh $(PROBES)/skill-weight-selftest.sh $(PROBES)/prove-mutation-selftest.sh $(PROBES)/acceptance-coverage-selftest.sh
-# The entry point records the WHOLE run under the command string `make evidence`
-# attests to; selftests-run does the work and records each suite (with its own case
-# count, which mutation-baseline.sh reads instead of running the suite again).
+# THE SUITE LIST, in ONE place. The recipe below iterates it, and scripts/evidence-record.sh
+# resolves the SAME text (this variable, with $(PROBES) and $(TEMPLATE_SELFTESTS) substituted,
+# expanded by the shell glob) at attest time to know which suites must each have a recorded line.
+SELFTEST_GLOBS = $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh prod-new/modules/*/scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS)
+# EACH SUITE is recorded as its own line (id `selftest:<path>`, command `bash <path>`, with its
+# case count, which mutation-baseline.sh reads instead of running the suite again). There is NO
+# aggregate line and NO nested `$(MAKE)`: `make evidence` derives the `probe-selftests` gate from
+# the per-suite lines of the same run, and only when every suite of the resolved list has one.
+# (A recorder line holding $(MAKE) or a leading `+` is executed by GNU make even under `make -n`,
+# which once let a dry run write a pass; scripts/evidence-record.sh --check-wiring refuses both.)
 selftests:
-	@$(RUN) --as 'make --no-print-directory selftests' probe-selftests -- $(MAKE) --no-print-directory selftests-run
-selftests-run:
 	@set -e; n=0; ran=" "; \
 	  for ts in $(TEMPLATE_SELFTESTS); do [ -f "$$ts" ] || { echo "selftests: $$ts is missing: a vendored selftest nothing runs here is first exercised in someone else's CI" >&2; exit 2; }; done; \
 	  for rs in $(REQUIRED_SELFTESTS); do [ -f "$$rs" ] || { echo "selftests: $$rs is missing: it was run by name in CI and must stay" >&2; exit 2; }; done; \
-	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh prod-new/modules/*/scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
+	  for t in $(SELFTEST_GLOBS); do \
 	    [ -f "$$t" ] || continue; \
 	    printf '  %-52s ' "$$(basename $$t)"; \
 	    if tl=$$($(RUN) --quiet --count "selftest:$$t" -- bash "$$t"); then echo "ok"; else echo "FAIL"; printf '%s\n' "$$tl"; exit 1; fi; \

@@ -28,6 +28,12 @@
 # Usage:
 #   mutation-baseline.sh          compare against the recorded counts (gate)
 #   mutation-baseline.sh --write  re-record, after a deliberate change
+#
+# CHECK MODE ALSO COMPARES THE SET OF SUITES. A row in the baseline for a suite that did not
+# run in this pass (a suite dropped from the glob, renamed or deleted) FAILS, and so does a
+# suite that ran with no row (a new suite nobody recorded): silently dropping a suite used to
+# pass, and a missing row was only a printed NEW. `--write` rewrites the file from scratch
+# from exactly the suites that ran, so after it rows and suites agree by construction.
 # Exit: 0 no regression · 1 a count fell · 2 refused to answer
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.." || exit 2
@@ -59,7 +65,9 @@ declare -a NAMES=() COUNTS=() TID=() TCNT=()
 total=0; nt=0; from_pass=0
 if [[ "${1:-}" != "--write" ]]; then
   while IFS=$'\t' read -r cid ccmd ccnt; do
-    [[ "$cid" == selftest:* && "$ccmd" == "bash ${cid#selftest:}" && "$ccnt" =~ ^[0-9]+$ ]] || continue
+    # the recorded command is the canonical (printf %q) form of the argv `bash <suite>`
+    printf -v want_cmd 'bash %q' "${cid#selftest:}"
+    [[ "$cid" == selftest:* && "$ccmd" == "$want_cmd" && "$ccnt" =~ ^[0-9]+$ ]] || continue
     TID[nt]="${cid#selftest:}"; TCNT[nt]="$ccnt"; nt=$((nt+1))
   done < <(bash scripts/run-once.sh counts 2>/dev/null)
 fi
@@ -142,14 +150,30 @@ elif (( rec_total != rec_sum )); then
   echo "  Do not hand-edit it; run \`make mutation-baseline\`." >&2; exit 1
 fi
 
-fell=0
+fell=0; mismatch=0
 for i in "${!NAMES[@]}"; do
   was=$(grep -E "^\| \`${NAMES[$i]}\` \|" "$BASELINE" | awk -F'|' '{gsub(/ /,"",$3); print $3}')
-  [[ -n "$was" ]] || { echo "  NEW      ${NAMES[$i]} (${COUNTS[$i]} cases) -- not in the baseline yet"; continue; }
+  [[ -n "$was" ]] || { echo "  NEW      ${NAMES[$i]} (${COUNTS[$i]} cases) -- ran, but has no row in the baseline" >&2; mismatch=$((mismatch+1)); continue; }
   if (( COUNTS[i] < was )); then
     echo "  FELL     ${NAMES[$i]}  $was -> ${COUNTS[$i]} case(s)" >&2; fell=$((fell+1))
   fi
 done
+# the other direction: a recorded row whose suite did not run in this pass
+ran_names=" ${NAMES[*]} "
+while IFS= read -r row; do
+  [[ -n "$row" ]] || continue
+  case "$ran_names" in
+    *" $row "*) ;;
+    *) echo "  MISSING  $row -- has a row in the baseline but did not run in this pass" >&2; mismatch=$((mismatch+1)) ;;
+  esac
+done < <(grep -E '^\| `[^`]+` \|' "$BASELINE" | awk -F'`' '{print $2}')
+
+if (( mismatch > 0 )); then
+  echo "mutation-baseline: $mismatch suite/row mismatch(es) between this pass and $BASELINE." >&2
+  echo "  A suite that stopped running (or was never recorded) must be a decision, not a" >&2
+  echo "  silent change: run \`make mutation-baseline\` to re-record exactly the suites that ran." >&2
+  exit 1
+fi
 
 if (( fell > 0 )); then
   echo "mutation-baseline: $fell suite(s) demonstrate FEWER mutations than recorded." >&2
