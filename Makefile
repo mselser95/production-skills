@@ -152,7 +152,7 @@ gates:
 # probe-wiring counts a Makefile target as an invoker even when nothing calls the
 # target, so it cannot see that `db-test` (the only runner of db-bootstrap-test.sh)
 # is driven by no workflow. This is that missing half, for this one target.
-	@n=$$(grep -cE 'run:[[:space:]]*make db-test' .github/workflows/pr.yaml); [ "$$n" -ge 1 ] || { echo "gates: .github/workflows/pr.yaml has no step running 'make db-test' -- the db bootstrap test would sit behind a target nobody runs" >&2; exit 1; }; echo "db-test is run by pr.yaml ($$n step)"
+	@bash prod-new/modules/db-postgres/scripts/db-ci-wired.sh .github/workflows/pr.yaml
 # And the ratified invariants: an invariant nothing runs is precisely the shape
 # the three of them exist to refuse.
 	@bash $(PROBES)/probe-wiring.sh verification/ratified

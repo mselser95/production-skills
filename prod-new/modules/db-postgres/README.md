@@ -22,7 +22,8 @@ PostgreSQL 19 is deliberately not used yet (liability `pg19-reevaluate`).
 
 `bash scripts/db-bootstrap-test.sh [--variant plain|timescale]` starts the module's compose stack in a
 throwaway project (`dbboot-<pid>`, always removed) and runs the SQL assertions (roles, SCRAM, TLS, settings,
-timeouts, persistence) against the real server. A fresh machine pulls the pinned images itself. It ends with
+timeouts, hba rule table, role memberships, connection limits, container capabilities, secrets, statistics and
+log leaks, certificate renewal, persistence) against the real server. A fresh machine pulls the pinned images itself. It ends with
 one line, `db-bootstrap-test: N assertions, N ok, 0 failed (<image>)`. Exit 0 pass / 1 an assertion failed or the
 database never became healthy (the run ends right after the 30 s health wait) / 2 could not start.
 
@@ -32,10 +33,15 @@ database never became healthy (the run ends right after the 30 s health wait) / 
   It always starts and reports; a first step diffs the pull request against its base and, when nothing under
   `prod-new/modules/db-postgres/`, the Makefile or the workflow changed, prints `db: skipped: no database change`
   and ends green (so a required check never hangs on a skipped job). Pushes to master always run it.
-  `make gates` also checks that `pr.yaml` still has a step running `make db-test`, because probe-wiring counts
-  a Makefile target nobody calls as wiring.
-- GitHub runners are linux/amd64 and the lock's runtime facts were observed on arm64 only: the first green
-  run of this job will be the first amd64 evidence. It has not run yet; nothing here claims it passes.
+  `make gates` also runs `bash scripts/db-ci-wired.sh`, which PARSES `pr.yaml` (python3 + PyYAML; a missing
+  parser is exit 2) and requires a job `db` with a step whose `run` is exactly `make db-test`, with no constant
+  false `if` and no `continue-on-error` on that step or the job. (A grep for the line is satisfied by a comment.)
+- GitHub runners are linux/amd64 and the lock's runtime facts were observed on arm64 only. The `db` job has
+  run green once on `ubuntu-latest` (linux/amd64) for this module's pull request, at an earlier commit than
+  the secrets, hardening and leak-check changes; it has NOT been observed on the current head, so nothing
+  here claims the current test passes on amd64. The lock's runtime facts are still arm64-only.
+- The stack needs its secret files first (`db/bootstrap/README.md`, "Secrets"); the test generates throwaway
+  ones in a scratch directory.
 
 ## Bumping the pair
 
@@ -55,5 +61,5 @@ database never became healthy (the run ends right after the 30 s health wait) / 
   compares the lock with the real images, and it is a step a human runs.
 - `make gates` passes both compose files (`db/compose.yml`, `db/compose.timescale.yml`) to `db-pin-check.sh`
   together with the lock, so a compose image that drifts from the lock is red offline.
-- The bootstrap test (below) is what proves the compose stack itself starts and behaves; its result
-  on linux/amd64 has not been observed yet (see CI).
+- The bootstrap test (above) is what proves the compose stack itself starts and behaves. Its linux/amd64
+  result on the current head has not been observed (see CI).

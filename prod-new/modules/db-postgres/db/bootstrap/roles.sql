@@ -1,29 +1,19 @@
 -- roles.sql — the role split, schema, grants and per-role limits. Idempotent.
 -- Run as the bootstrap superuser against the application database.
 --
--- Passwords come from the environment (\getenv); this file holds no secret.
+-- Passwords: NOT in this file and NEVER a literal in SQL text. 10-roles.sh pipes
+-- them to this psql's stdin and `\password` below sends only the SCRAM-SHA-256
+-- verifier (computed client-side by libpq). A cleartext `ALTER ROLE ... PASSWORD
+-- 'x'` would be recorded by pg_stat_statements (track_utility) and survive into
+-- the running server, readable by every pg_monitor member.
 \set ON_ERROR_STOP on
 
--- Keep passwords out of the server log: no statement logging, and do not echo
--- the failing statement on error, for this session only.
+-- Keep this session out of the logs and the statistics: no statement logging, do
+-- not echo the failing statement on error, no pg_stat_statements tracking.
 SET log_statement = 'none';
 SET log_min_error_statement = 'panic';
 SET log_min_duration_statement = -1;
-
-\getenv migrator_pw DB_MIGRATOR_PASSWORD
-\getenv app_pw      DB_APP_PASSWORD
-\getenv readonly_pw DB_READONLY_PASSWORD
-\getenv monitor_pw  DB_MONITOR_PASSWORD
-
-SELECT NOT (:{?migrator_pw} AND :{?app_pw} AND :{?readonly_pw} AND :{?monitor_pw}) AS missing \gset
-\if :missing
-  \echo 'roles.sql: DB_MIGRATOR_PASSWORD, DB_APP_PASSWORD, DB_READONLY_PASSWORD and DB_MONITOR_PASSWORD must all be set'
-  DO $$ BEGIN RAISE EXCEPTION 'role passwords missing from the environment'; END $$;
-\endif
-SELECT (:'migrator_pw' = '' OR :'app_pw' = '' OR :'readonly_pw' = '' OR :'monitor_pw' = '') AS empty \gset
-\if :empty
-  DO $$ BEGIN RAISE EXCEPTION 'a role password is empty'; END $$;
-\endif
+SET pg_stat_statements.track = 'none';
 
 SELECT current_database() AS db \gset
 
@@ -39,16 +29,22 @@ SELECT format('CREATE ROLE %I', r)
 ALTER ROLE app_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 -- migrator: DDL in the app schema, only for CI/deploy.
 ALTER ROLE app_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-  CONNECTION LIMIT 5 PASSWORD :'migrator_pw';
+  CONNECTION LIMIT 5;
 -- app: DML only.
 ALTER ROLE app_rw LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-  CONNECTION LIMIT 50 PASSWORD :'app_pw';
+  CONNECTION LIMIT 50;
 -- read-only.
 ALTER ROLE app_ro LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-  CONNECTION LIMIT 20 PASSWORD :'readonly_pw';
+  CONNECTION LIMIT 20;
 -- monitoring: pg_monitor and nothing else.
 ALTER ROLE app_monitor LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-  CONNECTION LIMIT 5 PASSWORD :'monitor_pw';
+  CONNECTION LIMIT 5;
+
+-- Passwords: stdin carries two lines per role (new + confirmation), in this order.
+\password app_migrator
+\password app_rw
+\password app_ro
+\password app_monitor
 
 -- Memberships. The migrator inherits the owner so it can `SET ROLE app_owner`
 -- for owner-owned objects. Nobody else is a member of anything but the
@@ -59,6 +55,13 @@ GRANT pg_monitor TO app_monitor;
 -- ---- database and schemas --------------------------------------------------
 REVOKE ALL ON DATABASE :"db" FROM PUBLIC;
 GRANT CONNECT ON DATABASE :"db" TO app_migrator, app_rw, app_ro, app_monitor;
+-- The other two databases: PUBLIC keeps CONNECT and TEMP on them by default, which
+-- would let an application role connect and create temp tables there. The
+-- superuser and the owner are unaffected. (Database ACLs are NOT copied by
+-- CREATE DATABASE, so a database created later starts with PUBLIC CONNECT/TEMP
+-- again; the CONTENTS of template1's public schema are copied.)
+REVOKE ALL ON DATABASE postgres FROM PUBLIC;
+REVOKE ALL ON DATABASE template1 FROM PUBLIC;
 
 -- No object creation in public for anyone but its owner (no-op on a fresh 18
 -- cluster, protective on a database cloned from an older template).
