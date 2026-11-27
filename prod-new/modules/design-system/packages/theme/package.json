@@ -1,0 +1,26 @@
+{
+  "name": "@ds-scope/theme",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed theme contract over CSS custom properties, with light and dark themes filled from the tokens package.",
+  "engines": { "node": ">=24 <27" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./css": "./dist/theme.css"
+  },
+  "files": ["src", "dist"],
+  "scripts": {
+    "build": "node scripts/build.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@ds-scope/tokens": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.11",
+    "typescript": "7.0.2",
+    "vitest": "5.1.2"
+  }
+}

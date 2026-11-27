@@ -60,7 +60,6 @@ def git(workdir, *args):
                           stdout=subprocess.PIPE).stdout
 
 
-UNTRACKED_SOURCE = (".go", ".mod", ".sum", ".yaml", ".yml")
 HOST_DIRS = (".claude/", ".codex/", ".agents/")
 HOST_FILES = ("CLAUDE.md", "AGENTS.md")
 
@@ -68,9 +67,10 @@ HOST_FILES = ("CLAUDE.md", "AGENTS.md")
 def tree_hash(workdir):
     """Hash of (1) every TRACKED file (index blob id, or the on-disk content
     when `git status` lists the path as changed; a deleted one hashes as
-    MISSING), (2) the porcelain status lines of tracked paths, (3) UNTRACKED
-    files that look like module sources (.go .mod .sum .yaml .yml) outside
-    host droppings (.claude/ .codex/ .agents/ CLAUDE.md AGENTS.md).
+    MISSING), (2) the porcelain status lines of tracked paths, (3) EVERY untracked
+    file except host droppings (.claude/ .codex/ .agents/ CLAUDE.md
+    AGENTS.md); git-ignored paths never appear in the status, so a fixture's
+    own .gitignore (target/, __pycache__/) is what keeps build output out.
     Two git calls only."""
     h = hashlib.sha256()
     staged = git(workdir, "ls-files", "-z", "-s").decode("utf-8", "replace")
@@ -97,8 +97,6 @@ def tree_hash(workdir):
         if code == "??":
             base = os.path.basename(name)
             if name.startswith(HOST_DIRS) or base in HOST_FILES:
-                continue
-            if not name.endswith(UNTRACKED_SOURCE):
                 continue
             h.update(b"U\0" + name.encode() + b"\0" + disk(name).encode())
         else:

@@ -1,0 +1,25 @@
+{
+  "id": "design-system",
+  "description": "Brand-neutral design tokens (DTCG JSON, three layers plus dimensions) and a typed theme contract with light and dark themes.",
+  "requires": [],
+  "conflicts": [],
+  "slots": {
+    "SCOPE": {
+      "literal": "ds-scope",
+      "description": "npm scope WITHOUT the leading @, for package names (@ds-scope/tokens, @ds-scope/theme). The literal is a valid package name on purpose: pnpm rejects '<SCOPE>' as a dependency name, so the module installs and tests unassembled. Assembly replaces every occurrence of the literal in file contents and paths.",
+      "example": "acme"
+    }
+  },
+  "unit_kind": "package",
+  "placement": {
+    "packages/**": "unit",
+    "package.json": "root",
+    "pnpm-workspace.yaml": "root",
+    "pnpm-lock.yaml": "root",
+    "tsconfig.base.json": "root",
+    ".npmrc": "root",
+    ".gitignore": "root"
+  },
+  "lands_at": ["packages/tokens", "packages/theme"],
+  "notes": "Root files (package.json, pnpm-workspace.yaml, tsconfig.base.json, .npmrc) are a minimal standalone workspace; the monorepo-root module owns the real ones and these must be merged into them, not copied over."
+}

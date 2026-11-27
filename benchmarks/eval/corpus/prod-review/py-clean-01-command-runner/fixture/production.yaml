@@ -1,0 +1,13 @@
+version: v1
+
+service:
+  name: cmdrun
+  tier: 2
+  tier_note: >
+    Small library module with no deployment of its own; callers own
+    persistence, transport and operations.
+  policy: production-skills (single source, main)
+
+invariants: []                      # none ratified for this module
+
+capabilities: []

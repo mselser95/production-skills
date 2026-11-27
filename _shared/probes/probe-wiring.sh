@@ -127,6 +127,7 @@ declare -A EXCEPT=(
   [prod-new/modules/db-postgres/scripts/db-pin-verify-live.sh]="opt-in verifier, needs Docker and the images (the offline gate is db-pin-check.sh); a human runs it when bumping the image pair (README); proven by db-pin-verify-live-selftest.sh with a fake docker"
   [_shared/probes/prove-mutation.sh]="agent tool run by prod-implementer in target repos; proven here by prove-mutation-selftest.sh"
   [_shared/probes/gate-run.sh]="agent tool run inside target repos by prod-implementer/mechanic/author; proven by gate-run-selftest.sh"
+  [_shared/probes/brand-strings.sh]="scans a generated tree for a user-supplied brand denylist; this repo has neither; run in scaffolded repos, proven here by brand-strings-selftest.sh"
   [prod-new/template/scripts/gate-run.sh]="agent tool, executed in scaffolded repos by agents; edited here, not run here; proven by gate-run-selftest.sh"
   [_shared/probes/acceptance-gap.sh]="orchestrator tool for target repos' held-out acceptance results (this repo has no features); run by prod-review there, proven here by acceptance-gap-selftest.sh"
   [_shared/probes/acceptance-coverage.sh]="gate for target repos' acceptance/<feature>.yaml (this repo has no features); run by prod-spec/prod-review there, proven here by acceptance-coverage-selftest.sh"

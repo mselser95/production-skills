@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Wait between retries of a failing backend so a struggling backend is not hit again immediately.
+tier: 2
+services: [fanout]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [go build ./..., go vet ./..., go test ./...]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new module dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml

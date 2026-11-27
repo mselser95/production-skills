@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Read settings from a TOML document into the same dotted keys the environment layer uses.
+tier: 2
+services: [settings]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [python3 -m compileall -q ., python3 -m unittest discover -s tests -v]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new dependencies
+  - public API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml
