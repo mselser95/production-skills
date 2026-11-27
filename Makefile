@@ -49,8 +49,11 @@ actionlint:
 	@actionlint
 	@echo "actionlint: workflows valid"
 
-# `make lint` is `scripts/lint-cached.sh`: shellcheck at -S warning over the
-# tracked shell scripts. Three properties, each of which was a finding:
+# `make lint` is `scripts/lint-cached.sh`: shellcheck at -S warning, with -x, over
+# the tracked shell scripts, ONE FILE PER shellcheck call. The rule it keeps: a
+# cached verdict is a function of exactly what its key hashes (the header of the
+# script lists the key; read it before changing anything here). Properties, each of
+# which was a finding:
 #
 # TRACKED FILES ONLY (`git ls-files`). The gate used to walk the working tree
 # while CI lints what the clone contains, so the two ran over different sets:
@@ -60,30 +63,37 @@ actionlint:
 # file the moment it is staged, which is when the pre-commit hook runs, so nothing
 # being committed escapes it; uncommitted scratch and per-user config are skipped.
 #
-# DEDUPED BY CONTENT, not a coverage compromise. install.sh mirrors the shared
-# probes into all nine skills, so `verify-standard.sh` alone appears ten times
-# byte-identically; shellcheck on identical bytes returns an identical verdict, so
-# one representative per sha256 checks the same set of distinct programs. The file
-# COUNT is printed next to the unique count (174 files -> 127 unique today) so a
-# reader sees the ratio; if the two ever converge, the mirroring broke.
+# ONE FILE PER CALL, WITH -x. Without -x shellcheck follows a sourced file only if
+# that file happens to be on the same command line, so a verdict depended on which
+# files shared a call. Every file is now linted alone and sources are always
+# followed; this is equal to or stricter than the old single call over all files.
 #
-# CACHED BY CONTENT. A verdict is a function of the bytes, the tool and the flags,
-# so a content already proven clean is not linted again, and the rest run in
-# parallel (LINT_JOBS, default cores capped at 4 and at a cgroup CPU quota).
-# Measured 2026-11-27 (174 files, 127 unique, 6 MB). The serial recipe was
-# reported at 135 s in a 16-core Linux container. Cold in an arm64 container
-# (shellcheck 0.9.0, 178 files on that tree), two runs on a loaded laptop, so
-# read the ratios rather than the seconds: --cpus 2: 1 job 10.6 s, 2 jobs 5.7 s,
-# old serial 16.4 s; --cpus 4: 1 job 26.9 s, 4 jobs 19.1 s, old serial 32.9 s.
-# Host (macOS, shellcheck 0.11.0): cold 22.0 s; warm 0.28-0.31 s; one small file
-# edited 0.95 s; the largest file (verify-standard.sh, 386 KB) edited 9.3 s.
-# The honesty conditions: ONLY A CLEAN RESULT IS CACHED (findings are
-# printed on every run); the key holds the shellcheck version, the severity
-# argument, SHELLCHECK_OPTS and any .shellcheckrc, so an upgrade invalidates
-# everything; `LINT_CACHE=verify make lint` re-lints cached entries too and FAILS
-# (exit 3, "CACHE LIE") if one now has findings; `LINT_CACHE=off` ignores the
-# cache. The cache lives in .cache/lint (gitignored). CI starts cold on the first
-# run after a shellcheck upgrade: that run costs the cold figure, then it is warm.
+# DEDUPED BY KEY, not by content alone. install.sh mirrors the shared probes into
+# the skills and the template, so `verify-standard.sh` appears eleven times byte-identically. Two
+# paths share a verdict only when their whole key is equal: same content, same
+# applicable .shellcheckrc, and (for a file that can source another) same
+# directory, because a relative source resolves against it. Today: 176 tracked
+# files, 154 distinct keys, of which 59 are sourcing files and 95 are not. The
+# mirrored probes are sourcing files, so each copy is its own key (see the cost
+# below).
+#
+# CACHED BY KEY. A clean verdict is stored under its key in .cache/lint
+# (gitignored) and not recomputed; the rest run in parallel (LINT_JOBS, default
+# min(4, cores) and the cgroup CPU quota). A sourcing file's key includes every
+# tracked *.sh, so editing ANY script re-lints all sourcing files (about 60 here):
+# coarse on purpose, because a sound narrower key needs the real source graph.
+# Measured on the author's macOS laptop (shellcheck 0.11.0) while the machine was
+# loaded by other work, so read the ratios: cold 17-20 s, warm 0.25 s, after
+# editing one script 13-15 s. The eleven mirrored verify-standard.sh copies take
+# about 4.7 s each and are most of the cold CPU time. The serial recipe was
+# reported at 135 s in a 16-core Linux container by an earlier profile; it was not
+# re-measured here. CI has no cache restore step, so every CI run is cold.
+# The honesty conditions: ONLY A CLEAN RESULT IS CACHED (findings are printed on
+# every run); an entry is trusted only if it is a regular file holding its own
+# key; a shellcheck failure other than "findings" (exit >= 2, killed) is exit 2
+# and is never cached; `LINT_CACHE=verify make lint` re-lints cached entries too
+# and FAILS (exit 3, "CACHE LIE") if one now has findings; `LINT_CACHE=off`
+# ignores the cache.
 #
 # Zero scripts, or zero after dedup, is exit 2: a clean lint over nothing is not a
 # clean lint. A lint that cannot run must not look like one that found nothing, so
