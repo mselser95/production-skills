@@ -66,9 +66,12 @@ GATES=(
 # part of this comparison.
 if [[ -r Makefile ]]; then
   uncovered=()
+  # capture, then match: `printf | grep -qF` under pipefail reads a MATCH as a miss
+  # when the writer takes SIGPIPE (gate-hygiene-fitness GREPQ-UNDER-PIPEFAIL)
+  gates_text=$(printf '%s\n' "${GATES[@]}")
   while IFS= read -r probe; do
     [[ -n "$probe" ]] || continue
-    printf '%s\n' "${GATES[@]}" | grep -qF "$probe" || uncovered+=("$probe")
+    grep -qF "$probe" <<<"$gates_text" || uncovered+=("$probe")
   done < <(sed -n '/^gates:/,/^$/p' Makefile | grep -vE '^[[:space:]]*#' \
              | grep -oE '[A-Za-z0-9_./$()-]+\.sh' | sed 's|.*/||' | sort -u)
   if (( ${#uncovered[@]} > 0 )); then

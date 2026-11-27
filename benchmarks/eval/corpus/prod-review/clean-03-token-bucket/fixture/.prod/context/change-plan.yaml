@@ -1,0 +1,37 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_critical_calculation
+
+files:
+  - path: bucket.go
+    action: modify
+    zone: orchestration
+
+new_states: []
+new_effects: []
+new_dependencies: []
+
+recovery: []
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: unchanged
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Replace the whole-second refill with an exact nanosecond refill that carries the fractional token.
+    files: [bucket.go]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one package, no new dependencies
+    acceptance: []
+    depends_on: []

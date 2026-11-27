@@ -136,9 +136,12 @@ for f in $(printf '%s\n' "${FILES[@]}" | sort); do
     echo "    CHANGED  $f  ${was:0:12} -> ${now:0:12}" >&2; changed=$((changed+1))
   fi
 done
+# capture, then match: `printf | grep -qxF` under pipefail reads a MATCH as a miss
+# when the writer takes SIGPIPE (gate-hygiene-fitness GREPQ-UNDER-PIPEFAIL)
+files_text=$(printf '%s\n' "${FILES[@]}")
 while IFS= read -r rec; do
   [[ -n "$rec" ]] || continue
-  printf '%s\n' "${FILES[@]}" | grep -qxF "$rec" || { echo "    REMOVED  $rec" >&2; changed=$((changed+1)); }
+  grep -qxF "$rec" <<<"$files_text" || { echo "    REMOVED  $rec" >&2; changed=$((changed+1)); }
 done < <(sed -n '/^per_file:/,$p' "$DIGEST_FILE" | grep -E '^  [^ ]+: ' | sed 's/^  //; s/:.*//')
 (( changed > 0 )) || echo "    (no per-file difference found -- the recorded digest predates the per_file block)" >&2
 echo "  Every repo scaffolded from the previous template is now behind. Acknowledge it" >&2

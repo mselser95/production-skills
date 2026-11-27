@@ -23,6 +23,7 @@ here would be a threshold nobody derived.
 | `coverage-ratchet-selftest.sh` | 9 |
 | `diagnostic-evidence-selftest.sh` | 4 |
 | `fuzz-row-selftest.sh` | 8 |
+| `gate-hygiene-fitness-selftest.sh` | 9 |
 | `gate-run-selftest.sh` | 17 |
 | `integration-lane-selftest.sh` | 35 |
 | `load-rows-selftest.sh` | 60 |
@@ -33,14 +34,14 @@ here would be a threshold nobody derived.
 | `policy-coverage-selftest.sh` | 7 |
 | `probe-excludes-selftest.sh` | 6 |
 | `probe-false-fail-selftest.sh` | 266 |
-| `probe-wiring-selftest.sh` | 13 |
+| `probe-wiring-selftest.sh` | 14 |
 | `prove-mutation-selftest.sh` | 22 |
 | `provenance-headers-selftest.sh` | 12 |
 | `row-vacuity-sweep-selftest.sh` | 19 |
 | `sbom-ordering-selftest.sh` | 10 |
 | `shard-selftest.sh` | 41 |
 | `single-suite-run-selftest.sh` | 106 |
-| `skill-weight-selftest.sh` | 89 |
+| `skill-weight-selftest.sh` | 121 |
 | `skills-static-selftest.sh` | 21 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
@@ -48,4 +49,4 @@ here would be a threshold nobody derived.
 | `template-vendored-list-selftest.sh` | 5 |
 | `template-workflow-pins-selftest.sh` | 573 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1824** |
+| **total** | **1866** |

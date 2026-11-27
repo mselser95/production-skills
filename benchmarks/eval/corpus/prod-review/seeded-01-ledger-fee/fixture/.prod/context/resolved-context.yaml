@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Let a Ledger charge a basis-point fee on each transfer and credit it to a fee account.
+tier: 2
+services: [ledger]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [go build ./..., go vet ./..., go test ./...]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new module dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml

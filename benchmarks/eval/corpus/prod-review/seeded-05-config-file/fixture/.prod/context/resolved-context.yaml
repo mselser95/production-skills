@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Load service settings from a file in an fs.FS with environment overrides, falling back to the defaults when the file is missing.
+tier: 2
+services: [config]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [go build ./..., go vet ./..., go test ./...]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new module dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml

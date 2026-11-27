@@ -121,6 +121,19 @@ jobs:
           bash _shared/probes/prove-mutation-selftest.sh
           bash _shared/probes/acceptance-coverage-selftest.sh
 
+      # The eval harness's own gate (benchmarks/eval: runner, host adapters,
+      # grader plumbing, corpus lint). A harness whose runner or grader is
+      # broken reports numbers nobody should trust, so its selftest, the
+      # corpus helper selftests and the corpus lint run here on every PR.
+      # Hermetic: the stub host and FAKE claude/codex binaries on a temp PATH,
+      # no credentials, no model call, no network. The seatbelt and keychain
+      # cases need macOS and are reported as `SKIP <case> (darwin-only)`
+      # against a declared set; the rest run on this Linux runner with the
+      # documented EVAL_CLAUDE_NO_SANDBOX=1 opt-out set by the test itself.
+      # Needs python3, git, make (all on ubuntu-latest); no Go, no PyYAML.
+      - name: eval harness (hermetic)
+        run: make eval
+
       # SECRET SCANNING, added 2026-08-29. Until today this repo ran NONE -- a
       # grep for gitleaks/trufflehog in this file returned zero, in the
       # repository whose own standard lists secret scanning on every trigger as

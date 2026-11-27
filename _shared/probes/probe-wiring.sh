@@ -136,15 +136,24 @@ declare -A EXCEPT=(
 # printing "No rule to make target" into two implementers' gate logs. The
 # source is checked, not the expanded value, because by expansion time the
 # command has already run.
-if sed -n '/^declare -A EXCEPT=(/,/^)/p' "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#' | grep -q '`'; then
+#
+# CAPTURE, THEN MATCH. `... | grep -q` under pipefail is a race: grep -q exits on
+# its first hit, a writer still writing takes SIGPIPE (141), pipefail reports the
+# MATCH as a failed pipeline, and `if` reads "no backtick". It fires exactly when
+# there IS one. Measured 2026-11-27 at the exception loop below (a false "stale exception"
+# FAIL in the pre-commit hook, twice, under load). gate-hygiene-fitness.sh now
+# refuses the shape.
+exc_src=$(sed -n '/^declare -A EXCEPT=(/,/^)/p' "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')
+if grep -q '`' <<<"$exc_src"; then
   echo "probe-wiring: a declared exception's reason contains a backtick -- that is a command, not a reason. Quote with '...'." >&2
   exit 2
 fi
+probe_lines=$(printf '%s\n' "${PROBES[@]}")
 for e in "${!EXCEPT[@]}"; do
   # Out of scope for this run rather than stale: an exception for another tree
   # is not an excuse this scan could be honouring.
   [[ "$(dirname "$e")" == "$PROBE_DIR" ]] || continue
-  if ! printf '%s\n' "${PROBES[@]}" | grep -qxF -- "$e"; then
+  if ! grep -qxF -- "$e" <<<"$probe_lines"; then
     echo "probe-wiring: declared exception '$e' names a probe that does not exist." >&2
     echo "  A stale exception silently excuses a gate nobody decided to excuse. Remove it." >&2
     exit 2

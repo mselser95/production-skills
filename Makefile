@@ -25,7 +25,7 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline eval eval-live
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -38,6 +38,8 @@ help:
 	@echo "token-report    agent token cost per (agentType, model) from ~/.claude* transcripts; exit 1 if tokens/completed rose >25%"
 	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
 	@echo "skill-weight-baseline  re-record benchmarks/skill-weight-baseline.md (the file-list and +5 % ratchet of the EAGER and REACHABLE sets; deliberate, never part of a gate run)"
+	@echo "eval        skill-eval harness: selftest + corpus lint (hermetic, no agent, not in check-fast)"
+	@echo "eval-live   PAID: every corpus task x claude,codex x skill,bare x N reps; needs EVAL_LIVE=1 (make eval-live EVAL_LIVE=1 N=3)"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates
@@ -269,3 +271,15 @@ token-baseline:
 # Deliberate re-recording of the skill eager-weight ratchet, like the other baselines.
 skill-weight-baseline:
 	@bash $(PROBES)/skill-weight.sh --write
+
+# ---- skill-eval harness (benchmarks/eval/README.md) --------------------------
+# eval: hermetic. The corpus may not exist yet; only then is an empty lint allowed.
+eval:
+	@bash benchmarks/eval/selftest.sh
+	@bash benchmarks/eval/lib/libtests.sh
+	@if [ -d benchmarks/eval/corpus ]; then bash benchmarks/eval/lint.sh; else bash benchmarks/eval/lint.sh --allow-empty; fi
+
+# eval-live: spends money (real agent runs). Refuses unless EVAL_LIVE=1; prints the plan either way.
+N ?= 3
+eval-live:
+	@N=$(N) bash benchmarks/eval/lib/live.sh
