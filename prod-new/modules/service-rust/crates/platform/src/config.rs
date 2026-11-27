@@ -118,6 +118,17 @@ impl Config {
                 "SVC_AUTH_TOKEN: want at least {MIN_TOKEN_LEN} bytes"
             )));
         }
+        // A request can only present a token made of visible ASCII: HTTP
+        // trims leading/trailing whitespace off a header value and forbids
+        // control bytes, so any other token could start the service and then
+        // never authorise a single write.
+        if !auth_token.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+            return Err(ConfigError(
+                "SVC_AUTH_TOKEN: only visible ASCII (0x21..0x7E) is allowed, no whitespace, \
+                 control or non-ASCII byte"
+                    .to_owned(),
+            ));
+        }
         let tracing = match get("SVC_TRACING").as_deref() {
             None | Some("off") => false,
             Some("log") => true,
@@ -204,6 +215,27 @@ mod tests {
         assert!(with(&[("SVC_AUTH_TOKEN", "0123456789abcde")]).is_err());
         assert!(with(&[("SVC_AUTH_TOKEN", "0123456789abcdef")]).is_ok());
         assert!(with(&[("SVC_AUTH_TOKEN", "")]).is_err());
+    }
+
+    #[test]
+    fn a_token_no_request_can_present_is_refused_at_startup() {
+        let bad = [
+            "                ",
+            "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t",
+            "0123456789abcdef ",
+            " 0123456789abcdef",
+            "0123456789 abcdef",
+            "0123456789\u{1}bcdef",
+            "0123456789\u{7f}bcdef",
+            "0123456789abcdé",
+            "0123456789abcdef\n",
+        ];
+        for t in bad {
+            let r = Config::from_lookup(|k| (k == "SVC_AUTH_TOKEN").then(|| t.to_owned()));
+            let e = r.expect_err(t);
+            assert!(e.0.contains("visible ASCII"), "{t:?}: {e}");
+        }
+        assert!(with(&[("SVC_AUTH_TOKEN", "!~Az09-._~+/=!~Az09")]).is_ok());
     }
 
     #[test]

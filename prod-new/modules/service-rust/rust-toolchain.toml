@@ -2,3 +2,5 @@
 channel = "1.99.1"
 components = ["clippy", "rustfmt"]
 profile = "minimal"
+# A target with no `std`: `make check-nostd` compiles domain and app for it.
+targets = ["thumbv7em-none-eabi"]

@@ -100,4 +100,26 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn a_poisoned_lock_is_recovered_by_both_update_and_read() {
+        let store = MemoryStore::new();
+        store
+            .update(&mut |s| Ok(s.apply(&ev("a", Kind::Deposit, 3))?))
+            .unwrap();
+        // A panic inside `change` poisons the lock while it is held.
+        let died = std::thread::scope(|sc| {
+            sc.spawn(|| {
+                let _ = store.update(&mut |_| panic!("a request died mid-update"));
+            })
+            .join()
+        });
+        assert!(died.is_err(), "the closure must have panicked");
+        assert_eq!(store.read().unwrap().balance, 3, "read after poison");
+        let (_, snap) = store
+            .update(&mut |s| Ok(s.apply(&ev("b", Kind::Deposit, 4))?))
+            .unwrap();
+        assert_eq!(snap.balance, 7, "update after poison");
+    }
 }

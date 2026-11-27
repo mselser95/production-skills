@@ -39,6 +39,9 @@ pub struct FinishedSpan {
 /// The recorder. Series are bounded: past `MAX_SERIES` new series are dropped.
 pub struct Recorder {
     log_spans: bool,
+    /// Every declared series is present from the start and a dropped call is
+    /// counted (`with_declared_series`); `new` stays lazy and silent.
+    declared: bool,
     inner: Mutex<Inner>,
 }
 
@@ -70,11 +73,48 @@ fn labels_text(keys: &[&'static str], values: &[&str]) -> Option<String> {
 }
 
 impl Recorder {
+    /// A bare recorder: a series exists once it was touched, and a dropped
+    /// call is silent. For unit tests; the service uses `with_declared_series`.
     /// `log_spans` writes one line per finished span to stderr.
     pub fn new(log_spans: bool) -> Self {
         Self {
             log_spans,
+            declared: false,
             inner: Mutex::new(Inner::default()),
+        }
+    }
+
+    /// The service's recorder: every declared label-less counter and gauge is
+    /// present at 0 from the first scrape (so an alert on
+    /// `svc_units_conserved_violations_total` sees 0, not an absent series),
+    /// every labelled family shows its `# TYPE` line before its first sample,
+    /// and a dropped call (wrong label count, series cap) is counted in
+    /// `svc_telemetry_errors_total`.
+    pub fn with_declared_series(log_spans: bool) -> Self {
+        let mut inner = Inner::default();
+        for c in Counter::ALL.iter().map(|c| c.spec()) {
+            if c.labels.is_empty() {
+                inner.counters.insert((c.name, String::new()), 0);
+            }
+        }
+        for g in Gauge::ALL.iter().map(|g| g.spec()) {
+            if g.labels.is_empty() {
+                inner.gauges.insert((g.name, String::new()), 0);
+            }
+        }
+        Self {
+            log_spans,
+            declared: true,
+            inner: Mutex::new(inner),
+        }
+    }
+
+    /// Counts a dropped call (declared mode only). Caller holds the lock.
+    fn note_dropped(&self, g: &mut Inner) {
+        if self.declared {
+            let key = (Counter::TelemetryErrors.spec().name, String::new());
+            let c = g.counters.entry(key).or_insert(0);
+            *c = c.saturating_add(1);
         }
     }
 
@@ -91,12 +131,15 @@ impl Recorder {
 impl Telemetry for Recorder {
     fn counter_inc(&self, counter: Counter, values: &[&str]) {
         let spec = counter.spec();
-        let Some(labels) = labels_text(spec.labels, values) else {
+        let labels = labels_text(spec.labels, values);
+        let mut g = self.lock();
+        let Some(labels) = labels else {
+            self.note_dropped(&mut g);
             return;
         };
         let key = (spec.name, labels);
-        let mut g = self.lock();
         if g.counters.len() >= MAX_SERIES && !g.counters.contains_key(&key) {
+            self.note_dropped(&mut g);
             return;
         }
         let c = g.counters.entry(key).or_insert(0);
@@ -105,12 +148,15 @@ impl Telemetry for Recorder {
 
     fn gauge_set(&self, gauge: Gauge, value: i64, values: &[&str]) {
         let spec = gauge.spec();
-        let Some(labels) = labels_text(spec.labels, values) else {
+        let labels = labels_text(spec.labels, values);
+        let mut g = self.lock();
+        let Some(labels) = labels else {
+            self.note_dropped(&mut g);
             return;
         };
         let key = (spec.name, labels);
-        let mut g = self.lock();
         if g.gauges.len() >= MAX_SERIES && !g.gauges.contains_key(&key) {
+            self.note_dropped(&mut g);
             return;
         }
         g.gauges.insert(key, value);
@@ -121,14 +167,17 @@ impl Telemetry for Recorder {
         let mut g = self.lock();
         g.next_span = g.next_span.saturating_add(1);
         let id = g.next_span;
-        if g.open.len() < MAX_SERIES {
-            g.open.insert(
-                id,
-                OpenSpan {
-                    name: spec.name,
-                    attrs: labels_text(spec.labels, values).unwrap_or_default(),
-                },
-            );
+        match labels_text(spec.labels, values) {
+            Some(attrs) if g.open.len() < MAX_SERIES => {
+                g.open.insert(
+                    id,
+                    OpenSpan {
+                        name: spec.name,
+                        attrs,
+                    },
+                );
+            }
+            _ => self.note_dropped(&mut g),
         }
         SpanId(id)
     }
@@ -173,6 +222,23 @@ impl MetricsSource for Recorder {
         let mut out = String::new();
         render_family(&mut out, "counter", &g.counters);
         render_family(&mut out, "gauge", &g.gauges);
+        if self.declared {
+            // A labelled family has no honest zero sample (its label values
+            // are open), but its name must still be scrapeable.
+            let absent = |kind: &str, name: &str, series: bool, out: &mut String| {
+                if !series {
+                    out.push_str(&format!("# TYPE {name} {kind}\n"));
+                }
+            };
+            for c in Counter::ALL.iter().map(|c| c.spec()) {
+                let seen = g.counters.keys().any(|(n, _)| *n == c.name);
+                absent("counter", c.name, seen, &mut out);
+            }
+            for ga in Gauge::ALL.iter().map(|x| x.spec()) {
+                let seen = g.gauges.keys().any(|(n, _)| *n == ga.name);
+                absent("gauge", ga.name, seen, &mut out);
+            }
+        }
         out
     }
 }
@@ -210,6 +276,39 @@ mod tests {
         r.counter_inc(Counter::Events, &["a", "b", "c"]);
         r.counter_inc(Counter::UnitsConservedViolations, &["x"]);
         assert_eq!(r.render(), "");
+    }
+
+    #[test]
+    fn a_dropped_call_is_counted_in_the_service_recorder() {
+        let r = Recorder::with_declared_series(false);
+        r.counter_inc(Counter::Events, &["deposit"]);
+        r.gauge_set(Gauge::BuildInfo, 1, &[]);
+        let id = r.span_start(SpanName::Deposit, &[]);
+        r.span_end(id, true);
+        assert!(r.render().contains("svc_telemetry_errors_total 3\n"));
+        assert!(!r.render().contains("svc_events_total{"));
+    }
+
+    #[test]
+    fn every_declared_name_is_scrapeable_before_any_event() {
+        let r = Recorder::with_declared_series(false);
+        let text = r.render();
+        for c in Counter::ALL.iter().map(|c| c.spec()) {
+            assert!(
+                text.contains(&format!("# TYPE {} counter\n", c.name)),
+                "{}",
+                c.name
+            );
+        }
+        for g in Gauge::ALL.iter().map(|g| g.spec()) {
+            assert!(
+                text.contains(&format!("# TYPE {} gauge\n", g.name)),
+                "{}",
+                g.name
+            );
+        }
+        assert!(text.contains("svc_units_conserved_violations_total 0\n"));
+        assert!(text.contains("svc_telemetry_errors_total 0\n"));
     }
 
     #[test]

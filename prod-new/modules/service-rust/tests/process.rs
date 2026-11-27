@@ -186,3 +186,106 @@ fn the_service_refuses_to_start_without_a_token_or_on_a_public_bind() {
         "SVC_ALLOW_NON_LOOPBACK",
     );
 }
+
+#[test]
+fn a_token_no_request_can_present_is_refused_with_exit_1_and_a_one_line_error() {
+    let sixteen_spaces = " ".repeat(16);
+    let sixteen_tabs = "\t".repeat(16);
+    for bad in [
+        sixteen_spaces.as_str(),
+        sixteen_tabs.as_str(),
+        "valid-looking-token ",
+        "valid-looking token",
+        "valid-looking-\u{1}-token",
+        "valid-looking-tokén-x",
+    ] {
+        refuses_to_start(
+            &[("SVC_LISTEN_ADDR", "127.0.0.1:0"), ("SVC_AUTH_TOKEN", bad)],
+            "SVC_AUTH_TOKEN: only visible ASCII",
+        );
+    }
+}
+
+fn post_deposit(addr: SocketAddr, token: &str) -> Option<u16> {
+    let mut s = TcpStream::connect(addr).unwrap();
+    let body = "id=p1&units=1";
+    write!(
+        s,
+        "POST /deposit HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    parse(&out).map(|r| r.0)
+}
+
+#[test]
+fn a_valid_token_starts_the_service_and_authorises_a_write() {
+    let svc = spawn(&[]);
+    assert_eq!(post_deposit(svc.addr, TOKEN), Some(200));
+    assert_eq!(post_deposit(svc.addr, "child-token-0123456780"), Some(401));
+}
+
+#[test]
+fn every_declared_metric_is_scrapeable_right_after_start() {
+    let svc = spawn(&[]);
+    let mut s = TcpStream::connect(svc.addr).unwrap();
+    s.write_all(b"GET /metrics HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("observability/emitted-metrics.yaml"),
+    )
+    .unwrap();
+    let names: Vec<&str> = manifest
+        .lines()
+        .filter_map(|l| l.strip_prefix("- name: "))
+        .collect();
+    assert!(names.len() >= 7, "{names:?}");
+    for n in &names {
+        assert!(
+            out.contains(&format!("# TYPE {n} ")),
+            "{n} missing in\n{out}"
+        );
+    }
+    assert!(
+        out.contains("svc_units_conserved_violations_total 0\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_second_signal_exits_at_once_with_code_4() {
+    let svc = spawn(&[
+        ("SVC_SHUTDOWN_GRACE_MS", "30000"),
+        ("SVC_HEAD_DEADLINE_MS", "20000"),
+        ("SVC_REQUEST_DEADLINE_MS", "20000"),
+    ]);
+    // An in-flight request (bytes sent, head unfinished) keeps the drain open.
+    let mut inflight = TcpStream::connect(svc.addr).unwrap();
+    inflight.write_all(b"GET /healthz HTTP/1.1\r\n").unwrap();
+    let mut probe = TcpStream::connect(svc.addr).unwrap();
+    probe.write_all(b"GET /healthz HTTP/1.1\r\n\r\n").unwrap();
+    let mut out = String::new();
+    probe.read_to_string(&mut out).unwrap();
+    let t = Instant::now();
+    svc.sigterm();
+    svc.sigterm();
+    let status = svc.exit();
+    assert_eq!(status.code(), Some(4), "second signal: forced exit");
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+}
+
+#[test]
+fn an_unused_connection_is_not_abandoned_at_shutdown() {
+    let svc = spawn(&[("SVC_SHUTDOWN_GRACE_MS", "300")]);
+    let _idle = TcpStream::connect(svc.addr).unwrap();
+    let mut probe = TcpStream::connect(svc.addr).unwrap();
+    probe.write_all(b"GET /healthz HTTP/1.1\r\n\r\n").unwrap();
+    let mut out = String::new();
+    probe.read_to_string(&mut out).unwrap();
+    svc.sigterm();
+    assert_eq!(svc.exit().code(), Some(0), "nothing was in flight");
+}

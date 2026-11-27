@@ -10,10 +10,17 @@
 //!   body) within `request_deadline`; every read waits at most what is left,
 //!   and expiry answers 408 and closes.
 //! * Connections still reading their head sit in a bounded registry
-//!   (`max_head_conns`). When it is full, the OLDEST unfinished head is
-//!   evicted (its socket is shut down) to admit the newcomer, so a flood of
-//!   stalled connections can never keep a fast `/healthz` out: the slow ones
-//!   evict each other.
+//!   (`max_head_conns`). When it is full, the connection that has made the
+//!   LEAST progress (fewest bytes received; the oldest on a tie) is evicted
+//!   (its socket is shut down, no reply) to admit the newcomer, and
+//!   `svc_http_head_evictions_total` counts it. A flood of stalled
+//!   connections can never keep a fast `/healthz` out: the idle ones evict
+//!   each other first, and a client that is merely slow but sending outlives
+//!   them. It is NOT protected outright: if every other head has sent more
+//!   bytes than it has, it is the victim.
+//! * At shutdown the listener closes first, then every connection that has
+//!   not sent a single request byte is closed and is not counted as
+//!   abandoned. The accept loop polls (1 ms) because `stop` is a bare flag.
 //! * Only a request that finished its head AND is a `POST` takes a body slot
 //!   (`max_body_conns`); `GET`s need no body, so `/healthz` and `/metrics`
 //!   never wait for a slot that a slow writer holds. A `POST` finding the body
@@ -39,7 +46,11 @@ pub const MAX_HEADERS: usize = 32;
 /// Largest request body, in bytes.
 pub const MAX_BODY: usize = 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-const ACCEPT_IDLE: Duration = Duration::from_millis(20);
+/// Accept poll when the backlog is empty. Short on purpose: a burst larger
+/// than the kernel backlog (128) that arrives during a long sleep is dropped.
+const ACCEPT_IDLE: Duration = Duration::from_millis(1);
+/// Drain poll while shutdown waits for in-flight requests.
+const DRAIN_POLL: Duration = Duration::from_millis(20);
 
 /// Server limits and the write-route credential.
 pub struct Options {
@@ -90,6 +101,8 @@ struct HeadEntry {
     id: u64,
     stream: TcpStream,
     evicted: Arc<AtomicBool>,
+    /// Request bytes received so far: the measure of progress.
+    bytes: Arc<AtomicUsize>,
 }
 
 struct Deps {
@@ -222,11 +235,22 @@ impl Server {
             }
         }
         drop(listener);
+        close_idle(&deps);
         let deadline = Instant::now() + grace;
         while deps.live.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-            thread::sleep(ACCEPT_IDLE);
+            thread::sleep(DRAIN_POLL);
         }
         deps.live.load(Ordering::SeqCst)
+    }
+}
+
+/// Closes every connection that has sent no request byte at all: nothing is
+/// in flight on it, so it is neither drained nor counted as abandoned.
+fn close_idle(deps: &Deps) {
+    let heads = deps.heads.lock().unwrap_or_else(PoisonError::into_inner);
+    for e in heads.iter().filter(|e| e.bytes.load(Ordering::SeqCst) == 0) {
+        e.evicted.store(true, Ordering::SeqCst);
+        let _ = e.stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -280,7 +304,8 @@ fn serve_one(
     let head_until = started + deps.opts.head_deadline;
     let request_until = started + deps.opts.request_deadline;
     // `registered` leaves the registry when this block ends (head read or not).
-    let (raw, leftover) = match read_head(stream, head_until.min(request_until)) {
+    let progress = Arc::clone(&registered.bytes);
+    let (raw, leftover) = match read_head(stream, head_until.min(request_until), &progress) {
         Ok(v) => v,
         Err(_) if registered.was_evicted() => return Err(Fail::Close),
         Err(f) => return Err(f),
@@ -306,30 +331,46 @@ struct Registration {
     deps: Arc<Deps>,
     id: u64,
     evicted: Arc<AtomicBool>,
+    bytes: Arc<AtomicUsize>,
 }
 
 impl Registration {
     fn new(deps: &Arc<Deps>, stream: &TcpStream) -> Self {
         let id = deps.next_conn.fetch_add(1, Ordering::SeqCst);
         let evicted = Arc::new(AtomicBool::new(false));
+        let bytes = Arc::new(AtomicUsize::new(0));
+        let mut evictions = 0usize;
         if let Ok(clone) = stream.try_clone() {
             let mut heads = deps.heads.lock().unwrap_or_else(PoisonError::into_inner);
             while heads.len() >= deps.opts.max_head_conns.max(1) {
-                if let Some(old) = heads.pop_front() {
-                    old.evicted.store(true, Ordering::SeqCst);
-                    let _ = old.stream.shutdown(Shutdown::Both);
-                }
+                // Least progress first (fewest bytes), the oldest on a tie.
+                let victim = heads
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, e)| (e.bytes.load(Ordering::SeqCst), e.id))
+                    .map(|(i, _)| i);
+                let Some(old) = victim.and_then(|i| heads.remove(i)) else {
+                    break;
+                };
+                old.evicted.store(true, Ordering::SeqCst);
+                let _ = old.stream.shutdown(Shutdown::Both);
+                evictions += 1;
             }
             heads.push_back(HeadEntry {
                 id,
                 stream: clone,
                 evicted: Arc::clone(&evicted),
+                bytes: Arc::clone(&bytes),
             });
+        }
+        for _ in 0..evictions {
+            deps.telemetry.counter_inc(Counter::HttpHeadEvictions, &[]);
         }
         Self {
             deps: Arc::clone(deps),
             id,
             evicted,
+            bytes,
         }
     }
 
@@ -377,7 +418,11 @@ fn read_some(stream: &mut TcpStream, until: Instant, chunk: &mut [u8]) -> Result
 
 /// Reads until the blank line; returns the head text and any body bytes
 /// already read behind it.
-fn read_head(stream: &mut TcpStream, until: Instant) -> Result<(String, Vec<u8>), Fail> {
+fn read_head(
+    stream: &mut TcpStream,
+    until: Instant,
+    progress: &AtomicUsize,
+) -> Result<(String, Vec<u8>), Fail> {
     let mut buf: Vec<u8> = Vec::with_capacity(512);
     let mut chunk = [0u8; 512];
     let head_end = loop {
@@ -391,6 +436,7 @@ fn read_head(stream: &mut TcpStream, until: Instant) -> Result<(String, Vec<u8>)
         if n == 0 {
             return Err(Fail::Reply(400));
         }
+        progress.fetch_add(n, Ordering::SeqCst);
         buf.extend_from_slice(chunk.get(..n).ok_or(Fail::Reply(400))?);
     };
     if head_end > MAX_HEAD {
@@ -637,16 +683,9 @@ impl Deps {
     }
 
     fn command(&self, route: &'static str, deposit: bool, body: &str) -> Reply {
-        let (mut id, mut units) = (None, None);
-        for pair in body.split('&').filter(|p| !p.is_empty()) {
-            match pair.split_once('=') {
-                Some(("id", v)) => id = Some(v.to_owned()),
-                Some(("units", v)) => units = v.parse::<u64>().ok(),
-                _ => return Reply::text(route, 400, "bad body\n"),
-            }
-        }
-        let Some(units) = units else {
-            return Reply::text(route, 400, "units required\n");
+        let (id, units) = match parse_body(body) {
+            Ok(v) => v,
+            Err(msg) => return Reply::text(route, 400, msg),
         };
         let id = id.unwrap_or_else(|| self.ids.next_id());
         let result = if deposit {
@@ -685,6 +724,34 @@ impl Deps {
             }
         }
     }
+}
+
+/// `units` is `0` or `[1-9][0-9]*` that fits `u64`: no sign, no leading zero.
+fn parse_units(v: &str) -> Option<u64> {
+    let canonical = v == "0"
+        || (v.bytes().next().is_some_and(|b| (b'1'..=b'9').contains(&b))
+            && v.bytes().all(|b| b.is_ascii_digit()));
+    if canonical {
+        v.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// `id=<id>&units=<n>` (`id` optional). Every field at most once.
+fn parse_body(body: &str) -> Result<(Option<String>, u64), &'static str> {
+    let (mut id, mut units) = (None, None);
+    for pair in body.split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("id", v)) if id.is_none() => id = Some(v.to_owned()),
+            Some(("units", v)) if units.is_none() => {
+                units = Some(parse_units(v).ok_or("bad units\n")?);
+            }
+            Some(("id" | "units", _)) => return Err("repeated field\n"),
+            _ => return Err("bad body\n"),
+        }
+    }
+    units.map(|u| (id, u)).ok_or("units required\n")
 }
 
 #[cfg(test)]
@@ -770,6 +837,48 @@ mod tests {
             )),
             Err(400)
         );
+    }
+
+    #[test]
+    fn content_length_is_checked_not_wrapped() {
+        for digits in [
+            "1000000000",           // 10 digits: over the 9-digit cap, would be a 413 if let through
+            "18446744073709551621", // 2^64 + 5: wraps to 5
+            "18446744073709551616", // 2^64: wraps to 0
+            "1844674407370955162100000", // 25 digits
+            "00000000000000000005", // 20 digits
+        ] {
+            let h = head(&format!("\r\nContent-Length: {digits}"));
+            assert_eq!(parse_head(&h), Err(400), "{digits}");
+        }
+    }
+
+    #[test]
+    fn units_are_zero_or_a_canonical_positive_integer() {
+        assert_eq!(parse_body("units=0"), Ok((None, 0)));
+        assert_eq!(parse_body("units=7&id=a"), Ok((Some("a".to_owned()), 7)));
+        for bad in [
+            "+5",
+            "007",
+            "00",
+            "-1",
+            " 5",
+            "5 ",
+            "5x",
+            "",
+            "1_0",
+            "18446744073709551616",
+        ] {
+            assert_eq!(
+                parse_body(&format!("units={bad}")),
+                Err("bad units\n"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(parse_body("units=1&units=2"), Err("repeated field\n"));
+        assert_eq!(parse_body("units=1&id=a&id=b"), Err("repeated field\n"));
+        assert_eq!(parse_body("id=a"), Err("units required\n"));
+        assert_eq!(parse_body("units=1&x=2"), Err("bad body\n"));
     }
 
     #[test]

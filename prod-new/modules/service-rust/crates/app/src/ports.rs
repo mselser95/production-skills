@@ -57,7 +57,7 @@ pub struct SpanId(pub u64);
 /// Metrics and spans. Names and label keys come from `telemetry::{Counter,
 /// Gauge, SpanName}` (one declaration); callers pass label VALUES in the
 /// declared key order. A call whose value count differs from the declared key
-/// count is dropped, never mislabelled.
+/// count is dropped, never mislabelled, and counted in `svc_telemetry_errors_total`.
 pub trait Telemetry: Send + Sync {
     /// Adds one to a counter series.
     fn counter_inc(&self, counter: Counter, values: &[&str]);

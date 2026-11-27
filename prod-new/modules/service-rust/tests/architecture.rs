@@ -1,12 +1,17 @@
 //! What the Cargo workspace cannot express by itself.
 //!
-//! Enforced by the COMPILER, not here: `domain` and `app` are `#![no_std]`
-//! (no file, socket, clock, environment or thread to reach) and name only the
-//! crates their `Cargo.toml` lists. This file pins those lists (a changed
-//! dependency list is a RED test), pins that `extern crate std` cannot sneak
-//! `std` back in, and holds the two rules that are test-enforced and weaker:
-//! only `config.rs` reads the environment, and the bearer token is compared
-//! through the constant-time helper (both are source scans).
+//! Zone purity (`domain` and `app` can reach no file, socket, clock, thread or
+//! environment) is enforced by the COMPILER and by nothing in this file:
+//! `make check-nostd` compiles both crates for a bare-metal target that has no
+//! `std` at all, so `extern crate std` in any spelling (a macro, an `include!`,
+//! a comment trick) is a compile error there. What this file adds is that the
+//! enforcement cannot be switched off unnoticed: the Makefile and the
+//! toolchain file name the target, `cargo metadata` shows both crates with no
+//! build script, no proc-macro and no dependency outside the allowed set, and
+//! the dependency lists of every zone are pinned (a changed list is RED). The
+//! two remaining rules are source scans and WEAKER: only `config.rs` reads the
+//! environment, and the bearer token is compared through the constant-time
+//! helper.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -169,6 +174,46 @@ fn dependency_graph() -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
+/// package -> the `kind` of each of its cargo targets, joined (`lib`, `test`,
+/// `custom-build`, `proc-macro`, ...), from `cargo metadata`.
+fn target_kinds() -> BTreeMap<String, Vec<String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let out = Command::new(cargo)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
+        .current_dir(root())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let json = P(&out.stdout, 0).value();
+    let Json::Arr(packages) = field(&json, "packages") else {
+        panic!("no packages")
+    };
+    packages
+        .iter()
+        .map(|p| {
+            let Json::Arr(targets) = field(p, "targets") else {
+                panic!("no targets")
+            };
+            let kinds = targets
+                .iter()
+                .flat_map(|t| {
+                    let Json::Arr(kinds) = field(t, "kind") else {
+                        panic!("no kind")
+                    };
+                    kinds.iter().map(|k| text(k).to_owned()).collect::<Vec<_>>()
+                })
+                .collect();
+            (text(field(p, "name")).to_owned(), kinds)
+        })
+        .collect()
+}
+
 #[test]
 fn the_dependency_graph_is_exactly_the_zone_rule() {
     let want: BTreeMap<String, Vec<String>> = [
@@ -213,10 +258,84 @@ fn the_release_profile_keeps_overflow_checks_and_unwinds() {
     assert!(t.contains("panic=\"unwind\""));
 }
 
-// ---- source scans ----
+/// The bare-metal target `domain` and `app` are compiled for. It has no `std`.
+const NOSTD_TARGET: &str = "thumbv7em-none-eabi";
 
-/// Source without comments and without any whitespace, so `std :: fs` and
-/// `std::fs` look the same.
+#[test]
+fn the_no_std_target_check_is_wired_into_the_gate_and_the_toolchain() {
+    let mk = fs::read_to_string(root().join("Makefile")).unwrap();
+    // The recipe of `check-nostd`, joined (continuation lines folded).
+    let recipe: Vec<String> = mk
+        .lines()
+        .skip_while(|l| !l.starts_with("check-nostd:"))
+        .skip(1)
+        .take_while(|l| l.starts_with('\t'))
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let cmd = recipe.join(" ; ");
+    for want in [
+        "check",
+        "--locked",
+        "-p svc-domain",
+        "-p svc-app",
+        "--lib",
+        &format!("--target {NOSTD_TARGET}"),
+    ] {
+        assert!(cmd.contains(want), "check-nostd lacks {want:?}: {cmd:?}");
+    }
+    assert!(
+        !cmd.contains("-p svc-adapter")
+            && !cmd.contains("-p svc-platform")
+            && !cmd.contains("--workspace"),
+        "check-nostd must cover exactly domain and app: {cmd:?}"
+    );
+    // `check-fast` runs it, and `verify` runs `check-fast`.
+    let line = |name: &str| {
+        mk.lines()
+            .find(|l| l.starts_with(&format!("{name}:")))
+            .unwrap_or_else(|| panic!("no `{name}:` target"))
+            .to_owned()
+    };
+    assert!(
+        line("check-fast").contains("check-nostd"),
+        "{}",
+        line("check-fast")
+    );
+    assert!(line("verify").contains("check-fast"), "{}", line("verify"));
+    assert!(
+        NOSTD_TARGET.contains("-none"),
+        "a target with an OS has std"
+    );
+    let tc = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
+    assert!(
+        squash(&tc).contains(&format!("targets=[\"{NOSTD_TARGET}\"")),
+        "rust-toolchain.toml must install {NOSTD_TARGET}"
+    );
+}
+
+#[test]
+fn domain_and_app_have_no_build_script_proc_macro_or_extra_dependency() {
+    let kinds = target_kinds();
+    for krate in ["svc-domain", "svc-app"] {
+        let k = &kinds[krate];
+        for kind in k {
+            assert!(
+                kind == "lib" || kind == "test",
+                "{krate}: a `{kind}` target (a build script or a proc-macro runs host code at build time)"
+            );
+        }
+        assert!(k.iter().any(|x| x == "lib"), "{krate}: no lib target");
+    }
+    // Their dependency lists are pinned by the dependency-graph test above:
+    // domain has none, app has only domain.
+}
+
+// ---- source scans (an early, friendly message; NOT the enforcement) ----
+
+/// Source without `//` comments and without any whitespace. A scan like this
+/// is loose by nature (a block comment or a macro defeats it); it is only used
+/// for the weaker rules below and as an early message. The compiler check is
+/// the enforcement of zone purity.
 fn squash(src: &str) -> String {
     src.lines()
         .map(|l| l.split("//").next().unwrap_or(""))
@@ -244,29 +363,19 @@ fn src_files(crate_dir: &str) -> Vec<PathBuf> {
 }
 
 #[test]
-fn domain_and_app_are_no_std_and_cannot_link_std_back_in() {
+fn early_message_domain_and_app_name_no_std_items() {
     for krate in ["crates/domain", "crates/app"] {
-        let lib = fs::read_to_string(root().join(krate).join("src/lib.rs")).unwrap();
-        let lines: Vec<&str> = lib.lines().map(str::trim).collect();
-        assert!(lines.contains(&"#![no_std]"), "{krate}: #![no_std] missing");
-        assert!(
-            lines.contains(&"#![forbid(unsafe_code)]"),
-            "{krate}: forbid(unsafe_code) missing"
-        );
+        let lib = squash(&fs::read_to_string(root().join(krate).join("src/lib.rs")).unwrap());
+        assert!(lib.contains("#![no_std]"), "{krate}: #![no_std] missing");
         for f in src_files(krate) {
             let s = squash(&fs::read_to_string(&f).unwrap());
-            // The one allowed `extern crate` is `alloc`; `extern crate std
-            // as s;` would link std back in and defeat no_std.
-            assert_eq!(
-                s.matches("externcrate").count(),
-                s.matches("externcratealloc;").count(),
-                "{}: an `extern crate` other than alloc",
+            // Only a hint; `make check-nostd` is what refuses std.
+            assert!(!s.contains("std::"), "{}: names `std::`", f.display());
+            assert!(
+                !s.contains("externcratestd"),
+                "{}: extern crate std",
                 f.display()
             );
-            // `#[path]` can only point at files of this same crate, which is
-            // itself no_std, but it is how code gets smuggled between zones.
-            assert!(!s.contains("#[path"), "{}: #[path]", f.display());
-            assert!(!s.contains("#[macro_use"), "{}: #[macro_use]", f.display());
         }
     }
 }

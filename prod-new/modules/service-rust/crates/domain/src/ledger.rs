@@ -207,7 +207,7 @@ impl State {
         &self.applied
     }
 
-    /// Ratified invariant `units_conserved`: deposits minus withdrawals is
+    /// Proposed (not yet ratified) invariant `units_conserved`: deposits minus withdrawals is
     /// the balance, and the version counts the applied ids.
     pub fn conservation_holds(&self) -> bool {
         self.total_in.checked_sub(self.total_out) == Some(self.balance)

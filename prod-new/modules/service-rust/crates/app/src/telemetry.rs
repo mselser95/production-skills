@@ -45,6 +45,8 @@ signals! {
         UnitsConservedViolations => ("svc_units_conserved_violations_total", []),
         Events => ("svc_events_total", ["kind", "outcome"]),
         HttpRequests => ("svc_http_requests_total", ["route", "code"]),
+        HttpHeadEvictions => ("svc_http_head_evictions_total", []),
+        TelemetryErrors => ("svc_telemetry_errors_total", []),
     }
 }
 

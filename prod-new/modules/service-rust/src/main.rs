@@ -2,7 +2,8 @@
 //! wires ports to adapters, serves, and shuts down on SIGINT/SIGTERM.
 //!
 //! Exit codes: 0 drained cleanly, 1 failed to start, 3 requests were still
-//! running when the shutdown grace expired.
+//! running when the shutdown grace expired, 4 a second SIGINT/SIGTERM arrived
+//! while draining (immediate exit, in-flight work abandoned).
 #![forbid(unsafe_code)]
 
 use std::error::Error;
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
 fn run() -> Result<usize, Box<dyn Error>> {
     let config = Config::from_env()?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let recorder = Arc::new(Recorder::new(config.tracing));
+    let recorder = Arc::new(Recorder::with_declared_series(config.tracing));
     let telemetry: Arc<dyn Telemetry> = recorder.clone();
     let metrics: Arc<dyn MetricsSource> = recorder;
     let ids: Arc<dyn IdGenerator> = Arc::new(Sequence::new(&clock));
