@@ -65,8 +65,11 @@ actionlint:
 # different real files, even byte-identical ones: four review rounds failed on predicting
 # what shellcheck follows (rc files, source-path, ignored or binary sources, links out of
 # the tree), and shellcheck applies those itself. Measured here: 176 tracked paths, 25 of
-# them symlinks, 151 real files, and byte-identical real files would have saved only 22
-# invocations, all small.
+# them symlinks, 151 real files; sharing between byte-identical real files would have saved
+# 22 invocations (761 KB), including the second copy of the largest script
+# (verify-standard.sh, about 3 s of CPU), so those are linted separately on purpose.
+# A symlinked script that sources directory-relatively (source-path=SCRIPTDIR) is checked
+# only against its real directory's siblings.
 #
 # -x per file is LOOSER than the old single-call recipe in two cases: a script sourcing a
 # tracked non-.sh file or an untracked file is followed and can be clean where the old

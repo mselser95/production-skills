@@ -22,8 +22,19 @@
 # sourced files, links out of the tree, abbreviated options) and four review rounds each
 # found one more thing it could not see. shellcheck applies its rc files and options itself,
 # so this tool no longer needs to know. Measured on this repo (2026-11-27): of 176 tracked
-# *.sh, 25 are symlinks to another tracked script and byte-identical REAL files would save
-# only 22 invocations, all of small files, so what the sharing bought was small.
+# *.sh, 25 are symlinks to another tracked script, and 22 invocations would have been saved
+# by sharing between byte-identical REAL files (761 KB in all). Those files are linted
+# separately on purpose, INCLUDING the second copy of the largest script (verify-standard.sh,
+# 386 KB, about 3.7 s of CPU).
+#
+# A DEFINITION, NOT A PROOF OF EQUIVALENCE: a symlinked script that sources directory-
+# relatively (source-path=SCRIPTDIR, dirname "$0") is checked only against its real
+# directory's siblings; a link in another directory with different siblings is not checked.
+# (shellcheck resolves that keyword from the path as given; measured on 0.11.0.)
+#
+# A link target is read exactly (readlink -n; a newline belonging to the name is kept); a newline
+# or a tab in any hop's path is exit 2, naming the link. A chain of more than 40 links is
+# exit 2. Directories on the way are resolved physically (`d/..` after a symlinked `d`).
 #
 # -x PER FILE: shellcheck follows what a file sources, so a verdict never depends on who
 # shares a command line. That is LOOSER than the old single-call recipe in two cases: a script
@@ -53,7 +64,10 @@
 # newline or tab, shellcheck exit >= 2 or killed, a timeout). 2 wins over 1. Output is in
 # real-path order for any job count. INT, TERM and HUP send TERM to the workers' process
 # group, wait at most 1 s, send KILL to what is left, remove the temp dir and exit 130 / 143 /
-# 129. SIGKILL of this script cannot be handled and can leave a $TMPDIR/lint-parallel.* dir.
+# 129. SIGKILL of this script cannot be handled: it orphans the workers and can leave a
+# $TMPDIR/lint-parallel.* dir. A grandchild that creates its own session survives a signal.
+# K in the summary counts links to a tracked file; links to an untracked file (linted only
+# through the link) are counted and worded separately.
 set -uo pipefail
 
 sev=${LINT_SEVERITY:-warning}
@@ -123,11 +137,15 @@ resolve() {
   local p=$1 hops=0 d t
   while :; do
     d=${p%/*}; [ "$d" != "$p" ] || d=.; [ -n "$d" ] || d=/
-    d=$(cd -P -- "$d" 2> /dev/null && pwd -P) || { RERR="a directory on its way is missing"; return 1; }
+    d=$(cd -P -- "$d" 2> /dev/null && pwd -P) || { RERR="a directory on its way is missing"; return 1; } # MUT:physical
     p=${d%/}/${p##*/}
+    case $p in *$'\n'* | *$'\t'*) RERR="a path on its way contains a newline or a tab"; return 1 ;; esac # MUT:nlcheck
     [ -L "$p" ] || break
-    hops=$((hops + 1)); [ "$hops" -le 40 ] || { RERR="too many levels of symbolic links"; return 1; }
-    t=$(readlink -- "$p") || { RERR="cannot read the link"; return 1; }
+    hops=$((hops + 1)); [ "$hops" -le 40 ] || { RERR="too many levels of symbolic links"; return 1; } # MUT:hopcap
+    # readlink -n prints the target with no newline of its own (the BSD and GNU ones differ without -n);
+    # the printf x keeps $(...) from eating a newline that belongs to the name
+    t=$(readlink -n -- "$p" && printf x) || { RERR="cannot read the link"; return 1; } # MUT:rlnl
+    t=${t%x} # MUT:rlnl2
     case $t in /*) p=$t ;; *) p=$d/$t ;; esac
   done
   [ -e "$p" ] || { RERR="dangling (target $p does not exist)"; return 1; } # MUT:dangling
@@ -135,17 +153,17 @@ resolve() {
   [ -f "$p" ] || { RERR="target $p is not a regular file"; return 1; } # MUT:notreg
   REAL=$p
 }
-nlinks=0
+nlinks=0; nuntr=0
 : > "$T/map"
 while IFS= read -r p; do
   if [ -L "$p" ]; then # MUT:realpath
-    nlinks=$((nlinks + 1))
     resolve "$p" || { echo "lint: tracked link $p: $RERR -- refusing (exit 2)" >&2; exit 2; }
     case $REAL in
       "$root"/*) rel=${REAL#"$root"/} ;; # MUT:outside
       *) echo "lint: tracked link $p -> $REAL points outside the repository -- refusing (exit 2)" >&2; exit 2 ;;
     esac
-    git ls-files --error-unmatch -- ":(literal)$rel" > /dev/null 2>&1 || echo "note: $p -> $rel (target is not tracked)" >&2
+    if git ls-files --error-unmatch -- ":(literal)$rel" > /dev/null 2>&1; then nlinks=$((nlinks + 1))
+    else nuntr=$((nuntr + 1)); echo "note: $p -> $rel (target is not tracked)" >&2; fi
   else
     [ -f "$p" ] && [ -r "$p" ] || { echo "lint: cannot read tracked file $p (deleted from the tree?)" >&2; exit 2; }
     rel=$p
@@ -236,7 +254,9 @@ if [ "$toolerr" -gt 0 ]; then
   echo "lint: $toolerr tool error(s): the lint did not complete -- exit 2" >&2
   exit 2
 fi
-echo "shellcheck: $L real file(s) linted for $n tracked path(s); $nlinks symlink(s) resolve to a file already linted; severity=$sev"
+extra=""
+[ "$nuntr" -eq 0 ] || extra="; $nuntr symlink(s) lead to an untracked file, linted only through the link"
+echo "shellcheck: $L real file(s) linted for $n tracked path(s); $nlinks symlink(s) resolve to a file already linted$extra; severity=$sev"
 if [ "$dirty" -gt 0 ]; then
   echo "shellcheck: findings in $dirty of $L real file(s)" >&2
   exit 1

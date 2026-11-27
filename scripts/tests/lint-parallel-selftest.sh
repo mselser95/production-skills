@@ -36,8 +36,8 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 unset LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM XDG_CONFIG_HOME
 SD="SCRIPT""DIR" # the directory-relative source-path keyword, for the real fixtures
 
-T=$(mktemp -d "${TMPDIR:-/tmp}/lint-parallel-selftest.XXXXXX") || exit 2
-cleanup() { case $T in */lint-parallel-selftest.*) rm -rf -- "$T" ;; esac; }
+T=$(mktemp -d "${TMPDIR:-/tmp}/lp.XXXXXX") || exit 2
+cleanup() { case $T in */lp.*) rm -rf -- "$T" ;; esac; }
 trap cleanup EXIT
 BASH_BIN=$BASH
 ORIG_PATH=$PATH
@@ -46,7 +46,7 @@ HARD=40 # seconds: the guard that turns a hung subject into a FAIL line
 
 # ---- fixtures ---------------------------------------------------------------------
 newcase() { # name -> C R FILES_LOG; a repo with a, b, dup(=a), "sp ace/c d"
-  C="$T/$1"; R="$C/repo"; FILES_LOG="$C/files"
+  C="$T/k$(printf %s "$1" | cksum | cut -d" " -f1)"; R="$C/repo"; FILES_LOG="$C/files"
   mkdir -p "$C/bin"; : > "$FILES_LOG"
   export FILES_LOG
   cat > "$C/bin/shellcheck" <<'FAKE'
@@ -83,9 +83,12 @@ expect() { [ "$2" = "$3" ] || fail "$1: want [$2] got [$3]"; }
 guarded() { # guarded <seconds> cmd... : run in $R, stdout/stderr to $C/out,$C/err, set RC; a hang past the guard is a FAIL
   local lim=$1 pid g; shift
   printf x >> "$T/runs"; rm -f "$C/hung"
+  set -m
   ( cd "$R" && exec "$@" ) > "$C/out" 2> "$C/err" &
   pid=$!
-  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep "$lim" & wait $!; : > "$C/hung"; kill -KILL "$pid" 2>/dev/null ) &
+  set +m
+  # the subject runs in its own process group: TERM it first (the tool's handler kills its workers), KILL the group after a grace
+  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep "$lim" & wait $!; : > "$C/hung"; kill -TERM "$pid" 2>/dev/null; sleep 1 & wait $!; kill -KILL -- "-$pid" 2>/dev/null ) &  # MUT:guardkill
   g=$!
   wait "$pid"; RC=$?
   kill -TERM "$g" 2>/dev/null; wait "$g" 2>/dev/null
@@ -108,7 +111,7 @@ bgrun() { # start the subject in its own process group (so INT is deliverable) w
   BGPID=$!
   set +m
   printf x >> "$T/runs"; rm -f "$C/hung"
-  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep 25 & wait $!; : > "$C/hung"; kill -KILL "$BGPID" 2>/dev/null ) &
+  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep 25 & wait $!; : > "$C/hung"; kill -TERM "$BGPID" 2>/dev/null; sleep 1 & wait $!; kill -KILL -- "-$BGPID" 2>/dev/null ) &
   BGG=$!
 }
 bgend() { wait "$BGPID"; RC=$?; kill -TERM "$BGG" 2>/dev/null; wait "$BGG" 2>/dev/null; [ ! -e "$C/hung" ] || fail "HUNG: killed by the 25s guard"; }
@@ -234,23 +237,24 @@ t_relative_and_absolute_link_inside_the_repo() {
 t_link_target_outside_the_repo_is_exit_2() {
   printf 'echo x\n' > "$C/outside.sh"; ln -s "$C/outside.sh" "$R/out.sh"; commit_all
   lc; expect rc_absolute 2 "$RC"
-  grep -q 'out.sh' "$C/err" && grep -q 'outside the repository' "$C/err" || fail "link not named: $(cat "$C/err")"
+  grep -q '^lint: tracked link out.sh -> [^ ]* points outside the repository' "$C/err" || fail "link not named: $(cat "$C/err")"
   expect nothing_linted 0 "$(linted)"
   rm "$R/out.sh"; ln -s ../outside.sh "$R/out.sh"; commit_all; lc; expect rc_relative 2 "$RC"
 }
 t_dangling_link_is_exit_2() {
   ln -s nowhere.sh "$R/dang.sh"; commit_all
-  lc; expect rc 2 "$RC"; grep -q 'dang.sh.*dangling' "$C/err" || fail "not named as dangling: $(cat "$C/err")"
+  lc; expect rc 2 "$RC"; grep -q '^lint: tracked link dang.sh: dangling (target ' "$C/err" || fail "not named as dangling: $(cat "$C/err")"
 }
 t_link_to_a_directory_is_exit_2() {
   mkdir "$R/adir"; printf 'x\n' > "$R/adir/f.txt"; ln -s adir "$R/dirlink.sh"; commit_all
-  lc; expect rc 2 "$RC"; grep -q 'dirlink.sh.*directory' "$C/err" || fail "not named as a directory link: $(cat "$C/err")"
+  lc; expect rc 2 "$RC"; grep -q '^lint: tracked link dirlink.sh: target [^ ]* is a directory' "$C/err" || fail "not named as a directory link: $(cat "$C/err")"
 }
 t_link_to_an_untracked_in_repo_file_is_linted_with_a_note() {
   printf 'echo u\n' > "$R/untracked-target.txt"; ln -s untracked-target.txt "$R/u.sh"
   ( cd "$R" && git add u.sh && git commit -qm link )
   lc; expect rc 0 "$RC"
   grep -qx 'note: u.sh -> untracked-target.txt (target is not tracked)' "$C/err" || fail "no note: $(cat "$C/err")"
+  expect summary "shellcheck: 5 real file(s) linted for 5 tracked path(s); 0 symlink(s) resolve to a file already linted; 1 symlink(s) lead to an untracked file, linted only through the link; severity=warning" "$(sumline)"
   grep -qx 'untracked-target.txt' "$FILES_LOG" || fail "the target was not linted: $(cat "$FILES_LOG")"
   grep -qx 'u.sh' "$FILES_LOG" && fail "the link itself was linted"
 }
@@ -268,6 +272,38 @@ t_links_in_any_creation_order_give_the_same_output() {
   ( cd "$R" && git rm -q lb.sh la.sh && git commit -qm rm ); ln -s a.sh "$R/la.sh"; ln -s a.sh "$R/lb.sh"; commit_all
   lc; cmp -s "$C/out1" "$C/out" || fail "output depends on the order the links were made"
   grep -qx 'also reachable as: la.sh, lb.sh' "$C/out" || fail "links not listed in byte order: $(cat "$C/out")"
+}
+
+t_link_target_with_newline_or_tab_is_exit_2() {
+  # readlink adds ONE newline: a name that ends in a newline, holds one, or holds a tab must not be cut or split
+  local nl=$'\n' tab=$'\t' name v
+  printf 'echo DIRTY\n' > "$R/x.sh$nl"; printf 'echo a\n' > "$R/a${nl}b"; printf 'echo t\n' > "$R/t${tab}x"; commit_all
+  for v in "x.sh$nl" "a${nl}b" "t${tab}x"; do
+    ln -s "$v" "$R/l.sh"; ( cd "$R" && git add l.sh && git commit -qm l ); name=$(printf %s "$v" | tr '\n\t' 'NT')
+    lc; expect "rc_$name" 2 "$RC"
+    grep -q '^lint: tracked link l.sh: a path on its way contains a newline or a tab' "$C/err" || fail "$name: link not refused by name: $(head -2 "$C/err")"
+    ( cd "$R" && git rm -qf l.sh && git commit -qm r )
+  done
+}
+t_hang_guard_kills_the_whole_group() {
+  # the guard TERMs the subject, then KILLs its process group: a TERM-ignoring child must not be left behind
+  printf '#!/bin/bash\ntrap "" TERM\nsleep 6123 &\nwait\n' > "$C/hang.sh"
+  guarded 1 "$BASH_BIN" "$C/hang.sh"
+  case $FAILS in *HUNG*) FAILS="" ;; *) fail "the guard did not fire" ;; esac
+  sleep 0.3
+  if pgrep -f "sleep 6123" > /dev/null; then fail "the guard left an orphan behind"; pkill -f "sleep 6123"; fi
+}
+t_link_loop_is_exit_2_promptly() {
+  ln -s loop2.sh "$R/loop1.sh"; ln -s loop1.sh "$R/loop2.sh"; commit_all
+  LIM=8 lc; expect rc 2 "$RC"
+  grep -q '^lint: tracked link loop[12].sh: too many levels of symbolic links' "$C/err" || fail "no loop message: $(head -2 "$C/err")"
+}
+t_links_resolve_physically_not_logically() {
+  # d -> sub/realdir, so `d/..` is sub; a logical reading would say the root
+  mkdir -p "$R/sub/realdir"; printf 'echo y\n' > "$R/sub/y.txt"; printf 'echo decoy\n' > "$R/y.txt"
+  ln -s sub/realdir "$R/d"; ln -s d/../y.txt "$R/l.sh"; commit_all
+  lc; expect rc 0 "$RC"
+  grep -qx 'sub/y.txt' "$FILES_LOG" && ! grep -qx 'y.txt' "$FILES_LOG" || fail "linted [$(sorted_log)] instead of sub/y.txt"
 }
 
 # ---- fake cases: process control ----------------------------------------------------------
@@ -401,6 +437,21 @@ t_real_directory_relative_source_path_variants() {
     grep -q '^In d1/x.sh' "$C/out" && fail "$v: d1/x.sh reported"
   done
 }
+t_real_link_in_another_directory_is_checked_as_its_real_path() {
+  # PINNED DEFINITION (header): a symlinked script that sources directory-relatively is checked only against its
+  # real directory's siblings. shellcheck resolves SCRIPTDIR from the path as given, so link/x.sh alone differs.
+  have_real || return 0
+  rmfix; mkdir -p "$R/real" "$R/link"
+  printf '#!/bin/bash\n# shellcheck source-path=%s\n. ./lib.sh\necho "$v"\n' "$SD" > "$R/real/x.sh"
+  printf '#!/bin/bash\n# shellcheck disable=SC2034\nv=1\n' > "$R/real/lib.sh"; printf '#!/bin/bash\n:\n' > "$R/link/lib.sh"
+  ln -s ../real/x.sh "$R/link/x.sh"; commit_all
+  ( cd "$R" && shellcheck -x -S warning -- link/x.sh > /dev/null 2>&1 ); expect link_path_alone_differs 1 "$?"
+  lcr; expect rc_clean 0 "$RC"
+  expect summary "shellcheck: 3 real file(s) linted for 4 tracked path(s); 1 symlink(s) resolve to a file already linted; severity=warning" "$(sumline)"
+  printf 'for f in $(ls); do :; done\n' >> "$R/real/x.sh"
+  lcr; expect rc_finding 1 "$RC"
+  grep -q '^In real/x.sh' "$C/out" && grep -qx 'also reachable as: link/x.sh' "$C/out" || fail "finding not under real/x.sh with the link listed: $(head -4 "$C/out")"
+}
 rcf_supported() { # does the installed shellcheck take the abbreviated --rcf=?
   [ -z "${LINT_SELFTEST_FORCE_RCF:-}" ] || return 0
   local d="$C/probe"; mkdir -p "$d"; : > "$d/rc"; printf '#!/bin/bash\necho\n' > "$d/p.sh"
@@ -438,7 +489,7 @@ t_skips_are_counted_separately_from_ok() {
   # the installed shellcheck is hidden from PATH: the real cases skip, and the final line says "skipped", not "ok"
   local d="$C/nosc" tool out p
   mkdir -p "$d"
-  for tool in git awk grep tr mkdir cp rm cat head wc sort cmp find mktemp pgrep pkill sleep kill printf env uname date xargs mv chmod mkfifo dirname readlink cut ls getconf sed ln touch tail; do
+  for tool in cksum git awk grep tr mkdir cp rm cat head wc sort cmp find mktemp pgrep pkill sleep kill printf env uname date xargs mv chmod mkfifo dirname readlink cut ls getconf sed ln touch tail; do
     p=$(command -v "$tool") && ln -sf "$p" "$d/$tool"
   done
   out=$(env PATH="$d" LINT_PARALLEL_SUBJECT="$subject" LINT_SELFTEST_ONLY="real_lib_change_flips_verdict real_looser_than_the_old_recipe" "$BASH_BIN" "$SELF" 2> /dev/null)
@@ -446,7 +497,7 @@ t_skips_are_counted_separately_from_ok() {
   case $out in *"SKIPPED real_lib_change_flips_verdict: real shellcheck is not installed"*) ;; *) fail "no skip line with a reason: $out" ;; esac
 }
 
-CASES="cold_lints_each_real_file_once_and_remembers_nothing identical_real_files_get_two_invocations findings_printed_under_the_real_path one_file_per_call_with_x untracked_sh_is_not_linted zero_tracked_sh_is_exit_2 shellcheck_missing_is_exit_2 exit_2_is_tool_error_and_beats_findings output_is_identical_for_one_and_four_jobs odd_filenames unreadable_file_is_exit_2 symlink_to_tracked_script_is_one_invocation nine_links_and_two_real_identical_files_are_two_invocations symlink_chain relative_and_absolute_link_inside_the_repo link_target_outside_the_repo_is_exit_2 dangling_link_is_exit_2 link_to_a_directory_is_exit_2 link_to_an_untracked_in_repo_file_is_linted_with_a_note link_named_sh_whose_target_is_not links_in_any_creation_order_give_the_same_output term_removes_the_temp_dir signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file watchdog_outcome_is_deterministic_at_the_boundary no_watchdog_sleep_is_left_after_a_normal_run real_lib_change_flips_verdict real_looser_than_the_old_recipe real_directory_relative_source_path_variants real_abbreviated_rcfile_option_is_honoured skip_logic_runs_the_case_when_the_probe_supports_it skips_are_counted_separately_from_ok"
+CASES="cold_lints_each_real_file_once_and_remembers_nothing identical_real_files_get_two_invocations findings_printed_under_the_real_path one_file_per_call_with_x untracked_sh_is_not_linted zero_tracked_sh_is_exit_2 shellcheck_missing_is_exit_2 exit_2_is_tool_error_and_beats_findings output_is_identical_for_one_and_four_jobs odd_filenames unreadable_file_is_exit_2 symlink_to_tracked_script_is_one_invocation nine_links_and_two_real_identical_files_are_two_invocations symlink_chain relative_and_absolute_link_inside_the_repo link_target_outside_the_repo_is_exit_2 dangling_link_is_exit_2 link_to_a_directory_is_exit_2 link_to_an_untracked_in_repo_file_is_linted_with_a_note link_named_sh_whose_target_is_not links_in_any_creation_order_give_the_same_output link_target_with_newline_or_tab_is_exit_2 hang_guard_kills_the_whole_group link_loop_is_exit_2_promptly links_resolve_physically_not_logically term_removes_the_temp_dir signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file watchdog_outcome_is_deterministic_at_the_boundary no_watchdog_sleep_is_left_after_a_normal_run real_lib_change_flips_verdict real_looser_than_the_old_recipe real_directory_relative_source_path_variants real_link_in_another_directory_is_checked_as_its_real_path real_abbreviated_rcfile_option_is_honoured skip_logic_runs_the_case_when_the_probe_supports_it skips_are_counted_separately_from_ok"
 
 one_case() {
   local n=$1 want=""
@@ -467,6 +518,8 @@ run_cases() {
     printf '%s\n' "$line"
     case $line in ok*) ok=$((ok + 1)) ;; SKIPPED*) skipped=$((skipped + 1)) ;; *) bad=$((bad + 1)) ;; esac # MUT:skipcount
   done
+  sleep 0.3
+  if pgrep -f "$T" > /dev/null; then bad=$((bad + 1)); printf 'FAIL leftover_processes: still alive: %s\n' "$(pgrep -fl "$T" | cut -c1-80 | tr '\n' '|')"; pkill -f "$T"; fi
   printf '%s ok, %s failed, %s skipped (%s runs of the subject)\n' "$ok" "$bad" "$skipped" "$(wc -c < "$T/runs" | tr -d ' ')"
   [ "$total" -gt 0 ] || { echo "no case ran" >&2; exit 2; }
   [ "$bad" -eq 0 ]
@@ -489,6 +542,10 @@ timeout-mapped-to-clean@@tomark=rc=0@@file_timeout_is_a_tool_error
 timeout-marker-check-removed@@tomark=:@@file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file
 kill-escalation-removed@@killesc=    :@@term_ignoring_shellcheck_is_killed_after_the_grace
 watchdog-kill-removed@@wdkill=  :@@watchdog_kills_a_term_ignoring_file
+readlink-trailing-newline-reverted@@rlnl=    t=$(readlink -- "$p") || { RERR="cannot read the link"; return 1; }##rlnl2=    :@@link_target_with_newline_or_tab_is_exit_2
+real-path-newline-tab-check-removed@@nlcheck=    :@@link_target_with_newline_or_tab_is_exit_2
+loop-cap-removed@@hopcap=    :@@link_loop_is_exit_2_promptly
+physical-resolution-made-logical@@physical=    d=$(cd -- "$d" 2> /dev/null && pwd) || { RERR="x"; return 1; }@@links_resolve_physically_not_logically
 watchdog-not-reaped@@wdreap=:@@no_watchdog_sleep_is_left_after_a_normal_run
 group-kill-replaced-by-killing-xargs-only@@termkill=    kill -TERM "$xpid" 2> /dev/null##killesc=    :@@signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace
 output-sort-removed@@sortmap=cp "$T/map" "$T/map.sorted"@@symlink_to_tracked_script_is_one_invocation links_in_any_creation_order_give_the_same_output
@@ -499,6 +556,7 @@ XEOF
 )
 # selftest mutations: applied to a copy of THIS file; the copy runs the guarding cases
 SMUTATIONS=$(cat <<'XEOF'
+hang-guard-kills-only-the-subject@@guardkill=  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep "$lim" & wait $!; : > "$C/hung"; kill -KILL "$pid" 2>/dev/null ) &@@hang_guard_kills_the_whole_group
 skip-made-unconditional@@skip=  if true; then SKIP="forced"; return 0; fi@@skip_logic_runs_the_case_when_the_probe_supports_it
 skip-counted-as-ok@@skipcount=    case $line in ok*|SKIPPED*) ok=$((ok + 1)) ;; *) bad=$((bad + 1)) ;; esac@@skips_are_counted_separately_from_ok
 XEOF
