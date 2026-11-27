@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Refill a token bucket to the nanosecond instead of in whole seconds, without overflow or lost fractions.
+tier: 2
+services: [bucket]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [go build ./..., go vet ./..., go test ./...]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new module dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml
