@@ -4,7 +4,7 @@
 # `expires: never` is the one legal non-date value.
 #
 # Live entries today: four skill-weight liabilities below (one per skill and
-# set), and nothing else. check-registries.sh distinguishes a file carrying an
+# set) and one database-pin re-evaluation (pg19-reevaluate). check-registries.sh distinguishes a file carrying an
 # `entries:` key (a repo saying what it has) from a missing one (a repo that
 # said nothing).
 #
@@ -57,3 +57,9 @@ entries:
     created: 2026-11-27
     expires: 2027-01-31
     reason: "reachable set (291351 bytes) is dominated by references/dimensions.md (117712), references/tier-policy.yaml (58242) and references/mechanism-derivation.md (38391)"
+  - id: pg19-reevaluate
+    obligation: "Re-evaluate PostgreSQL 19 as the default database major (db-postgres image pin)"
+    owner: "@mselser95"
+    created: 2026-11-27
+    expires: 2027-05-31
+    reason: "PostgreSQL 18 is pinned on purpose. Retire when TimescaleDB declares PostgreSQL 19 support AND a 19.x minor >= 19.1 exists; then bump prod-new/modules/db-postgres/db/image.lock and its major check."
