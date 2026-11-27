@@ -31,3 +31,10 @@ This repo's heavy checks saturated the owner's laptop twice on 2026-11-27. There
 - Hand-back: IMPLEMENTED or BAIL on line 1; what you built (files, counts); test counts and
   wall times; mutations with their RED lines; `git status --porcelain` summary; proof nothing
   of yours is running and no temp dir is left; a NOT VALIDATED section.
+
+## A blocked command stays blocked
+If the permission system or a safety check refuses a command (an `rm -rf`, a `make` target,
+a Docker call), do NOT reach the same effect another way (Python `shutil.rmtree`, `find
+-delete`, a wrapper script). Stop that step, leave the files where they are, and report the
+exact command and the refusal in the hand-back. Leftover scratch directories are fine: name
+them so the orchestrator can remove them.

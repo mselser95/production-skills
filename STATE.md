@@ -305,3 +305,39 @@ calibrated pilot of prod-review; T19/T21 (unit gates + CI for Rust/Python), T23 
 metrics), T24 (migrations), T28 monorepo-root (owns root files two services collide on), T29
 web-react, T30/T31 DS components, T34 Playwright e2e; checks < 15 s (wire gate-run-cached, CI
 cache restore, evidence attests instead of re-running). Phase 2 papers loop not started.
+
+## Checkpoint 2026-11-27 18:05 (session d1e79d60)
+
+Merged to master today: #14 #15 #16 #17 #18 #21 #22 #23 #24 #25 #26 #29.
+MASTER IS RED until #33 merges (one eval task lacked `language`: #22 + #26 merged apart).
+
+| PR | What | State |
+|---|---|---|
+| 33 | fix: missing `language` key (master red) | open, merge FIRST |
+| 19 | cached lint | draft; Opus rejected twice (source-following classifier unsound); redesign in progress: maybe-sourcing files are never cached |
+| 20 | assembler | draft; Opus rejected (path escape, non-atomic); fix pushed, needs Opus round 2 |
+| 27 | eval sandbox, both hosts | Opus security review running; first real model runs passed (codex bare, claude bare, claude skill) |
+| 28 | install.sh --host | CI red on Linux (one selftest case); fix in progress |
+| 30, 31 | service-rust, service-python | stacked on #20, CI green, no Opus yet |
+| 32 | db bootstrap | Opus security review running; make db-test 107/107 both variants (arm64 local, amd64 CI) |
+| — | ci/evidence-attest (worktree .wt/ci-attest) | in progress: run every gate/suite once, evidence attests |
+
+CI `gates` job is still ~14 min (evidence record 484 s, check-fast+selftests 272 s).
+
+Lessons today:
+- 4 of 5 first-round Opus reviews were CHANGES REQUIRED with real defects: never merge unreviewed gates.
+- Several squash merges in a row can break master while each PR was green: after a batch, wait
+  for master's CI before merging more, or merge master into each PR first.
+- container-commit.sh now also runs the selftests a change touches (CI runs `make selftests`;
+  check-fast alone missed a Linux-only failure, #28).
+- Never call scripts/evidence-record.sh on the host with any argument: it has no --help and
+  executes every gate.
+- A subagent that is refused a command must not reach the effect another way; and the
+  orchestrator does not run a command a subagent was refused (ask the owner).
+- Stacked PRs: after the base is squash-merged, merge master into the child, take the child's
+  side for files whose master blob equals the old base blob, and check the tree is unchanged.
+
+Next: Opus round 2 on #20; T19/T21 (unit gates + CI for Rust/Python); T23 db exporter + metrics;
+T24 migrations; T28 monorepo-root; T29 web-react; T30/T31 DS components; T34 Playwright; eval
+pilot (5 reps × Go tasks; estimate cost first; keep transcripts so skill loading is provable);
+CI under 1 minute (after attest: content cache + restore, split the slow suites).
