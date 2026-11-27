@@ -23,4 +23,3 @@ node_modules/
 
 # session worktrees and local harness state; never part of the standard
 .claude/
-.cache/

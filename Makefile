@@ -49,11 +49,24 @@ actionlint:
 	@actionlint
 	@echo "actionlint: workflows valid"
 
-# `make lint` is `scripts/lint-cached.sh`: shellcheck at -S warning, with -x, over
-# the tracked shell scripts, ONE FILE PER shellcheck call. The rule it keeps: a
-# cached verdict is a function of exactly what its key hashes (the header of the
-# script lists the key; read it before changing anything here). Properties, each of
-# which was a finding:
+# `make lint` is `scripts/lint-parallel.sh`: shellcheck at -S warning, with -x, over the
+# tracked shell scripts, ONE FILE PER shellcheck call, in parallel (LINT_JOBS, default
+# min(4, cores)). It remembers nothing between runs.
+#
+# NO CACHE. An earlier version cached clean verdicts. With a sound rule, 118 of the 129
+# distinct groups could not be cached, so the cache saved 11 files and a warm run cost as
+# much as a cold one; it was also the part that failed review twice.
+#
+# DEDUPLICATION. install.sh mirrors the shared probes into the skills and the template, so
+# `verify-standard.sh` appears eleven times byte-identically. Within one run, two paths
+# share ONE shellcheck run when their content and rc chain are equal. Premise, measured
+# and kept as a selftest case: with -x from the repo root a relative source resolves
+# against the working directory, so identical copies get the same verdict. A path whose
+# bytes, rc files or $SHELLCHECK_OPTS contain SCRIPTDIR is never shared.
+#
+# COST, measured on a loaded laptop (shellcheck 0.11.0): 176 tracked files, 129 runs of
+# shellcheck on every invocation, about 8.5 to 9.2 s. verify-standard.sh, about 5 s, is
+# the floor.
 #
 # TRACKED FILES ONLY (`git ls-files`). The gate used to walk the working tree
 # while CI lints what the clone contains, so the two ran over different sets:
@@ -65,44 +78,16 @@ actionlint:
 #
 # ONE FILE PER CALL, WITH -x. Without -x shellcheck follows a sourced file only if
 # that file happens to be on the same command line, so a verdict depended on which
-# files shared a call. Every file is now linted alone and sources are always
-# followed; this is equal to or stricter than the old single call over all files.
+# files shared a call. Every file is now linted alone and sources are always followed.
 #
-# DEDUPED BY KEY, not by content alone. install.sh mirrors the shared probes into
-# the skills and the template, so `verify-standard.sh` appears eleven times byte-identically. Two
-# paths share a verdict only when their whole key is equal: same content, same
-# applicable .shellcheckrc, and (for a file that can source another) same
-# directory, because a relative source resolves against it. Today: 176 tracked
-# files, 154 distinct keys, of which 59 are sourcing files and 95 are not. The
-# mirrored probes are sourcing files, so each copy is its own key (see the cost
-# below).
-#
-# CACHED BY KEY. A clean verdict is stored under its key in .cache/lint
-# (gitignored) and not recomputed; the rest run in parallel (LINT_JOBS, default
-# min(4, cores) and the cgroup CPU quota). A sourcing file's key includes every
-# tracked *.sh, so editing ANY script re-lints all sourcing files (about 60 here):
-# coarse on purpose, because a sound narrower key needs the real source graph.
-# Measured on the author's macOS laptop (shellcheck 0.11.0) while the machine was
-# loaded by other work, so read the ratios: cold 17-20 s, warm 0.25 s, after
-# editing one script 13-15 s. The eleven mirrored verify-standard.sh copies take
-# about 4.7 s each and are most of the cold CPU time. The serial recipe was
-# reported at 135 s in a 16-core Linux container by an earlier profile; it was not
-# re-measured here. CI has no cache restore step, so every CI run is cold.
-# The honesty conditions: ONLY A CLEAN RESULT IS CACHED (findings are printed on
-# every run); an entry is trusted only if it is a regular file holding its own
-# key; a shellcheck failure other than "findings" (exit >= 2, killed) is exit 2
-# and is never cached; `LINT_CACHE=verify make lint` re-lints cached entries too
-# and FAILS (exit 3, "CACHE LIE") if one now has findings; `LINT_CACHE=off`
-# ignores the cache.
-#
-# Zero scripts, or zero after dedup, is exit 2: a clean lint over nothing is not a
-# clean lint. A lint that cannot run must not look like one that found nothing, so
-# the missing-tool guard stays here and exits 2 as well. The recipe is ONE command
-# on purpose: make grades its exit status directly (the old multi-line recipe once
-# stayed green over a real finding because only its trailing `echo` was graded).
+# Exit 0 clean, 1 findings, 2 tool error (shellcheck missing, zero files, exit >= 2,
+# killed), with 2 over 1. A lint that cannot run must not look like one that found
+# nothing. The recipe is ONE command on purpose: make grades its exit status directly
+# (the old multi-line recipe once stayed green over a real finding because only its
+# trailing `echo` was graded).
 lint:
 	@command -v shellcheck >/dev/null || { echo "shellcheck missing -- brew install shellcheck" >&2; exit 2; }
-	@bash scripts/lint-cached.sh
+	@bash scripts/lint-parallel.sh
 
 # The repo's own probes, run against the repo itself -- the half that was missing.
 gates:

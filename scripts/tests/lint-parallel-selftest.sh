@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# lint-parallel-selftest.sh -- proves scripts/lint-parallel.sh does what its header says.
+#
+# Hermetic and sequential: every case copies a small temp git repo under one temp root.
+# Two kinds of case:
+#   fake cases  -- a FAKE `shellcheck` first on PATH logs every file it is asked to lint
+#                  and calls a file "dirty" when its content contains the word DIRTY (or
+#                  its path matches $FAKE_DIRTY); it can also exit with a chosen code or
+#                  kill itself. They pin the orchestration and are fast.
+#   real cases  -- named real_*: the REAL shellcheck on small fixtures (cross-file
+#                  sourcing, rc files). When shellcheck is not installed they are
+#                  SKIPPED and the line says so; a skip is never a silent pass.
+# One line per case, then "N ok, M failed". Exit 0 all ok, 1 any failure, 2 none ran.
+#
+# Usage: lint-parallel-selftest.sh [--mutations]
+#   --mutations  apply ONE mutation at a time to a scratch COPY of the subject (the
+#                lines carrying a `# MUT:<id>` marker), run the cases that guard it, and
+#                require RED. Prints RED/GREEN per mutation; exit 1 on any GREEN.
+# Env:   LINT_PARALLEL_SUBJECT  script under test (default ../lint-parallel.sh)
+#        LINT_SELFTEST_ONLY     space-separated case names (used by --mutations)
+#        LINT_MUT_ONLY          space-separated mutation ids: run only those
+#        LINT_SELFTEST_RUNS     set: append the number of subject runs to each case line
+set -uo pipefail
+
+case ${BASH_SOURCE[0]} in */*) here=$(cd "${BASH_SOURCE[0]%/*}" && pwd) ;; *) here=$(pwd) ;; esac
+subject=${LINT_PARALLEL_SUBJECT:-$here/../lint-parallel.sh}
+SELF="$here/${BASH_SOURCE[0]##*/}"
+[ -r "$subject" ] || { echo "no subject at $subject" >&2; exit 2; }
+
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+unset LINT_JOBS LINT_SEVERITY SHELLCHECK_OPTS FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL XDG_CONFIG_HOME
+
+T=$(mktemp -d "${TMPDIR:-/tmp}/lint-parallel-selftest.XXXXXX") || exit 2
+cleanup() { case $T in */lint-parallel-selftest.*) rm -rf -- "$T" ;; esac; }
+trap cleanup EXIT
+BASH_BIN=$BASH
+ORIG_PATH=$PATH
+mkdir -p "$T/home"; export HOME="$T/home"
+
+# ---- fixtures ---------------------------------------------------------------------
+newcase() { # name -> C R FILES_LOG; a repo with a, b, dup(=a), "sp ace/c d"
+  C="$T/$1"; R="$C/repo"; FILES_LOG="$C/files"
+  mkdir -p "$C/bin"; : > "$FILES_LOG"
+  export FILES_LOG
+  cat > "$C/bin/shellcheck" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FILES_LOG.argv"
+for a in "$@"; do f=$a; done
+sev=$3
+printf '%s\n' "$f" >> "$FILES_LOG"
+[ -z "${FAKE_SLEEP:-}" ] || sleep "0.0$(( $$ % 4 ))"
+if [ -n "${FAKE_KILL:-}" ]; then case $f in *"$FAKE_KILL"*) kill -9 $$ ;; esac; fi
+if [ -n "${FAKE_RC:-}" ]; then case $f in *"${FAKE_RC_ON:-}"*) echo "fake tool failure"; exit "$FAKE_RC" ;; esac; fi
+if [ -n "${FAKE_HOLD_ON:-}" ]; then case $f in *"$FAKE_HOLD_ON"*) echo go > "$FAKE_FIFO"; sleep 1 ;; esac; fi
+dirty=0
+while IFS= read -r l || [ -n "$l" ]; do case $l in *DIRTY*) dirty=1 ;; esac; done < "$f"
+[ -z "${FAKE_DIRTY:-}" ] || case $f in *"$FAKE_DIRTY"*) dirty=1 ;; esac
+if [ "$dirty" = 1 ]; then echo "In $f line 1: finding (severity $sev)"; exit 1; fi
+exit 0
+FAKE
+  chmod +x "$C/bin/shellcheck"
+  if [ ! -d "$T/tmpl" ]; then
+    mkdir -p "$T/tmpl/sp ace"
+    printf 'echo a\n' > "$T/tmpl/a.sh"; printf 'echo b\n' > "$T/tmpl/b.sh"; printf 'echo a\n' > "$T/tmpl/dup.sh"
+    printf 'echo c\n' > "$T/tmpl/sp ace/c d.sh"; printf 'text\n' > "$T/tmpl/readme.txt"
+    ( cd "$T/tmpl" && git init -q . && git add -A && git commit -qm init )
+  fi
+  rm -rf -- "$R"; cp -R "$T/tmpl" "$R"
+  unset FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_SLEEP LINT_JOBS LINT_SEVERITY SHELLCHECK_OPTS
+  export LINT_JOBS=2
+}
+lc() { # run the subject inside the repo with the fake first on PATH
+  printf x >> "$T/runs"
+  ( cd "$R" && PATH="$C/bin:$ORIG_PATH" "$BASH_BIN" "$subject" ) > "$C/out" 2> "$C/err"; RC=$?
+}
+lcr() { # the same with the REAL shellcheck
+  printf x >> "$T/runs"
+  ( cd "$R" && PATH="$ORIG_PATH" "$BASH_BIN" "$subject" ) > "$C/out" 2> "$C/err"; RC=$?
+}
+have_real() { command -v shellcheck >/dev/null || { INFO="SKIPPED: real shellcheck is not installed"; return 1; }; }
+linted() { wc -l < "$FILES_LOG" | tr -d ' '; }
+reset() { : > "$FILES_LOG"; : > "$FILES_LOG.argv"; }
+sumline() { grep '^shellcheck:' "$C/out" | head -1; }
+commit_all() { ( cd "$R" && git add -A && git commit -qm c ); }
+fail() { FAILS="$FAILS $1;"; }
+expect() { [ "$2" = "$3" ] || fail "$1: want [$2] got [$3]"; }
+sorted_log() { LC_ALL=C sort "$FILES_LOG" | tr '\n' ' '; }
+rmfix() { rm "$R/a.sh" "$R/b.sh" "$R/dup.sh" "$R/sp ace/c d.sh"; }
+LIBARR='#!/bin/bash\nARR=(1 2)\necho "${ARR[@]}"\n'
+SRCSH='#!/bin/bash\n. ./lib.sh\necho "$ARR"\n'
+LOOP_DIRTY='#!/bin/bash\nfor f in $(ls); do echo "$f"; done\n' # real finding SC2045
+
+# ---- fake cases -------------------------------------------------------------------
+t_cold_lints_each_unique_once_and_remembers_nothing() {
+  mkdir "$C/tmp"; TMPDIR="$C/tmp" lc; expect rc 0 "$RC"
+  expect lints 3 "$(linted)"
+  expect summary "shellcheck: 3 unique script(s) of 4 clean at severity=warning" "$(sumline)"
+  expect temp_dir_removed_on_exit 0 "$(find "$C/tmp" -mindepth 1 | wc -l | tr -d ' ')"
+  reset; lc; expect second_run_lints_everything_again 3 "$(linted)"
+}
+t_identical_content_linted_once() {
+  rm "$R/b.sh" "$R/sp ace/c d.sh"; commit_all   # a.sh and dup.sh remain, byte-identical
+  lc; expect rc 0 "$RC"
+  expect lints 1 "$(linted)"; expect which a.sh "$(cat "$FILES_LOG")"
+  expect summary "shellcheck: 1 unique script(s) of 2 clean at severity=warning" "$(sumline)"
+}
+t_findings_printed_and_sharing_paths_listed() {
+  printf 'echo DIRTY\n' > "$R/b.sh"
+  lc; expect rc1 1 "$RC"
+  grep -q 'In b.sh line 1: finding' "$C/out" || fail "findings not printed"
+  grep -q 'findings in 1 of 3 unique' "$C/err" || fail "no findings summary on stderr"
+  printf 'echo DIRTY\n' > "$R/a.sh"; printf 'echo DIRTY\n' > "$R/dup.sh"; printf 'echo b\n' > "$R/b.sh"; lc
+  grep -q 'In a.sh line 1' "$C/out" || fail "finding not under the representative a.sh"
+  grep -q 'In dup.sh' "$C/out" && fail "finding printed under the non-representative dup.sh"
+  grep -q 'the same verdict holds for dup.sh' "$C/out" || fail "sharing paths not listed: $(cat "$C/out")"
+}
+t_one_file_per_call_with_x() {
+  lc; expect rc 0 "$RC"
+  expect calls 3 "$(wc -l < "$FILES_LOG.argv" | tr -d ' ')"
+  expect every_call_is_x_S_dashdash 0 "$(grep -vc -- '^-x -S warning -- ' "$FILES_LOG.argv")"
+  grep -qx -- '-x -S warning -- sp ace/c d.sh' "$FILES_LOG.argv" || fail "spaced path not passed whole: $(cat "$FILES_LOG.argv")"
+  reset; LINT_SEVERITY=style lc; grep -q -- '-x -S style -- ' "$FILES_LOG.argv" || fail "severity not passed"
+}
+t_untracked_sh_is_not_linted() {
+  printf 'echo DIRTY\n' > "$R/scratch.sh"; lc; expect rc 0 "$RC"
+  expect lints 3 "$(linted)"
+}
+t_zero_tracked_sh_is_exit_2() {
+  ( cd "$R" && git rm -q a.sh b.sh dup.sh "sp ace/c d.sh" && git commit -qm none )
+  lc; expect rc 2 "$RC"
+  grep -q 'ZERO shell scripts' "$C/err" || fail "no ZERO message"
+}
+t_shellcheck_missing_is_exit_2() {
+  mkdir -p "$C/empty"
+  ( cd "$R" && PATH="$C/empty" "$BASH_BIN" "$subject" ) > "$C/out" 2> "$C/err"; RC=$?
+  expect rc 2 "$RC"
+  grep -q 'shellcheck missing' "$C/err" || fail "no missing message: $(cat "$C/err")"
+}
+t_exit_2_is_tool_error_and_beats_findings() {
+  FAKE_DIRTY=a.sh FAKE_RC=2 FAKE_RC_ON=b.sh lc; expect rc 2 "$RC"
+  grep -q 'TOOL ERROR on b.sh' "$C/err" || fail "no tool-error message: $(cat "$C/err")"
+  grep -q 'In a.sh line 1' "$C/out" || fail "the finding was lost behind the tool error"
+  grep -q 'findings in' "$C/err" && fail "a tool error was reported as findings"
+  FAKE_KILL=b.sh lc; expect killed_rc 2 "$RC"
+  grep -q 'TOOL ERROR on b.sh' "$C/err" || fail "a killed shellcheck is not a tool error"
+}
+t_output_is_identical_for_one_and_four_jobs() {
+  local i; mkdir -p "$R/zz" "$R/mm"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'echo %s %s\n' "$i" "$([ $((i % 3)) = 0 ] && echo DIRTY)" > "$R/f$i.sh"; done
+  for i in 1 2 3 4; do printf 'echo DIRTY %s\n' "$i" > "$R/zz/z$i.sh"; printf 'echo DIRTY m%s\n' "$i" > "$R/mm/m$i.sh"; done
+  commit_all; export FAKE_SLEEP=1
+  LINT_JOBS=1 lc; cp "$C/out" "$C/out1"; expect rc1 1 "$RC"
+  LINT_JOBS=4 lc; cmp -s "$C/out1" "$C/out" || fail "stdout differs between LINT_JOBS=1 and 4"
+  [ "$(grep -c '^In ' "$C/out")" = 12 ] || fail "expected 12 findings, got $(grep -c '^In ' "$C/out")"
+  grep '^In ' "$C/out" | cut -d' ' -f2 > "$C/order"
+  LC_ALL=C sort "$C/order" | cmp -s - "$C/order" || fail "findings are not in path order: $(tr '\n' ' ' < "$C/order")"
+}
+t_odd_filenames() {
+  printf 'echo bs\n' > "$R/back\\slash.sh"; printf 'echo dash\n' > "$R/-dash.sh"; commit_all
+  lc; expect rc 0 "$RC"
+  grep -qxF 'back\slash.sh' "$FILES_LOG" || fail "backslash path not linted whole: $(cat "$FILES_LOG")"
+  grep -qxF -- '-dash.sh' "$FILES_LOG" || fail "dash path not linted whole"
+  rm "$R/back\\slash.sh"; commit_all
+  printf 'echo t\n' > "$R/tab"$'\t'"x.sh"; commit_all; lc; expect rc_tab 2 "$RC"
+  rm "$R/tab"$'\t'"x.sh"; commit_all
+  if printf 'echo n\n' > "$R/nl"$'\n'"x.sh" 2> /dev/null; then
+    commit_all; lc; expect rc_newline 2 "$RC"
+    grep -q 'newline or a tab' "$C/err" || fail "no refusal message for the newline path"
+  else INFO="newline filename not creatable here; refusal not exercised"; fi
+}
+t_dedupe_respects_rc_chain() {
+  # same content under the same rc chain shares a run; a nearer rc file is a different chain
+  local d; mkdir -p "$R/x" "$R/y" "$R/sub"; rmfix
+  for d in x y sub; do printf 'echo n\n' > "$R/$d/n.sh"; done
+  printf 'disable=SC1000\n' > "$R/.shellcheckrc"; printf 'disable=SC2000\n' > "$R/sub/.shellcheckrc"; commit_all
+  lc; expect rc 0 "$RC"
+  expect shared_under_one_rc_split_under_another "sub/n.sh x/n.sh " "$(sorted_log)"
+}
+t_dedupe_respects_scriptdir() {
+  # identical plain copies share a run; SCRIPTDIR in the bytes, in an rc file or in the
+  # opts stops the sharing
+  mkdir -p "$R/d1" "$R/d2" "$R/e1" "$R/e2"; rmfix
+  printf 'echo n\n' > "$R/d1/s.sh"; cp "$R/d1/s.sh" "$R/d2/s.sh"
+  printf '#!/bin/bash\n# source-path=SCRIPTDIR\n. ./lib.sh\n' > "$R/e1/t.sh"; cp "$R/e1/t.sh" "$R/e2/t.sh"; commit_all
+  lc; expect bytes "d1/s.sh e1/t.sh e2/t.sh " "$(sorted_log)"
+  printf 'source-path=SCRIPTDIR\n' > "$R/.shellcheckrc"; reset; lc
+  expect rc_file 4 "$(linted)"
+  rm "$R/.shellcheckrc"; reset; SHELLCHECK_OPTS=--source-path=SCRIPTDIR lc
+  expect opts 4 "$(linted)"
+}
+t_term_removes_the_temp_dir() {
+  # TERM removes the temp dir (SIGKILL cannot be handled and is not tested). INT is not
+  # delivered here: a background job of a non-interactive shell starts with INT ignored.
+  mkfifo "$C/fifo"; mkdir "$C/tmp"; local pid
+  ( cd "$R" && TMPDIR="$C/tmp" FAKE_FIFO="$C/fifo" FAKE_HOLD_ON=b.sh PATH="$C/bin:$ORIG_PATH" "$BASH_BIN" "$subject" ) > "$C/out" 2> "$C/err" &
+  pid=$!
+  read -r _ < "$C/fifo"; kill -TERM "$pid"; wait "$pid"; RC=$?
+  expect rc_143 143 "$RC"
+  expect temp_dir_removed 0 "$(find "$C/tmp" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+}
+# ---- real shellcheck ---------------------------------------------------------------
+t_real_lib_change_flips_verdict() {
+  # a.sh uses an array that lib.sh defines: followed with -x, SC2128 fires in a.sh (the old
+  # one-call recipe sees it too); a change of only lib.sh flips the verdict on the next run
+  have_real || return 0
+  rmfix; printf '%b' "$SRCSH" > "$R/a.sh"; printf '%b' "$LIBARR" > "$R/lib.sh"; commit_all
+  lcr; expect rc_array 1 "$RC"; grep -q 'SC2128' "$C/out" || fail "SC2128 not reported: $(head -5 "$C/out")"
+  ( cd "$R" && shellcheck -S warning a.sh lib.sh > /dev/null 2>&1 ); expect old_recipe_rc 1 "$?"
+  printf '#!/bin/bash\nARR=1\necho "$ARR"\n' > "$R/lib.sh"
+  lcr; expect rc_scalar 0 "$RC"; expect summary "shellcheck: 2 unique script(s) of 2 clean at severity=warning" "$(sumline)"
+  printf '%b' "$LIBARR" > "$R/lib.sh"
+  lcr; expect rc_array_again 1 "$RC"
+}
+t_real_follows_three_forms() {
+  # plain `. ./lib.sh`, a `#`-first line that is code (a quote closes on it), a directive
+  have_real || return 0
+  rmfix
+  printf '#!/bin/bash\n. ./lib.sh\necho "$ARR"\n' > "$R/f1.sh"
+  printf '#!/bin/bash\necho "a\n#"; . ./lib.sh\necho "$ARR"\n' > "$R/f2.sh"
+  printf '#!/bin/bash\n# shellcheck source=lib.sh\n. "$X"\necho "$ARR"\n' > "$R/f3.sh"
+  printf '%b' "$LIBARR" > "$R/lib.sh"; commit_all
+  lcr; expect rc 1 "$RC"
+  expect all_three_reported "f1.sh f2.sh f3.sh" "$(grep '^In ' "$C/out" | cut -d' ' -f2 | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+}
+t_real_b2_sources_outside_the_tree_flip() {
+  # a directive resolving outside the work tree (the CWD is the repo root, so ../lib.sh is
+  # the repo's parent) and one naming an untracked root path
+  have_real || return 0
+  rmfix
+  printf '#!/bin/bash\n# shellcheck source=../lib.sh\n. "$X"\necho "$ARR"\n' > "$R/s1.sh"
+  printf '#!/bin/bash\n# shellcheck source=untracked.sh\n. "$X"\necho "$ARR"\n' > "$R/s2.sh"; commit_all
+  lcr; expect none_there_rc 0 "$RC"
+  printf 'ARR=(1 2)\n' > "$C/lib.sh"; printf 'ARR=(1 2)\n' > "$R/untracked.sh"
+  lcr; expect created_flips_rc 1 "$RC"
+  grep -q '^In s1.sh' "$C/out" || fail "outside-the-tree source not followed: $(head -3 "$C/out")"
+  grep -q '^In s2.sh' "$C/out" || fail "untracked root source not followed"
+  printf 'ARR=1\n' > "$C/lib.sh"; printf 'ARR=1\n' > "$R/untracked.sh"; lcr; expect changed_flips_back_rc 0 "$RC"
+}
+t_real_rc_representative_case_b() {
+  # identical content at z.sh and sub/a.sh, sub/.shellcheckrc disables the finding: the
+  # verdict of each path is its own, whichever is first and whichever is deleted
+  have_real || return 0
+  rmfix; mkdir -p "$R/sub"
+  printf '%b' "$LOOP_DIRTY" > "$R/z.sh"; printf '%b' "$LOOP_DIRTY" > "$R/sub/a.sh"
+  printf 'disable=SC2045\n' > "$R/sub/.shellcheckrc"; commit_all
+  lcr; expect both_present_rc 1 "$RC"
+  grep -q '^In z.sh' "$C/out" || fail "finding not under z.sh"; grep -q '^In sub/a.sh' "$C/out" && fail "sub/a.sh must be clean (its rc disables SC2045)"
+  ( cd "$R" && git rm -q z.sh ); lcr; expect only_sub_rc 0 "$RC"
+  ( cd "$R" && git reset -q --hard && git rm -q sub/a.sh ); lcr; expect only_z_rc 1 "$RC"
+}
+t_real_nested_and_ancestor_rc() {
+  have_real || return 0
+  rmfix; mkdir -p "$R/sub"; printf '%b' "$LOOP_DIRTY" > "$R/sub/a.sh"; commit_all
+  lcr; expect no_rc 1 "$RC"
+  printf 'disable=SC2045\n' > "$R/sub/.shellcheckrc"; lcr; expect untracked_nested_rc_added 0 "$RC"
+  rm "$R/sub/.shellcheckrc"; lcr; expect removed 1 "$RC"
+  printf 'disable=SC2045\n' > "$C/.shellcheckrc"; lcr; expect ancestor_above_repo_added 0 "$RC"
+}
+t_real_dedupe_premise() {
+  # the premise of the sharing rule, measured: with -x from the repo root, two identical
+  # copies in two directories follow the SAME lib.sh unless SCRIPTDIR is in play, whatever
+  # sits next to each copy; with source-path=SCRIPTDIR the directory decides
+  have_real || return 0
+  rmfix; mkdir -p "$R/d1" "$R/d2"
+  printf 'A=1\n' > "$R/d1/lib.sh"; printf 'A=(1 2)\n' > "$R/d2/lib.sh"
+  local body='#!/bin/bash\n. ./lib.sh\necho "$A"\n'
+  printf '%b' "$body" > "$R/d1/s.sh"; printf '%b' "$body" > "$R/d2/s.sh"
+  printf '#!/bin/bash\n# shellcheck source-path=SCRIPTDIR\n. ./lib.sh\necho "$A"\n' > "$R/d1/t.sh"; cp "$R/d1/t.sh" "$R/d2/t.sh"
+  sc() { ( cd "$R" && shellcheck -x -S warning -- "$1" > /dev/null 2>&1; echo $? ); }
+  expect plain_copies_agree "$(sc d1/s.sh)" "$(sc d2/s.sh)"
+  expect plain_follows_neither_dir_lib 0 "$(sc d2/s.sh)"
+  expect scriptdir_d1 0 "$(sc d1/t.sh)"; expect scriptdir_d2_follows_its_own_lib 1 "$(sc d2/t.sh)"
+  printf 'A=(1 2)\n' > "$R/lib.sh"
+  expect root_array_d1 1 "$(sc d1/s.sh)"; expect root_array_d2 1 "$(sc d2/s.sh)"
+  printf 'A=1\n' > "$R/lib.sh"
+  expect root_scalar_d1 0 "$(sc d1/s.sh)"; expect root_scalar_d2 0 "$(sc d2/s.sh)"
+  INFO="plain copies: dir lib ignored; SCRIPTDIR copies: d1 0, d2 1"
+}
+
+CASES="cold_lints_each_unique_once_and_remembers_nothing identical_content_linted_once findings_printed_and_sharing_paths_listed one_file_per_call_with_x untracked_sh_is_not_linted zero_tracked_sh_is_exit_2 shellcheck_missing_is_exit_2 exit_2_is_tool_error_and_beats_findings output_is_identical_for_one_and_four_jobs odd_filenames dedupe_respects_rc_chain dedupe_respects_scriptdir term_removes_the_temp_dir real_lib_change_flips_verdict real_follows_three_forms real_b2_sources_outside_the_tree_flip real_rc_representative_case_b real_nested_and_ancestor_rc real_dedupe_premise"
+
+one_case() {
+  local n=$1 want=""
+  newcase "$n"; FAILS=""; INFO=""
+  "t_$n"
+  [ -z "$INFO" ] || want=" ($INFO)"
+  if [ -z "$FAILS" ]; then printf 'ok   %s%s\n' "$n" "$want"; else printf 'FAIL %s:%s\n' "$n" "$FAILS"; fi
+}
+run_cases() {
+  local n ok=0 bad=0 line total=0 r0 r1
+  : > "$T/runs"
+  for n in $CASES; do
+    if [ -n "${LINT_SELFTEST_ONLY:-}" ]; then case " $LINT_SELFTEST_ONLY " in *" $n "*) ;; *) continue ;; esac; fi
+    total=$((total + 1))
+    r0=$(wc -c < "$T/runs"); line=$(one_case "$n" 2>&1); r1=$(wc -c < "$T/runs")
+    [ -z "${LINT_SELFTEST_RUNS:-}" ] || line="$line [runs $((r1 - r0))]"
+    printf '%s\n' "$line"
+    case $line in ok*) ok=$((ok + 1)) ;; *) bad=$((bad + 1)) ;; esac
+  done
+  printf '%s ok, %s failed (%s runs of the subject)\n' "$ok" "$bad" "$(wc -c < "$T/runs" | tr -d ' ')"
+  [ "$total" -gt 0 ] || { echo "no case ran" >&2; exit 2; }
+  [ "$bad" -eq 0 ]
+}
+
+# ---- mutations --------------------------------------------------------------------
+# id @@ marker=replacement line (';;' separates several) @@ guarding cases
+MUTATIONS=$(cat <<'XEOF'
+x-removed@@noxflag=X=@@one_file_per_call_with_x real_lib_change_flips_verdict
+dashdash-removed@@dashdash=DD=@@one_file_per_call_with_x
+dedupe-removed@@dedupe=      k = H[i] "|" P[i]@@identical_content_linted_once cold_lints_each_unique_once_and_remembers_nothing
+dedupe-ignores-rc-chain@@rcdedupe=      k = k@@dedupe_respects_rc_chain real_rc_representative_case_b
+dedupe-ignores-scriptdir@@sdirdedupe=      if (0) k = k "|" p@@dedupe_respects_scriptdir
+zero-files-guard-removed@@zeroguard=  :@@zero_tracked_sh_is_exit_2
+exit-ge2-mapped-to-findings@@rc1=    [1-9]*)@@exit_2_is_tool_error_and_beats_findings
+exit-ge2-mapped-to-clean@@rc0=    0 | [2-9]* | 1[0-9][0-9])@@exit_2_is_tool_error_and_beats_findings
+output-sort-removed@@sortpipe=  }' "$T/dirrc" "$T/rchash" "$T/sdir" "$T/rcsd" "$T/paths" "$T/hashes" > "$T/groups"@@output_is_identical_for_one_and_four_jobs
+untracked-files-linted@@gitls=find . -name '*.sh' -not -path './.git/*' -print0 > "$T/files0"@@untracked_sh_is_not_linted
+shellcheck-missing-guard-removed@@missing=:@@shellcheck_missing_is_exit_2
+XEOF
+)
+mutate_line() { # file id replacement
+  local f=$1 id=$2 repl=$3
+  REPL=$repl ID=$id awk '{ if (index($0, "# MUT:" ENVIRON["ID"]) && $0 ~ ("# MUT:" ENVIRON["ID"] "$")) print ENVIRON["REPL"]; else print }' "$f" > "$f.m" && mv "$f.m" "$f"
+}
+mutant_parses() { # does the mutant RUN through to its end on a clean fixture without a shell syntax error?
+  newcase mutctl
+  ( cd "$R" && PATH="$C/bin:$ORIG_PATH" "$BASH_BIN" "$1" ) > "$C/out" 2> "$C/err"
+  ! grep -Eq 'syntax error|unexpected (token|EOF)' "$C/err"
+}
+run_mutations() {
+  local line id spec cases rest pair mid repl d out red=0 green=0 base
+  mkdir -p "$T/mut"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id=${line%%@@*}; line=${line#*@@}; spec=${line%%@@*}; cases=${line#*@@}
+    if [ -n "${LINT_MUT_ONLY:-}" ]; then case " $LINT_MUT_ONLY " in *" $id "*) ;; *) continue ;; esac; fi
+    d="$T/mut/$id"; mkdir -p "$d"; cp "$subject" "$d/lint-parallel.sh"
+    rest=$spec
+    while [ -n "$rest" ]; do
+      case $rest in *';;'*) pair=${rest%%;;*}; rest=${rest#*;;} ;; *) pair=$rest; rest="" ;; esac
+      mid=${pair%%=*}; repl=${pair#*=}
+      mutate_line "$d/lint-parallel.sh" "$mid" "$repl"
+    done
+    if cmp -s "$subject" "$d/lint-parallel.sh"; then printf 'ERROR %-30s mutation did not change the script (marker missing?)\n' "$id"; green=$((green + 1)); continue; fi
+    if ! mutant_parses "$d/lint-parallel.sh"; then printf 'ERROR %-30s mutant does not parse: %s\n' "$id" "$(grep -E 'syntax error|unexpected' "$C/err" | head -1)"; green=$((green + 1)); continue; fi
+    out=$(LINT_PARALLEL_SUBJECT="$d/lint-parallel.sh" LINT_SELFTEST_ONLY="$cases" "$BASH_BIN" "$SELF" 2>&1); base=$?
+    if [ "$base" -eq 1 ]; then printf 'RED   %-30s %s\n' "$id" "$(printf '%s\n' "$out" | grep '^FAIL' | head -1 | cut -c1-100)"; red=$((red + 1))
+    else printf 'GREEN %-30s the guarding case(s) [%s] still pass: that part is unguarded\n' "$id" "$cases"; green=$((green + 1)); fi
+  done <<MUTEOF
+$MUTATIONS
+MUTEOF
+  printf '%s RED, %s not RED\n' "$red" "$green"
+  [ "$green" -eq 0 ]
+}
+
+if [ "${1:-}" = "--mutations" ]; then
+  run_mutations
+  exit $?
+fi
+run_cases
