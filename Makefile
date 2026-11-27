@@ -93,8 +93,8 @@ actionlint:
 # that file happens to be on the same command line, so a verdict depended on which
 # files shared a call. Every file is now linted alone and sources are always followed.
 #
-# Exit 0 clean, 1 findings, 2 tool error (shellcheck missing, zero files, exit >= 2,
-# killed), with 2 over 1. A lint that cannot run must not look like one that found
+# Exit codes (0 clean, 1 findings, 2 tool error with 2 over 1; the list of what is a
+# tool error, timeouts and refused links included, is in the header of the script). A lint that cannot run must not look like one that found
 # nothing. The recipe is ONE command on purpose: make grades its exit status directly
 # (the old multi-line recipe once stayed green over a real finding because only its
 # trailing `echo` was graded).

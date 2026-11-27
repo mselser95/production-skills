@@ -32,9 +32,10 @@
 # directory's siblings; a link in another directory with different siblings is not checked.
 # (shellcheck resolves that keyword from the path as given; measured on 0.11.0.)
 #
-# A link target is read exactly (readlink -n; a newline belonging to the name is kept); a newline
-# or a tab in any hop's path is exit 2, naming the link. A chain of more than 40 links is
-# exit 2. Directories on the way are resolved physically (`d/..` after a symlinked `d`).
+# A link target is read exactly (readlink -n; a newline belonging to the name is kept). Exit 2,
+# naming the link, when the link's own name, its target, or any intermediate LINK on the way
+# contains a newline or a tab (a physically resolved path that is clean is linted), when the
+# target is empty, or when the chain is longer than 40 links. Directories on the way are resolved physically (`d/..` after a symlinked `d`).
 #
 # -x PER FILE: shellcheck follows what a file sources, so a verdict never depends on who
 # shares a command line. That is LOOSER than the old single-call recipe in two cases: a script
@@ -146,6 +147,7 @@ resolve() {
     # the printf x keeps $(...) from eating a newline that belongs to the name
     t=$(readlink -n -- "$p" && printf x) || { RERR="cannot read the link"; return 1; } # MUT:rlnl
     t=${t%x} # MUT:rlnl2
+    [ -n "$t" ] || { RERR="target is empty"; return 1; }
     case $t in /*) p=$t ;; *) p=$d/$t ;; esac
   done
   [ -e "$p" ] || { RERR="dangling (target $p does not exist)"; return 1; } # MUT:dangling
@@ -190,15 +192,21 @@ cat > "$T/worker.sh" <<'WORKER'
 # $1 = index, $2 = path. Output and exit code go to files; never to the shared stdout.
 # The watchdog writes the marker $T/to.$1 BEFORE it signals, TERM then KILL after $GRACE; the marker,
 # not the exit status, decides "timeout". When the file finishes first the watchdog is signalled and reaped.
+# Each shellcheck runs in its OWN process group (job control for that one command), so a wrapper in front
+# of it cannot leave children behind: the watchdog and an abort signal address the group.
+sc=""; wd=""
+trap '[ -z "$sc" ] || kill -KILL -- "-$sc" 2>/dev/null || kill -KILL "$sc" 2>/dev/null; [ -z "$wd" ] || kill -TERM "$wd" 2>/dev/null; exit 143' TERM HUP INT
+set -m
 shellcheck $X -S "$SEV" $DD "$2" > "$T/o.$1" 2>&1 &
 sc=$!
+set +m
 (
   trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM
   sleep "$TMO" & wait $!
   : > "$T/to.$1"
-  kill -TERM "$sc" 2>/dev/null
+  kill -TERM -- "-$sc" 2>/dev/null || kill -TERM "$sc" 2>/dev/null # MUT:wdterm
   sleep "$GRACE" & wait $!
-  kill -KILL "$sc" 2>/dev/null # MUT:wdkill
+  kill -KILL -- "-$sc" 2>/dev/null || kill -KILL "$sc" 2>/dev/null # MUT:wdkill
   exit 0
 ) &
 wd=$!

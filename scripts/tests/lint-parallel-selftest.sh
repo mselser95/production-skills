@@ -33,14 +33,52 @@ SELF="$here/${BASH_SOURCE[0]##*/}"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-unset LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM XDG_CONFIG_HOME
+unset LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM FAKE_SPAWN XDG_CONFIG_HOME
 SD="SCRIPT""DIR" # the directory-relative source-path keyword, for the real fixtures
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/lp.XXXXXX") || exit 2
-cleanup() { case $T in */lp.*) rm -rf -- "$T" ;; esac; }
-trap cleanup EXIT
 BASH_BIN=$BASH
 ORIG_PATH=$PATH
+ORIG_TMPDIR=${TMPDIR:-}
+REALSLEEP=$(command -v sleep)
+# PROCESS HYGIENE. No pattern here matches a process that is not this run's: every helper carries $T in its
+# command line (sleeps go through the wrapper $C/bin/sleep, which records its pid and runs as `$C/sl <n>`; the
+# subject gets TMPDIR under $C, so its workers carry $C too; fakes are scripts under $C) or has its pid in
+# $C/files.pids. $C/foreign.pids holds deliberate decoys, killed unconditionally.
+leak_check() { # print the pids of this run that are alive: carrying $T, or recorded in a pid file; one settle, one re-check
+  local p out="" f n=0
+  while [ "$n" -lt 2 ]; do
+    out=""
+    for p in $(pgrep -f "$T"); do out="$out $p"; done
+    for f in "$T"/*/files.pids "$T"/*/foreign.pids; do # MUT:leakpids
+      [ -f "$f" ] || continue
+      for p in $(cat "$f"); do kill -0 "$p" 2> /dev/null && out="$out $p"; done
+    done
+    [ -n "$out" ] || break
+    n=$((n + 1)); [ "$n" -ge 2 ] || sleep 0.3
+  done
+  printf '%s' "$out"
+}
+reap_all() { # KILL (never TERM: a helper may ignore it) everything of this run, then say what is still alive
+  local p f
+  for p in $(pgrep -f "$T"); do kill -KILL "$p" 2> /dev/null; done # MUT:reapkill
+  for f in "$T"/*/files.pids; do
+    [ -f "$f" ] || continue
+    for p in $(cat "$f"); do
+      case $(ps -o command= -p "$p" 2> /dev/null) in *"$T"*) kill -KILL "$p" 2> /dev/null ;; esac
+    done
+  done
+  for f in "$T"/*/foreign.pids; do
+    [ -f "$f" ] || continue
+    for p in $(cat "$f"); do kill -KILL "$p" 2> /dev/null; done
+  done
+  [ -z "$(pgrep -f "$T")" ]
+}
+cleanup() { reap_all; case $T in */lp.*) rm -rf -- "$T" ;; esac; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 mkdir -p "$T/home"; export HOME="$T/home"
 HARD=40 # seconds: the guard that turns a hung subject into a FAIL line
 
@@ -51,11 +89,13 @@ newcase() { # name -> C R FILES_LOG; a repo with a, b, dup(=a), "sp ace/c d"
   export FILES_LOG
   cat > "$C/bin/shellcheck" <<'FAKE'
 #!/bin/sh
+echo $$ >> "$FILES_LOG.pids"
 printf '%s\n' "$*" >> "$FILES_LOG.argv"
 for a in "$@"; do f=$a; done
 sev=$3
 printf '%s\n' "$f" >> "$FILES_LOG"
 [ -z "${FAKE_IGNORE_TERM:-}" ] || trap '' TERM
+if [ -n "${FAKE_SPAWN:-}" ]; then case $f in *b.sh*) trap '' TERM; sleep "$FAKE_SPAWN" & sleep "$FAKE_SPAWN" ;; esac; fi
 [ -z "${FAKE_NAP:-}" ] || sleep "$FAKE_NAP"
 if [ -n "${FAKE_HANG_ON:-}" ]; then case $f in *"$FAKE_HANG_ON"*) exec sleep "$FAKE_HANG" ;; esac; fi
 if [ -n "${FAKE_KILL:-}" ]; then case $f in *"$FAKE_KILL"*) kill -9 $$ ;; esac; fi
@@ -68,6 +108,8 @@ if [ "$dirty" = 1 ]; then echo "In $f line 1: finding (severity $sev)"; exit 1; 
 exit 0
 FAKE
   chmod +x "$C/bin/shellcheck"
+  printf '#!/bin/bash\necho $$ >> "$FILES_LOG.pids"\nexec -a "${FILES_LOG%%/files}/sl" "%s" "$@"\n' "$REALSLEEP" > "$C/bin/sleep"
+  chmod +x "$C/bin/sleep"; mkdir -p "$C/tmp"
   if [ ! -d "$T/tmpl" ]; then
     mkdir -p "$T/tmpl/sp ace"
     printf 'echo a\n' > "$T/tmpl/a.sh"; printf 'echo b\n' > "$T/tmpl/b.sh"; printf 'echo a\n' > "$T/tmpl/dup.sh"
@@ -75,7 +117,7 @@ FAKE
     ( cd "$T/tmpl" && git init -q . && git add -A && git commit -qm init )
   fi
   rm -rf -- "$R"; cp -R "$T/tmpl" "$R"
-  unset FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS LIM
+  unset FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM FAKE_SPAWN LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS LIM
   export LINT_JOBS=2
 }
 fail() { FAILS="$FAILS $1;"; }
@@ -83,13 +125,15 @@ expect() { [ "$2" = "$3" ] || fail "$1: want [$2] got [$3]"; }
 guarded() { # guarded <seconds> cmd... : run in $R, stdout/stderr to $C/out,$C/err, set RC; a hang past the guard is a FAIL
   local lim=$1 pid g; shift
   printf x >> "$T/runs"; rm -f "$C/hung"
+  [ "${TMPDIR:-}" != "$ORIG_TMPDIR" ] || export TMPDIR="$C/tmp" # the subject's workers then carry $C in their command lines
   set -m
   ( cd "$R" && exec "$@" ) > "$C/out" 2> "$C/err" &
   pid=$!
   set +m
+  echo "$pid" >> "$FILES_LOG.pids"
   # the subject runs in its own process group: TERM it first (the tool's handler kills its workers), KILL the group after a grace
-  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep "$lim" & wait $!; : > "$C/hung"; kill -TERM "$pid" 2>/dev/null; sleep 1 & wait $!; kill -KILL -- "-$pid" 2>/dev/null ) &  # MUT:guardkill
-  g=$!
+  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; "$C/bin/sleep" "$lim" & wait $!; : > "$C/hung"; kill -TERM "$pid" 2>/dev/null; "$C/bin/sleep" 1 & wait $!; kill -KILL -- "-$pid" 2>/dev/null ) &  # MUT:guardkill
+  g=$!; echo "$g" >> "$FILES_LOG.pids"
   wait "$pid"; RC=$?
   kill -TERM "$g" 2>/dev/null; wait "$g" 2>/dev/null
   [ ! -e "$C/hung" ] || fail "HUNG: killed by the ${lim}s guard"
@@ -107,23 +151,24 @@ physroot() { ( cd "$R" && pwd -P ); }
 tmp_empty() { expect "$1" 0 "$(find "$2" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"; }
 bgrun() { # start the subject in its own process group (so INT is deliverable) with env pairs; sets BGPID, BGG
   set -m
-  ( cd "$R" && exec env "$@" PATH="$C/bin:$ORIG_PATH" "$BASH_BIN" "$subject" ) > "$C/out" 2> "$C/err" &
+  ( cd "$R" && exec env TMPDIR="$C/tmp" "$@" PATH="$C/bin:$ORIG_PATH" "$BASH_BIN" "$subject" ) > "$C/out" 2> "$C/err" &
   BGPID=$!
   set +m
+  echo "$BGPID" >> "$FILES_LOG.pids"
   printf x >> "$T/runs"; rm -f "$C/hung"
-  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep 25 & wait $!; : > "$C/hung"; kill -TERM "$BGPID" 2>/dev/null; sleep 1 & wait $!; kill -KILL -- "-$BGPID" 2>/dev/null ) &
-  BGG=$!
+  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; "$C/bin/sleep" 25 & wait $!; : > "$C/hung"; kill -TERM "$BGPID" 2>/dev/null; "$C/bin/sleep" 1 & wait $!; kill -KILL -- "-$BGPID" 2>/dev/null ) &
+  BGG=$!; echo "$BGG" >> "$FILES_LOG.pids"
 }
 bgend() { wait "$BGPID"; RC=$?; kill -TERM "$BGG" 2>/dev/null; wait "$BGG" 2>/dev/null; [ ! -e "$C/hung" ] || fail "HUNG: killed by the 25s guard"; }
-unrelated_sleep() { sleep 4423 & SIB=$!; }
-end_unrelated() { kill -0 "$SIB" 2> /dev/null || fail "$1: an unrelated sibling sleep was killed"; kill "$SIB" 2> /dev/null; wait "$SIB" 2> /dev/null; }
+unrelated_sleep() { "$C/bin/sleep" 4423 & SIB=$!; echo "$SIB" >> "$FILES_LOG.pids"; }
+end_unrelated() { kill -0 "$SIB" 2> /dev/null || fail "$1: an unrelated sibling sleep was killed"; kill -KILL "$SIB" 2> /dev/null; wait "$SIB" 2> /dev/null; }
 LIBARR='#!/bin/bash\nARR=(1 2)\necho "${ARR[@]}"\n'
 SRCSH='#!/bin/bash\n. ./lib.sh\necho "$ARR"\n'
 
 # ---- fake cases: what is linted, and how ---------------------------------------------
 t_cold_lints_each_real_file_once_and_remembers_nothing() {
   # a.sh and dup.sh are byte-identical REAL files: both are linted
-  mkdir "$C/tmp"; TMPDIR="$C/tmp" lc; expect rc 0 "$RC"
+  TMPDIR="$C/tmp" lc; expect rc 0 "$RC"
   expect lints 4 "$(linted)"
   expect summary "shellcheck: 4 real file(s) linted for 4 tracked path(s); 0 symlink(s) resolve to a file already linted; severity=warning" "$(sumline)"
   tmp_empty temp_dir_removed_on_exit "$C/tmp"
@@ -287,11 +332,47 @@ t_link_target_with_newline_or_tab_is_exit_2() {
 }
 t_hang_guard_kills_the_whole_group() {
   # the guard TERMs the subject, then KILLs its process group: a TERM-ignoring child must not be left behind
-  printf '#!/bin/bash\ntrap "" TERM\nsleep 6123 &\nwait\n' > "$C/hang.sh"
+  printf '#!/bin/bash\ntrap "" TERM\n"%s/bin/sleep" 6123 &\nwait\n' "$C" > "$C/hang.sh"
   guarded 1 "$BASH_BIN" "$C/hang.sh"
   case $FAILS in *HUNG*) FAILS="" ;; *) fail "the guard did not fire" ;; esac
   sleep 0.3
-  if pgrep -f "sleep 6123" > /dev/null; then fail "the guard left an orphan behind"; pkill -f "sleep 6123"; fi
+  if pgrep -f "$C/sl 6123" > /dev/null; then fail "the guard left an orphan behind"; fi # MUT:hangpat
+}
+t_hang_guard_ignores_foreign_processes() {
+  # a decoy TERM-immune `sleep 6123` that this run did not start: the hang case must neither match nor kill it
+  local dp line
+  bash -c 'trap "" TERM; exec sleep 6123' & dp=$!
+  echo "$dp" >> "$C/foreign.pids"; sleep 0.2
+  line=$(nested hang_guard_kills_the_whole_group)
+  case $line in ok*) ;; *) fail "the hang case does not pass beside a foreign decoy: $line" ;; esac
+  kill -0 "$dp" 2> /dev/null || fail "the hang case killed a process it did not own"
+  kill -KILL "$dp" 2> /dev/null; wait "$dp" 2> /dev/null
+}
+t_reap_kills_term_immune_helpers() {
+  local p
+  # carries $T in its command line but is in no pid file: only the pgrep half of reap_all can find it
+  bash -c 'trap "" TERM; exec -a "$1/imm" "$2" 6127' x "$C" "$REALSLEEP" & p=$!
+  sleep 0.3
+  reap_all
+  if kill -0 "$p" 2> /dev/null; then fail "a TERM-immune helper survived reap_all"; kill -KILL "$p"; fi
+  wait "$p" 2> /dev/null
+}
+t_leak_check_sees_a_helper_without_the_root_in_its_command_line() {
+  local p out
+  sleep 6128 & p=$!
+  echo "$p" >> "$FILES_LOG.pids"
+  out=$(leak_check)
+  case " $out " in *" $p "*) ;; *) fail "leak_check missed pid $p: [$out]" ;; esac
+  kill -KILL "$p" 2> /dev/null; wait "$p" 2> /dev/null
+}
+t_timeout_kills_the_whole_group_of_the_shellcheck() {
+  # a fake shellcheck that spawns a child and ignores TERM: after the timeout nothing of this case survives
+  local t0=$SECONDS
+  FAKE_SPAWN=6129 LINT_FILE_TIMEOUT=1 lc; expect rc 2 "$RC"
+  [ $((SECONDS - t0)) -lt 8 ] || fail "took $((SECONDS - t0)) s"
+  grep -q 'timeout: b.sh' "$C/err" || fail "no timeout line: $(head -3 "$C/err")"
+  grep -q 'TOOL ERROR' "$C/err" && fail "surfaced as a tool error"
+  sleep 0.3; pgrep -f "$C/sl 6129" > /dev/null && fail "a child of the timed-out shellcheck survived"
 }
 t_link_loop_is_exit_2_promptly() {
   ln -s loop2.sh "$R/loop1.sh"; ln -s loop1.sh "$R/loop2.sh"; commit_all
@@ -309,7 +390,7 @@ t_links_resolve_physically_not_logically() {
 # ---- fake cases: process control ----------------------------------------------------------
 t_term_removes_the_temp_dir() {
   # TERM removes the temp dir (SIGKILL cannot be handled and is not tested)
-  mkfifo "$C/fifo"; mkdir "$C/tmp"
+  mkfifo "$C/fifo"
   bgrun TMPDIR="$C/tmp" FAKE_FIFO="$C/fifo" FAKE_HOLD_ON=b.sh
   read -r _ < "$C/fifo"; kill -TERM "$BGPID"; bgend
   expect rc_143 143 "$RC"; tmp_empty temp_dir_removed "$C/tmp"
@@ -328,7 +409,7 @@ t_signals_kill_the_group_fast() {
     expect "rc_$sig" "$code" "$RC"
     [ $((SECONDS - t0)) -lt 3 ] || fail "$sig: took $((SECONDS - t0)) s to exit"
     sleep 0.3
-    pgrep -f "sleep $nap" > /dev/null && fail "$sig: a fake shellcheck survived"
+    pgrep -f "$C/sl $nap" > /dev/null && fail "$sig: a fake shellcheck survived"
     end_unrelated "$sig"; tmp_empty "temp_dir_removed_$sig" "$C/tmp.$sig"
   done
 }
@@ -341,7 +422,7 @@ t_term_ignoring_shellcheck_is_killed_after_the_grace() {
   expect rc_143 143 "$RC"
   [ $((SECONDS - t0)) -lt 4 ] || fail "took $((SECONDS - t0)) s to exit"
   sleep 0.3
-  pgrep -f "sleep $nap" > /dev/null && fail "a TERM-ignoring fake shellcheck survived the run (orphan)"
+  pgrep -f "$C/sl $nap" > /dev/null && fail "a TERM-ignoring fake shellcheck survived the run (orphan)"
 }
 t_file_timeout_is_a_tool_error() {
   local t0=$SECONDS
@@ -350,24 +431,24 @@ t_file_timeout_is_a_tool_error() {
   grep -q 'timeout: b.sh' "$C/err" || fail "message does not name the file: $(cat "$C/err")"
   grep -q 'TOOL ERROR' "$C/err" && fail "the timeout surfaced as a tool error: $(cat "$C/err")"
   grep -q 'findings in' "$C/err" && fail "a timeout was reported as findings"
-  sleep 0.3; pgrep -f "sleep 3171" > /dev/null && fail "the hung shellcheck survived"
+  sleep 0.3; pgrep -f "$C/sl 3171" > /dev/null && fail "the hung shellcheck survived"
 }
 t_watchdog_kills_a_term_ignoring_file() {
   local t0=$SECONDS
   FAKE_HANG_ON=b.sh FAKE_HANG=8.0517 FAKE_IGNORE_TERM=1 LINT_FILE_TIMEOUT=1 lc; expect rc 2 "$RC"
   [ $((SECONDS - t0)) -lt 6 ] || fail "the file was not killed after the grace: $((SECONDS - t0)) s"
   grep -q 'timeout: b.sh' "$C/err" || fail "no timeout line: $(cat "$C/err")"
-  sleep 0.3; pgrep -f "sleep 8.0517" > /dev/null && fail "a TERM-ignoring shellcheck survived its watchdog"
+  sleep 0.3; pgrep -f "$C/sl 8.0517" > /dev/null && fail "a TERM-ignoring shellcheck survived its watchdog"
 }
 t_watchdog_outcome_is_deterministic_at_the_boundary() {
   # 20 runs at once, each file napping ~ the timeout: only `clean` or `timeout`, never exit 137, never a lost file
   local i pids="" g bad=0 to=0 clean=0
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    ( cd "$R" && FAKE_NAP=1 LINT_FILE_TIMEOUT=1 LINT_JOBS=4 PATH="$C/bin:$ORIG_PATH" "$BASH_BIN" "$subject" > "$C/o.$i" 2> "$C/e.$i"; echo $? > "$C/r.$i" ) &
+    ( cd "$R" && TMPDIR="$C/tmp" FAKE_NAP=1 LINT_FILE_TIMEOUT=1 LINT_JOBS=4 PATH="$C/bin:$ORIG_PATH" "$BASH_BIN" "$subject" > "$C/o.$i" 2> "$C/e.$i"; echo $? > "$C/r.$i" ) &
     pids="$pids $!"; printf x >> "$T/runs"
   done
   # shellcheck disable=SC2086
-  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep 40 & wait $!; kill -KILL $pids 2>/dev/null ) &
+  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; "$C/bin/sleep" 40 & wait $!; kill -KILL $pids 2>/dev/null ) &
   g=$!
   # shellcheck disable=SC2086
   wait $pids
@@ -381,12 +462,13 @@ t_watchdog_outcome_is_deterministic_at_the_boundary() {
   done
   expect bad_outcomes 0 "$bad"
   expect accounted_for 20 $((clean + to))
+  sleep 1.1 # the napping fakes the watchdog TERMed finish their own `sleep 1`
 }
 t_no_watchdog_sleep_is_left_after_a_normal_run() {
   local tm=$((10000 + $$ % 50000)) # a marker no other process of this machine sleeps for
   LIM=10 LINT_FILE_TIMEOUT=$tm lc; expect rc 0 "$RC"
   sleep 0.3
-  if pgrep -f "sleep $tm" > /dev/null; then fail "a watchdog sleep outlived the run: $(pgrep -fl "sleep $tm" | tr '\n' '|')"; pkill -f "sleep $tm"; fi
+  if pgrep -f "$C/sl $tm" > /dev/null; then fail "a watchdog sleep outlived the run: $(pgrep -fl "$C/sl $tm" | cut -c1-90 | tr '\n' '|')"; fi
 }
 
 # ---- real shellcheck ---------------------------------------------------------------
@@ -473,7 +555,8 @@ t_real_abbreviated_rcfile_option_is_honoured() {
 # ---- the selftest's own skip logic -------------------------------------------------
 nested() { # nested <case> <env...> : run this selftest on one case, print its first line
   local c=$1; shift
-  env LINT_PARALLEL_SUBJECT="$subject" LINT_SELFTEST_ONLY="$c" "$@" "$BASH_BIN" "$SELF" 2> /dev/null | head -1
+  mkdir -p "$T/nt"
+  env TMPDIR="$T/nt" LINT_PARALLEL_SUBJECT="$subject" LINT_SELFTEST_ONLY="$c" "$@" "$BASH_BIN" "$SELF" 2> /dev/null | head -1
 }
 t_skip_logic_runs_the_case_when_the_probe_supports_it() {
   have_real || return 0
@@ -492,17 +575,19 @@ t_skips_are_counted_separately_from_ok() {
   for tool in cksum git awk grep tr mkdir cp rm cat head wc sort cmp find mktemp pgrep pkill sleep kill printf env uname date xargs mv chmod mkfifo dirname readlink cut ls getconf sed ln touch tail; do
     p=$(command -v "$tool") && ln -sf "$p" "$d/$tool"
   done
-  out=$(env PATH="$d" LINT_PARALLEL_SUBJECT="$subject" LINT_SELFTEST_ONLY="real_lib_change_flips_verdict real_looser_than_the_old_recipe" "$BASH_BIN" "$SELF" 2> /dev/null)
+  mkdir -p "$T/nt"
+  out=$(env TMPDIR="$T/nt" PATH="$d" LINT_PARALLEL_SUBJECT="$subject" LINT_SELFTEST_ONLY="real_lib_change_flips_verdict real_looser_than_the_old_recipe" "$BASH_BIN" "$SELF" 2> /dev/null)
   case $out in *"0 ok, 0 failed, 2 skipped"*) ;; *) fail "final line does not count skips apart: $(printf '%s' "$out" | tail -1)" ;; esac
   case $out in *"SKIPPED real_lib_change_flips_verdict: real shellcheck is not installed"*) ;; *) fail "no skip line with a reason: $out" ;; esac
 }
 
-CASES="cold_lints_each_real_file_once_and_remembers_nothing identical_real_files_get_two_invocations findings_printed_under_the_real_path one_file_per_call_with_x untracked_sh_is_not_linted zero_tracked_sh_is_exit_2 shellcheck_missing_is_exit_2 exit_2_is_tool_error_and_beats_findings output_is_identical_for_one_and_four_jobs odd_filenames unreadable_file_is_exit_2 symlink_to_tracked_script_is_one_invocation nine_links_and_two_real_identical_files_are_two_invocations symlink_chain relative_and_absolute_link_inside_the_repo link_target_outside_the_repo_is_exit_2 dangling_link_is_exit_2 link_to_a_directory_is_exit_2 link_to_an_untracked_in_repo_file_is_linted_with_a_note link_named_sh_whose_target_is_not links_in_any_creation_order_give_the_same_output link_target_with_newline_or_tab_is_exit_2 hang_guard_kills_the_whole_group link_loop_is_exit_2_promptly links_resolve_physically_not_logically term_removes_the_temp_dir signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file watchdog_outcome_is_deterministic_at_the_boundary no_watchdog_sleep_is_left_after_a_normal_run real_lib_change_flips_verdict real_looser_than_the_old_recipe real_directory_relative_source_path_variants real_link_in_another_directory_is_checked_as_its_real_path real_abbreviated_rcfile_option_is_honoured skip_logic_runs_the_case_when_the_probe_supports_it skips_are_counted_separately_from_ok"
+CASES="cold_lints_each_real_file_once_and_remembers_nothing identical_real_files_get_two_invocations findings_printed_under_the_real_path one_file_per_call_with_x untracked_sh_is_not_linted zero_tracked_sh_is_exit_2 shellcheck_missing_is_exit_2 exit_2_is_tool_error_and_beats_findings output_is_identical_for_one_and_four_jobs odd_filenames unreadable_file_is_exit_2 symlink_to_tracked_script_is_one_invocation nine_links_and_two_real_identical_files_are_two_invocations symlink_chain relative_and_absolute_link_inside_the_repo link_target_outside_the_repo_is_exit_2 dangling_link_is_exit_2 link_to_a_directory_is_exit_2 link_to_an_untracked_in_repo_file_is_linted_with_a_note link_named_sh_whose_target_is_not links_in_any_creation_order_give_the_same_output link_target_with_newline_or_tab_is_exit_2 hang_guard_kills_the_whole_group hang_guard_ignores_foreign_processes reap_kills_term_immune_helpers leak_check_sees_a_helper_without_the_root_in_its_command_line timeout_kills_the_whole_group_of_the_shellcheck link_loop_is_exit_2_promptly links_resolve_physically_not_logically term_removes_the_temp_dir signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file watchdog_outcome_is_deterministic_at_the_boundary no_watchdog_sleep_is_left_after_a_normal_run real_lib_change_flips_verdict real_looser_than_the_old_recipe real_directory_relative_source_path_variants real_link_in_another_directory_is_checked_as_its_real_path real_abbreviated_rcfile_option_is_honoured skip_logic_runs_the_case_when_the_probe_supports_it skips_are_counted_separately_from_ok"
 
 one_case() {
-  local n=$1 want=""
+  local n=$1 want="" lk
   newcase "$n"; FAILS=""; INFO=""; SKIP=""
   "t_$n"
+  lk=$(leak_check); [ -z "$lk" ] || { fail "processes of this run outlived the case:$lk"; reap_all; }
   [ -z "$INFO" ] || want=" ($INFO)"
   if [ -n "$SKIP" ] && [ -z "$FAILS" ]; then printf 'SKIPPED %s: %s\n' "$n" "$SKIP"
   elif [ -z "$FAILS" ]; then printf 'ok   %s%s\n' "$n" "$want"; else printf 'FAIL %s:%s\n' "$n" "$FAILS"; fi
@@ -518,14 +603,16 @@ run_cases() {
     printf '%s\n' "$line"
     case $line in ok*) ok=$((ok + 1)) ;; SKIPPED*) skipped=$((skipped + 1)) ;; *) bad=$((bad + 1)) ;; esac # MUT:skipcount
   done
-  sleep 0.3
-  if pgrep -f "$T" > /dev/null; then bad=$((bad + 1)); printf 'FAIL leftover_processes: still alive: %s\n' "$(pgrep -fl "$T" | cut -c1-80 | tr '\n' '|')"; pkill -f "$T"; fi
+  line=$(leak_check)
+  if [ -n "$line" ]; then bad=$((bad + 1)); printf 'FAIL leftover_processes: still alive:%s\n' "$line"; reap_all; fi
   printf '%s ok, %s failed, %s skipped (%s runs of the subject)\n' "$ok" "$bad" "$skipped" "$(wc -c < "$T/runs" | tr -d ' ')"
   [ "$total" -gt 0 ] || { echo "no case ran" >&2; exit 2; }
   [ "$bad" -eq 0 ]
 }
 
 # ---- mutations --------------------------------------------------------------------
+# (the KILL escalation in the script's on_sig is defence in depth since each worker KILLs its shellcheck's own group on
+#  TERM: removing it changes nothing observable, so it has no mutation entry here)
 # subject mutations: id @@ marker=replacement line ('##' separates several) @@ guarding cases
 MUTATIONS=$(cat <<'XEOF'
 x-removed@@noxflag=X=@@one_file_per_call_with_x real_lib_change_flips_verdict
@@ -540,8 +627,8 @@ exit-ge2-mapped-to-findings@@rc1=    [1-9]*)@@exit_2_is_tool_error_and_beats_fin
 exit-ge2-mapped-to-clean@@rc0=    0 | [2-9]* | 1[0-9][0-9])@@exit_2_is_tool_error_and_beats_findings
 timeout-mapped-to-clean@@tomark=rc=0@@file_timeout_is_a_tool_error
 timeout-marker-check-removed@@tomark=:@@file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file
-kill-escalation-removed@@killesc=    :@@term_ignoring_shellcheck_is_killed_after_the_grace
 watchdog-kill-removed@@wdkill=  :@@watchdog_kills_a_term_ignoring_file
+watchdog-kills-only-the-pid@@wdterm=  kill -TERM "$sc" 2>/dev/null##wdkill=  kill -KILL "$sc" 2>/dev/null@@timeout_kills_the_whole_group_of_the_shellcheck
 readlink-trailing-newline-reverted@@rlnl=    t=$(readlink -- "$p") || { RERR="cannot read the link"; return 1; }##rlnl2=    :@@link_target_with_newline_or_tab_is_exit_2
 real-path-newline-tab-check-removed@@nlcheck=    :@@link_target_with_newline_or_tab_is_exit_2
 loop-cap-removed@@hopcap=    :@@link_loop_is_exit_2_promptly
@@ -556,7 +643,10 @@ XEOF
 )
 # selftest mutations: applied to a copy of THIS file; the copy runs the guarding cases
 SMUTATIONS=$(cat <<'XEOF'
-hang-guard-kills-only-the-subject@@guardkill=  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; sleep "$lim" & wait $!; : > "$C/hung"; kill -KILL "$pid" 2>/dev/null ) &@@hang_guard_kills_the_whole_group
+hang-guard-kills-only-the-subject@@guardkill=  ( trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM; "$C/bin/sleep" "$lim" & wait $!; : > "$C/hung"; kill -KILL "$pid" 2>/dev/null ) &@@hang_guard_kills_the_whole_group
+hang-case-uses-a-global-pattern@@hangpat=  if pgrep -f "sleep 6123" > /dev/null; then fail "orphan"; fi@@hang_guard_ignores_foreign_processes
+reap-uses-term-instead-of-kill@@reapkill=  for p in $(pgrep -f "$T"); do kill -TERM "$p" 2> /dev/null; done@@reap_kills_term_immune_helpers
+end-check-reduced-to-pgrep-of-the-root@@leakpids=    for f in "$T"/none/*.pids; do@@leak_check_sees_a_helper_without_the_root_in_its_command_line
 skip-made-unconditional@@skip=  if true; then SKIP="forced"; return 0; fi@@skip_logic_runs_the_case_when_the_probe_supports_it
 skip-counted-as-ok@@skipcount=    case $line in ok*|SKIPPED*) ok=$((ok + 1)) ;; *) bad=$((bad + 1)) ;; esac@@skips_are_counted_separately_from_ok
 XEOF
@@ -579,8 +669,8 @@ mutant_parses() { # does the mutant RUN through on a clean fixture without a she
   ! grep -Eq 'syntax error|unexpected (token|EOF)' "$C/err"
 }
 run_mutations() {
-  local line id spec cases d out red=0 green=0 base kind list
-  mkdir -p "$T/mut"
+  local line id spec cases d out red=0 green=0 base kind list surv=0 lk
+  mkdir -p "$T/mut" "$T/nt"
   for kind in subject self; do
     if [ "$kind" = subject ]; then list=$MUTATIONS; else list=$SMUTATIONS; fi
     while IFS= read -r line; do
@@ -592,20 +682,21 @@ run_mutations() {
         cp "$subject" "$d/lint-parallel.sh"; mutate_into "$d/lint-parallel.sh" "$spec"
         if cmp -s "$subject" "$d/lint-parallel.sh"; then printf 'ERROR %-38s mutation did not change the script (marker missing?)\n' "$id"; green=$((green + 1)); continue; fi
         if ! mutant_parses "$d/lint-parallel.sh"; then printf 'ERROR %-38s mutant does not parse: %s\n' "$id" "$(grep -E 'syntax error|unexpected' "$C/err" | head -1)"; green=$((green + 1)); continue; fi
-        out=$(LINT_PARALLEL_SUBJECT="$d/lint-parallel.sh" LINT_SELFTEST_ONLY="$cases" "$BASH_BIN" "$SELF" 2>&1); base=$?
+        out=$(TMPDIR="$T/nt" LINT_PARALLEL_SUBJECT="$d/lint-parallel.sh" LINT_SELFTEST_ONLY="$cases" "$BASH_BIN" "$SELF" 2>&1); base=$?
       else
         cp "$SELF" "$d/self.sh"; mutate_into "$d/self.sh" "$spec"
         if cmp -s "$SELF" "$d/self.sh"; then printf 'ERROR %-38s mutation did not change the selftest (marker missing?)\n' "$id"; green=$((green + 1)); continue; fi
-        out=$(LINT_PARALLEL_SUBJECT="$subject" LINT_SELFTEST_ONLY="$cases" "$BASH_BIN" "$d/self.sh" 2>&1); base=$?
+        out=$(TMPDIR="$T/nt" LINT_PARALLEL_SUBJECT="$subject" LINT_SELFTEST_ONLY="$cases" "$BASH_BIN" "$d/self.sh" 2>&1); base=$?
       fi
+      lk=$(leak_check); if [ -n "$lk" ]; then surv=$((surv + 1)); printf 'SURVIVORS after %s:%s\n' "$id" "$lk"; reap_all; fi
       if [ "$base" -eq 1 ]; then printf 'RED   %-38s %s\n' "$id" "$(printf '%s\n' "$out" | grep '^FAIL' | head -1 | cut -c1-110)"; red=$((red + 1))
       else printf 'GREEN %-38s the guarding case(s) [%s] still pass: that part is unguarded\n' "$id" "$cases"; green=$((green + 1)); fi
     done <<MUTEOF
 $list
 MUTEOF
   done
-  printf '%s RED, %s not RED\n' "$red" "$green"
-  [ "$green" -eq 0 ]
+  printf '%s RED, %s not RED, %s mutant(s) left processes behind\n' "$red" "$green" "$surv"
+  [ "$green" -eq 0 ] && [ "$surv" -eq 0 ]
 }
 
 if [ "${1:-}" = "--mutations" ]; then
