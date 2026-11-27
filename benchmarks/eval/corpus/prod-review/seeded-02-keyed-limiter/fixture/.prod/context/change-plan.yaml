@@ -1,0 +1,42 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+  - introduces_state
+
+files:
+  - path: keyed.go
+    action: create
+    zone: orchestration
+
+new_states: [limiter_per_key]
+new_effects: []
+new_dependencies: []
+
+recovery:
+  - state: limiter_per_key
+    crash_here: held in memory only; a restart starts with no keys and each is recreated full on first use
+    retry: idempotent
+    reconciled_by: none; rebuilt on demand, not a source of truth
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Add Keyed, a set of Limiters indexed by key, reusing Limiter unchanged.
+    files: [keyed.go]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one package, no new dependencies
+    acceptance: []
+    depends_on: []
