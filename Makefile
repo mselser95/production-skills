@@ -25,7 +25,7 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline eval eval-live
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline eval eval-live db-test
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -38,6 +38,7 @@ help:
 	@echo "token-report    agent token cost per (agentType, model) from ~/.claude* transcripts; exit 1 if tokens/completed rose >25%"
 	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
 	@echo "eval        skill-eval harness: selftest + corpus lint (hermetic, no agent, not in check-fast)"
+	@echo "db-test     Docker, ~1 min: db-postgres bootstrap test, plain then timescale (not in check-fast; CI job db)"
 	@echo "eval-live   PAID: every corpus task x claude,codex x skill,bare x N reps; needs EVAL_LIVE=1 (make eval-live EVAL_LIVE=1 N=3)"
 
 # ---- the cheap gate -------------------------------------------------------
@@ -142,8 +143,13 @@ gates:
 	@set -e; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d"; n=$$((n+1)); done; \
 	  if [ "$$n" -eq 0 ]; then echo "gates: found ZERO module script dirs -- refusing to report a pass over nothing" >&2; exit 2; fi
 # The database image pin: the lock is read offline (no network, no Docker). A broken
-# lock, or a broken gate (its selftest runs in `make selftests`), goes red here.
-	@bash prod-new/modules/db-postgres/scripts/db-pin-check.sh
+# lock, or a broken gate (its selftest runs in `make selftests`), goes red here; the
+# module's compose files are checked against the lock in the same invocation.
+	@bash prod-new/modules/db-postgres/scripts/db-pin-check.sh prod-new/modules/db-postgres/db/image.lock --compose prod-new/modules/db-postgres/db/compose.yml prod-new/modules/db-postgres/db/compose.timescale.yml
+# probe-wiring counts a Makefile target as an invoker even when nothing calls the
+# target, so it cannot see that `db-test` (the only runner of db-bootstrap-test.sh)
+# is driven by no workflow. This is that missing half, for this one target.
+	@n=$$(grep -cE 'run:[[:space:]]*make db-test' .github/workflows/pr.yaml); [ "$$n" -ge 1 ] || { echo "gates: .github/workflows/pr.yaml has no step running 'make db-test' -- the db bootstrap test would sit behind a target nobody runs" >&2; exit 1; }; echo "db-test is run by pr.yaml ($$n step)"
 # And the ratified invariants: an invariant nothing runs is precisely the shape
 # the three of them exist to refuse.
 	@bash $(PROBES)/probe-wiring.sh verification/ratified
@@ -163,6 +169,13 @@ gates:
 # to every scaffold unnoticed. This reads them: remote scripts must be pinned to a
 # commit (or checksummed) and tools must not install at @latest/@main.
 	@bash scripts/template-workflow-pins.sh
+
+# The database module's bootstrap test: starts a REAL PostgreSQL per variant (Docker,
+# ~30 s each), so it is in no aggregate target. The pr.yaml job `db` runs it.
+# Sequential, first failure stops the target (make aborts on a non-zero recipe line).
+db-test:
+	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain
+	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant timescale
 
 # ---- the full gate --------------------------------------------------------
 verify: check-fast selftests invariants tcb mutation

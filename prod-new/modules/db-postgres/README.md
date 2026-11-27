@@ -18,6 +18,25 @@ PostgreSQL 19 is deliberately not used yet (liability `pg19-reevaluate`).
   mismatch / 2 docker absent, image not local (use `--pull`) or not startable.
   Its selftest (`scripts/tests/db-pin-verify-live-selftest.sh`, fake `docker`) runs in `make selftests`.
 
+## The bootstrap test (Docker)
+
+`bash scripts/db-bootstrap-test.sh [--variant plain|timescale]` starts the module's compose stack in a
+throwaway project (`dbboot-<pid>`, always removed) and runs the SQL assertions (roles, SCRAM, TLS, settings,
+timeouts, persistence) against the real server. A fresh machine pulls the pinned images itself. It ends with
+one line, `db-bootstrap-test: N assertions, N ok, 0 failed (<image>)`. Exit 0 pass / 1 an assertion failed or the
+database never became healthy (the run ends right after the 30 s health wait) / 2 could not start.
+
+- Locally: `make db-test` runs the plain image, then the Timescale variant, and stops at the first failure
+  (about a minute, needs Docker). It is in no aggregate target (`check-fast`, `gates`, `selftests`).
+- In CI: job `db` in `.github/workflows/pr.yaml` runs `make db-test` on `ubuntu-latest` (timeout 5 minutes).
+  It always starts and reports; a first step diffs the pull request against its base and, when nothing under
+  `prod-new/modules/db-postgres/`, the Makefile or the workflow changed, prints `db: skipped: no database change`
+  and ends green (so a required check never hangs on a skipped job). Pushes to master always run it.
+  `make gates` also checks that `pr.yaml` still has a step running `make db-test`, because probe-wiring counts
+  a Makefile target nobody calls as wiring.
+- GitHub runners are linux/amd64 and the lock's runtime facts were observed on arm64 only: the first green
+  run of this job will be the first amd64 evidence. It has not run yet; nothing here claims it passes.
+
 ## Bumping the pair
 
 1. Edit `db/image.lock` (tags, index and per-platform digests, versions).
@@ -34,5 +53,7 @@ PostgreSQL 19 is deliberately not used yet (liability `pg19-reevaluate`).
   and needs a reindex; that is a known limitation and is not solved here.
 - The offline gate proves the lock is self-consistent and that compose files match it. Only the live script
   compares the lock with the real images, and it is a step a human runs.
-- No compose files exist in this module yet; once they land they must be passed to `db-pin-check.sh --compose`
-  from `make gates` (and listed in `module.json`).
+- `make gates` passes both compose files (`db/compose.yml`, `db/compose.timescale.yml`) to `db-pin-check.sh`
+  together with the lock, so a compose image that drifts from the lock is red offline.
+- The bootstrap test (below) is what proves the compose stack itself starts and behaves; its result
+  on linux/amd64 has not been observed yet (see CI).

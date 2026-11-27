@@ -67,6 +67,9 @@ emit() { # PASS|FAIL name [detail]
 }
 
 # ---- start -------------------------------------------------------------------
+# `up -d` pulls an image that is absent (compose's default policy is "missing"; no
+# `--pull never` anywhere), and that happens HERE, before the health wait below, so a
+# fresh runner's first pull is bounded by the caller's timeout, never by the wait.
 cid=""
 if ! dc up -d >"$scratch/up.log" 2>&1; then
   echo "FAIL START: docker compose up failed:"; tail -n 8 "$scratch/up.log"; exit 2
@@ -94,10 +97,16 @@ if ((rc == 2)); then
   exit 2
 fi
 unhealthy=0
+image="$(docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null)"; image="${image:-unknown}"
 if ((rc == 1)); then
   unhealthy=1
   expected=$((expected + 1))
   emit FAIL healthcheck-reaches-healthy "not healthy within 30s; health log: $(docker inspect -f '{{if .State.Health}}{{range .State.Health.Log}}{{.Output}}{{end}}{{end}}' "$cid" 2>/dev/null | tail -n 3 | tr '\n' ' ')"
+  # Fail fast: every later session needs a healthy server and would only add
+  # connection timeouts (the run used to take ~90 s here). The wait is 30 s; the
+  # teardown comes on top, so a never-healthy run ends well inside 45 s.
+  echo "db-bootstrap-test: $((pass + fail)) assertions, $pass ok, $fail failed ($image)"
+  exit 1
 else
   expected=$((expected + 1)); emit PASS healthcheck-reaches-healthy
 fi
@@ -322,6 +331,7 @@ fi
 
 total=$((pass + fail))
 echo "RESULT variant=$variant pass=$pass fail=$fail expected=$expected seconds=$SECONDS"
+echo "db-bootstrap-test: $total assertions, $pass ok, $fail failed ($image)"
 if ((total == 0 || pass + fail != expected)); then
   echo "FAIL COUNT: $total assertion lines, $expected expected"
   exit 1
