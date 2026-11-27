@@ -17,22 +17,32 @@
 #                         Codex: skills + generated role files under $CODEX_HOME
 #                         (default ~/.codex); see _shared/hosts.md for what is
 #                         VERIFIED, UNVERIFIED and DEGRADED there.
+#   install.sh --adopt    Codex only: replace destinations that are not ours after
+#                         moving each to <path>.bak.<timestamp> (ignored for claude).
 #
 # Exit non-zero on verification failure, so it can gate a session or a cron.
 # The code says WHICH failure, because the three call for different actions:
 #   1  TCB DRIFT     — installed contents differ from the manifest (tamper)
 #   2  STALE INSTALL — manifest intact, but describes an OLDER source (reinstall)
 #   3  TCB WRITABLE  — contents correct, read-only guard missing (reinstall)
+# Install-time refusals and failures (new; verify never returns these):
+#   4  DESTINATION IS A SYMLINK  (Codex tree: skills/, agents/, a skill dir, a role file, the manifest)
+#   5  NOT OURS      — a Codex destination exists and the previous manifest does not list it
+#                      (--adopt moves it to <path>.bak.<timestamp>, never deletes it)
+#   6  LOCKED        — another install holds <config root>/.prod-skills.lock
+#   7  STEP FAILED   — a copy/move/chmod failed; the host's tree is rolled back, no manifest written
+#   (a refused role file / dangling source symlink / bad TOML exits 1)
 
 set -uo pipefail
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-usage() { echo "usage: install.sh [--verify|--diff] [--host claude|codex|both]" >&2; exit 2; }
-host=claude; mode=""
+usage() { echo "usage: install.sh [--verify|--diff] [--host claude|codex|both] [--adopt]" >&2; exit 2; }
+host=claude; mode=""; adopt=0
 while (( $# )); do
   case "$1" in
     --host)   [[ $# -ge 2 ]] || usage; host="$2"; shift 2 ;;
     --host=*) host="${1#--host=}"; shift ;;
+    --adopt)  adopt=1; shift ;;
     *)        [[ -n "$mode" ]] || mode="$1"; shift ;;
   esac
 done
@@ -119,26 +129,44 @@ verify_host() {
       # prod-curate/SKILL.md, and naming them is precisely what showed the cause
       # was a single commit that never got reinstalled.
       #
-      # The source side keeps its path (prefixed with the skill, since `find .`
-      # yields ./SKILL.md in every one of them and the bare name would be
-      # ambiguous across nine skills); only the hash is compared, exactly as
-      # before, so which files this branch FIRES on is unchanged.
-      stale_rows=$(comm -13 \
-        <(hash_tree "$cfg/skills" "${skills[@]}" | awk '{print $1}' | sort) \
-        <(for s in "${skills[@]}"; do
-            # -L is load-bearing: in the source repo the shared material reaches
-            # each skill through a references/ SYMLINK, and plain `find -type f`
-            # skips symlinks — which would silently exclude _shared/ from the
-            # source side and make this whole check blind to the files most
-            # worth watching (the probes). Verified: without -L, editing
-            # _shared/probes/verify-standard.sh went undetected.
-            # Same file set as hash_tree above -- every regular file. Filtering
-            # by extension here while hash_tree hashes everything would leave the
-            # staleness check blind to exactly the files the manifest just
-            # started protecting (prod-new's template sources).
-            [[ -d "$src/$s" ]] && ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' ! -path '*/benchmark-results/*' \
-                -exec shasum -a 256 {} + 2>/dev/null )
-          done | awk '{print $1}' | sort) )
+      # PATH-AWARE since the review of the hosts change: the comparison is over
+      # (hash, path) ROWS, not hashes alone. Hash-only said "verified" over a tree
+      # with a file at the wrong place or a missing top-level SKILL.md (a nested
+      # copy, or two interleaved installs). Every row the SOURCE would install
+      # must be in the manifest at that path with that hash (else STALE), and the
+      # manifest's skill rows must be exactly those (an extra path is STALE too).
+      # -L is load-bearing: the shared material reaches each skill through a
+      # references/ SYMLINK, and plain `find -type f` would skip it, blinding this
+      # check to _shared/. Same file set as hash_tree: every regular file.
+      have=(); for s in "${skills[@]}"; do [[ -d "$src/$s" ]] && have+=("$s"); done
+      exp_rows=$( (( ${#have[@]} )) && cd "$src" && find -L "${have[@]}" -type f ! -name 'config.sh' ! -path '*/benchmark-results/*' \
+          -exec shasum -a 256 {} + 2>/dev/null | LC_ALL=C sort)
+      man_skill_rows=$(grep -v '  \./' "$manifest" | LC_ALL=C sort)
+      man_agent_rows=$(grep '  \./' "$manifest" | LC_ALL=C sort)
+      stale_rows=$(LC_ALL=C comm -13 <(printf '%s\n' "$man_skill_rows" | awk 'NF') <(printf '%s\n' "$exp_rows" | awk 'NF'))
+      # EXTRA is by PATH: a changed file keeps its path (it is STALE, not extra), a
+      # path the source does not have at all is extra.
+      extra_rows=$(LC_ALL=C comm -23 <(printf '%s\n' "$man_skill_rows" | awk 'NF{print $2}' | LC_ALL=C sort) <(printf '%s\n' "$exp_rows" | awk 'NF{print $2}' | LC_ALL=C sort) | sed 's|^|-  |')
+      if [[ "$cur_host" == claude ]]; then
+        # agents/*.md are copied verbatim: same (hash, path) rule, missing/changed only
+        # (the Claude manifest hashes the whole agents/ dir, so extras stay allowed).
+        exp_agent_rows=$(for a in "$src"/agents/*.md; do
+            [[ -e "$a" ]] && ( cd "$src/agents" && shasum -a 256 "$(basename "$a")" ) | sed 's|  |  ./|'
+          done | LC_ALL=C sort)
+        agent_stale=$(LC_ALL=C comm -13 <(printf '%s\n' "$man_agent_rows" | awk 'NF') <(printf '%s\n' "$exp_agent_rows" | awk 'NF'))
+        agent_extra=""
+      else
+        # Codex role files are GENERATED, so the source has no hash to compare; the
+        # PATHS are exact: one agents/prod-*.toml per source agents/prod-*.md.
+        exp_agent_paths=$(for a in "$src"/agents/prod-*.md; do
+            [[ -e "$a" ]] && echo "./$(basename "$a" .md).toml"
+          done | LC_ALL=C sort)
+        man_agent_paths=$(printf '%s\n' "$man_agent_rows" | awk 'NF{print $2}' | LC_ALL=C sort)
+        agent_stale=$(LC_ALL=C comm -13 <(printf '%s\n' "$man_agent_paths" | awk 'NF') <(printf '%s\n' "$exp_agent_paths" | awk 'NF') | sed 's|^|-  |')
+        agent_extra=$(LC_ALL=C comm -23 <(printf '%s\n' "$man_agent_paths" | awk 'NF') <(printf '%s\n' "$exp_agent_paths" | awk 'NF') | sed 's|^|-  |')
+      fi
+      stale_rows=$(printf '%s\n%s\n' "$stale_rows" "$agent_stale" | awk 'NF')
+      extra_rows=$(printf '%s\n%s\n' "$extra_rows" "$agent_extra" | awk 'NF')
       # MODE IS PART OF THE TRUSTED SET, and until 2026-08-29 nothing checked it.
       #
       # Line ~307 chmods the installed tree read-only, and the comment there
@@ -179,28 +207,19 @@ verify_host() {
       fi
 
       stale=$(printf '%s' "$stale_rows" | grep -c . || true)
-      if (( stale > 0 )); then
-        echo "STALE INSTALL — ${stale} source file(s) in $src are not present in the installed copy." >&2
-        # Map each stale hash back to the path(s) carrying it, so the operator
-        # sees WHICH component is untrusted without rerunning this comparison.
-        #
-        # The source tree is hashed ONCE here, not once per stale hash. The
-        # first version nested the find+shasum inside the loop over stale
-        # hashes: fine for the two files that prompted it, but a large refactor
-        # or a first-ever install makes every source file stale, and 400 stale
-        # hashes x 9 skills is ~3600 full-tree hashings of a tree that includes
-        # prod-new/template. A diagnostic that becomes unusable exactly when the
-        # news is worst is not a diagnostic.
-        stale_map=$(for s in "${skills[@]}"; do
-          [[ -d "$src/$s" ]] || continue
-          ( cd "$src/$s" && find -L . -type f ! -name 'config.sh' ! -path '*/benchmark-results/*' \
-              -exec shasum -a 256 {} + 2>/dev/null ) \
-            | sed "s|  \./|  $s/|"
-        done)
-        awk 'NR==FNR { want[$1]=1; next }
-             ($1 in want) { print "  stale: " $2 }' \
-          <(printf '%s\n' "$stale_rows") <(printf '%s\n' "$stale_map") \
-          | sort -u >&2
+      extra=$(printf '%s' "$extra_rows" | grep -c . || true)
+      if (( stale > 0 || extra > 0 )); then
+        # The rows carry their paths, so the operator sees WHICH component is
+        # untrusted without rerunning this comparison (and the source tree is
+        # hashed once, above, not once per stale row).
+        if (( stale > 0 )); then
+          echo "STALE INSTALL — ${stale} source file(s) in $src are not present in the installed copy." >&2
+          printf '%s\n' "$stale_rows" | awk '{p=$2; if (p ~ /^\.\//) p="agents/" substr(p,3); print "  stale: " p}' | sort -u >&2
+        fi
+        if (( extra > 0 )); then
+          echo "STALE INSTALL — ${extra} installed file(s) are not part of the source tree (extra path, or a file at the wrong place)." >&2
+          printf '%s\n' "$extra_rows" | awk '{p=$2; if (p ~ /^\.\//) p="agents/" substr(p,3); print "  extra: " p}' | sort -u >&2
+        fi
         echo "The manifest is intact but describes an OLDER trusted set. Re-run install.sh." >&2
         exit 2
       fi
@@ -379,8 +398,11 @@ echo "source consistency: ${#mirrors[@]} mirrored file(s) match _shared"
 
 # --- Codex role files, generated from agents/*.md ---------------------------
 #
-# Codex does not read agents/*.md. Each agent becomes <codex home>/agents/<name>.toml
-# with keys name, description, developer_instructions (+ model when asked for).
+# Codex does not read agents/*.md. Each prod-* agent becomes <codex home>/agents/<name>.toml
+# with keys name, description, developer_instructions (+ model when asked for); other
+# agents/*.md are NOT installed for Codex. Strings are TOML basic strings with every
+# control character escaped, and each file is parse-checked (toml_check) when python3
+# has tomllib.
 # Location and keys are UNVERIFIED against the binary (see _shared/hosts.md).
 #
 # model: Claude names (sonnet/opus/haiku) have no VERIFIED Codex equivalent, so
@@ -388,10 +410,11 @@ echo "source consistency: ${#mirrors[@]} mirrored file(s) match _shared"
 # <ROLE> = agent name without the prod- prefix, upper-cased, - as _.
 #
 # tools: has no Codex equivalent. The restriction is restated in WORDS at the end
-# of developer_instructions, derived from the tools list. DEGRADED: instruction-
-# only until a hook enforces it.
+# of developer_instructions, derived from the tools list; a role with NO tools line
+# says it declares no restriction (on Claude Code that means "inherits everything").
+# DEGRADED: instruction-only until a hook enforces it.
 fm_field() { # fm_field <file> <key> -> value, folded scalars joined by spaces
-  awk -v k="$2" '
+  LC_ALL=C awk -v k="$2" '
     NR==1 && $0=="---" { infm=1; next }
     infm && $0=="---" { exit }
     !infm { next }
@@ -400,107 +423,339 @@ fm_field() { # fm_field <file> <key> -> value, folded scalars joined by spaces
     cap { cap=0 }
     END { print out }' "$1"
 }
-role_body() { awk 'NR==1 && $0=="---" {fm=1; next} fm && $0=="---" {fm=0; c=1; next} c' "$1"; }
-toml_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-gen_codex_role() {
-  local f="$1" name desc tools model_var model body restr=""
-  local lit="'''"
-  name="$(fm_field "$f" name)"; desc="$(fm_field "$f" description)"; tools="$(fm_field "$f" tools)"
+fm_fields() { # name, description, tools: one per line
+  local k
+  for k in name description tools; do fm_field "$1" "$k"; done
+}
+role_body() { LC_ALL=C awk 'NR==1 && $0=="---" {fm=1; next} fm && $0=="---" {fm=0; c=1; next} c' "$1"; }
+valid_role_name() { [[ "$1" =~ ^[a-z][a-z0-9-]*$ && "$1" == "$2" ]]; } # valid_role_name <name> <file basename>
+has_nul() { ! LC_ALL=C tr -d '\000' <"$1" | cmp -s - "$1"; }
+# stdin text -> the inside of a TOML BASIC string. Every backslash, quote and
+# control character (0x01-0x1f, 0x7f) is escaped; newlines become \n. Nothing is
+# un-representable, so there is no ''' refusal. Bytes >= 0x80 pass through (a
+# non-UTF-8 byte makes the parse check below refuse the file).
+toml_esc() {
+  LC_ALL=C awk 'BEGIN { for (i = 1; i < 32; i++) c[sprintf("%c", i)] = sprintf("\\u%04X", i); c[sprintf("%c", 127)] = "\\u007F" }
+    { s = $0; o = ""; n = length(s)
+      for (i = 1; i <= n; i++) { ch = substr(s, i, 1)
+        if (ch == "\\") o = o "\\\\"; else if (ch == "\"") o = o "\\\""; else if (ch in c) o = o c[ch]; else o = o ch }
+      printf "%s%s", (NR > 1 ? "\\n" : ""), o }'
+}
+# Parse every generated file ONCE and compare name / description /
+# developer_instructions (/ model) with the intended values. Returns 0 ok, 1
+# mismatch or parse error, 3 when no tomllib is available (python3 < 3.11 or
+# absent): then the files rest on toml_esc alone, which the selftest proves by round
+# trip where tomllib exists. Arguments: groups of <file> <name> <desc> <instr> <model>.
+toml_check_all() {
+  (( $# )) || return 0
+  python3 -I -c 'import tomllib' 2>/dev/null || return 3
+  python3 -I - "$@" <<'PY'
+import sys, tomllib
+a = sys.argv[1:]
+bad = 0
+for f, name, desc, instr, model in zip(*[iter(a)] * 5):
+    try:
+        d = tomllib.loads(open(f, 'rb').read().decode('utf-8'))
+    except Exception as e:
+        print('install: %s: parse error: %s' % (f, e), file=sys.stderr); bad = 1; continue
+    want = {'name': name, 'description': desc, 'developer_instructions': instr}
+    if model: want['model'] = model
+    if d != want:
+        print('install: %s: round-trip mismatch on %s' % (f, sorted(k for k in set(d) | set(want) if d.get(k) != want.get(k))), file=sys.stderr); bad = 1
+sys.exit(bad)
+PY
+}
+chk_args=()
+gen_codex_role() { # gen_codex_role <agents/x.md> <out file>   (queues the parse check; see toml_check_all)
+  local f="$1" out="$2" name desc tools model_var model body restr="" restline instr
+  if has_nul "$f"; then echo "install: $f contains a NUL byte; refused" >&2; return 1; fi
+  { IFS= read -r name; IFS= read -r desc; IFS= read -r tools; } < <(fm_fields "$f")
   [[ -n "$name" && -n "$desc" ]] || { echo "install: $f has no name/description frontmatter" >&2; return 1; }
+  valid_role_name "$name" "$(basename "$f" .md)" || { echo "install: $f: name '$name' must match ^[a-z][a-z0-9-]*\$ and equal the file name" >&2; return 1; }
   body="$(role_body "$f")"
-  if [[ "$body" == *"$lit"* ]]; then
-    echo "install: $f body contains $lit and cannot be a TOML literal string" >&2; return 1
+  if [[ -z "$tools" ]]; then
+    restline="This role declares no tool restriction (on Claude Code a role without a tools line inherits every tool of the session); none is restated here."
+  else
+    case ", $tools," in *", Edit,"*|*", Write,"*) ;; *)
+      restr="$restr You must not edit, create or delete files; use shell commands only to read, search and run the gates (a temporary mutation that your instructions above tell you to revert before finishing is the only exception)." ;;
+    esac
+    case ", $tools," in *", Bash,"*) ;; *) restr="$restr You must not run shell commands." ;; esac
+    case ", $tools," in *", Agent,"*|*", Task,"*) ;; *) restr="$restr You must not spawn other agents." ;; esac
+    restline="The tool allow-list of this role ($tools) cannot be enforced by this host, so it is stated here and you are bound by it.$restr"
   fi
-  case ", $tools," in *", Edit,"*|*", Write,"*) ;; *)
-    restr="$restr You must not edit, create or delete files; use shell commands only to read, search and run the gates (a temporary mutation that your instructions above tell you to revert before finishing is the only exception)." ;;
-  esac
-  case ", $tools," in *", Bash,"*) ;; *) restr="$restr You must not run shell commands." ;; esac
-  case ", $tools," in *", Agent,"*|*", Task,"*) ;; *) restr="$restr You must not spawn other agents." ;; esac
+  instr="${body}"$'\n\n## Host restrictions (Codex)\n'"$restline"
   model_var="PROD_CODEX_MODEL_$(printf '%s' "${name#prod-}" | tr 'a-z-' 'A-Z_')"
   model="${!model_var:-}"
-  printf 'name = "%s"\n' "$(toml_str "$name")"
-  printf 'description = "%s"\n' "$(toml_str "$desc")"
   if [[ -n "$model" ]]; then
     [[ "$model" =~ ^[A-Za-z0-9._:/-]+$ ]] || { echo "install: $model_var has characters outside [A-Za-z0-9._:/-]" >&2; return 1; }
-    printf 'model = "%s"\n' "$model"
   fi
-  printf 'developer_instructions = %s\n' "$lit"
-  role_body "$f"
-  printf '\n## Host restrictions (Codex)\nThe tool allow-list of this role (%s) cannot be enforced by this host, so it is stated here and you are bound by it.%s\n' "${tools:-none declared}" "$restr"
-  printf '%s\n' "$lit"
+  {
+    printf 'name = "%s"\n' "$name"                    # validated: [a-z][a-z0-9-]*, nothing to escape
+    printf 'description = "%s"\n' "$(printf '%s' "$desc" | toml_esc)"
+    [[ -z "$model" ]] || printf 'model = "%s"\n' "$model"
+    printf 'developer_instructions = "%s"\n' "$(printf '%s' "$instr" | toml_esc)"
+  } > "$out" || return 1
+  chk_args+=("$out" "$name" "$desc" "$instr" "$model")
 }
 
-install_host() {
-mkdir -p "$cfg/skills" "$cfg/agents"
-# The installed copy is left READ-ONLY at the end of this script, so make it
-# writable again before rewriting it. install.sh is the only legitimate writer:
-# any other in-place edit of an installed skill is tampering by definition,
-# which is what makes read-only the right protection HERE and the wrong one on
-# a repo's registries/ or verification/ratified/ (those receive legitimate
-# edits constantly, and a guard that blocks normal work is a guard that gets
-# turned off).
-if [[ "$cur_host" == claude ]]; then
-  chmod -R u+w "$cfg/skills" "$cfg/agents" 2>/dev/null || true
-else
-  # Codex homes hold other people's skills and roles (.system, user roles):
-  # unlock only what this installer owns.
-  for s in "${skills[@]}"; do chmod -R u+w "$cfg/skills/$s" 2>/dev/null || true; done
-  chmod u+w "$cfg"/agents/$agent_glob 2>/dev/null || true
-fi
-for s in "${skills[@]}"; do
-  rm -rf "$cfg/skills/$s"
-  cp -R "$src/$s" "$cfg/skills/$s"
-  # shared material travels as real files, resolved from the repo's symlinks
-  if [[ -d "$src/$s/references" ]]; then
-    rm -rf "$cfg/skills/$s/references"; mkdir -p "$cfg/skills/$s/references"
-    for r in "$src/$s/references"/*; do
-      [[ -e "$r" ]] || continue
-      if [[ -d "$r" ]]; then mkdir -p "$cfg/skills/$s/references/$(basename "$r")"
-        cp -RL "$r"/* "$cfg/skills/$s/references/$(basename "$r")/" 2>/dev/null || true
-      else cp -L "$r" "$cfg/skills/$s/references/$(basename "$r")"; fi
-    done
-  fi
-  # per-skill config stays LOCAL and unhashed: it holds org facts, not policy
-  [[ -f "$src/$s/config.sh" ]] && cp "$src/$s/config.sh" "$cfg/skills/$s/config.sh"
-done
-# Remove first, then copy. `cp -f` onto an existing SYMLINK follows it and
-# writes through to the target, so a hand-made symlink survives every install --
-# and `find -type f` skips symlinks, which kept the three agent definitions out
-# of the manifest entirely in one config dir while they were hashed in the
-# other. Agent definitions carry the write-masks that bound what a cheap model
-# may touch; an unhashed one is an unverified security instruction.
-if [[ "$cur_host" == claude ]]; then
-  for a in "$src"/agents/*.md; do
-    [[ -e "$a" ]] || continue
-    rm -f "$cfg/agents/$(basename "$a")"
-    cp "$a" "$cfg/agents/$(basename "$a")"
+# --- locking, ownership, staging -------------------------------------------
+#
+# DESTRUCTIVE OPERATIONS and their guards (the review asked for this list):
+#   rename of a skill dir / role file to trash or <path>.bak.<ts>  (mv, same parent)
+#       Codex: only after lstat says not-a-symlink AND (listed in the previous
+#       manifest OR --adopt, which backs up instead of deleting). Claude: historic
+#       behaviour, replaces skills/<our names> and agents/*.md of our names.
+#   rm -rf on $cfg/{skills,agents}/.prod-trash.<pid>.* and .prod-stage.<pid>.*
+#       (names we created this run with a non-clobbering mkdir/cp; rm -rf never
+#       follows a symlink, and the u+w pass before it skips symlinks: ! -type l)
+#   chmod u+w / a-w: Codex only on paths under our own stage/trash names and our
+#       freshly moved-in units; Claude keeps the historic chmod -R.
+#   writes: only into the stage names above, the lock dir, the manifest temp; the
+#       manifest is replaced by rename (a symlinked manifest is refused on Codex).
+tmp_paths=(); locks=(); made_dirs=()
+cleanup() {
+  local p
+  for p in "${tmp_paths[@]:-}"; do
+    [[ -n "$p" ]] || continue
+    if [[ -d "$p" && ! -L "$p" ]]; then find "$p" ! -type l -exec chmod u+w {} + 2>/dev/null; fi
+    if [[ -e "$p" || -L "$p" ]]; then rm -rf "$p" 2>/dev/null; fi
   done
-else
+  for p in "${locks[@]:-}"; do [[ -n "$p" ]] && { rm -f "$p/pid"; rmdir "$p" 2>/dev/null; }; done
+  # directories THIS run created, newest first; rmdir only succeeds on an empty one,
+  # so a completed install keeps them and a refused/failed first install leaves nothing
+  for ((p=${#made_dirs[@]}-1; p>=0; p--)); do rmdir "${made_dirs[$p]}" 2>/dev/null; done
+  return 0
+}
+trap cleanup EXIT
+
+lock_host() {
+  local lk="$cfg/.prod-skills.lock" old
+  if [[ ! -d "$cfg" ]]; then
+    mkdir -p "$cfg" || { echo "install: cannot create $cfg" >&2; exit 7; }
+    made_dirs+=("$cfg")
+  fi
+  if ! mkdir "$lk" 2>/dev/null; then
+    old="$(find "$lk" -maxdepth 0 -mmin +10 2>/dev/null)"
+    if [[ -n "$old" ]]; then
+      echo "install: another install is running, or died holding $lk (older than 10 minutes, pid $(cat "$lk/pid" 2>/dev/null || echo '?')). Not stealing it: if no install is running, remove that directory by hand." >&2
+    else
+      echo "install: another install is running (lock $lk, pid $(cat "$lk/pid" 2>/dev/null || echo '?'))" >&2
+    fi
+    exit 6
+  fi
+  locks+=("$lk")
+  echo "$$" > "$lk/pid" 2>/dev/null || true
+}
+
+refuse_sym=0; refuse_foreign=0; adopt_paths=""
+owned_in_manifest() { # owned_in_manifest <skill name | ./role.toml>
+  [[ -f "$manifest" ]] || return 1
+  case "$1" in
+    ./*) awk -v p="$1" '$2 == p { f = 1 } END { exit !f }' "$manifest" ;;
+    *)   awk -v p="$1/" 'index($2, p) == 1 { f = 1 } END { exit !f }' "$manifest" ;;
+  esac
+}
+check_dest() { # check_dest <path> <ownership key>
+  if [[ -L "$1" ]]; then
+    echo "install: refusing: $1 is a symlink (destination is a symlink); it is yours, replace it with a real path yourself" >&2; refuse_sym=1
+  elif [[ -e "$1" ]] && ! owned_in_manifest "$2"; then
+    if (( adopt )); then
+      adopt_paths="$adopt_paths$1"$'\n'
+      echo "install: --adopt: $1 is not ours; it will be moved to $1.bak.<timestamp>"
+    else
+      echo "install: refusing to overwrite $1: not installed by this tool; move it away or pass --adopt" >&2; refuse_foreign=1
+    fi
+  fi
+}
+# Everything that can be refused is refused HERE, before any host is written.
+precheck_host() {
+  [[ "$cur_host" == codex ]] || return 0
+  local d s a n l seen=" "
+  for d in "$cfg/skills" "$cfg/agents" "$manifest"; do
+    if [[ -L "$d" ]]; then
+      echo "install: refusing: $d is a symlink (destination is a symlink); it is yours, replace it with a real path yourself" >&2; refuse_sym=1
+    fi
+  done
+  (( refuse_sym )) && return 0
+  for s in "${skills[@]}"; do
+    [[ -d "$src/$s" ]] || { echo "install: source skill missing: $src/$s" >&2; exit 1; }
+    l="$(find -L "$src/$s" -type l 2>/dev/null | head -n 1)"
+    [[ -z "$l" ]] || { echo "install: dangling symlink in the source: $l" >&2; exit 1; }
+    check_dest "$cfg/skills/$s" "$s"
+  done
   for a in "$src"/agents/*.md; do
     [[ -e "$a" ]] || continue
     n="$(basename "$a" .md)"
-    gen_codex_role "$a" > "$cfg/agents/.gen.$$" || { rm -f "$cfg/agents/.gen.$$"; echo "install: cannot generate Codex role for $a" >&2; exit 1; }
-    rm -f "$cfg/agents/$n.toml"
-    mv "$cfg/agents/.gen.$$" "$cfg/agents/$n.toml"
+    case "$n" in prod-*) ;; *) echo "install: agents/$n.md is not a prod-* agent; not installed for Codex" >&2; continue ;; esac
+    valid_role_name "$(fm_field "$a" name)" "$n" || { echo "install: $a: frontmatter name must match ^[a-z][a-z0-9-]*\$ and equal the file name" >&2; exit 1; }
+    case "$seen" in *" $n "*) echo "install: duplicate agent name $n" >&2; exit 1 ;; esac
+    seen="$seen$n "
+    check_dest "$cfg/agents/$n.toml" "./$n.toml"
+  done
+}
+
+# STAGING: every skill and role is built beside its destination under a
+# .prod-stage.<pid>.<name> sibling (same parent, so the final rename is atomic and
+# needs no write permission on the unit itself). Only when ALL units of the host
+# are built does the COMMIT start: each existing destination is renamed away
+# (trash, or <path>.bak.<ts> for an adopted one) and its stage renamed in. A failure
+# anywhere rolls the renames back, so a host is all-or-nothing; the manifest is
+# built last, in a temp file, and renamed into place as the final step.
+u_src=(); u_dst=(); u_old=(); u_state=()
+rollback_units() {
+  local i
+  for ((i=${#u_src[@]}-1; i>=0; i--)); do
+    if [[ "${u_state[$i]:-0}" == 2 ]]; then
+      mv "${u_dst[$i]}" "${u_src[$i]}" || echo "install: rollback: cannot move ${u_dst[$i]} back to its stage" >&2
+    fi
+    if [[ "${u_state[$i]:-0}" -ge 1 && -n "${u_old[$i]}" ]]; then
+      mv "${u_old[$i]}" "${u_dst[$i]}" || echo "install: rollback: cannot restore ${u_dst[$i]} from ${u_old[$i]}" >&2
+    fi
+  done
+}
+fail_step() { rollback_units; echo "install: $* -- this host was rolled back, no manifest written" >&2; exit 7; }
+add_unit() { # add_unit <stage path> <dest path>
+  u_src+=("$1"); u_dst+=("$2"); u_old+=(""); u_state+=(0); tmp_paths+=("$1")
+}
+
+install_host() {
+local old_umask i s a n d st ts mt rc trash_fail=0 n_roles=0
+old_umask="$(umask)"
+# Codex: explicit modes, independent of the caller's umask (dirs 0755, files from
+# the source's own modes minus group/other write, then read-only below).
+[[ "$cur_host" == codex ]] && umask 022
+u_src=(); u_dst=(); u_old=(); u_state=(); chk_args=()
+[[ -d "$cfg/skills" ]] || made_dirs+=("$cfg/skills")
+[[ -d "$cfg/agents" ]] || made_dirs+=("$cfg/agents")
+mkdir -p "$cfg/skills" "$cfg/agents" || fail_step "cannot create $cfg/skills and $cfg/agents"
+# The installed copy is left READ-ONLY at the end of this script. It needs no
+# unlock before being replaced: units are renamed away whole, never edited in place
+# (the old Claude path ran a blanket chmod -R u+w over skills/ and agents/, which
+# also unlocked every FOREIGN file there and could not be undone on a failed
+# install; that side effect is gone, the trash is unlocked only to be deleted).
+agstage="$cfg/.prod-stage.$$.agents"; agtrash="$cfg/.prod-trash.$$.agents"
+tmp_paths+=("$agstage" "$agtrash")
+mkdir "$agstage" "$agtrash" || fail_step "cannot create the staging directories under $cfg"
+for s in "${skills[@]}"; do
+  st="$cfg/skills/.prod-stage.$$.$s"
+  add_unit "$st" "$cfg/skills/$s"
+  cp -R "$src/$s" "$st" || fail_step "cannot copy skill $s"
+  # shared material travels as real files, resolved from the repo's symlinks
+  if [[ -d "$src/$s/references" ]]; then
+    rm -rf "$st/references" || fail_step "cannot reset $st/references"
+    mkdir -p "$st/references" || fail_step "cannot create $st/references"
+    for r in "$src/$s/references"/*; do
+      [[ -e "$r" ]] || continue
+      if [[ -d "$r" ]]; then
+        mkdir -p "$st/references/$(basename "$r")" || fail_step "cannot create references/$(basename "$r")"
+        if [[ "$cur_host" == codex ]]; then
+          cp -RL "$r"/. "$st/references/$(basename "$r")/" || fail_step "cannot copy references/$(basename "$r") of $s"
+        else
+          cp -RL "$r"/* "$st/references/$(basename "$r")/" 2>/dev/null || true
+        fi
+      else
+        cp -L "$r" "$st/references/$(basename "$r")" || fail_step "cannot copy $r"
+      fi
+    done
+  fi
+  # per-skill config stays LOCAL and unhashed: it holds org facts, not policy
+  if [[ -f "$src/$s/config.sh" ]]; then cp "$src/$s/config.sh" "$st/config.sh" || fail_step "cannot copy config.sh of $s"; fi
+done
+# Agent definitions. Stage, then rename over: a plain `cp` onto an existing SYMLINK
+# would follow it and write through to its target, and `find -type f` skips
+# symlinks, which once kept the agent definitions out of the manifest entirely.
+# Agent definitions carry the write-masks that bound what a cheap model may touch;
+# an unhashed one is an unverified security instruction.
+for a in "$src"/agents/*.md; do
+  [[ -e "$a" ]] || continue
+  n="$(basename "$a" .md)"
+  if [[ "$cur_host" == claude ]]; then
+    st="$agstage/$n.md"; add_unit "$st" "$cfg/agents/$n.md"
+    cp "$a" "$st" || fail_step "cannot copy agent $n"
+  else
+    case "$n" in prod-*) ;; *) continue ;; esac   # Codex: only prod-* roles are generated, hashed and locked
+    st="$agstage/$n.toml"; add_unit "$st" "$cfg/agents/$n.toml"
+    gen_codex_role "$a" "$st" || { rollback_units; echo "install: cannot generate Codex role for $a" >&2; exit 1; }
+    n_roles=$((n_roles+1))
+  fi
+done
+if (( ${#chk_args[@]} )); then
+  toml_check_all "${chk_args[@]}"; rc=$?
+  if (( rc == 3 )); then echo "install: note: python3 with tomllib not found; role files were not parse-checked (escaping only)" >&2
+  elif (( rc != 0 )); then rollback_units; echo "install: the generated role files do not round-trip through a TOML parser; refusing" >&2; exit 1; fi
+fi
+
+# COMMIT
+ts="$(date +%Y%m%d%H%M%S)"
+for ((i=0; i<${#u_src[@]}; i++)); do
+  d="${u_dst[$i]}"
+  if [[ -e "$d" || -L "$d" ]]; then
+    if [[ "$cur_host" == codex && $'\n'"$adopt_paths" == *$'\n'"$d"$'\n'* ]]; then
+      u_old[$i]="$d.bak.$ts"; [[ -e "${u_old[$i]}" ]] && u_old[$i]="$d.bak.$ts.$$"
+    else
+      # skills: a sibling of the destination (same parent: atomic, no write bit needed on
+      # the unit). Agent files: a directory beside agents/, because the Claude manifest
+      # hashes the whole agents/ dir and a trash file inside it would be counted.
+      case "$d" in
+        "$cfg"/agents/*) u_old[$i]="$agtrash/$(basename "$d")" ;;
+        *) u_old[$i]="$(dirname "$d")/.prod-trash.$$.$(basename "$d")"; tmp_paths+=("${u_old[$i]}") ;;
+      esac
+    fi
+    mv "$d" "${u_old[$i]}" || { u_old[$i]=""; fail_step "cannot move $d aside"; }
+    u_state[$i]=1
+  fi
+  mv "${u_src[$i]}" "$d" || fail_step "cannot move ${u_src[$i]} into place"
+  u_state[$i]=2
+done
+
+# Read-only AFTER the new units are in place and BEFORE the manifest. This does
+# not stop a determined writer -- it can be undone with one chmod -- and it is not
+# meant to. It removes the SILENT case: an accidental write to the trusted copy now
+# fails loudly at the moment it happens. Prevention is impossible under
+# bypassPermissions; making the act explicit is not.
+for s in "${skills[@]}"; do chmod -R a-w "$cfg/skills/$s" || fail_step "cannot make $cfg/skills/$s read-only"; done
+if [[ "$cur_host" == claude ]]; then
+  chmod -R a-w "$cfg"/agents/$agent_glob 2>/dev/null || true
+else
+  for ((i=0; i<${#u_dst[@]}; i++)); do
+    case "${u_dst[$i]}" in "$cfg"/agents/*) chmod a-w "${u_dst[$i]}" || fail_step "cannot make ${u_dst[$i]} read-only" ;; esac
   done
 fi
 
-{ hash_tree "$cfg/skills" "${skills[@]}"; agents_hash; } | sort > "$manifest"
+# The manifest is written LAST and atomically (temp file + rename): an incomplete
+# install never leaves a manifest that describes it.
+mt="$cfg/.prod-skills.manifest.tmp.$$"; tmp_paths+=("$mt")
+{ hash_tree "$cfg/skills" "${skills[@]}"; agents_hash; } | sort > "$mt" || fail_step "cannot write the manifest"
+[[ -s "$mt" ]] || fail_step "the manifest came out empty"
+if [[ "$cur_host" == codex ]]; then chmod 0444 "$mt" || fail_step "cannot chmod the manifest"; fi
+mv "$mt" "$manifest" || fail_step "cannot move the manifest into place"
 
-# Read-only, AFTER the manifest is written. This does not stop a determined
-# writer -- it can be undone with one chmod -- and it is not meant to. It
-# removes the SILENT case: an accidental or incidental write to the trusted copy
-# now fails loudly at the moment it happens, instead of being discovered later by
-# the drift check, or not at all. Prevention is impossible under
-# bypassPermissions; making the act explicit is not.
-for s in "${skills[@]}"; do chmod -R a-w "$cfg/skills/$s" 2>/dev/null || true; done
-chmod -R a-w "$cfg"/agents/$agent_glob 2>/dev/null || true
-echo "installed ${#skills[@]} skills + $(ls "$src"/agents/*.md 2>/dev/null | wc -l | tr -d ' ') agents as verified copies"
+# The replaced units were renamed aside; delete the trash only now that the new
+# install is complete and recorded. (Adopted ones stay as <path>.bak.<ts>.)
+for ((i=0; i<${#u_old[@]}; i++)); do
+  case "${u_old[$i]}" in
+    "") ;;
+    *.bak.*) ;;
+    *) find "${u_old[$i]}" ! -type l -exec chmod u+w {} + 2>/dev/null
+       rm -rf "${u_old[$i]}" || { echo "install: could not remove the replaced copy ${u_old[$i]}; the new install is complete, remove it by hand" >&2; trash_fail=1; } ;;
+  esac
+done
+umask "$old_umask"
+if [[ "$cur_host" == claude ]]; then
+  echo "installed ${#skills[@]} skills + $(ls "$src"/agents/*.md 2>/dev/null | wc -l | tr -d ' ') agents as verified copies"
+else
+  echo "installed ${#skills[@]} skills + $n_roles agents as verified copies"
+fi
 echo "manifest: $manifest ($(wc -l <"$manifest" | tr -d ' ') files)"
 echo
 echo "Verify at any time (and from a cron or session hook):"
 echo "  bash $src/install.sh --verify$( [[ "$cur_host" == claude ]] || echo " --host $cur_host" )"
+(( trash_fail == 0 )) || return 7
 }
+for h in "${hosts[@]}"; do set_host "$h"; lock_host; done
+for h in "${hosts[@]}"; do set_host "$h"; precheck_host; done
+if (( refuse_sym )); then echo "install: nothing was installed (exit 4: destination is a symlink)" >&2; exit 4; fi
+if (( refuse_foreign )); then echo "install: nothing was installed (exit 5: destinations not installed by this tool)" >&2; exit 5; fi
 for h in "${hosts[@]}"; do
   set_host "$h"
   (( ${#hosts[@]} > 1 )) && echo "== host: $h =="
