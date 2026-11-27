@@ -27,8 +27,12 @@ CHECKS (exit 1, one line per problem, nothing printed as a plan):
   duplicate_id, missing_id, bad_field, unknown_dependency, cycle, no_files,
   bad_path, too_broad, file_conflict.
 Limits (exit 2, "plan too large"): 1000 tasks, 2000 path entries after brace
-expansion; an entry has at most 32 components. At most 50 file_conflict lines
-are printed, then "... and N more".
+expansion (checked while expanding, so a huge plan is refused at once); an
+entry has at most 32 components. At most 50 lines of each error class are
+printed, then "... and N more <class>" (JSON: `more` maps class -> count).
+Task ids, dependency ids and file entries must be encodable as UTF-8 (a lone
+surrogate is bad_field). Two ids equal after ASCII lower-casing + NFC are
+bad_field: ids stay distinct, but a typo of that kind is never silent.
 
 --landed ID,ID: print only the READY set. Exit 2 unless every dependency
 (transitively) of every landed task is itself listed, and unless the list has
@@ -39,13 +43,19 @@ OVERLAP RULE (one rule, no glob algebra; it can over-report, never under-report)
      at most 256 expansions); `{1..3}`, unbalanced or empty braces are bad_path.
   2. Components are split on '/'; '.' and empty ones dropped; absolute, '~',
      drive letters, backslash, '..', control characters are bad_path.
-  3. A component is LITERAL if it has none of `* ? [ ] { }`, else a wildcard
-     (`**` too). The LITERAL PREFIX is the leading run of literal components.
+  3. A component is LITERAL only if it is pure ASCII from the alphabet
+     `A-Z a-z 0-9 . _ - + @ = , %` and does not end in '.'. Anything else (a
+     wildcard, a non-ASCII letter, a space, `( ) | $ ! ^ #` ..., a trailing dot)
+     is NON-literal: the LITERAL PREFIX is the leading run of literal components
+     and stops before it, so such a component can never prove two entries apart.
+     Filesystems disagree on case, normalisation and trailing dots, so only
+     plain ASCII is ever compared.
   4. Two entries are DISJOINT only if, at some position where both have a literal
-     component, the two differ after NFC + casefold. Everything else overlaps:
-     equal entries, one prefix inside the other, a wildcard reached first.
-  5. An entry with an EMPTY literal prefix (`*.go`, `**/x`) is too_broad, unless
-     the plan has exactly one task.
+     component, the two differ after ASCII lower-casing. Everything else
+     overlaps: equal entries, one prefix inside the other, a non-literal
+     component reached first (`src/e-acute.go` overlaps `src/a.go`).
+  5. An entry with an EMPTY literal prefix (`*.go`, `**/x`, a non-ASCII first
+     component) is too_broad, unless the plan has exactly one task.
 So `src/*.go` and `src/*.md` OVERLAP: list files explicitly or add depends_on.
 
 Exit: 0 valid plan, 1 invalid plan, 2 usage / unreadable file / unparseable /
@@ -59,14 +69,15 @@ import sys
 import unicodedata
 
 PROG = "plan-dag"
-WILD = "*?[]{}"
+LITERAL = re.compile(r"[A-Za-z0-9._+@=,%-]+\Z")
+CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 CODE_ORDER = ["missing_id", "duplicate_id", "bad_field", "unknown_dependency",
               "cycle", "no_files", "bad_path", "too_broad", "file_conflict"]
 MAX_TASKS = 1000
 MAX_PATHS = 2000
 MAX_EXPANSIONS = 256
 MAX_COMPONENTS = 32
-MAX_CONFLICT_LINES = 50
+MAX_LINES = 50
 NO_YAML = ("PyYAML is required to read a YAML plan (pip install PyYAML), "
            "or pass the plan as JSON")
 
@@ -210,13 +221,27 @@ def expand_braces(s, cap=MAX_EXPANSIONS):
     return [s[:i] + x + y for x in inner for y in sufs]
 
 
-def _fold(c):
-    n = unicodedata.normalize
-    return n("NFC", n("NFC", c).casefold())
-
-
 def _is_literal(c):
-    return not any(ch in c for ch in WILD)
+    """Pure ASCII from the safe alphabet, no trailing dot: the only components
+    ever compared. ASCII lower-casing of such a component is exact."""
+    return LITERAL.match(c) is not None and not c.endswith(".")
+
+
+def _short(f):
+    r = repr(f)
+    return r if len(r) <= 120 else r[:117] + "..."
+
+
+def _utf8(s):
+    try:
+        s.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _id_key(s):
+    return re.sub("[A-Z]", lambda m: m.group().lower(), unicodedata.normalize("NFC", s))
 
 
 def norm_path(p):
@@ -225,7 +250,7 @@ def norm_path(p):
         return None, ("bad_path", "empty file path")
     if "\\" in p:
         return None, ("bad_path", "contains a backslash")
-    if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in p):
+    if CTRL.search(p):
         return None, ("bad_path", "contains a control character")
     try:
         exps = expand_braces(p)
@@ -233,7 +258,7 @@ def norm_path(p):
         return None, ("bad_path", "%s; write the paths out" % e)
     except TooMany:
         return None, ("too_broad", "more than %d brace alternatives" % MAX_EXPANSIONS)
-    out = []
+    out, seen = [], set()
     for e in exps:
         if e.startswith("/") or e.startswith("~") or re.match(r"^[A-Za-z]:", e):
             return None, ("bad_path", "absolute path")
@@ -246,9 +271,10 @@ def norm_path(p):
         for c in comps:
             if not _is_literal(c):
                 break
-            pre.append(_fold(c))
+            pre.append(c.lower())
         ent = (tuple(pre), e.endswith("/"))
-        if ent not in out:
+        if ent not in seen:
+            seen.add(ent)
             out.append(ent)
     return out, None
 
@@ -312,7 +338,7 @@ def _is_num(e):
 
 
 def validate(raw_tasks):
-    """-> (tasks, errors, more_conflicts)"""
+    """-> (tasks, errors, more) where more maps an error class to the lines not shown"""
     errors = []
     tasks = {}
     for n, t in enumerate(raw_tasks):
@@ -326,6 +352,10 @@ def validate(raw_tasks):
         if not isinstance(tid, str):
             errors.append(err("bad_field", [], None,
                               "task #%d: `id` is %s, not a string; quote it" % (n + 1, type(tid).__name__)))
+            continue
+        if not _utf8(tid):
+            errors.append(err("bad_field", [], None,
+                              "task #%d: `id` is not valid UTF-8 text (lone surrogate)" % (n + 1)))
             continue
         if not tid.strip():
             errors.append(err("missing_id", [], None, "task #%d has no usable `id`" % (n + 1)))
@@ -341,8 +371,14 @@ def validate(raw_tasks):
         if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
             errors.append(err("bad_field", [tid], None, "%s: depends_on must be a list of task ids" % tid))
             deps, ok = [], False
+        elif not all(_utf8(d) for d in deps):
+            errors.append(err("bad_field", [tid], None, "%s: depends_on has text that is not valid UTF-8" % tid))
+            deps, ok = [], False
         if files is not None and (not isinstance(files, list) or not all(isinstance(f, str) for f in files)):
             errors.append(err("bad_field", [tid], None, "%s: files must be a list of paths" % tid))
+            files, ok = [], False
+        elif files is not None and not all(_utf8(f) for f in files):
+            errors.append(err("bad_field", [tid], None, "%s: files has text that is not valid UTF-8" % tid))
             files, ok = [], False
         est = t.get("estimate")
         if est is not None and not _is_num(est):
@@ -351,11 +387,19 @@ def validate(raw_tasks):
         tasks[tid] = {"deps": sorted(set(deps)), "files": files or [],
                       "bad": not ok, "estimate": est}
     ids = sorted(tasks)
+    keyed = {}
+    for tid in ids:
+        keyed.setdefault(_id_key(tid), []).append(tid)
+    for grp in sorted(keyed.values()):
+        if len(grp) > 1:
+            errors.append(err("bad_field", grp, None,
+                              "ids differ only by case or normalisation: %s"
+                              % ", ".join(repr(g) for g in grp)))
     for tid in ids:
         info = tasks[tid]
         for d in info["deps"]:
             if d not in tasks:
-                errors.append(err("unknown_dependency", [tid], None, "%s depends_on %s, which is not a task" % (tid, d)))
+                errors.append(err("unknown_dependency", [tid], None, "%s depends_on %s, which is not a task" % (tid, _short(d))))
         if not info["files"] and not info["bad"]:
             errors.append(err("no_files", [tid], None,
                               "%s declares no files; a task without files cannot be checked for disjointness" % tid))
@@ -365,28 +409,38 @@ def validate(raw_tasks):
         for fi, f in enumerate(tasks[tid]["files"]):
             c, bad = norm_path(f)
             if bad:
-                errors.append(err(bad[0], [tid], f, "%s: file %r: %s" % (tid, f, bad[1])))
+                errors.append(err(bad[0], [tid], f, "%s: file %s: %s" % (tid, _short(f), bad[1])))
                 continue
             for pre, _isdir in c:
                 npaths += 1
+                if npaths > MAX_PATHS:
+                    raise ParseError("plan too large: more than %d path entries after brace expansion"
+                                     % MAX_PATHS)
                 if not pre:
                     if len(raw_tasks) != 1:
                         errors.append(err("too_broad", [tid], f,
-                                          "%s: file %r starts with a wildcard, so it overlaps every other task; "
-                                          "name a literal directory first" % (tid, f)))
+                                          "%s: file %s starts with a wildcard or a non-literal component, so it "
+                                          "overlaps every other task; name a literal ASCII directory first"
+                                          % (tid, _short(f))))
                     continue
                 entries.append((tid, fi, pre))
-    if npaths > MAX_PATHS:
-        raise ParseError("plan too large: %d path entries after brace expansion (limit %d)"
-                         % (npaths, MAX_PATHS))
     cyc = find_cycle(tasks, ids)
     if cyc:
         errors.append(err("cycle", sorted(set(cyc)), None, "dependency cycle: " + " -> ".join(cyc)))
     errors.sort(key=lambda e: (CODE_ORDER.index(e["code"]), e["tasks"], e["file"] or "", e["msg"]))
+    more, shown = {}, {}
+    kept = []
+    for e in errors:
+        shown[e["code"]] = shown.get(e["code"], 0) + 1
+        if shown[e["code"]] <= MAX_LINES:
+            kept.append(e)
+        else:
+            more[e["code"]] = more.get(e["code"], 0) + 1
+    errors = kept
     anc = ancestors(tasks, ids)
     hits = find_conflicts(entries)
     pairs = sorted(k for k in hits if k[1] not in anc[k[0]] and k[0] not in anc[k[1]])
-    for a, b in pairs[:MAX_CONFLICT_LINES]:
+    for a, b in pairs[:MAX_LINES]:
         fa, fb = (tasks[a]["files"][hits[(a, b)][0]], tasks[b]["files"][hits[(a, b)][1]])
         if fa == fb:
             where, fld = "both touch %s" % fa, fa
@@ -397,7 +451,9 @@ def validate(raw_tasks):
             "%s and %s have no dependency path between them and %s; "
             "they could share a wave: add depends_on between them or split the files"
             % (a, b, where)))
-    return tasks, errors, max(0, len(pairs) - MAX_CONFLICT_LINES)
+    if len(pairs) > MAX_LINES:
+        more["file_conflict"] = len(pairs) - MAX_LINES
+    return tasks, errors, more
 
 
 def find_cycle(tasks, ids):
@@ -472,12 +528,16 @@ def batches(ids, n):
     return [ids[i:i + n] for i in range(0, len(ids), n)] if ids else []
 
 
-OVERLAP_HELP = """Overlap rule: braces expand (simple comma form, max 256); an entry's literal
-prefix is its leading components with none of * ? [ ] { }. Two entries are
+OVERLAP_HELP = """Overlap rule: braces expand (simple comma form, max 256). A path component is
+literal only if it is pure ASCII from A-Z a-z 0-9 . _ - + @ = , % and does
+not end in '.'; any other component (wildcard, non-ASCII, space, ( ) | $ !,
+trailing dot) is non-literal and ends the entry's literal prefix, so it never
+proves two entries apart (src/e-acute.go overlaps src/a.go). Two entries are
 disjoint only if both have a literal component at some position and the two
-differ after NFC + casefold; otherwise they overlap. An entry with an empty
-literal prefix (*.go, **/x) is too_broad unless the plan has one task. So
-src/*.go and src/*.md overlap: list files explicitly or add depends_on."""
+differ after ASCII lower-casing; otherwise they overlap. An entry whose first
+component is non-literal (*.go, **/x, a non-ASCII name) is too_broad unless the
+plan has one task. So src/*.go and src/*.md overlap:
+list files explicitly or add depends_on."""
 
 
 def main(argv):
@@ -510,13 +570,19 @@ def main(argv):
         if a.format == "json":
             doc = {"ok": False, "errors": errors}
             if more:
-                doc["more_file_conflicts"] = more
+                doc["more"] = more
+            if more.get("file_conflict"):
+                doc["more_file_conflicts"] = more["file_conflict"]
             print(json.dumps(doc, separators=(",", ":")))
         else:
-            for e in errors:
-                print("ERROR %s: %s" % (e["code"], e["msg"]))
-            if more:
-                print("... and %d more file_conflict" % more)
+            last = None
+            for e in errors + [None]:
+                code = e["code"] if e else None
+                if last is not None and code != last and more.get(last):
+                    print("... and %d more %s" % (more[last], last))
+                if e:
+                    print("ERROR %s: %s" % (code, e["msg"]))
+                last = code
         return 1
     landed = set()
     if a.landed:
@@ -581,6 +647,11 @@ def main(argv):
 
 
 def cli(argv):
+    for st in (sys.stdout, sys.stderr):  # output must never raise on odd text
+        try:
+            st.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     try:
         return main(argv)
     except ParseError as e:

@@ -15,8 +15,21 @@ skipped=0
 ok() { pass=$((pass + 1)); }
 bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; }
 
+# PyYAML probe. CI runs the tool as `python3 -I -B`, so that is the probe that counts.
+# Importable plainly but not under -I (PyYAML only in the user site) means the tool cannot
+# read YAML the way CI runs it: that is a FAIL, never a quiet skip of 25 cases.
 HAVE_YAML=0
+YAML_PLAIN=0
 if python3 -I -B -c 'import yaml' >/dev/null 2>&1; then HAVE_YAML=1; fi
+if python3 -B -c 'import yaml' >/dev/null 2>&1; then YAML_PLAIN=1; fi
+if [ "$YAML_PLAIN" = 1 ] && [ "$HAVE_YAML" = 0 ]; then
+  bad "PyYAML is importable by python3 but not by python3 -I: install it into the interpreter's own site-packages"
+fi
+if [ "${PLAN_DAG_ST_PROBE_ONLY:-0}" = 1 ]; then # meta-case mode: report the probe, run nothing else
+  printf 'probe: have_yaml=%s plain=%s fail=%s\n' "$HAVE_YAML" "$YAML_PLAIN" "$fail"
+  [ "$fail" -eq 0 ]
+  exit
+fi
 skip() { skipped=$((skipped + 1)); printf 'SKIPPED %s: PyYAML not importable\n' "$1"; }
 # yaml_only LABEL: true when YAML cases can run, else count a skip
 yaml_only() { if [ "$HAVE_YAML" = 1 ]; then return 0; fi; skip "$1"; return 1; }
@@ -238,8 +251,34 @@ eq no-pyyaml-yaml-plan "$err" 'plan-dag: cannot parse plan: PyYAML is required t
 noyaml "$T/d.json"
 expect_rc no-pyyaml-json-plan 0
 has no-pyyaml-json-plan "$out" 'tasks=4'
+# meta-case: a stub python3 on PATH that imports yaml plainly but not under -I must make the
+# suite FAIL; one that imports it nowhere is a genuine absence and stays exit 0
+REAL_PY="$(command -v python3)"
+mkdir "$T/stub-user" "$T/stub-none"
+for kind in user none; do
+  cat >"$T/stub-$kind/python3" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"import yaml"*)
+    if [ "$kind" = none ]; then exit 1; fi
+    for a in "\$@"; do if [ "\$a" = -I ]; then exit 1; fi; done
+    exit 0 ;;
+esac
+exec "$REAL_PY" "\$@"
+STUB
+  chmod +x "$T/stub-$kind/python3"
+done
+mrc=0
+mout="$(PATH="$T/stub-user:$PATH" PLAN_DAG_ST_PROBE_ONLY=1 bash "${BASH_SOURCE[0]}" 2>&1)" || mrc=$?
+[ "$mrc" -ne 0 ] && ok || bad "probe-meta: plain-importable but not under -I must fail the suite (rc=$mrc)"
+has probe-meta-message "$mout" "importable by python3 but not by python3 -I"
+mrc=0
+mout="$(PATH="$T/stub-none:$PATH" PLAN_DAG_ST_PROBE_ONLY=1 bash "${BASH_SOURCE[0]}" 2>&1)" || mrc=$?
+eq probe-meta-absent-is-skip "$mrc:$mout" "0:probe: have_yaml=0 plain=0 fail=0"
 run --help
 expect_rc help-cli 0
+has help-literal-alphabet "$out" 'A-Z a-z 0-9 . _ - + @ = , %'
+has help-ascii-lower "$out" 'ASCII lower-casing'
 has help-overlap-rule "$out" 'src/*.go and'
 has help-overlap-advice "$out" 'list files explicitly or add depends_on'
 
@@ -339,7 +378,7 @@ for p, q in [("src/[ab].go", "src/[a-c].go"), ("src/[ab].go", "src/[ax].go"), ("
              ("a/v1.2", "a/v1.2/x.go"), ("node_modules/.bin", "node_modules/.bin/x"),
              (".github", ".github/workflows/pr.yaml"), ("a/*.d", "a/x.d/f"), ("src/*.go", "src/*.md"),
              ("a/x*", "a/y*"), ("a/*.md", "a/x.go"), ("src/**/*.go", "src/a/b.md"),
-             ("é.go", "é.go"), ("a/b.go", "a/b.go/c"), ("{a/b,c}/x", "c/x/y"),
+             ("a/é.go", "a/é.go"), ("a/b.go", "a/b.go/c"), ("{a/b,c}/x", "c/x/y"),
              ("a//b", "a/./b"), ("./a/b", "a/b/"), ("a/b", "a/b")]:
     pair("file_conflict", p, q)
 for p, q in [("a/b.go", "a/b.go.bak"), ("docs/**", "src/**"), ("a/b/**", "a/c/**"),
@@ -360,6 +399,69 @@ r, o, e = cli([jplan({"id": "a", "files": ["**/*.go"]})])
 check("single-task-wildcard-ok", r == 0, o + e)
 r, o, e = cli([jplan({"id": "a", "files": ["/".join("d%d" % i for i in range(32))]})])
 check("32-components-ok", r == 0, o + e)
+
+# ---- round-3: a component is literal only if pure ASCII from the safe alphabet
+for p, q in [("src/\u1fb7.go", "src/\u1fbc\u0342.go"),  # canonically caseless-equal: one file on APFS
+             ("src/\u00e9.go", "src/e\u0301.go"),           # NFC vs NFD
+             ("src/\u00e9.go", "src/a.go"),                  # non-literal stops the prefix at `src`
+             ("Src/A.go", "src/a.go"), ("src/a.", "src/a"), ("src/a..", "src/a"),
+             ("src/+(a|b).go", "src/a.go"), ("src/@(a|b).go", "src/a.go"), ("src/!(x).go", "src/a.go"),
+             ("src/$V.go", "src/a.go"), ("src/a b.go", "src/a.go"), ("src/`x`.go", "src/a.go"),
+             ("src/\u212a.go", "src/k.go"), ("src/\u00df.go", "src/ss.go")]:
+    pair("file_conflict", p, q)
+# NTFS 8.3 short names (ABCDEF~1.GO) may alias another file: a component with ~ is never literal
+pair("file_conflict", "src/abcdef~1.go", "src/abcdefghij.go")
+for p, q in [("src/a.go", "src/b.go"), ("src/a-b_c+d@e=f,g%hi.go", "src/a-b_c+d@e=f,g%hj.go"),
+             ("a/\u00e9.go", "b/\u00e9.go")]:
+    pair("ok", p, q)
+pair("too_broad", "\u00e9/x.go", "z/q")
+pair("too_broad", "\u00e9", "z/q")
+pair("too_broad", "$V/x.go", "z/q")
+r, o, e = cli([jplan({"id": "a", "files": ["\u00e9/x.go"]})])
+check("single-task-non-ascii-first-ok", r == 0, o + e)
+
+# ---- round-3 warnings
+# 1: the path limit is enforced while expanding (was: after expanding everything, 85 s)
+wide = ",".join("a%d" % k for k in range(256))
+t0 = time.time()
+r, o, e = cli([jplan(*[{"id": "t%d" % i, "files": ["x%d_%d/{%s}" % (i, j, wide) for j in range(40)]}
+                       for i in range(1000)])])
+dt = time.time() - t0
+check("limit-in-loop-fast", r == 2 and "plan too large" in e and dt < 10, "rc=%s %.1fs %s" % (r, dt, e[:100]))
+print("INFO limit-in-loop: %.2fs" % dt)
+# 2: every error class is capped, text and JSON
+for code, mk in (("bad_path", lambda i: {"id": "t%d" % i, "files": ["/a"] * 40}),
+                 ("too_broad", lambda i: {"id": "t%d" % i, "files": ["*.go"]}),
+                 ("bad_field", lambda i: {"id": "t%d" % i, "files": "x"}),
+                 ("no_files", lambda i: {"id": "t%d" % i})):
+    n = 40000 if code == "bad_path" else 1000
+    tasks = [mk(i) for i in range(1000)]
+    r, o, e = cli([jplan(*tasks)])
+    total = 40000 if code == "bad_path" else 1000
+    check("cap-text-" + code, r == 1 and o.count("ERROR " + code) == 50 and o.count("\n") == 51
+          and "... and %d more %s" % (total - 50, code) in o and len(o) < 20000, "%d lines %d bytes" % (o.count("\n"), len(o)))
+    r, o, e = cli([jplan(*tasks), "--format", "json"])
+    d = json.loads(o)
+    check("cap-json-" + code, len(d["errors"]) == 50 and d["more"] == {code: total - 50} and len(o) < 20000, o[-120:])
+    print("INFO cap %s: %d entries -> text %d lines" % (code, total, 51))
+# 4: a lone surrogate is a bad_field, not an internal error; output never raises
+for label, doc in (("id", '{"tasks":[{"id":"\\ud800","files":["x"]}]}'),
+                   ("file", '{"tasks":[{"id":"a","files":["x\\udc80"]}]}'),
+                   ("depends", '{"tasks":[{"id":"a","files":["x"],"depends_on":["\\ud800"]}]}')):
+    r, o, e = cli([plan(doc)])
+    check("surrogate-" + label, r == 1 and "bad_field" in o and o.count("\n") == 1 and "internal error" not in e, "rc=%s %s%s" % (r, o, e))
+raw = io.BytesIO()
+ascii_out = io.TextIOWrapper(raw, encoding="ascii", errors="strict")
+with contextlib.redirect_stdout(ascii_out), contextlib.redirect_stderr(io.StringIO()):
+    r = pd.cli([jplan({"id": "p", "files": ["s/\u00e9"]}, {"id": "q", "files": ["s/\u00e9"]})])
+ascii_out.flush()
+check("output-never-raises", r == 1 and b"\\xe9" in raw.getvalue(), "rc=%s %r" % (r, raw.getvalue()[:80]))
+# 5: ids stay distinct but a plan whose ids differ only by case / normalisation is refused
+for a, b in (("A", "a"), ("\u00e9", "e\u0301"), ("Task-1", "task-1")):
+    r, o, e = cli([jplan({"id": a, "files": ["x"]}, {"id": b, "files": ["y"]})])
+    check("id-clash-%r" % a, r == 1 and "ids differ only by case or normalisation" in o and o.count("\n") == 1, o)
+r, o, e = cli([jplan({"id": "a", "files": ["x"]}, {"id": "b", "files": ["y"]}, {"id": "ab", "files": ["z"]})])
+check("distinct-ids-ok", r == 0, o + e)
 
 # ---- loading: types, duplicate keys, estimates, documents
 case("json-dup-top", '{"tasks":[],"tasks":[]}', 2, "appears twice")
@@ -513,12 +615,21 @@ FIRST = ["a", "b", "A", "x.d", ".git", "\u00e9", "e\u0301", "a*", "[ab]", "?", "
 WILDS = ["*", "?", "[ab]", "[!a]", "[a-c]", "*.go", "a*", "?.go", "*b", "a?", "v[0-9].*", "[A-z]", "??",
          "a*b", "{a,b}", "{a,{b,c}}", "{a/b,c}", "{a}", "{x.d,f.go}", "**", "**"]
 
+# round 3: NFC and NFD, canonical caseless pairs, mixed case, trailing dots, shell characters
+NAMES += ["\u00e9", "e\u0301", "\u00c9", "E\u0301", "\u1fb7", "\u1fbc\u0342", "\u1fb3\u0342", "ss", "SS",
+          "\u212a", "k", "K", "aB", "A.GO", "a.", "a..", "+(a|b).go", "@(a|b).go", "!(x).go", "$V.go", "a$", "`a`"]
+DIRS += ["\u00e9", "e\u0301", "\u1fb7", "a."]
+LITS += ["\u00e9", "e\u0301", "\u1fb7", "\u1fbc\u0342", "a.", "aB", "ss", "K",
+         "+(a|b).go", "@(a|b).go", "!(x).go", "$V.go"]
+FIRST += ["a", "A", "b", "ab", "a."]
+
 
 def universe():
     R = random.Random(20261127)
     u = {(n,) for n in NAMES}
     u |= {(d, n) for d in DIRS for n in NAMES}
-    while len(u) < 450:
+    base = len(u)
+    while len(u) < base + 150:
         k = R.randint(3, 5)
         u.add(tuple(R.choice(DIRS if i < k - 1 else NAMES) for i in range(k)))
     return sorted(u)
@@ -556,8 +667,29 @@ def o_expand(s):
     return res
 
 
-def fold(c):
-    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", c).casefold())
+_LOW = {ord(c): ord(c) + 32 for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+
+
+def _canon(c):
+    n = unicodedata.normalize
+    return n("NFD", n("NFD", c).casefold())
+
+
+# "the same file" = the UNION of every relation a real filesystem may apply: byte-equal,
+# ASCII-case-insensitive, NFC, NFD, canonical caseless (NFD(casefold(NFD))), trailing-dot-insensitive
+KEYS = [lambda c: c,
+        lambda c: c.translate(_LOW),
+        lambda c: unicodedata.normalize("NFC", c),
+        lambda c: unicodedata.normalize("NFD", c),
+        _canon,
+        lambda c: c.rstrip("."),
+        lambda c: _canon(c).rstrip(".")]
+SHELLISH = re.compile(r"[()|$!`^#&;<>'\" ]")
+
+
+def shellish(c):
+    """a shell or extglob character could make this component match anything"""
+    return "*" if SHELLISH.search(c) else c
 
 
 _cm = {}
@@ -589,15 +721,21 @@ def covers(pc, path):
     return go(0, 0)
 
 
+_UK = {}
+
+
 def matched(pattern, uni):
     hit = set()
+    if id(uni) not in _UK:
+        _UK[id(uni)] = [[tuple(K(c) for c in path) for path in uni] for K in KEYS]
     for e in o_expand(pattern):
-        e = e.replace("", "{").replace("", "}")
-        pc = [c for c in e.split("/") if c not in ("", ".")]
-        fc = [fold(c) for c in pc]
-        for idx, path in enumerate(uni):
-            if covers(pc, path) or covers(fc, [fold(c) for c in path]):
-                hit.add(idx)
+        e = e.replace("\ue000", "{").replace("\ue001", "}")
+        pc = [shellish(c) for c in e.split("/") if c not in ("", ".")]
+        for ki, K in enumerate(KEYS):
+            kc = [K(c) for c in pc]
+            for idx, kp in enumerate(_UK[id(uni)][ki]):
+                if idx not in hit and covers(kc, kp):
+                    hit.add(idx)
     return hit
 
 
