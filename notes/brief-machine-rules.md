@@ -38,3 +38,17 @@ a Docker call), do NOT reach the same effect another way (Python `shutil.rmtree`
 -delete`, a wrapper script). Stop that step, leave the files where they are, and report the
 exact command and the refusal in the hand-back. Leftover scratch directories are fine: name
 them so the orchestrator can remove them.
+
+## Scoped inner check only (adopted 2026-11-27, from the swarm-orchestration study)
+Measured on this goal's own session: agents spent 41.5% of their time in gate-like Bash
+(about 5.8 heavy gate runs per implementer task, plus poll-wait loops), and THAT is what
+saturated the host. So, inside an agent:
+- Run only the check your change needs: your own test or selftest file, plus the single gate
+  whose inputs your diff touches. Budget: 15 seconds per run. Count your runs and report them.
+- Never the full suite (`make check-fast`, `make selftests`, `make evidence`,
+  `scripts/mutation-baseline.sh`, `verify-standard.sh`): the orchestrator runs it ONCE per
+  batch on the joined tree, in a container.
+- Never a poll-wait loop (`while …; do sleep …; done`, `until …`). If something is not ready,
+  stop and report.
+- A validator does not re-run the suite either: it proves non-vacuity by mutating only the
+  check the change adds, on a scratch copy.
