@@ -121,6 +121,7 @@ gates:
 	@bash $(PROBES)/skill-weight.sh
 	@bash $(PROBES)/policy-coverage.sh
 	@bash $(PROBES)/row-vacuity-sweep.sh
+	@bash $(PROBES)/row-catalogue.sh
 	@bash $(PROBES)/check-registries.sh
 # The shell files this repo VENDORS into scaffolds are held to the template's own
 # gate-hygiene rules HERE, before a consumer's check-fast finds them: the

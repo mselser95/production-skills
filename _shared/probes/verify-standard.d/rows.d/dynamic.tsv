@@ -1,0 +1,24 @@
+id	dimension	group	bucket	scope	property	source
+backup_restore_test	7	dynamic	test-exec	unit	A named test proves a backup restores to a usable state.	145
+effect_journal_atomic	7	dynamic	test-exec	unit	A named test proves an effect and its journal entry commit atomically.	145
+effect_journal_outbox	7	dynamic	test-exec	unit	A named test proves outbound effects are journaled before they are performed.	145
+reconciliation	7	dynamic	test-exec	unit	A named test proves state is reconciled with the external system after a divergence.	145
+scalability:bounded_boot	12	dynamic	test-exec	unit	A named test proves start-up time stays bounded as stored data grows.	146
+scalability:bounded_storage	12	dynamic	test-exec	unit	A named test proves stored data growth is bounded.	146
+scalability:egress_backpressure	12	dynamic	test-exec	unit	A named test proves outbound pressure is applied back to producers rather than buffered without bound.	146
+invariants-ratified	3	dynamic	test-exec	unit	Ratified invariants exist as runnable tests and every one of them passes.	1690
+invariants-non-vacuity	2	dynamic	test-exec	unit	Each ratified invariant test turns red when the behaviour it guards is deliberately broken.	1824
+integration-real-lane	5	dynamic	test-exec	unit	A test lane against real dependencies exists and runs, not only fakes.	2306
+compatibility	19	dynamic	test-exec	unit	Tests that pin the wire or on-disk format against earlier versions exist and pass.	2339
+replay-corpus	7	dynamic	test-exec	unit	Recorded regression event fixtures exist and the replay harness over them passes.	2551
+auto-recovery:self_recovery	13	dynamic	test-exec	unit	A named test proves the unit recovers by itself after a fault.	2912
+backup-restore-test	7	dynamic	test-exec	unit	A named test proves a backup restores to a usable state.	2960
+published-contract:versioned	14	dynamic	test-exec	unit	A named test proves the foreign-consumer contract carries a version.	2968
+published-contract:shape_pinned	14	dynamic	test-exec	unit	A named test proves the published contract shape is pinned against accidental change.	2969
+data-lifecycle:subject_deletion	15	dynamic	test-exec	unit	A named test proves a deletion request removes the subject data, snapshots included.	3016
+observability-contract-checked	8	dynamic	test-exec	unit	A test reads the emitted-signals manifest, compares it to what the unit emits, and passes.	3039
+authz-invariants	9	dynamic	test-exec	unit	A named test proves authorization denies what the spec says it must deny.	4727
+overload:ingress_shedding	26	dynamic	test-exec	unit	A named test proves the unit sheds load at ingress when saturated.	4760
+overload:retry_budget	26	dynamic	test-exec	unit	A named test proves retries are bounded by a budget.	4777
+consistency-verification	20	dynamic	test-exec	unit	A named test checks recorded histories for consistency violations.	4805
+scalability:*	12	dynamic	test-exec	unit	PATTERN: one row per scalability property the spec names, each proved by a named test (members listed individually in this catalogue).	2718
