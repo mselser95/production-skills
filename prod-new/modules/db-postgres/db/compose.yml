@@ -1,0 +1,118 @@
+# compose.yml - PostgreSQL 18 with the hardened baseline (plain variant).
+#
+#   mkdir -p secrets && cd secrets     # then one random file per example:
+#   for f in *.example; do head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$(basename "$f" .example)"; done
+#   docker compose up -d               # secrets/db_* are git-ignored; an absent one stops `up`
+#
+# The Timescale variant is this file plus the override:
+#   docker compose -f compose.yml -f compose.timescale.yml up -d
+#
+# Images are pinned by tag AND digest and must equal db/image.lock
+# (scripts/db-pin-check.sh --compose compose.yml compose.timescale.yml).
+# No host port is published by default.
+services:
+  # One-shot: writes a self-signed DEVELOPMENT certificate into the dbtls
+  # volume when none exists or it expires within 30 days (neither database
+  # image has the openssl CLI). The alpine/openssl pin is not in image.lock
+  # yet; tag and digest are both required here, as for the database image.
+  tls-init:
+    image: alpine/openssl:3.5.9@sha256:9698e7956c08e713265da24c4587205beba3eaa6af2b319d73575d30a6ff033e
+    entrypoint: ["sh", "/bootstrap/tls-init.sh"]
+    network_mode: none
+    restart: "no"
+    # Root, with every capability dropped but CHOWN (the key must end up owned
+    # by uid 70); the root filesystem is read-only: it writes only to the volume.
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 128m
+    volumes:
+      - dbtls:/tls
+      - ./bootstrap/tls-init.sh:/bootstrap/tls-init.sh:ro
+
+  db:
+    image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 1g
+    shm_size: 256m
+    pids_limit: 256
+    stop_grace_period: 30s
+    security_opt: ["no-new-privileges:true"]
+    # Runs as the postgres user (uid 70) from the first instruction: no root
+    # step, so no capability is needed at all. A fresh named volume copies the
+    # ownership of /var/lib/postgresql from the image (uid 70), which is what
+    # makes this work without a chown.
+    user: "70:70"
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql:uid=70,gid=70,mode=0755
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: app
+      # No password is in the environment: the image reads the superuser's from
+      # this file, and 10-roles.sh reads the four role passwords from /run/secrets
+      # at init only (docker inspect shows paths, never values).
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_superuser_password
+    secrets:
+      - db_superuser_password
+      - db_migrator_password
+      - db_app_password
+      - db_readonly_password
+      - db_monitor_password
+    volumes:
+      # PostgreSQL 18 images keep the cluster in /var/lib/postgresql/18/docker
+      # (PGDATA), so the volume mounts at the PARENT /var/lib/postgresql, not
+      # at .../data as before 18. Mounting .../data would silently put the
+      # cluster on the container's writable layer.
+      - pgdata:/var/lib/postgresql
+      - dbtls:/tls:ro
+      - ./conf:/etc/postgresql:ro
+      - ./bootstrap:/bootstrap:ro
+      - ./bootstrap/10-roles.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+      - ./bootstrap/20-extensions.sql:/docker-entrypoint-initdb.d/20-extensions.sql:ro
+      - ./bootstrap/99-final.sql:/docker-entrypoint-initdb.d/99-final.sql:ro
+    # No host port by default. Opt in, localhost only, with:
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    healthcheck:
+      # A real authenticated query over TLS as the monitoring role: it fails on a
+      # wrong password, a missing role, ssl off and a server that is only up
+      # on the init-time unix socket (the temporary server listens on no TCP
+      # port). pg_isready is NOT used: it never checks credentials.
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$(cat /run/secrets/db_monitor_password)" PGCONNECT_TIMEOUT=3 PGSSLMODE=require
+          psql -X -h 127.0.0.1 -U app_monitor -d app -tAc 'SELECT 1' | grep -qx 1
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+volumes:
+  pgdata:
+  dbtls:
+
+# Files, not environment: `docker inspect` and /proc/<pid>/environ show no
+# password. Default location ./secrets (git-ignored); DB_SECRETS_DIR overrides
+# it. A missing file stops `up` ("bind source path does not exist").
+secrets:
+  db_superuser_password:
+    file: ${DB_SECRETS_DIR:-./secrets}/db_superuser_password
+  db_migrator_password:
+    file: ${DB_SECRETS_DIR:-./secrets}/db_migrator_password
+  db_app_password:
+    file: ${DB_SECRETS_DIR:-./secrets}/db_app_password
+  db_readonly_password:
+    file: ${DB_SECRETS_DIR:-./secrets}/db_readonly_password
+  db_monitor_password:
+    file: ${DB_SECRETS_DIR:-./secrets}/db_monitor_password

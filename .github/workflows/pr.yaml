@@ -310,6 +310,48 @@ jobs:
           path: .prod/evidence/*.json
           if-no-files-found: error
 
+  # THE DATABASE MODULE'S BOOTSTRAP TEST, on a real PostgreSQL (Docker is preinstalled
+  # on ubuntu-latest). Before this job the 107-assertion test existed and nothing ran
+  # it. It is also the first linux/amd64 evidence for the image lock, whose runtime
+  # facts were observed on arm64 only.
+  #
+  # The path filter is a STEP, not workflow-level `paths:` (this workflow has other
+  # jobs) and not a job-level `if`: a skipped job reports "skipped", and a required
+  # check that is skipped can leave a PR waiting. The job always starts and always
+  # reports; with no database change it says so on one line and ends green.
+  db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: did the database module change?
+        id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "db: running (event $EVENT)"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE" HEAD) || { echo "db: cannot diff against $BASE" >&2; exit 1; }
+          if grep -qE '^(prod-new/modules/db-postgres/|Makefile$|\.github/workflows/pr\.yaml$)' <<<"$files"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "db: running (database module, Makefile or workflow changed)"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "db: skipped: no database change"
+          fi
+
+      - name: db-postgres bootstrap test (plain, then timescale)
+        if: steps.changed.outputs.run == 'true'
+        run: make db-test
+
   # THE VENDED PRODUCT, BUILT. Added 2026-08-29.
   #
   # This repository's product is a scaffolded repo, and until today nothing ever
