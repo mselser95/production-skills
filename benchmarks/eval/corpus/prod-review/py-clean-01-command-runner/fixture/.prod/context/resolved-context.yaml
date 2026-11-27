@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Run a command with input on stdin and return its exit code and output without raising on failure.
+tier: 2
+services: [cmdrun]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [python3 -m compileall -q ., python3 -m unittest discover -s tests -v]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new dependencies
+  - public API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml

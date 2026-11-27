@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Let callers produce frames, not only read them: encode a payload into the existing length-prefixed wire format.
+tier: 2
+services: [framing]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [cargo build --locked --offline, cargo clippy --locked --offline -- -D warnings, cargo test --locked --offline]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new crate dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml

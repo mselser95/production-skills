@@ -59,6 +59,7 @@ def make_repo(root):
     write(root, "production.yaml", "version: v1\n")
     write(root, ".prod/context/change-plan.yaml", "a: 1\n" * 10)
     write(root, "sub/dir.go", "package sub\n")
+    write(root, ".gitignore", "target/\n__pycache__/\n*.out\n")
     sh(["git", "init", "-q"], root)
     sh(["git", "add", "-A"], root)
     sh(["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-qm", "base"], root)
@@ -335,7 +336,16 @@ mod_case("untracked .claude/ ignored", lambda d: write(d, ".claude/settings.json
 mod_case("untracked .codex/ ignored", lambda d: write(d, ".codex/x.go", "package x\n"), 0, {})
 mod_case("untracked AGENTS.md ignored", lambda d: write(d, "AGENTS.md", "x"), 0, {})
 mod_case("untracked CLAUDE.md ignored", lambda d: write(d, "CLAUDE.md", "x"), 0, {})
-mod_case("untracked non-source file ignored", lambda d: write(d, "scratch.txt", "x"), 0, {})
+mod_case("new untracked .rs", lambda d: write(d, "src/extra.rs", "fn x() {}\n"), 1, {"modified_files": True})
+mod_case("new untracked .py", lambda d: write(d, "extra.py", "x = 1\n"), 1, {"modified_files": True})
+mod_case("new untracked .toml", lambda d: write(d, "extra.toml", "a = 1\n"), 1, {"modified_files": True})
+mod_case("new untracked .txt", lambda d: write(d, "scratch.txt", "x"), 1, {"modified_files": True})
+mod_case("new untracked extension-less file", lambda d: write(d, "Makefile2", "x"), 1, {"modified_files": True})
+mod_case("untracked target/ ignored by .gitignore", lambda d: write(d, "target/debug/x.rs", "x"), 0, {})
+mod_case("untracked __pycache__/ ignored by .gitignore", lambda d: write(d, "__pycache__/a.pyc", "x"), 0, {})
+mod_case("untracked *.out ignored by .gitignore", lambda d: write(d, "bin.out", "x"), 0, {})
+mod_case("untracked .agents/ ignored", lambda d: write(d, ".agents/x.md", "x"), 0, {})
+mod_case(".gitignore itself edited is caught", append(".gitignore"), 1, {"modified_files": True})
 mod_case("modified tree on an unparsable output still reports it", lambda d: write(d, "new.go", "x"), 1, {},
          content="LGTM", metrics=M(parse_error=True, modified_files=True))
 run_mods()
@@ -527,6 +537,10 @@ MUTATIONS = [
     ("specific-width cap removed", "MAX_SPECIFIC_WIDTH = 12", "MAX_SPECIFIC_WIDTH = 10**9"),
     ("context exclusion removed", 'return p.startswith(".prod/") or p == "production.yaml"', "return False"),
     ("modification check off", "modified = tree_hash(a.workdir) != expected", "modified = False"),
+    ("untracked filter restored to a source-extension tuple",
+     "            if name.startswith(HOST_DIRS) or base in HOST_FILES:\n                continue\n",
+     "            if name.startswith(HOST_DIRS) or base in HOST_FILES:\n                continue\n"
+     '            if not name.endswith((".go", ".mod", ".sum", ".yaml", ".yml")):\n                continue\n'),
     ("verdict-consistency check removed", 'return has == (doc["verdict"] == "defects_found")', "return True"),
     ("schema validation removed (extra key accepted)", "if set(f) != set(KEYS_FINDING):",
      "if not set(KEYS_FINDING) <= set(f):"),

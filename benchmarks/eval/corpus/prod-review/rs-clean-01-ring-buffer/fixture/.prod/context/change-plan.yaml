@@ -1,0 +1,37 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+
+files:
+  - path: src/ring.rs
+    action: modify
+    zone: core
+
+new_states: []
+new_effects: []
+new_dependencies: []
+
+recovery: []
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Add Ring::push (evicts the oldest item when full), pop_front, get and peek_oldest.
+    files: [src/ring.rs]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one crate, no new dependencies
+    acceptance: []
+    depends_on: []

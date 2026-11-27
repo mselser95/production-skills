@@ -1,0 +1,41 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+
+files:
+  - path: src/frame.rs
+    action: modify
+    zone: core
+
+  - path: src/lib.rs
+    action: modify
+    zone: core
+
+new_states: []
+new_effects: []
+new_dependencies: []
+
+recovery: []
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Add encode and encode_all to the framing crate, the inverse of decode, and re-export them.
+    files: [src/frame.rs, src/lib.rs]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one crate, no new dependencies
+    acceptance: []
+    depends_on: []

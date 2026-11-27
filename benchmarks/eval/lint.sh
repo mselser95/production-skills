@@ -7,7 +7,7 @@
 # So each task must show its grader RED on the unsolved fixture and GREEN on the
 # reference solution, and each skill with tasks must keep a held-out task.
 #
-# task.json needs a non-empty string `kind`; a skill with _lib/output.schema.json needs a reference
+# task.json needs a non-empty string `kind` and a non-empty string `language`; a skill with _lib/output.schema.json needs a reference
 # that writes a JSON object.
 # Usage: lint.sh [--allow-empty] [corpus-root]    (default root: benchmarks/eval/corpus)
 # Exit:  0 ok | 1 a check failed | 2 no task found (--allow-empty: 0, says it checked nothing)
@@ -46,7 +46,8 @@ spec = {"id": lambda v: isinstance(v, str) and v, "skill": lambda v: isinstance(
         "timeout_s": lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0,
         "max_budget_usd": lambda v: num(v) and v > 0,
         "agent_mode": lambda v: v in ("read-only", "workspace-write"),
-        "kind": lambda v: isinstance(v, str) and v.strip()}
+        "kind": lambda v: isinstance(v, str) and v.strip(),
+        "language": lambda v: isinstance(v, str) and v.strip()}
 for k, ok in spec.items():
     if k not in t: print("task.json missing key '%s'" % k)
     elif not ok(t[k]): print("task.json key '%s' has the wrong type/value" % k)
