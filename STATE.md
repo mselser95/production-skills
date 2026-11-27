@@ -124,6 +124,34 @@ Decisions taken for round 2:
   before trusting any Codex number. See `notes/hosts-research-2026-11-27.md`.
 - `prod-validator` has no Edit/Write tools; it ran every mutation on a scratch copy, tree left clean.
 
+### Phase 5 — language portability: Go, Rust and Python (added by the user 2026-11-27)
+
+Everything the skills produce and check must work for Rust and Python services, not only Go.
+Today the standard is Go-only in four places (recon 2026-11-27):
+- `_shared/probes/verify-standard.sh` (6,332 lines) is a Go-only probe (RUNBOOK.md:8, AGENTS.md:91).
+- `prod-new/template/` is Go only (83 `.go` files; `config.example.yml` `PROD_LANGUAGE="go"`).
+- `_shared/dimensions.md` and the skills describe mechanisms through Go tooling.
+- The eval corpus fixtures and the harness's toolchain env (GOCACHE, GOPROXY) are Go only.
+
+Scope
+1. A language-neutral core: each dimension and each verify-standard row states the PROPERTY, and a
+   per-language adapter says how it is checked (Go / Rust / Python). A row with no adapter for the
+   repo's language is a FAIL or an explicit, dated liability — never a silent NA.
+2. prod-new scaffolds a service in any of the three, with the same zones, gates, registries,
+   observability and non-vacuity selftests; the monorepo default (Phase 1) accepts any of the three
+   as the backend. Default when the human does not say: Go (unchanged). ASSUMPTION — revisit if told.
+3. prod-spec, prod-implement, prod-review, prod-test-synth, prod-bootstrap, prod-incident, prod-ops,
+   prod-curate: no step may assume Go (test provenance headers, lanes/build tags, mutation, fuzz,
+   race detection, coverage, lint, SAST, dependency pinning each need a Rust and a Python form).
+4. Eval: every skill's corpus has tasks in all three languages, reported per language; a skill
+   "works" for a language only when it wins the held-out there. The harness's isolated toolchain
+   env becomes per-language (GOCACHE / CARGO_HOME + target dir / pip + venv caches, all offline).
+5. A probe fails when a skill or shared file names one language's tool as THE way to do something
+   without the other two (same mutation discipline as the host-vocabulary probe of Phase 4).
+Order: after the eval harness lands (it is the measuring stick), start with the corpus in three
+languages for prod-review (cheapest, proves the harness), then the adapter split of
+verify-standard, then the Rust and Python templates.
+
 ### Open / blocked
 
 - Unknown from the Codex binary, to resolve from official docs in Phase 4: agent-role TOML schema,
@@ -139,4 +167,6 @@ Decisions taken for round 2:
    size gate; wire token-report.
 3. Phase 4: `_shared/hosts.md`, dual installer, host-vocabulary probe, per-host smoke.
 4. Phase 1: greenfield concept in prod-spec, monorepo + React + DS + Playwright template, dim 28.
-5. Phase 2: papers loop.
+5. Phase 5: Go + Rust + Python (see above) — corpus first, then verify-standard adapters, then templates.
+6. Phase 2: papers loop.
+7. `make check-fast` runtime: `gate-hygiene-fitness.sh` is superlinear in file length (70 lines 4 s, 130 lines 14 s, 190 lines 79 s, measured 2026-11-27); 100 s idle, 30+ min under load.
