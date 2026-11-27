@@ -341,3 +341,23 @@ Next: Opus round 2 on #20; T19/T21 (unit gates + CI for Rust/Python); T23 db exp
 T24 migrations; T28 monorepo-root; T29 web-react; T30/T31 DS components; T34 Playwright; eval
 pilot (5 reps × Go tasks; estimate cost first; keep transcripts so skill loading is provable);
 CI under 1 minute (after attest: content cache + restore, split the slow suites).
+
+## Decision 2026-11-27 18:50 (owner): finish the open PRs, then switch to the new framework
+
+"Terminá con lo de ahora y pasá al framework nuevo." The new framework is
+notes/swarm-orchestration-adopted.md (source: ~/dev/personal/swarm-orchestration-2026-11-27/REPORT.md).
+
+Adopted already: scoped inner check in agents (3), per-change parallel review (4), cap by
+budget not CPU (8). Built, not yet used: plan-dag.py (#34), integration-train.py (branch
+ops/integration-train). Not started: dispatch from code (2), verify-first for tasks others
+depend on (6), one-line notices to in-flight agents (7), the skill text changes.
+
+Switch-over order once #19 #20 #27 #28 #30 #31 #34 and the train PR are closed out:
+1. First real batch through the train (the local proof: full-suite runs per landed change,
+   share of agent time in gates, mean concurrency, p and flake rate per batch).
+2. Remaining plan (phases 1, 5, 6: T19 T21 T23 T24 T27 T28 T29 T30 T31 T34 …) written as a
+   change plan and passed through plan-dag.py before any dispatch.
+3. Dispatch from code (Workflow tool or a claim board), implement -> review chained.
+4. Skill text: _shared/dispatch.md, prod-spec change-plan format, prod-implement gate step,
+   prod-validator, prod-ops (train + bisection).
+Merged today so far: #14-#18 #21-#26 #29 #32 #33.
