@@ -53,20 +53,24 @@ actionlint:
 # tracked shell scripts, ONE FILE PER shellcheck call, in parallel (LINT_JOBS, default
 # min(4, cores)). It remembers nothing between runs.
 #
-# NO CACHE. An earlier version cached clean verdicts. With a sound rule, 118 of the 129
-# distinct groups could not be cached, so the cache saved 11 files and a warm run cost as
-# much as a cold one; it was also the part that failed review twice.
+# NO CACHE. An earlier version cached clean verdicts. A sound cache could cover only the
+# files that provably source nothing, a small minority of the groups, so a warm run cost
+# about as much as a cold one; it was also the part that failed review twice.
 #
 # DEDUPLICATION. install.sh mirrors the shared probes into the skills and the template, so
 # `verify-standard.sh` appears eleven times byte-identically. Within one run, two paths
 # share ONE shellcheck run when their content and rc chain are equal. Premise, measured
 # and kept as a selftest case: with -x from the repo root a relative source resolves
-# against the working directory, so identical copies get the same verdict. A path whose
-# bytes, rc files or $SHELLCHECK_OPTS contain SCRIPTDIR is never shared.
+# against the working directory, so identical copies get the same verdict. The
+# directory-relative source-path keyword breaks the premise, and it can hide in a sourced
+# file or an rc named by $SHELLCHECK_OPTS, so ONE mention anywhere in the work tree, in an
+# rc file shellcheck could read, or in $SHELLCHECK_OPTS (or --rcfile, -P, --source-path
+# there, or a failed scan) switches sharing off for the whole run, and a `dedupe: off`
+# line says why.
 #
-# COST, measured on a loaded laptop (shellcheck 0.11.0): 176 tracked files, 129 runs of
-# shellcheck on every invocation, about 8.5 to 9.2 s. verify-standard.sh, about 5 s, is
-# the floor.
+# COST. Load-independent facts: one shellcheck per distinct group (129 invocations for 176 tracked files), and
+# the largest file, verify-standard.sh, dominates and is the floor. CPU of one run:
+# about 33 s (28 user + 5 system) measured 2026-11-27 on a laptop under heavy load (load average ~58, shellcheck 0.11.0, 4 jobs). Wall-clock varies with load and is not quoted.
 #
 # TRACKED FILES ONLY (`git ls-files`). The gate used to walk the working tree
 # while CI lints what the clone contains, so the two ran over different sets:
