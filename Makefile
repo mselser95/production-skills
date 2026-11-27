@@ -125,7 +125,7 @@ gates:
 # single-suite selftest shipped a PREFIX-ASSIGN-EXPAND that only the consumer's
 # gate-hygiene-fitness.sh caught, because nothing in this repo ran it over the
 # files it vendors. Findings fail; the latent GREPQ advisories are printed.
-	@bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts
+	@bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts prod-new/modules/*/scripts
 # And the wiring of that step itself: probe-wiring over the template's scripts
 # reports gate-hygiene-fitness.sh as an orphan the moment the line above is
 # deleted. Every other template script is a declared exception (run downstream).
@@ -135,6 +135,15 @@ gates:
 # and instantiate-template.sh are gates by any reasonable reading, and they lived
 # outside the only check that asks whether a gate is driven.
 	@bash $(PROBES)/probe-wiring.sh scripts
+# The modules' scripts (prod-new/modules/*/scripts), one probe-wiring run per module
+# because the tool takes ONE directory: db-pin-check.sh was an orphan gate until this
+# loop existed. Zero module dirs is an error, not a pass. db-pin-verify-live.sh needs
+# Docker and is a declared exception in probe-wiring.sh.
+	@set -e; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d"; n=$$((n+1)); done; \
+	  if [ "$$n" -eq 0 ]; then echo "gates: found ZERO module script dirs -- refusing to report a pass over nothing" >&2; exit 2; fi
+# The database image pin: the lock is read offline (no network, no Docker). A broken
+# lock, or a broken gate (its selftest runs in `make selftests`), goes red here.
+	@bash prod-new/modules/db-postgres/scripts/db-pin-check.sh
 # And the ratified invariants: an invariant nothing runs is precisely the shape
 # the three of them exist to refuse.
 	@bash $(PROBES)/probe-wiring.sh verification/ratified
@@ -219,7 +228,7 @@ TEMPLATE_SELFTESTS = prod-new/template/scripts/tests/changed-line-coverage-selft
 selftests:
 	@set -e; n=0; \
 	  for ts in $(TEMPLATE_SELFTESTS); do [ -f "$$ts" ] || { echo "selftests: $$ts is missing: a vendored selftest nothing runs here is first exercised in someone else's CI" >&2; exit 2; }; done; \
-	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
+	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh prod-new/modules/*/scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
 	    [ -f "$$t" ] || continue; \
 	    printf '  %-52s ' "$$(basename $$t)"; \
 	    if bash "$$t" >/dev/null 2>&1; then echo "ok"; else echo "FAIL"; bash "$$t" 2>&1 | tail -20; exit 1; fi; \
