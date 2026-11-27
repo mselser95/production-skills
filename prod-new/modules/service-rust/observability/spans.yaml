@@ -1,0 +1,16 @@
+# Checked-in manifest of every span this service emits.
+#
+# Contract: tests/observability_contract.rs diffs this file against the
+# literal names passed to `span_start(` in src/, in both directions.
+
+- name: svc.deposit
+  emitted_by: src/app/ledger.rs (Ledger::deposit -> process)
+  attrs: [event_type]
+  note: >
+    Wraps the full command: validation, load, domain apply, invariant check,
+    save. Closed as an error when the command failed at any stage.
+
+- name: svc.withdraw
+  emitted_by: src/app/ledger.rs (Ledger::withdraw -> process)
+  attrs: [event_type]
+  note: Same pipeline as svc.deposit, for the withdrawal command.
