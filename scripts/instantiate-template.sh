@@ -27,16 +27,19 @@
 #
 # Usage: instantiate-template.sh <dest-dir> [service-name] [owner]
 #   A value (service-name, owner) is 1 to 64 ASCII characters: [A-Za-z0-9] first,
-#   then [A-Za-z0-9._-]; never empty, `.` or `..`. An OMITTED argument keeps its
+#   then [A-Za-z0-9._-], the last not `.`; never empty, `.` or `..`. An OMITTED argument keeps its
 #   default (svc, mselser95); an explicitly passed EMPTY argument is an error.
 # Exit:  0 instantiated · 1 refused source (a file with a setuid/setgid/sticky
-#        bit) · 2 could not (usage, bad value, copy failure)
+#        bit; a path component that is .git in any case, ends in a dot or a
+#        space, or is git~1) · 2 could not (usage, bad value, copy failure,
+#        an unreadable source: scripts/assemble.py exits 2 there too)
 #
 # MODES, the same rule scripts/assemble.py follows: cp -R applies the umask to
 # each source mode (macOS and GNU alike); setuid/setgid/sticky are cleared on
 # directories and refused on files; a directory exists only because a file or
 # link lives in it (an EMPTY source directory is dropped); the dest root is
-# 0777 & ~umask when this script creates it.
+# 0777 & ~umask when this script creates it. Extended attributes are NOT copied
+# (assemble.py writes none): macOS cp -R copies them unless told not to (-X).
 set -uo pipefail
 
 USAGE="usage: instantiate-template.sh <dest-dir> [service] [owner]  (values: 1-64 chars, [A-Za-z0-9][A-Za-z0-9._-]*, never empty)"
@@ -55,7 +58,7 @@ svc=svc; owner=mselser95
 valid_value() {
   local LC_ALL=C
   local al=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
-  local re="^[$al][$al._-]*\$"
+  local re="^[${al}]([${al}._-]*[${al}_-])?\$"
   (( ${#1} <= 64 )) && [[ "$1" =~ $re ]]
 }
 for v in "$svc" "$owner"; do
@@ -74,8 +77,18 @@ if [[ -n "$special" ]]; then
   exit 1
 fi
 
+# a .git in the template would be copied too and run as a hook in the scaffolded repo; a
+# component ending in a dot or a space is an NTFS alias of .git; same rule as assemble.py
+reserved=$(find "$tpl" \( -iname .git -o -iname 'git~1' -o -name '*.' -o -name '* ' \) 2>/dev/null | head -n 5)
+if [[ -n "$reserved" ]]; then
+  echo "instantiate: refused -- reserved path component(s) in the template (.git in any case, a trailing dot or space, git~1):" >&2
+  printf '    %s\n' "$reserved" >&2
+  exit 1
+fi
+
+cpflags=-R; [[ "$(uname)" == Darwin ]] && cpflags=-RX   # GNU cp copies no xattr without --preserve
 mkdir -p "$dest" || exit 2
-cp -R "$tpl/." "$dest/" || exit 2
+cp $cpflags "$tpl/." "$dest/" || exit 2
 # a directory exists only because a file or link lives in it (git tracks no empty directory)
 (cd "$dest" && find . -mindepth 1 -depth -type d -empty -exec rmdir {} \;) || exit 2
 # The installed TCB is read-only and cp preserves mode, so a template copied out

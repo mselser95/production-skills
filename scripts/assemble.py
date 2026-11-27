@@ -15,8 +15,9 @@ anything as `unit` must declare (and be given) the SERVICE slot, else exit 2.
 
 SLOT VALUES. ONE grammar for every value, checked before anything else:
   1 to 64 characters (the length cap), each in [A-Za-z0-9._-], the first in
-  [A-Za-z0-9]: no `/` `\\` `&` `<` whitespace NUL newline, no leading `-` or
-  `.`, never empty, never `.` or `..`, ASCII only (a byte >= 0x80 is refused)
+  [A-Za-z0-9] and the last not `.` (`x.` is an alias of `x` on Windows): no `/`
+  `\\` `&` `<` whitespace NUL newline, no leading `-` or `.`, never empty, never
+  `.` or `..`, ASCII only (a byte >= 0x80 is refused)
 instantiate-template.sh enforces the same grammar and cap, so both tools accept
 and refuse exactly the same values (an EMPTY value is refused by both, exit 2).
 A slot may NARROW it with two FIXED options that cannot backtrack (there is no
@@ -45,8 +46,17 @@ after Unicode NFC normalisation and case folding (they are ONE file on a
 case-insensitive filesystem; refused on every platform, so a tree assembled on
 Linux is safe to check out on macOS), and the same fold for the prefix check; a
 link whose target is absolute or, resolved from the link's OUTPUT location
-(`dirname(out)/target`, target never substituted), leaves dest; a source file
-with a setuid/setgid/sticky bit. Symlinks inside a module are copied AS links
+(`dirname(out)/target`, target never substituted), leaves dest; a link target that
+passes through, or ends at, another planned link (`d/L1 -> ..` then
+`E -> d/L1/..` would leave dest through a link the lexical path cannot see: no
+link-through-link); a source file with a setuid/setgid/sticky bit; an OUTPUT path
+(after substitution and placement, however the candidate list was obtained) with
+a component that is `.git` in any case or Unicode form (zero-width characters
+ignored), ends in a dot or a space (`.git.` is `.git` on NTFS) or is `git~1`;
+`.github`, `.gitignore`, `.gitattributes`, `.gitkeep`, `.gitmodules` stay allowed.
+A module whose source tree, read by a filesystem walk, contains a `.git` entry
+(a module directory that is itself a checkout) is refused, exit 1. A module
+that yields no file is refused, exit 1. Symlinks inside a module are copied AS links
 (like `cp -R`), never followed; writes use O_EXCL|O_NOFOLLOW. The template ships
 no links today.
 
@@ -59,9 +69,13 @@ cleared; a directory that exists only because of the monorepo placement prefix
 directory mode wins. A directory exists only because a file or link lives in it:
 an EMPTY source directory is dropped (instantiate-template.sh removes it too).
 
-INTERRUPTS. SIGINT, SIGTERM and SIGHUP remove the temp dir, print ONE line
-(`assemble: interrupted -- nothing written`) and exit 130, 143 and 129. A signal
-after the final rename is ignored (the tree is complete).
+INTERRUPTS. SIGINT, SIGTERM, SIGHUP and SIGQUIT remove the temp dir, print ONE
+line (`assemble: interrupted -- nothing written`) and exit 130, 143, 129 and 131.
+A signal after the final rename is ignored (the tree is complete, exit 0). The
+cleanup itself cannot be interrupted and the exit code is that of the ORIGINAL
+cause (a failure's code, or 128+N). Cleanup opens every directory of the temp
+tree to the owner before removing it; a temp dir that still cannot be removed is
+named on stderr. A closed stdout (BrokenPipe) after success is still exit 0.
 
 DEST CONTRACT: dest must not exist, or be an empty directory (it is replaced by
 the finished tree via rename; its own mode is not kept). A symlink dest is
@@ -69,7 +83,10 @@ refused. Missing parent dirs are created only after success.
 
 Exit: 0 ok - 1 refused input (leftover slot, unplaced file, dest not empty or a
 link, path escape, collision, conflict, requires/conflicts, unused literal,
-special-mode file, I/O failure) - 128+N interrupted by signal N - 2 usage or manifest error (bad --slot, bad value, bad manifest).
+special-mode file, reserved .git path, I/O failure while writing) - 128+N
+interrupted by signal N - 2 usage or manifest error (bad --slot, bad value, bad
+manifest) or an UNREADABLE SOURCE (a directory or file that cannot be read,
+found at plan time so nothing is written; instantiate-template.sh also exits 2).
 Every refusal is ONE message on stderr (plus listed items); never a traceback.
 
 MANIFEST KEYS (MANIFEST_KEYS below is the one list; unknown key -> exit 2):
@@ -125,7 +142,7 @@ import sys
 import tempfile
 import unicodedata
 
-VALUE_RX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+VALUE_RX = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?")
 SLOT_NAME_RX = re.compile(r"[A-Z][A-Z0-9_]*")
 MODULE_ID_RX = re.compile(r"[a-z][a-z0-9-]*")
 MANIFEST_KEYS = ("id", "source", "placement", "requires", "conflicts", "unit_kind",
@@ -136,7 +153,7 @@ MAX_VALUE = 64
 LOWER = "abcdefghijklmnopqrstuvwxyz"
 DIGITS = "0123456789"
 SPECIAL = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
-SIGNALS = tuple(getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, n))
+SIGNALS = tuple(getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT") if hasattr(signal, n))
 LAYOUTS = ("single", "monorepo")
 STRATEGIES = ("union-lines",)
 TOKEN = re.compile(rb"<([A-Z][A-Z0-9_]*)>")
@@ -151,10 +168,42 @@ class Interrupted(BaseException):
         self.code = code
 
 
-def on_signal(signum, frame):
-    for s in SIGNALS:  # one interrupt is enough: the cleanup must not be interrupted again
+def ignore_signals():
+    """Drop every handled signal: later ones are discarded, pending ones too."""
+    for s in SIGNALS:
         signal.signal(s, signal.SIG_IGN)
+
+
+def on_signal(signum, frame):
+    ignore_signals()  # one interrupt is enough: the cleanup must not be interrupted again
     raise Interrupted(128 + signum)
+
+
+TMP = [None]  # the temp dir that cleanup() still owes a removal
+
+
+def cleanup():
+    """Remove the temp dir. Not interruptible, idempotent (a second call is a no-op), and it
+    makes every directory of the tree owner-accessible first (a 0500 source directory or a
+    0777 umask leaves unreadable ones). A dir that cannot be removed is NAMED on stderr."""
+    tmp, TMP[0] = TMP[0], None
+    if tmp is None or not os.path.lexists(tmp):
+        return
+    ignore_signals()  # CLEANUP-MASK: a signal now must not abandon the removal half done
+    try:
+        os.chmod(tmp, 0o700)
+        for dp, dns, _ in os.walk(tmp):  # top-down: a child is opened up before it is listed
+            for d in dns:
+                p = os.path.join(dp, d)
+                if not os.path.islink(p):
+                    os.chmod(p, 0o700)
+        shutil.rmtree(tmp)
+    except OSError as e:
+        sys.stderr.write("assemble: could not remove temp dir %s: %s\n" % (tmp, e))
+
+
+def unreadable(path, e):
+    die(2, "unreadable source %s: %s" % (path, e.strerror or e))
 
 
 def die(code, msg):
@@ -199,6 +248,37 @@ def charset_ok(cs, v):
 def fold(p):
     """The key two paths must NOT share: NFC, case-folded, NFC again."""
     return unicodedata.normalize("NFC", unicodedata.normalize("NFC", p).casefold())
+
+
+def dotgit(c):
+    """True when a path component IS .git in any case / Unicode form (zero-width format
+    characters are ignored, as git itself does on macOS)."""
+    return fold("".join(ch for ch in c if unicodedata.category(ch) != "Cf")) == ".git"
+
+
+def reserved(c):
+    """A component no scaffold may ship: .git (any case), its NTFS aliases (a trailing dot or
+    space is dropped by Windows: `.git.` IS `.git`; `git~1` is its short name)."""
+    return dotgit(c) or (c not in (".", "..") and c.endswith((".", " "))) or fold(c) == "git~1"
+
+
+def through_link(out, tgt, links):
+    """The planned link a link target passes through, or None. `..` after a link would leave
+    the link's own target, which the lexical path cannot see, so a link in the way is refused."""
+    cur = out.split("/")[:-1]
+    for c in tgt.split("/"):
+        if c in ("", "."):
+            continue
+        if c == "..":
+            if fold("/".join(cur)) in links:
+                return "/".join(cur)
+            if cur:
+                cur.pop()
+        else:
+            cur.append(c)
+            if fold("/".join(cur)) in links:
+                return "/".join(cur)
+    return None
 
 
 def no_dups(pairs):
@@ -297,7 +377,7 @@ def git_list(src, env, others_only):
     return [os.fsdecode(b) for b in r.stdout.split(b"\0") if b]
 
 
-def candidates(src, strict):
+def candidates(src, strict, mid):
     """Relative paths of files (and symlinks) under src, sorted."""
     env = git_env()
     try:
@@ -317,13 +397,28 @@ def candidates(src, strict):
         out = set()
         for rel in git_list(src, env, False):
             full = os.path.join(src, rel)
-            if not os.path.lexists(full) or (os.path.isdir(full) and not os.path.islink(full)):
-                continue  # tracked but deleted, or a submodule
+            try:
+                st = os.lstat(full)
+            except FileNotFoundError:
+                continue  # tracked but deleted
+            except OSError as e:
+                unreadable(full, e)  # NOT "deleted": an unreadable file is an error
+            if stat.S_ISDIR(st.st_mode):
+                continue  # a submodule
             out.add(rel)
         return sorted(out)
+
+    def walk_error(e):
+        unreadable(e.filename, e)
+
     entries = []
-    for dp, dns, fns in os.walk(src):
+    for dp, dns, fns in os.walk(src, onerror=walk_error):
         dns.sort()
+        for n in dns + fns:
+            if dotgit(n):  # SOURCE-GIT: a module directory that is a git checkout
+                die(1, "module %s: source tree %s contains %r: a module directory that is itself a "
+                    "git checkout is a packaging mistake (a planted .git/hooks file would run on the "
+                    "user's next git command); nothing written" % (mid, src, os.path.join(dp, n)))
         for n in sorted(fns) + [d for d in dns if os.path.islink(os.path.join(dp, d))]:
             entries.append(os.path.relpath(os.path.join(dp, n), src))
     return sorted(entries)
@@ -566,7 +661,11 @@ def run():
                 and any(t == "unit" for _, t in rules):
             die(2, "module %s places files as `unit` but does not declare the SERVICE slot "
                 "(required by layout monorepo)" % mid)
-        for rel in candidates(src, a.strict_tracked):
+        cands = candidates(src, a.strict_tracked, mid)
+        if not [r for r in cands if not (self_dir and r == "module.json")]:
+            die(1, "module %s: source %s yields no files (an empty or unlistable source is an "
+                "error, never \"nothing to copy\")" % (mid, src))
+        for rel in cands:
             if (self_dir and rel == "module.json") or any(rx.match(rel) for rx in excl):
                 continue
             target = next((t for rx, t in rules if rx.match(rel)), None)
@@ -579,12 +678,20 @@ def run():
             if escapes("/assemble-root", out):
                 bad_esc.append("%r (module %s)" % (out, mid))
                 continue
+            rc_ = next((c for c in out.split("/") if reserved(c)), None)
+            if rc_ is not None:  # OUTPUT-GIT: whatever way the candidate list was obtained
+                bad_esc.append("%r (module %s): path component %r is reserved (.git in any case, "
+                               "a trailing dot or space, git~1)" % (out, mid, rc_))
+                continue
             if re.search(r"<[^<>/]*>", out):
                 bad_paths.append(out)
             full = os.path.join(src, rel)
-            st = os.lstat(full)
-            if stat.S_ISLNK(st.st_mode):
-                tgt = os.readlink(full)
+            try:
+                st = os.lstat(full)
+                tgt = os.readlink(full) if stat.S_ISLNK(st.st_mode) else None
+            except OSError as e:
+                unreadable(full, e)
+            if tgt is not None:
                 norm = posixpath.normpath(posixpath.join(posixpath.dirname(out), tgt))
                 if os.path.isabs(tgt) or "\0" in tgt or norm == ".." or norm.startswith("../"):
                     bad_link.append("%s -> %s (module %s)" % (out, tgt, mid))
@@ -595,8 +702,11 @@ def run():
                     bad_link.append("%s has a setuid/setgid/sticky bit (%o) (module %s)"
                                     % (rel, stat.S_IMODE(st.st_mode), mid))
                     continue
-                with open(full, "rb") as f:
-                    data = sub.b(f.read())
+                try:
+                    with open(full, "rb") as f:
+                        data = sub.b(f.read())
+                except OSError as e:
+                    unreadable(full, e)  # at PLAN time: nothing has been written yet
                 for k in slots:
                     if ("<%s>" % k).encode() in data:
                         bad_content.append(out)
@@ -663,6 +773,14 @@ def run():
             if k in slots and k not in sub.hits:
                 bad_lit.append("module %s: literal %r of slot %s never occurs" % (mid, m["_lit"][k], k))
 
+    links = {fold(o) for o, e in plan.items() if e["kind"] == "link"}
+    for out in sorted(plan):
+        e = plan[out]
+        via = through_link(out, e["data"], links) if e["kind"] == "link" else None
+        if via is not None:
+            bad_link.append("%s -> %s (module %s): the target passes through planned link %s"
+                            % (out, e["data"], " + ".join(e["mods"]), via))
+
     if unplaced or bad_paths or bad_content or bad_lit or bad_esc or bad_link:
         for label, items in (("literal", bad_lit), ("unplaced", unplaced), ("path", bad_paths),
                              ("file", bad_content), ("escape", bad_esc), ("link", bad_link)):
@@ -699,13 +817,14 @@ def run():
     anc = os.path.dirname(dest_abs)
     while not os.path.lexists(anc):
         anc = os.path.dirname(anc)
-    tmp = None
     try:
-        block(True)  # no signal between mkdtemp and the assignment that lets `finally` remove it
+        block(True)  # no signal between mkdtemp and the assignment that lets cleanup() remove it
         try:
             tmp = tempfile.mkdtemp(prefix=".assemble-", dir=anc)
+            TMP[0] = tmp
         finally:
             block(False)
+        os.chmod(tmp, 0o700)  # MKDTEMP-CHMOD: under umask 0777 mkdtemp yields a mode-000 directory
         write_tree(plan, tmp, umask, dir_modes)
         block(True)  # the commit: a signal now waits, and is dropped once the rename happened
         try:
@@ -713,14 +832,23 @@ def run():
             if os.path.islink(dest) or (os.path.lexists(dest) and (not os.path.isdir(dest) or os.listdir(dest))):
                 die(1, "dest %s changed while assembling; nothing written" % dest)
             os.rename(tmp, dest_abs)
-            for sg in SIGNALS:
-                signal.signal(sg, signal.SIG_IGN)
+            TMP[0] = None
+            ignore_signals()  # COMMIT-IGNORE: the tree is complete; a late signal is dropped
+        except BaseException:
+            ignore_signals()  # CAUSE-WINS: a pending signal must not replace the real failure
+            raise
         finally:
             block(False)
     finally:
-        if tmp is not None and os.path.lexists(tmp):
-            shutil.rmtree(tmp, ignore_errors=True)
-    print("assemble: ok -- %d file(s), layout %s, slots remaining: 0" % (len(plan), a.layout))
+        cleanup()
+    try:
+        print("assemble: ok -- %d file(s), layout %s, slots remaining: 0" % (len(plan), a.layout))
+        sys.stdout.flush()
+    except BrokenPipeError:  # the reader went away; the tree is complete, so this is success
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
 
 
 def main():
