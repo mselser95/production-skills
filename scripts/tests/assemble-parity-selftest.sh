@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# assemble-parity-selftest.sh -- scripts/assemble.py --layout single must equal
-# scripts/instantiate-template.sh byte for byte (contents, paths, modes), and
-# must refuse what instantiate refuses. Hermetic, sequential, no network.
-# ASSEMBLE=<path> runs another copy of the assembler (mutation proofs).
+# assemble-parity-selftest.sh -- scripts/instantiate-template.sh is a thin wrapper over scripts/assemble.py:
+# one golden case proves it still equals the frozen original tool on the real template; everything else
+# tests the assembler. Hermetic, sequential, no network.
+# ASSEMBLE=<path> runs another copy of the assembler; BASE_FIXTURE=<path> another golden fixture (mutation proofs).
 # Exit: 0 all ok - 1 a case failed - 2 zero cases ran.
 set -uo pipefail
 
@@ -20,25 +20,26 @@ tmp_before="$(tmpnames)"
 ok=0; bad=0
 pass() { ok=$((ok + 1)); echo "ok   $1"; }
 fail() { bad=$((bad + 1)); echo "FAIL $1${2:+ -- $2}"; }
+GREENS=" "
+green() { if "$1" "${2:-$asm}"; then GREENS+="$1 "; return 0; fi; return 1; }   # <scenario> [real tool]: run it on the REAL tool, cache a green
 A() { python3 -I -B "${USE:-$asm}" --modules-dir "${MODS:-$mods}" "$@"; }
 # files, directories AND the root ("."): mode string + path
 modes() { (cd "$1" && find . -exec ls -ld {} + | awk '{print substr($1,1,10), $NF}' | LC_ALL=C sort); }
 
-parity() { # <label> <svc> <owner> <umask>   one real-template pair per umask (reused by every check)
-  local d="$tmp/$1" um="$4"
-  (umask "$um"; A --dest "$d/a" --layout single --module service-go --slot "SERVICE=$2" --slot "OWNER=$3" --strict-tracked) >/dev/null 2>"$d.err" \
-    || { fail "$1 assemble" "$(head -c 200 "$d.err")"; return; }
-  (umask "$um"; cd "$here" && bash "$inst" "$d/b" "$2" "$3") >/dev/null 2>&1 || { fail "$1 instantiate failed"; return; }
-  if diff -r "$d/a" "$d/b" >"$d.diff" 2>&1; then pass "$1 diff -r empty (umask $um)"; else fail "$1 diff -r" "$(head -c 200 "$d.diff")"; fi
+base="${BASE_FIXTURE:-$here/scripts/tests/fixtures/instantiate-template.base.sh.txt}"
+golden() { # <label> <svc> <owner>: the wrapper equals the frozen ORIGINAL tool on the REAL template (umask 022)
+  local d="$tmp/$1"; mkdir -p "$d"
+  (umask 022; bash "$inst" "$d/a" "$2" "$3") >/dev/null 2>"$d.err" || { fail "$1 wrapper" "$(head -c 200 "$d.err")"; return; }
+  (umask 022; cd "$here" && bash "$base" "$d/b" "$2" "$3") >/dev/null 2>&1 || { fail "$1 frozen original failed"; return; }
+  if diff -r "$d/a" "$d/b" >"$d.diff" 2>&1; then pass "$1 golden: diff -r empty against the frozen original"; else fail "$1 golden diff -r" "$(head -c 200 "$d.diff")"; fi
   local ma mb; ma="$(modes "$d/a")"; mb="$(modes "$d/b")"
-  if [[ "$ma" == "$mb" ]] && grep -q '^d.* \./cmd$' <<<"$ma" && grep -q ' \.$' <<<"$ma"; then
-    pass "$1 file, directory and root modes equal (umask $um)"
-  else fail "$1 modes differ (files, directories or root)" "$(diff <(modes "$d/a") <(modes "$d/b") | head -c 200)"; fi
+  if [[ "$ma" == "$mb" ]] && grep -q '^d.* \./cmd$' <<<"$ma" && grep -q ' \.$' <<<"$ma"; then pass "$1 golden: file, directory and root modes equal"
+  else fail "$1 golden modes differ" "$(diff <(modes "$d/a") <(modes "$d/b") | head -c 200)"; fi
 }
 
-parity p1 payments acme 022
-parity p2 order-book some-org 002
-parity p3 ledger9 acme.io 077
+golden p1 payments acme
+golden p2 order-book some-org
+golden p3 ledger9 acme.io
 
 # placement glob dropped from a COPY of the manifest -> a file is unplaced -> refused
 mkdir -p "$tmp/m/prod-new/modules/service-go"
@@ -197,14 +198,12 @@ runc() {
   (umask "${UMK:-$(umask)}"; MODS="$sm" A --dest "$tmp/$lb/dest" --layout "$lay" "${mm[@]}" "${ss[@]}" ${AFLAGS:-}) >"$tmp/log_$lb.out" 2>"$tmp/log_$lb.err"; rc=$?
 }
 untouched() { [[ "$(ls -A "$tmp/$1" | tr '\n' ' ')" == "canary " && "$(cat "$tmp/$1/canary")" == canary ]]; }
-# mutant <from> <to> <out>: exact-once text replacement in a copy of the assembler (a rename makes this FAIL loudly)
+# mutant <from> <to> <out> [<in>]: exact-once text replacement in a copy (a rename makes this FAIL loudly)
 mutant() {
-  python3 -I - "$asm" "$1" "$2" "$3" <<'PY' || { fail "mutant marker missing: $1"; return 1; }
-import sys
+  python3 -I -c 'import sys
 s = open(sys.argv[1]).read()
 assert s.count(sys.argv[2]) == 1, sys.argv[2]
-open(sys.argv[4], "w").write(s.replace(sys.argv[2], sys.argv[3]))
-PY
+open(sys.argv[4], "w").write(s.replace(sys.argv[2], sys.argv[3]))' "${4:-$asm}" "$1" "$2" "$3" || { fail "mutant marker missing or not unique: $1"; return 1; }
 }
 mutant '    if not v.isascii() or VALUE_RX.fullmatch(v) is None:' '    if False:' "$tmp/m-nogram.py"
 mutant '    if "\0" in rel or rel.startswith("/")' '    return False
@@ -406,7 +405,7 @@ run pw1 single pw -- NAME=a/b
 run so1 single esc -- 'SERVICE=<OWNER>'; r1=$rc
 [[ $r1 -eq 2 ]] && pass "SERVICE=<OWNER> refused (no order dependence left)" || fail "placeholder value" "rc=$r1"
 
-# ---- value-grammar parity: both tools accept/refuse the same values, accepted ones are identical
+# ---- value grammar through the assembler
 mx="$tmp/mx"; mt="$mx/prod-new/template"; mkdir -p "$mx/prod-new/modules" "$mt/cmd/<SERVICE>" "$mt/scripts"
 cp -R "$mods/service-go" "$mx/prod-new/modules/"
 printf 'package main // <SERVICE> <OWNER>\n' >"$mt/cmd/<SERVICE>/main.go"; printf '* @<OWNER>\n' >"$mt/CODEOWNERS"
@@ -414,26 +413,20 @@ printf '#!/bin/sh\necho <SERVICE>\n' >"$mt/scripts/run.sh"; chmod 755 "$mt/scrip
 # directory fixtures: a 750 directory (source mode rule), an empty nested directory (dropped by both tools)
 mkdir -p "$mt/docs/priv" "$mt/docs/hollow/deep"; printf 'x <SERVICE>\n' >"$mt/docs/priv/x.md"
 find "$mt" -type d -exec chmod 755 {} +; chmod 750 "$mt/docs/priv"
-# vp_both <label> <svc> <owner>: both tools on the fixture template under umask ${UM:-022}.
-# Sets VA/VI (exit codes) and VEQ (0 only when both succeeded and trees + modes are equal).
-# Overrides: VMX (fixture root), USE (assembler copy), INSTU (shell tool copy).
+# vp_both <label> <svc> <owner>: the assembler on the fixture template under umask ${UM:-022}. Sets VA (exit code).
+# Overrides: VMX (fixture root), USE (assembler copy).
 vp_both() {
   local d="$tmp/vp_$1" f="${VMX:-$mx}"; rm -rf "$d"; mkdir -p "$d"
   (umask "${UM:-022}"; MODS="$f/prod-new/modules" A --dest "$d/a" --layout single --module service-go --slot "SERVICE=$2" --slot "OWNER=$3") >/dev/null 2>"$d/a.err"; VA=$?
-  (umask "${UM:-022}"; cd "$f" && bash "${INSTU:-$inst}" "$d/b" "$2" "$3") >/dev/null 2>"$d/b.err"; VI=$?
-  VEQ=1
-  if [[ $VA -eq 0 && $VI -eq 0 ]] && diff -r "$d/a" "$d/b" >/dev/null && [[ "$(modes "$d/a")" == "$(modes "$d/b")" ]]; then VEQ=0; fi
 }
 vparity() { # <label> <expect ok|refuse> <svc> <owner>
   vp_both "$1" "$3" "$4"
-  local da=refuse di=refuse; [[ $VA -eq 0 ]] && da=ok; [[ $VI -eq 0 ]] && di=ok
-  if [[ "$da" != "$2" || "$di" != "$2" ]]; then fail "value $1" "expected $2, assembler=$da template=$di"
-  elif [[ "$2" == ok && $VEQ -ne 0 ]]; then fail "value $1" "accepted by both but trees differ"
-  else pass "value $1: both tools $2"; fi
+  local da=refuse; [[ $VA -eq 0 ]] && da=ok
+  if [[ "$da" != "$2" ]]; then fail "value $1" "expected $2, assembler=$da"
+  else pass "value $1: $2"; fi
 }
 long65="$(printf 'z%.0s' $(seq 1 65))"
-# end to end (both real tools, trees compared) for a few values; the WHOLE list is compared below in ONE python
-# process (the assembler's own check_value) and ONE shell loop (the shell tool's own valid_value)
+# end to end for a few values; the WHOLE list is compared below in ONE python process (the assembler's own check_value)
 vparity ok-a.b ok a.b 9lives
 vparity ok-64 ok "$(printf 'z%.0s' $(seq 1 64))" acme
 vparity bad-empty refuse '' acme
@@ -445,30 +438,28 @@ okv=(s a.b order-book A1_x 9lives A a_ x-y a.b.c z-_ "$(printf 'z%.0s' $(seq 1 6
 badv=('' 'a/b' 'a\b' 'a&b' '\1' 'a b' '-x' '.x' '..' '.' '../../E' '/abs' 'a<OWNER>' $'a\nb' $'a\n' 'a;b' "a'b" 'é' 'a$b' $'a\xe9' 'x.' 'a..' 'a-.' "$long65")
 vals="$tmp/vals.bin"; printf '%s\0' "${okv[@]}" "${badv[@]}" >"$vals"
 vexp="$(printf '1%.0s' "${okv[@]}")$(printf '0%.0s' "${badv[@]}")"
-vv="$(sed -n '/^valid_value()/,/^}/p' "$inst")"; eval "$vv"
-vsh=""; for v in "${okv[@]}" "${badv[@]}"; do if valid_value "$v"; then vsh+="1"; else vsh+="0"; fi; done
 
 # ======================= round 2: umask matrix, fixed slot options, signals, folds =======================
-# ---- B3: directory modes. Rule: dir = (source dir & ~umask) | u+w, root 0777 & ~umask (cp -R does the same)
-for um in 002 077; do UM=$um vp_both "um$um" um acme
-  mu="$(modes "$tmp/vp_um$um/a")"
-  if [[ $VEQ -eq 0 ]] && grep -q ' \./docs/priv$' <<<"$mu"; then pass "fixture parity under umask $um: files, directories (750 docs/priv) and root equal"
-  else fail "fixture parity umask $um" "VA=$VA VI=$VI $(diff <(modes "$tmp/vp_um$um/a") <(modes "$tmp/vp_um$um/b") | head -c 160)"; fi
+# ---- directory modes. Rule: dir = (source dir & ~umask) | u+w, root 0777 & ~umask
+for um in 002 077 022; do UM=$um vp_both "um$um" um acme; mu="$(modes "$tmp/vp_um$um/a")"
+  case $um in 002) dp="drwxr-x---"; rt="drwxrwxr-x";; 077) dp="drwx------"; rt="drwx------";; *) dp="drwxr-x---"; rt="drwxr-xr-x";; esac
+  if [[ $VA -eq 0 ]] && grep -q "^$dp \./docs/priv$" <<<"$mu" && grep -q "^$rt \.$" <<<"$mu"; then pass "umask $um: docs/priv is $dp (source 750 & ~umask), root is $rt"
+  else fail "dir modes umask $um" "VA=$VA $(grep -E ' \.(/docs/priv)?$' <<<"$mu" | head -c 160)"; fi
 done
-UM=022 vp_both um022 um acme
-[[ $VEQ -eq 0 && ! -e "$tmp/vp_um022/a/docs/hollow" && ! -e "$tmp/vp_um022/b/docs/hollow" ]] && pass "empty source directories are dropped by BOTH tools (docs/hollow/deep)" || fail "empty directory rule" "VA=$VA VI=$VI"
+[[ ! -e "$tmp/vp_um022/a/docs/hollow" ]] && pass "an empty source directory is dropped (docs/hollow/deep)" || fail "empty directory rule"
 mz="$tmp/mz"; cp -R "$mx" "$mz"; chmod 1750 "$mz/prod-new/template/docs/priv"
 VMX="$mz" vp_both st1 s acme
-sa="$(modes "$tmp/vp_st1/a")"; sb="$(modes "$tmp/vp_st1/b")"
-[[ $VEQ -eq 0 ]] && grep -Eq '^d.{8}[^tT] \./docs/priv$' <<<"$sa" && grep -Eq '^d.{8}[^tT] \./docs/priv$' <<<"$sb" && pass "sticky source directory: both tools clear the bit and agree" || fail "sticky directory" "VA=$VA VI=$VI"
+sa="$(modes "$tmp/vp_st1/a")"
+[[ $VA -eq 0 ]] && grep -Eq '^d.{8}[^tT] \./docs/priv$' <<<"$sa" && pass "sticky source directory: the bit is cleared" || fail "sticky directory" "VA=$VA"
 
-# ---- W6: special bits refused by both tools; exclude globs
+# ---- special bits refused; exclude globs
 my="$tmp/my"; cp -R "$mx" "$my"; chmod 4755 "$my/prod-new/template/scripts/run.sh"
 VMX="$my" vp_both sp1 s acme
-if [[ $VA -eq 1 && $VI -eq 1 ]] && grep -q 'run.sh' "$tmp/vp_sp1/a.err" && grep -q 'run.sh' "$tmp/vp_sp1/b.err" && [[ ! -e "$tmp/vp_sp1/a" ]]; then pass "setuid source file: both tools exit 1 naming it"
-else fail "setuid file" "VA=$VA VI=$VI"; fi
+if [[ $VA -eq 1 ]] && grep -q 'run.sh' "$tmp/vp_sp1/a.err" && [[ ! -e "$tmp/vp_sp1/a" ]]; then pass "setuid source file: exit 1 naming it, nothing written"
+else fail "setuid file" "VA=$VA"; fi
 chmod 1755 "$my/prod-new/template/scripts/run.sh"; VMX="$my" vp_both sp2 s acme
-[[ $VA -eq 1 && $VI -eq 1 ]] && pass "sticky source file: both tools exit 1" || fail "sticky file" "VA=$VA VI=$VI"
+[[ $VA -eq 1 ]] && pass "sticky source file: exit 1" || fail "sticky file" "VA=$VA"
+mbatch excl-dotdot "{\"id\":\"bm\",\"source\":\"f\",$P,\"exclude\":[\"../x\"]}" "'exclude'"
 mbatch excl-dotdot "{\"id\":\"bm\",\"source\":\"f\",$P,\"exclude\":[\"../x\"]}" "'exclude'"
 mbatch excl-abs "{\"id\":\"bm\",\"source\":\"f\",$P,\"exclude\":[\"/x\"]}" "'exclude'"
 
@@ -479,8 +470,6 @@ t0=$(date +%s); run rx1 single rx -- NAME=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-; t1=$
 run lv1 single esc -- "SERVICE=$long65"
 [[ $rc -eq 2 ]] && grep -q 'cap is 64' "$tmp/lv1.err" && pass "65-character value: exit 2 naming the cap" || fail "length cap" "rc=$rc $(head -c 160 "$tmp/lv1.err")"
 run lv2 single esc -- "SERVICE=$(printf 'z%.0s' $(seq 1 64))"; [[ $rc -eq 0 ]] && pass "64-character value accepted" || fail "64 chars" "rc=$rc"
-(cd "$mx" && bash "$inst" "$tmp/lvs" "$long65" acme) >/dev/null 2>"$tmp/lvs.err"; rc=$?
-[[ $rc -eq 2 ]] && grep -q 'outside the value grammar' "$tmp/lvs.err" && [[ ! -e "$tmp/lvs" ]] && pass "shell tool: 65-character value exit 2, nothing written" || fail "shell cap" "rc=$rc"
 cs_case() { # <label> <manifest-slot-json> <value> <expect-rc>
   mkmod cs "{\"id\":\"cs\",\"source\":\"f\",\"slots\":{\"NAME\":$2},\"placement\":{\"**\":\"root\"}}"; mkdir -p "$sm/cs/f"; echo '<NAME>' >"$sm/cs/f/t"
   run "cs_$1" single cs -- "NAME=$3"
@@ -509,22 +498,17 @@ mbatch charset-unknown "{\"id\":\"bm\",\"source\":\"f\",$P,\"slots\":{\"A\":{\"c
 mbatch literal-slash "{\"id\":\"bm\",\"source\":\"f\",$P,\"slots\":{\"A\":{\"literal\":\"aa/bb\"}}}" "literal"
 mbatch literal-long "{\"id\":\"bm\",\"source\":\"f\",$P,\"slots\":{\"A\":{\"literal\":\"$long65\"}}}" "literal"
 
-# ---- W4: an explicit empty value is an error in both tools; an omitted argument keeps its default
+# ---- the wrapper passes its arguments through faithfully (all validation is the assembler's)
 run em1 single esc -- SERVICE=; [[ $rc -eq 2 ]] && pass "assemble: empty --slot value exit 2" || fail "empty slot" "rc=$rc"
-(cd "$mx" && bash "$inst" "$tmp/em2" "" acme) >/dev/null 2>&1; r1=$?
-(cd "$mx" && bash "$inst" "$tmp/em3" svc "") >/dev/null 2>&1; r2=$?
-(cd "$mx" && bash "$inst" "$tmp/em4") >/dev/null 2>&1; r3=$?
-if [[ $r1 -eq 2 && $r2 -eq 2 && $r3 -eq 0 && -f "$tmp/em4/cmd/svc/main.go" && ! -e "$tmp/em2" && ! -e "$tmp/em3" ]]; then pass "shell tool: empty service/owner exit 2; omitted arguments keep the defaults"
-else fail "shell empty vs omitted" "$r1/$r2/$r3"; fi
-
-# ---- M4: byte >= 0x80 under a Latin-1 locale (the class is enumerated, so the locale cannot widen it)
-lat=""; for l in de_DE.ISO8859-1 de_DE.iso88591 en_US.ISO8859-1; do [[ " $(locale -a 2>/dev/null | tr 'A-Z\n' 'a-z ') " == *" $(tr 'A-Z' 'a-z' <<<"$l") "* ]] && { lat="$l"; break; }; done
-if [[ -n "$lat" ]]; then
-  (cd "$mx" && LC_ALL="$lat" LANG="$lat" bash "$inst" "$tmp/lat" $'a\xe9' acme) >/dev/null 2>&1; rc=$?
-  [[ $rc -eq 2 && ! -e "$tmp/lat" ]] && pass "shell tool under $lat: byte 0xE9 refused, exit 2" || fail "latin-1 locale" "rc=$rc"
-else echo "SKIPPED shell tool under a Latin-1 locale: no ISO8859-1 locale installed; the equivalent check follows (no range in the class)"; fi
-if grep -Eq '[A-Za-z0-9]-[A-Za-z0-9]' <<<"$vv"; then fail "valid_value uses a locale-dependent character range"
-else pass "valid_value has no character range (bytewise by construction, locale independent)"; fi
+wr() { local d="$tmp/wr_$1"; shift; rm -rf "$d"; "$WT" "$d" "$@" >"$d.out" 2>"$d.err"; wrc=$?; WD="$d"; }
+sc_wrap() { local WT="$1" ok=1
+  wr a order-book acme.io; [[ $wrc -eq 0 && -f "$WD/cmd/order-book/main.go" && -f "$WD/go.mod" && ! -e "$WD/services" ]] && grep -q acme.io "$WD/CODEOWNERS" || ok=0
+  wr b; [[ $wrc -eq 0 && -f "$WD/cmd/svc/main.go" ]] && grep -q mselser95 "$WD/CODEOWNERS" || ok=0
+  wr c "" acme; [[ $wrc -eq 2 && ! -e "$WD" ]] || ok=0
+  wr d svc ""; [[ $wrc -eq 2 && ! -e "$WD" ]] || ok=0
+  wr e a b c; [[ $wrc -eq 2 && ! -e "$WD" ]] || ok=0
+  [[ $ok -eq 1 ]]; }
+green sc_wrap "$inst" && pass "wrapper: hyphenated service + dotted owner, omitted args -> defaults, empty arg -> exit 2, a third argument -> exit 2, nothing written" || fail "wrapper arguments"
 
 # ---- W3: duplicate JSON keys, at any depth
 mbatch dup-slots "{\"id\":\"bm\",\"source\":\"f\",$P,\"slots\":{},\"slots\":{\"A\":\"d\"}}" "duplicate key 'slots'"
@@ -694,37 +678,27 @@ sigcase() { # <SIGNAME> <expected rc>
 }
 sigcase SIGTERM 143; sigcase SIGINT 130; sigcase SIGHUP 129; sigcase SIGQUIT 131
 
-# ---- mutants of this round: each guard removed in a copy must turn its case RED
-# red <label> <from> <to> <scenario-function>  (the scenario returns 0 when the guard holds; the real tool must pass it)
+# ---- mutants: each guard removed in a copy must turn its scenario RED
+# red <label> <from> <to> <scenario>: PAIRED BY CONSTRUCTION. The scenario must already be green on the REAL tool
+# (cached in GREENS, filled by `green`; run now when missing); a scenario with no green is a FAIL "unpaired" and
+# its mutant is never judged. The scenario returns 0 when the guard holds and takes the tool path as $1.
+pairing() { # <label> <scenario> <real-tool>
+  [[ "$GREENS" == *" $2 "* ]] || green "$2" "$3"
+  [[ "$GREENS" == *" $2 "* ]] || { fail "mutant $1: unpaired (scenario $2 is not green on the real tool)"; return 1; }
+}
 red() {
   local lb="$1" f="$tmp/mr-$1.py"
-  mutant "$2" "$3" "$f" || return
-  "$4" "$asm" || { fail "mutant $lb: the scenario does not pass on the real tool"; return; }
-  if "$4" "$f"; then fail "mutant $lb stayed GREEN"; else pass "mutant $lb: RED"; fi
-}
-redk() { # like red, for a scenario whose IDENTICAL invocation already passed on the real tool in a case above
-  local lb="$1" f="$tmp/mr-$1.py"
+  pairing "$lb" "$4" "$asm" || return
   mutant "$2" "$3" "$f" || return
   if "$4" "$f"; then fail "mutant $lb stayed GREEN"; else pass "mutant $lb: RED"; fi
 }
-redsh() { # same for the shell tool: <label> <from> <to> <scenario(tool-path)>
-  local lb="$1" f="$tmp/mr-$1.sh"
-  python3 -I - "$inst" "$2" "$3" "$f" <<'PY' || { fail "shell mutant marker missing: $2"; return; }
-import sys
-s = open(sys.argv[1]).read(); assert s.count(sys.argv[2]) == 1, sys.argv[2]
-open(sys.argv[4], "w").write(s.replace(sys.argv[2], sys.argv[3]))
-PY
-  "$4" "$inst" || { fail "shell mutant $lb: the scenario does not pass on the real tool"; return; }
-  if "$4" "$f"; then fail "shell mutant $lb stayed GREEN"; else pass "shell mutant $lb: RED"; fi
-}
-redshk() { # like redsh, for a scenario whose identical invocation already passed on the real tool above
-  local lb="$1" f="$tmp/mr-$1.sh"
-  python3 -I - "$inst" "$2" "$3" "$f" <<'PY' || { fail "shell mutant marker missing: $2"; return; }
-import sys
-s = open(sys.argv[1]).read(); assert s.count(sys.argv[2]) == 1, sys.argv[2]
-open(sys.argv[4], "w").write(s.replace(sys.argv[2], sys.argv[3]))
-PY
-  if "$4" "$f"; then fail "shell mutant $lb stayed GREEN"; else pass "shell mutant $lb: RED"; fi
+# redw: the same for the WRAPPER: the mutated wrapper runs beside a copy of the assembler, over the real prod-new
+redw() { # <label> <from> <to> <scenario>
+  local lb="$1" w="$tmp/wm/$1/scripts"
+  pairing "$lb" "$4" "$inst" || return
+  mkdir -p "$w" && ln -s "$here/prod-new" "$tmp/wm/$1/prod-new" && cp "$asm" "$w/assemble.py" || { fail "wrapper mutant $lb: setup"; return; }
+  mutant "$2" "$3" "$w/instantiate-template.sh" "$inst" || return
+  if "$4" "$w/instantiate-template.sh"; then fail "wrapper mutant $lb stayed GREEN"; else pass "wrapper mutant $lb: RED"; fi
 }
 sc_rc() { # <asm> <expect-rc> <err-needle|-> <label> <layout> <modules...> -- slots
   local u="$1" want="$2" nd="$3" lb="$4"; shift 4; chmod -R u+rwx "$tmp/mu_$lb" 2>/dev/null; rm -rf "$tmp/mu_$lb"; USE="$u" runc "mu_$lb" "$@"
@@ -750,9 +724,9 @@ sc_fold()   { sc_rc "$1" 1 'path collision' m17 single cfd -- SERVICE=A; }
 sc_lnkout() { sc_rc "$1" 0 - m18 monorepo lkm -- SERVICE=svc; }
 sc_order()  { sc_rc "$1" 0 - m19 single ov -- SHORT=x LONG=y && [[ "$(cat "$tmp/mu_m19/dest/t.txt")" == 'y and x' ]]; }
 sc_special(){ sc_rc "$1" 1 'setuid' m20 single sx --; }
-sc_dirmode(){ local d="$tmp/vp_m21"; rm -rf "${d:?}"; mkdir -p "$d"   # the assembler alone, against the shell tool's tree from the umask-002 case above
+sc_dirmode(){ local d="$tmp/vp_m21"; rm -rf "${d:?}"; mkdir -p "$d"   # umask 002: the 750 source directory stays 750 (source mode & ~umask)
   (umask 002; MODS="$mx/prod-new/modules" USE="$1" A --dest "$d/a" --layout single --module service-go --slot SERVICE=um --slot OWNER=acme) >/dev/null 2>&1 \
-    && diff -r "$d/a" "$tmp/vp_um002/b" >/dev/null && [[ "$(modes "$d/a")" == "$(modes "$tmp/vp_um002/b")" ]]; }
+    && grep -q "^drwxr-x--- \./docs/priv$" <<<"$(modes "$d/a")"; }
 sc_wesc()   { local o; o="$(USE="$1" direct esc)"; [[ "$o" == REFUSED* ]]; }
 sc_wexcl()  { local o; o="$(USE="$1" direct excl)"; [[ "$o" == REFUSED* ]]; }
 sc_sigterm(){ local d="$tmp/sg_m" r; rm -rf "$d"; mkdir -p "$d"; (ulimit -c 0; python3 -I -B "$tmp/direct.py" "$1" sig:SIGTERM "$d/dest" "$sm" >/dev/null 2>"$d/err"); r=$?
@@ -765,52 +739,42 @@ red grammar-search 'VALUE_RX.fullmatch(v) is None' 'VALUE_RX.search(v) is None' 
 red grammar-service-only '    for k, v in slots.items():
         check_value(k, v)' '    for k, v in slots.items():
         if k == "SERVICE": check_value(k, v)' sc_owner
-redk prefix-files-only '            if pre is not None:' '            if pre is not None and plan[pre]["kind"] == "file":' sc_linkpre
+red prefix-files-only '            if pre is not None:' '            if pre is not None and plan[pre]["kind"] == "file":' sc_linkpre
 red link-target-check 'if os.path.isabs(tgt) or "\0" in tgt or norm == ".." or norm.startswith("../"):' 'if False:' sc_linkchk
-redk requires-off '            if r not in chosen:' '            if False:' sc_req
-redk conflicts-off '            if c in chosen:' '            if False:' sc_conf
-redk unknown-key-tolerated '    if unknown:' '    if False:' sc_unk
-redk id-mismatch-tolerated '    if m["id"] != mid:' '    if False:' sc_idm
-redk strict-ignores-untracked '        stray = git_list(src, env, True)
+red requires-off '            if r not in chosen:' '            if False:' sc_req
+red conflicts-off '            if c in chosen:' '            if False:' sc_conf
+red unknown-key-tolerated '    if unknown:' '    if False:' sc_unk
+red id-mismatch-tolerated '    if m["id"] != mid:' '    if False:' sc_idm
+red strict-ignores-untracked '        stray = git_list(src, env, True)
         if stray:' '        stray = git_list(src, env, True)
         if False:' sc_strict
-redk length-cap-off '    if len(v) > MAX_VALUE:' '    if False:' sc_cap
+red length-cap-off '    if len(v) > MAX_VALUE:' '    if False:' sc_cap
 red charset-off '            if k in slots and not charset_ok(cs, slots[k]):' '            if False:' sc_cset
 red max-len-off '            if k in slots and len(slots[k]) > n:' '            if False:' sc_mlen
 red dupkeys-off '        if k in d:' '        if False:' sc_dup
-redk source-rule-off '        if not (real_src == real_mod or' '        if False and not (real_src == real_mod or' sc_src
+red source-rule-off '        if not (real_src == real_mod or' '        if False and not (real_src == real_mod or' sc_src
 red literal-slash-off '            if "/" in v["literal"] or "\0" in v["literal"]:' '            if False:' sc_litslash
 red exclude-dotdot-off '        if ".." in g or g.startswith("/") or "\0" in g:' '        if False:' sc_excl
-redk fold-identity '    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", p).casefold())' '    return p' sc_fold
+red fold-identity '    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", p).casefold())' '    return p' sc_fold
 red link-by-source-path 'posixpath.normpath(posixpath.join(posixpath.dirname(out), tgt))' 'posixpath.normpath(posixpath.join(posixpath.dirname(rel), tgt))' sc_lnkout
-redk placeholders-unsorted 'key=lambda kv: (-len(kv[1]), kv[1])' 'key=lambda kv: kv[1]' sc_order
+red placeholders-unsorted 'key=lambda kv: (-len(kv[1]), kv[1])' 'key=lambda kv: kv[1]' sc_order
 red special-bits-off '                if st.st_mode & SPECIAL:' '                if False:' sc_special
-redk dir-mode-ignores-source 'dir_modes[od] = (dstat[sd] & ~umask) | stat.S_IWUSR' 'dir_modes[od] = (0o777 & ~umask) | stat.S_IWUSR' sc_dirmode
-redk write-escape-off '    for out in sorted(plan):
+red dir-mode-ignores-source 'dir_modes[od] = (dstat[sd] & ~umask) | stat.S_IWUSR' 'dir_modes[od] = (0o777 & ~umask) | stat.S_IWUSR' sc_dirmode
+red write-escape-off '    for out in sorted(plan):
         if escapes(tmp, out):' '    for out in sorted(plan):
         if False:' sc_wesc
-redk write-excl-to-trunc 'os.O_CREAT | os.O_EXCL | nofollow' 'os.O_CREAT | os.O_TRUNC | nofollow' sc_wexcl
-redk sigterm-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGHUP", "SIGQUIT")' sc_sigterm
-sh_empty() { (cd "$mx" && bash "$1" "$tmp/shm_e" "" acme) >/dev/null 2>&1; local r=$?; rm -rf "$tmp/shm_e"; [[ $r -eq 2 ]]; }
-sh_cap()   { (cd "$mx" && bash "$1" "$tmp/shm_c" "$long65" acme) >/dev/null 2>&1; local r=$?; rm -rf "$tmp/shm_c"; [[ $r -eq 2 ]]; }
-sh_empdir(){ INSTU="$1" vp_both m22 um acme; [[ $VEQ -eq 0 ]]; }
-sh_stkdir(){ INSTU="$1" VMX="$mz" vp_both m23 s acme; [[ $VEQ -eq 0 ]]; }
-sh_special(){ INSTU="$1" VMX="$my" vp_both m24 s acme; [[ $VI -eq 1 ]]; }
-redsh shell-empty-defaults '(( $# >= 2 )) && svc="$2"' 'svc="${2:-svc}"' sh_empty
-redsh shell-length-cap '  (( ${#1} <= 64 )) && [[ "$1" =~ $re ]]' '  [[ "$1" =~ $re ]]' sh_cap
-redshk shell-keeps-empty-dirs '(cd "$dest" && find . -mindepth 1 -depth -type d -empty -exec rmdir {} \;) || exit 2' ':' sh_empdir
-redshk shell-keeps-sticky-dir-bit 'chmod -R u+w,u-s,g-s,-t "$dest"' 'chmod -R u+w "$dest"' sh_stkdir
-redshk shell-accepts-setuid-file 'if [[ -n "$special" ]]; then' 'if false; then' sh_special
+red write-excl-to-trunc 'os.O_CREAT | os.O_EXCL | nofollow' 'os.O_CREAT | os.O_TRUNC | nofollow' sc_wexcl
+red sigterm-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGHUP", "SIGQUIT")' sc_sigterm
 
 
 # ======================= round 4: .git, unreadable sources, cleanup, links, modes =======================
-# the whole value list through BOTH tools' own checks (one python process, one shell loop)
+# the whole value list through the assembler's own check (one python process)
 vpy="$(direct vals "$vals")"
-if [[ "$vpy" == "$vexp " && "$vsh" == "$vexp" ]]; then pass "value grammar: ${#okv[@]} accepted + ${#badv[@]} refused values, assembler and shell tool agree on every one"
-else fail "value grammar differs" "expected $vexp / assembler ${vpy% } / shell $vsh"; fi
+if [[ "$vpy" == "$vexp " ]]; then pass "value grammar: ${#okv[@]} accepted + ${#badv[@]} refused values, every one as expected"
+else fail "value grammar differs" "expected $vexp / assembler ${vpy% }"; fi
 sc_vals() { [[ "$(USE="$1" direct vals "$vals")" == "$vexp " ]]; }
 sc_names() { [[ "$(USE="$1" direct names)" == "OK " ]]; }
-sc_names "$asm" && pass "reserved(): .git in any case/form, trailing dot or space, git~1 refused; .github .gitignore .gitattributes .gitkeep .gitmodules .git-hooks allowed" || fail "reserved()" "$(direct names)"
+green sc_names && pass "reserved(): .git in any case/form, trailing dot or space, git~1 refused; .github .gitignore .gitattributes .gitkeep .gitmodules .git-hooks allowed" || fail "reserved()" "$(direct names)"
 
 mres="$(direct mbad "$tmp/mb.bin")"
 [[ "$mres" == "OK $nmb " ]] && pass "manifest refusals ($nmb in one process): each exit 2, one line naming its key, no traceback" || fail "manifest refusals" "$mres"
@@ -853,30 +817,29 @@ runc gl1 single gtl --
 gmod ghs .git/hooks/pre-commit; gmod gtd '.git./config'
 sc_gsrc() { sc_rc "$1" 1 'git checkout' m34 single ghs --; }
 sc_gout() { sc_rc "$1" 1 'reserved' m35 single gtd --; }
-sc_gsrc "$asm" && sc_gout "$asm" || fail "git mutant scenarios do not pass on the real tool"
-# the shell tool refuses the same, and the real template has none
+green sc_gsrc && green sc_gout || fail "git mutant scenarios do not pass on the real tool"
+# reserved components planted in a copy of the template fixture are refused; the real template has none
 mg="$tmp/mg"; cp -R "$mx" "$mg"
 shgit() { rm -rf "${mg:?}/prod-new/template/docs/gitcase"; mkdir -p "$mg/prod-new/template/docs/gitcase/$(dirname "$1")"; echo y >"$mg/prod-new/template/docs/gitcase/$1"; VMX="$mg" vp_both gc s acme; }
-for x in '.GIT/hooks/pre-commit' 'trail./x' 'sub/git~1/y'; do
+for x in '.GIT/hooks/pre-commit' 'trail./x' 'sub/git~1/y' '.git:x/y' 'a:b/y'; do
   shgit "$x"
-  if [[ $VA -eq 1 && $VI -eq 1 ]] && grep -Eq 'reserved|git checkout' "$tmp/vp_gc/a.err" && grep -q 'reserved' "$tmp/vp_gc/b.err" && [[ ! -e "$tmp/vp_gc/b" && ! -e "$tmp/vp_gc/a" ]]; then pass "template with $x: both tools exit 1 naming the reserved path, nothing written"
-  else fail "template reserved $x" "VA=$VA VI=$VI $(head -c 120 "$tmp/vp_gc/a.err") / $(head -c 120 "$tmp/vp_gc/b.err")"; fi
+  if [[ $VA -eq 1 ]] && grep -Eq 'reserved|git checkout' "$tmp/vp_gc/a.err" && [[ ! -e "$tmp/vp_gc/a" ]]; then pass "template with $x: exit 1, nothing written"
+  else fail "template reserved $x" "VA=$VA $(head -c 120 "$tmp/vp_gc/a.err")"; fi
 done
-[[ -z "$(find "$here/prod-new/template" \( -iname .git -o -iname 'git~1' -o -name '*.' -o -name '* ' \))" ]] && pass "the real template holds no reserved path component" || fail "real template has a reserved component"
-sh_gitref() { INSTU="$1" shgit '.GIT/hooks/pre-commit'; [[ $VI -eq 1 ]]; }
+[[ -z "$(find "$here/prod-new/template" \( -iname .git -o -iname 'git~1' -o -name '*.' -o -name '* ' -o -name '*:*' \))" ]] && pass "the real template holds no reserved path component and no colon" || fail "real template has a reserved component"
 
 # B2: zero files, unreadable directory / tracked file (exit 2 in BOTH tools, one line, nothing written)
 mkmod zf '{"id":"zf","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/zf/f"
 sc_zf() { sc_rc "$1" 1 'yields no files' m36 single zf ra --; }
-sc_zf "$asm" && pass "a module that yields zero files is refused (exit 1) even when another module has files" || fail "zero files" "$(head -c 160 "$tmp/log_mu_m36.err")"
+green sc_zf && pass "a module that yields zero files is refused (exit 1) even when another module has files" || fail "zero files" "$(head -c 160 "$tmp/log_mu_m36.err")"
 if [[ "$(id -u)" -ne 0 ]]; then
   mkmod ud '{"id":"ud","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/ud/f/sub"; echo a >"$sm/ud/f/a.txt"; echo b >"$sm/ud/f/sub/b.txt"; chmod 000 "$sm/ud/f/sub"
   sc_unr() { sc_rc "$1" 2 'unreadable source' m37 single ud -- && grep -q 'ud/f/sub' "$tmp/log_mu_m37.err" && [[ "$(wc -l <"$tmp/log_mu_m37.err")" -eq 1 ]] && untouched mu_m37; }
-  sc_unr "$asm" && pass "walk: a mode-000 source directory exits 2 naming it (one line), nothing written" || fail "unreadable dir" "$(head -c 200 "$tmp/log_mu_m37.err")"
+  green sc_unr && pass "walk: a mode-000 source directory exits 2 naming it (one line), nothing written" || fail "unreadable dir" "$(head -c 200 "$tmp/log_mu_m37.err")"
   mu="$tmp/mu"; cp -R "$mx" "$mu"; chmod 000 "$mu/prod-new/template/docs/priv"
   VMX="$mu" vp_both unr s acme
-  if [[ $VA -eq 2 && $VI -eq 2 ]] && grep -q 'priv' "$tmp/vp_unr/a.err" && [[ ! -e "$tmp/vp_unr/a" ]]; then pass "unreadable template directory: both tools exit 2 (assembler names it, writes nothing)"
-  else fail "unreadable template dir" "VA=$VA VI=$VI $(head -c 160 "$tmp/vp_unr/a.err")"; fi
+  if [[ $VA -eq 2 ]] && grep -q 'priv' "$tmp/vp_unr/a.err" && [[ ! -e "$tmp/vp_unr/a" ]]; then pass "unreadable template directory: exit 2 (names it, writes nothing)"
+  else fail "unreadable template dir" "VA=$VA $(head -c 160 "$tmp/vp_unr/a.err")"; fi
   chmod 755 "$mu/prod-new/template/docs/priv"
   mkmod gtu '{"id":"gtu","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/gtu/f/sub"; echo a >"$sm/gtu/f/a.txt"; echo b >"$sm/gtu/f/sub/b.txt"
   (cd "$sm/gtu" && git init -q && git add f) >/dev/null 2>&1; chmod 000 "$sm/gtu/f/sub"
@@ -897,37 +860,36 @@ sc_changed() { dsc "$1" changed; [[ $r -eq 1 ]] && grep -q 'changed while assemb
 sc_bp()      { dsc "$1" bp; [[ $r -eq 0 && ! -s "$DS/err" && -f "$DS/dest/only-a" ]]; }
 sc_quit()    { local d="$tmp/sg_q" q; chmod -R u+rwx "$d" 2>/dev/null; rm -rf "${d:?}"; mkdir -p "$d"; (ulimit -c 0; python3 -I -B "$tmp/direct.py" "$1" sig:SIGQUIT "$d/dest" "$sm" >/dev/null 2>"$d/err"); q=$?
   [[ $q -eq 131 && "$(cat "$d/err")" == "assemble: interrupted -- nothing written" && "$(ls -A "$d")" == err ]]; }
-sc_clean "$asm" && pass "write failure + TERM at the start of the cleanup: temp dir gone, exit 1 (the failure's code), not 143" || fail "cleanup under signal" "r=$r $(head -c 200 "$DS/err") ls=$(ls -A "$DS" | tr '\n' ' ')"
-sc_commit "$asm" && pass "TERM right after the rename: exit 0, complete dest, silent (never 143 with a dest present)" || fail "TERM after rename" "r=$r $(head -c 200 "$DS/err")"
-sc_changed "$asm" && pass "dest-changed check with a TERM pending: exit 1 'changed while assembling', not 143" || fail "original cause wins" "r=$r $(head -c 200 "$DS/err")"
-sc_bp "$asm" && pass "stdout closed early (BrokenPipe) after success: exit 0, no message, dest complete" || fail "broken pipe" "r=$r $(head -c 200 "$DS/err")"
+green sc_clean && pass "write failure + TERM at the start of the cleanup: temp dir gone, exit 1 (the failure's code), not 143" || fail "cleanup under signal" "r=$r $(head -c 200 "$DS/err") ls=$(ls -A "$DS" | tr '\n' ' ')"
+green sc_commit && pass "TERM right after the rename: exit 0, complete dest, silent (never 143 with a dest present)" || fail "TERM after rename" "r=$r $(head -c 200 "$DS/err")"
+green sc_changed && pass "dest-changed check with a TERM pending: exit 1 'changed while assembling', not 143" || fail "original cause wins" "r=$r $(head -c 200 "$DS/err")"
+green sc_bp && pass "stdout closed early (BrokenPipe) after success: exit 0, no message, dest complete" || fail "broken pipe" "r=$r $(head -c 200 "$DS/err")"
 MODS="$sm" A --dest "$tmp/pipe1" --layout single --module ra 2>"$tmp/pipe1.err" | head -0; prc=${PIPESTATUS[0]}
 [[ $prc -eq 0 && ! -s "$tmp/pipe1.err" && -f "$tmp/pipe1/only-a" ]] && pass "real pipe to 'head -0': exit 0, silent, dest complete" || fail "real broken pipe" "rc=$prc $(head -c 200 "$tmp/pipe1.err")"
-sc_quit "$asm" && pass "signal SIGQUIT: exit 131, one line, nothing left" || fail "SIGQUIT"
+green sc_quit && pass "signal SIGQUIT: exit 131, one line, nothing left" || fail "SIGQUIT"
 
 # B4: umask 0777 (mkdtemp yields a mode-000 directory) and read-only trees
 mkmod ldn '{"id":"ldn","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/ldn/f/d"; echo x >"$sm/ldn/f/d/x"
 sc_mk700()  { UMK=0777 sc_rc "$1" 0 - m30 single ra -- && chmod u+rwx "$tmp/mu_m30/dest" && [[ -f "$tmp/mu_m30/dest/only-a" && -z "$(find "$tmp/mu_m30" -maxdepth 1 -name '.assemble-*')" ]]; }
 sc_umnest() { UMK=0777 sc_rc "$1" 1 'I/O error' m31 single ldn -- && [[ -z "$(find "$tmp/mu_m31" -maxdepth 1 -name '.assemble-*')" ]] && ! grep -q 'could not remove' "$tmp/log_mu_m31.err"; }
-sc_mk700 "$asm" && pass "umask 0777: mkdtemp's mode-000 dir is opened to the owner, the run completes (exit 0), no temp dir left" || fail "umask 0777" "rc=$rc $(head -c 200 "$tmp/log_mu_m30.err")"
-sc_umnest "$asm" && pass "umask 0777, nested write fails (000 directory): exit 1, the cleanup removes the unreadable tree, no .assemble-* left" || fail "umask 0777 cleanup" "rc=$rc $(head -c 200 "$tmp/log_mu_m31.err") ls=$(ls -A "$tmp/mu_m31" | tr '\n' ' ')"
+green sc_mk700 && pass "umask 0777: mkdtemp's mode-000 dir is opened to the owner, the run completes (exit 0), no temp dir left" || fail "umask 0777" "rc=$rc $(head -c 200 "$tmp/log_mu_m30.err")"
+green sc_umnest && pass "umask 0777, nested write fails (000 directory): exit 1, the cleanup removes the unreadable tree, no .assemble-* left" || fail "umask 0777 cleanup" "rc=$rc $(head -c 200 "$tmp/log_mu_m31.err") ls=$(ls -A "$tmp/mu_m31" | tr '\n' ' ')"
 # M4 / M2: directory modes, against the written-down rule (not "equal to the other tool")
 mkmod rod '{"id":"rod","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/rod/f/ro"; echo x >"$sm/rod/f/ro/x"; chmod 500 "$sm/rod/f/ro"
 sc_rodir()   { UMK=022 sc_rc "$1" 0 - m32 single rod -- && [[ "$(ls -ld "$tmp/mu_m32/dest/ro" | cut -c1-10)" == drwx------ ]]; }
 sc_unitdir() { UMK=002 sc_rc "$1" 0 - m33 monorepo up -- SERVICE=svc && [[ "$(ls -ld "$tmp/mu_m33/dest/services" | cut -c1-10)" == drwxr-xr-x && "$(ls -ld "$tmp/mu_m33/dest/services/svc" | cut -c1-10)" == drwxr-xr-x ]]; }
-sc_rodir "$asm" && pass "a 0500 source directory comes out 0700 (owner-writable: 0500 & ~umask | u+w)" || fail "u+w on directories" "rc=$rc $(ls -ld "$tmp/mu_m32/dest/ro" 2>&1 | cut -c1-10)"
-sc_unitdir "$asm" && pass "monorepo services/ and services/<svc> are 0755 & ~umask | u+w under umask 002 (drwxr-xr-x), not the umask-derived 0775" || fail "unit prefix dir mode" "rc=$rc $(ls -ld "$tmp/mu_m33/dest/services" 2>&1 | cut -c1-10)"
+green sc_rodir && pass "a 0500 source directory comes out 0700 (owner-writable: 0500 & ~umask | u+w)" || fail "u+w on directories" "rc=$rc $(ls -ld "$tmp/mu_m32/dest/ro" 2>&1 | cut -c1-10)"
+green sc_unitdir && pass "monorepo services/ and services/<svc> are 0755 & ~umask | u+w under umask 002 (drwxr-xr-x), not the umask-derived 0775" || fail "unit prefix dir mode" "rc=$rc $(ls -ld "$tmp/mu_m33/dest/services" 2>&1 | cut -c1-10)"
 
 # W1 / M1: link rules
 mkmod l0 '{"id":"l0","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/l0/f"; ln -s .. "$sm/l0/f/L"
 mkmod ll '{"id":"ll","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/ll/f/d"; ln -s .. "$sm/ll/f/d/L1"; ln -s d/L1/.. "$sm/ll/f/E"
 sc_up() { sc_rc "$1" 1 'link: L -> ..' m39 single l0 --; }
 sc_ll() { sc_rc "$1" 1 'passes through planned link d/L1' m38 single ll --; }
-sc_up "$asm" && pass "a link at the dest root whose target is exactly '..' is refused" || fail "link to .." "rc=$rc $(head -c 200 "$tmp/log_mu_m39.err")"
-sc_ll "$asm" && pass "link-through-link refused (d/L1 -> .. then E -> d/L1/..): rule = no target may pass through or end at a planned link" || fail "link through link" "rc=$rc $(head -c 200 "$tmp/log_mu_m38.err")"
+green sc_up && pass "a link at the dest root whose target is exactly '..' is refused" || fail "link to .." "rc=$rc $(head -c 200 "$tmp/log_mu_m39.err")"
+green sc_ll && pass "link-through-link refused (d/L1 -> .. then E -> d/L1/..): rule = no target may pass through or end at a planned link" || fail "link through link" "rc=$rc $(head -c 200 "$tmp/log_mu_m38.err")"
 
 # W5: macOS cp -R copies extended attributes; neither tool may
-xok=0
 if [[ "$(uname)" == Darwin ]] && command -v xattr >/dev/null 2>&1; then
   xset() { xattr -w parity.test 1 "$1" 2>/dev/null; }; xget() { xattr -l "$1" 2>/dev/null | grep -c 'parity.test' || true; }
 elif command -v setfattr >/dev/null 2>&1; then
@@ -935,34 +897,133 @@ elif command -v setfattr >/dev/null 2>&1; then
 else xset() { return 1; }; fi
 mxa="$tmp/mxa"; cp -R "$mx" "$mxa"; xf="$mxa/prod-new/template/docs/plain.md"; echo plain >"$xf"   # no slot token: sed -i would rewrite (and so strip) a slot-bearing file's xattr
 if xset "$xf" && [[ "$(xget "$xf")" == 1 ]]; then
-  xok=1; VMX="$mxa" vp_both xa s acme
-  [[ $VEQ -eq 0 && "$(xget "$tmp/vp_xa/a/docs/plain.md")" == 0 && "$(xget "$tmp/vp_xa/b/docs/plain.md")" == 0 ]] && pass "a source file with a user xattr: NEITHER output carries it, trees equal" || fail "xattr copied" "VEQ=$VEQ a=$(xget "$tmp/vp_xa/a/docs/plain.md") b=$(xget "$tmp/vp_xa/b/docs/plain.md")"
+  VMX="$mxa" vp_both xa s acme
+  [[ $VA -eq 0 && "$(xget "$tmp/vp_xa/a/docs/plain.md")" == 0 ]] && pass "a source file with a user xattr: the output carries none" || fail "xattr" "VA=$VA"
 else echo "SKIPPED xattr parity: no xattr/setfattr tool, or this filesystem refuses a user xattr"; fi
-sh_xattr() { INSTU="$1" VMX="$mxa" vp_both m40 s acme; [[ "$(xget "$tmp/vp_m40/b/docs/plain.md")" == 0 ]]; }
 
 # mutants of this round: each guard removed in a copy must turn its scenario RED
-# (the scenario has just passed on the real tool, so redk/redshk skip the second real run)
-redk walk-git-source-off '            if dotgit(n):  # SOURCE-GIT: a module directory that is a git checkout' '            if False:' sc_gsrc
-redk git-output-off '            if rc_ is not None:  # OUTPUT-GIT: whatever way the candidate list was obtained' '            if False:' sc_gout
-redk git-casefold-off '    return fold("".join(ch for ch in c if unicodedata.category(ch) != "Cf")) == ".git"' '    return "".join(ch for ch in c if unicodedata.category(ch) != "Cf") == ".git"' sc_names
-redk git-trailing-dot-space-off '    return dotgit(c) or (c not in (".", "..") and c.endswith((".", " "))) or fold(c) == "git~1"' '    return dotgit(c) or fold(c) == "git~1"' sc_names
-redk value-trailing-dot-off '[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?' '[A-Za-z0-9][A-Za-z0-9._-]*' sc_vals
-redk zero-files-off '        if not [r for r in cands if not (self_dir and r == "module.json")]:' '        if False:' sc_zf
-[[ "$(id -u)" -ne 0 ]] && redk walk-onerror-off '    for dp, dns, fns in os.walk(src, onerror=walk_error):' '    for dp, dns, fns in os.walk(src):' sc_unr
-redk cleanup-signal-mask-off '    ignore_signals()  # CLEANUP-MASK: a signal now must not abandon the removal half done' '    pass' sc_clean
-redk mkdtemp-chmod-off '        os.chmod(tmp, 0o700)  # MKDTEMP-CHMOD: under umask 0777 mkdtemp yields a mode-000 directory' '        pass' sc_mk700
-redk cleanup-dir-chmod-off '                    os.chmod(p, 0o700)' '                    pass' sc_umnest
-redk link-through-link-off '        if via is not None:' '        if False:' sc_ll
-redk link-to-dotdot-off 'or norm == ".." or norm.startswith("../")' 'or norm.startswith("../")' sc_up
-redk broken-pipe-off '    except BrokenPipeError:  # the reader went away; the tree is complete, so this is success' '    except ZeroDivisionError:' sc_bp
-redk sigquit-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGTERM", "SIGHUP")' sc_quit
-redk cause-wins-off '            ignore_signals()  # CAUSE-WINS: a pending signal must not replace the real failure' '            pass' sc_changed
-redk commit-ignore-off '            ignore_signals()  # COMMIT-IGNORE: the tree is complete; a late signal is dropped' '            pass' sc_commit
-redk unit-prefix-dir-mode-off 'dir_modes[od] = (0o755 & ~umask) | stat.S_IWUSR' 'dir_modes[od] = (0o777 & ~umask) | stat.S_IWUSR' sc_unitdir
-redk dir-u-plus-w-off 'dir_modes[od] = (dstat[sd] & ~umask) | stat.S_IWUSR' 'dir_modes[od] = dstat[sd] & ~umask' sc_rodir
-redshk shell-git-refusal-off 'if [[ -n "$reserved" ]]; then' 'if false; then' sh_gitref
-if [[ $xok -eq 1 && "$(uname)" == Darwin ]]; then redshk shell-copies-xattrs '[[ "$(uname)" == Darwin ]] && cpflags=-RX' ':' sh_xattr
-else echo "SKIPPED shell mutant shell-copies-xattrs: GNU cp does not copy xattrs, so the flag has no effect there"; fi
+red walk-git-source-off '                if env is None:  # SOURCE-GIT:' '                if False:  # SOURCE-GIT:' sc_gsrc
+red git-output-off '            if rc_ is not None:  # OUTPUT-GIT: whatever way the candidate list was obtained' '            if False:' sc_gout
+red git-casefold-off '    return fold("".join(ch for ch in c if unicodedata.category(ch) != "Cf")) == ".git"' '    return "".join(ch for ch in c if unicodedata.category(ch) != "Cf") == ".git"' sc_names
+red git-trailing-dot-space-off '(c not in (".", "..") and c.endswith((".", " ")))' 'False' sc_names
+red value-trailing-dot-off '[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?' '[A-Za-z0-9][A-Za-z0-9._-]*' sc_vals
+red zero-files-off '        if not [r for r in cands if not (self_dir and r == "module.json")]:' '        if False:' sc_zf
+[[ "$(id -u)" -ne 0 ]] && red walk-onerror-off 'os.walk(src, onerror=walk_error, followlinks=False)' 'os.walk(src, followlinks=False)' sc_unr
+red cleanup-signal-mask-off '    ignore_signals()  # CLEANUP-MASK: a signal now must not abandon the removal half done' '    pass' sc_clean
+red mkdtemp-chmod-off '        os.chmod(tmp, 0o700)  # MKDTEMP-CHMOD: under umask 0777 mkdtemp yields a mode-000 directory' '        pass' sc_mk700
+red cleanup-dir-chmod-off '                    os.chmod(p, 0o700)' '                    pass' sc_umnest
+red link-through-link-off '        if via is not None:' '        if False:' sc_ll
+red link-to-dotdot-off 'or norm == ".." or norm.startswith("../")' 'or norm.startswith("../")' sc_up
+red broken-pipe-off '        except (OSError, ValueError):
+            # a closed pipe' '        except ZeroDivisionError:
+            # a closed pipe' sc_bp
+red sigquit-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGTERM", "SIGHUP")' sc_quit
+red cause-wins-off '            ignore_signals()  # CAUSE-WINS: a pending signal must not replace the real failure' '            pass' sc_changed
+red commit-ignore-off '            ignore_signals()  # COMMIT-IGNORE: the tree is complete; a late signal is dropped' '            pass' sc_commit
+red unit-prefix-dir-mode-off 'dir_modes[od] = (0o755 & ~umask) | stat.S_IWUSR' 'dir_modes[od] = (0o777 & ~umask) | stat.S_IWUSR' sc_unitdir
+red dir-u-plus-w-off 'dir_modes[od] = (dstat[sd] & ~umask) | stat.S_IWUSR' 'dir_modes[od] = dstat[sd] & ~umask' sc_rodir
+# ======================= round 5: link targets, special entries, stdout, colon, stale temp, wrapper =======================
+# B2: a link TARGET is walked component by component against the same reserved predicate as output paths
+mkmod lt '{"id":"lt","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/lt/f"
+ln -s .git "$sm/lt/f/L1"; ln -s .git/hooks "$sm/lt/f/L2"; ln -s .GIT/hooks/pre-commit "$sm/lt/f/L3"; ln -s sub/.git "$sm/lt/f/L4"
+ln -s $'.g\xe2\x80\x8bit' "$sm/lt/f/L5"; ln -s a:b "$sm/lt/f/L6"; ln -s .git. "$sm/lt/f/L7"
+mkmod ltm '{"id":"ltm","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"unit"}}'; mkdir -p "$sm/ltm/f"; ln -s ../../.git/hooks "$sm/ltm/f/l"
+mkmod lok '{"id":"lok","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/lok/f"; ln -s .github/workflows "$sm/lok/f/l1"; ln -s .gitignore "$sm/lok/f/l2"
+sc_ltgit() { local e="$tmp/log_mu_m50.err"; sc_rc "$1" 1 'target component' m50 single lt -- \
+  && grep -q 'link: L1 -> \.git (module lt)' "$e" && grep -q 'link: L2 -> \.git/hooks' "$e" && grep -q 'link: L3 -> \.GIT/hooks/pre-commit' "$e" \
+  && grep -q 'link: L4 -> sub/\.git' "$e" && grep -q $'link: L5 -> \\.g\xe2\x80\x8bit' "$e" && grep -q 'link: L6 -> a:b' "$e" && grep -q 'link: L7 -> \.git\.' "$e" \
+  && untouched mu_m50; }
+sc_ltmono() { sc_rc "$1" 1 'target component' m51 monorepo ltm -- SERVICE=s && grep -q 'link: services/s/l -> \.\./\.\./\.git/hooks (module ltm)' "$tmp/log_mu_m51.err" && untouched mu_m51; }
+sc_ltok() { sc_rc "$1" 0 - m52 single lok -- && [[ "$(readlink "$tmp/mu_m52/dest/l1")" == .github/workflows && "$(readlink "$tmp/mu_m52/dest/l2")" == .gitignore ]]; }
+green sc_ltgit && pass "link targets naming .git (.git, .git/hooks, .GIT/hooks/pre-commit, sub/.git, zero-width, trailing dot, a colon) refused, link and target named, nothing written" || fail "link target .git" "rc=$rc $(head -c 300 "$tmp/log_mu_m50.err")"
+green sc_ltmono && pass "monorepo services/s/l -> ../../.git/hooks refused" || fail "monorepo link into .git" "rc=$rc $(head -c 200 "$tmp/log_mu_m51.err")"
+green sc_ltok && pass "links to .github/workflows and .gitignore are allowed" || fail "allowed git-like link targets" "rc=$rc $(head -c 200 "$tmp/log_mu_m52.err")"
+
+# B3: special entries and unreadable directories, one rule on both candidate paths
+for id in sw sg sgi sks; do mkmod "$id" "{\"id\":\"$id\",\"source\":\"f\",\"slots\":{},\"placement\":{\"**\":\"root\"}}"; rm -rf "${sm:?}/$id/f" "${sm:?}/$id/.git"; mkdir -p "$sm/$id/f"; echo a >"$sm/$id/f/a.txt"; done
+mkfifo "$sm/sw/f/q"                                                    # walk path (not a git work tree)
+mkfifo "$sm/sg/f/q"; (cd "$sm/sg" && git init -q && git add f/a.txt) >/dev/null 2>&1                    # git path, untracked and NOT ignored
+mkfifo "$sm/sgi/f/q"; echo q >"$sm/sgi/f/.gitignore"; (cd "$sm/sgi" && git init -q && git add f) >/dev/null 2>&1   # git path, ignored
+mkdir -p "$sm/sks/f/d"; echo b >"$sm/sks/f/d/b.txt"; (cd "$sm/sks/f/d" && python3 -I -c 'import socket; socket.socket(socket.AF_UNIX).bind("s")')   # a socket, walk path
+fast() { local t0=$SECONDS; "$@"; local r=$?; (( SECONDS - t0 <= 1 )) || { echo "slow: $((SECONDS - t0))s" >&2; return 1; }; return $r; }   # SECONDS ticks whole seconds: <= 1 means < 2 s
+sc_spw() { fast sc_rc "$1" 1 'is not a regular file' m60 single sw -- && grep -q 'sw/f/q' "$tmp/log_mu_m60.err" && untouched mu_m60; }
+sc_spg() { fast sc_rc "$1" 1 'git does not ignore it' m61 single sg -- && grep -q 'sg/f/q' "$tmp/log_mu_m61.err" && untouched mu_m61; }
+sc_spi() { fast sc_rc "$1" 0 - m62 single sgi -- && [[ -f "$tmp/mu_m62/dest/a.txt" && ! -e "$tmp/mu_m62/dest/q" ]]; }
+sc_spk() { fast sc_rc "$1" 1 'is not a regular file' m63 single sks -- && grep -q 'sks/f/d/s' "$tmp/log_mu_m63.err" && untouched mu_m63; }
+green sc_spw && pass "walk path: a FIFO in the source is refused (exit 1, named, never opened, < 2 s), nothing written" || fail "walk FIFO" "rc=$rc $(head -c 200 "$tmp/log_mu_m60.err")"
+green sc_spg && pass "git path: an untracked, not-ignored FIFO is refused (exit 1, named, < 2 s)" || fail "git FIFO" "rc=$rc $(head -c 200 "$tmp/log_mu_m61.err")"
+green sc_spi && pass "git path: a git-IGNORED FIFO is build junk: skipped, not an error" || fail "ignored FIFO" "rc=$rc $(head -c 200 "$tmp/log_mu_m62.err")"
+green sc_spk && pass "walk path: a socket in a subdirectory is refused (exit 1, named)" || fail "socket" "rc=$rc $(head -c 200 "$tmp/log_mu_m63.err")"
+if [[ "$(id -u)" -ne 0 ]]; then
+  # an UNTRACKED directory nothing can list: mode 000 and mode 0100, with and without --strict-tracked; an ignored one is junk
+  mkmod su '{"id":"su","source":"f","slots":{},"placement":{"**":"root"}}'; rm -rf "${sm:?}/su"/f "${sm:?}/su/.git"; mkdir -p "$sm/su/f/un" "$sm/su/f/ig"
+  echo a >"$sm/su/f/a.txt"; echo b >"$sm/su/f/un/b.txt"; echo c >"$sm/su/f/ig/c.txt"; echo 'ig/' >"$sm/su/f/.gitignore"
+  (cd "$sm/su" && git init -q && git add f/a.txt f/.gitignore) >/dev/null 2>&1
+  sc_unrg() { local ok=1 m
+    for m in 000 100; do chmod $m "$sm/su/f/un"; chmod 000 "$sm/su/f/ig"
+      sc_rc "$1" 2 'unreadable source' m64 single su -- && grep -q 'su/f/un' "$tmp/log_mu_m64.err" && untouched mu_m64 || ok=0
+      AFLAGS=--strict-tracked sc_rc "$1" 2 'unreadable source' m65 single su -- || ok=0
+    done
+    chmod 755 "$sm/su/f/un"; chmod 000 "$sm/su/f/ig"      # now only the IGNORED directory is unreadable: junk, skipped
+    sc_rc "$1" 0 - m66 single su -- && [[ ! -e "$tmp/mu_m66/dest/ig" ]] || ok=0
+    chmod 755 "$sm/su/f/ig"; chmod 755 "$sm/su/f/un"; [[ $ok -eq 1 ]]; }
+  green sc_unrg && pass "git path: an untracked unreadable directory (000 and 0100) is exit 2, also under --strict-tracked; an ignored one is skipped" || fail "git unreadable untracked" "rc=$rc $(head -c 200 "$tmp/log_mu_m64.err")"
+else sc_unrg() { return 0; }; fi
+
+# W: no crash with stdout closed or full; the tree is complete, so exit 0
+sc_nostdout() { local d="$tmp/so_x"; chmod -R u+rwx "$d" 2>/dev/null; rm -rf "${d:?}"; mkdir -p "$d"; python3 -I -B "$1" --modules-dir "$sm" --dest "$d/dest" --layout single --module ra >&- 2>"$d/err"; local r=$?
+  [[ $r -eq 0 && ! -s "$d/err" && -f "$d/dest/only-a" ]]; }
+sc_full() { [[ -w /dev/full ]] || return 0; local d="$tmp/sf_x"; rm -rf "${d:?}"; mkdir -p "$d"; python3 -I -B "$1" --modules-dir "$sm" --dest "$d/dest" --layout single --module ra >/dev/full 2>"$d/err"; local r=$?
+  [[ $r -eq 0 && ! -s "$d/err" && -f "$d/dest/only-a" ]]; }
+green sc_nostdout && pass "stdout CLOSED (>&-): exit 0, silent, dest complete" || fail "stdout closed"
+if [[ -w /dev/full ]]; then green sc_full && pass "stdout to /dev/full: exit 0, silent, dest complete" || fail "stdout full"; else echo "SKIPPED stdout to /dev/full: no /dev/full here"; fi
+
+# W: any colon in an output path component is refused (NTFS stream spellings of .git)
+gmod gc3 'a:b' '.git:x' '.git::$INDEX_ALLOCATION/x' 'git~1:x'
+sc_colon() { sc_rc "$1" 1 'reserved' m67 single gc3 -- && local e="$tmp/log_mu_m67.err" && grep -q "'a:b' (module gc3)" "$e" && grep -q "'.git:x' (module gc3)" "$e" \
+  && grep -q "INDEX_ALLOCATION" "$e" && grep -q "'git~1:x' (module gc3)" "$e" && untouched mu_m67; }
+green sc_colon && pass "a colon in an output path component is refused (a:b, .git:x, .git::\$INDEX_ALLOCATION, git~1:x)" || fail "colon" "rc=$rc $(head -c 300 "$tmp/log_mu_m67.err")"
+
+# W: a stale .assemble-* beside dest (a killed run): one stderr line naming it, the run continues, it is never deleted
+sc_stale() { local d="$tmp/st_x"; chmod -R u+rwx "$d" 2>/dev/null; rm -rf "${d:?}"; mkdir -p "$d/.assemble-OLD"; python3 -I -B "$1" --modules-dir "$sm" --dest "$d/dest" --layout single --module ra >"$d/out" 2>"$d/err"; local r=$?
+  [[ $r -eq 0 && -d "$d/.assemble-OLD" && -f "$d/dest/only-a" && "$(wc -l <"$d/err" | tr -d ' ')" == 1 ]] && grep -q '\.assemble-OLD' "$d/err"; }
+green sc_stale && pass "a stale .assemble-* beside dest: one stderr line names it, the run succeeds, the leftover stays" || fail "stale temp"
+
+# the golden fixture guard as a predicate, so it can be shown to REJECT a fixture that is the wrapper
+fixture_ok() { # <file>: line 1 names the freeze, the rest is the original at that commit, and it is not the wrapper
+  [[ -s "$1" && "$(head -n 1 "$1")" == *FROZEN* ]] || return 1
+  cmp -s <(tail -n +2 "$1") "$inst" && return 1
+  if git -C "$here" cat-file -e 8d911016b96ee2ec85fcdd403c6517438b9c6063 2>/dev/null; then
+    cmp -s <(tail -n +2 "$1") <(git -C "$here" show 8d911016b96ee2ec85fcdd403c6517438b9c6063:scripts/instantiate-template.sh) || return 1
+  fi
+  return 0
+}
+{ echo '# FROZEN'; cat "$inst"; } >"$tmp/fx-wrapper.txt"; { echo '# FROZEN'; echo 'echo hi'; } >"$tmp/fx-other.txt"
+if fixture_ok "$base" && ! fixture_ok "$inst" && ! fixture_ok "$tmp/fx-wrapper.txt" && ! { git -C "$here" cat-file -e 8d911016b96ee2ec85fcdd403c6517438b9c6063 2>/dev/null && fixture_ok "$tmp/fx-other.txt"; }; then
+  pass "golden fixture guard: accepts the frozen original; rejects the wrapper, the wrapper behind a FROZEN line, and (commit reachable) any other text"
+else fail "golden fixture guard"; fi
+
+# the pairing helper: a mutant whose scenario is not green on the real tool is a FAIL "unpaired", not a verdict
+sc_never() { return 1; }
+meta="$(red meta-unpaired '    if len(v) > MAX_VALUE:' '    if False:' sc_never 2>&1)"
+[[ "$meta" == *"FAIL mutant meta-unpaired: unpaired"* ]] && pass "pairing: a mutant whose scenario is not green on the real tool is reported unpaired" || fail "pairing helper accepts an unpaired mutant" "$meta"
+
+# ---- mutants of this round
+red link-target-reserved-off '                if rt is not None:  # TARGET-GIT:' '                if False:  # TARGET-GIT:' sc_ltgit
+red link-target-casefold-off '                rt = next((c for c in tgt.split("/") if reserved(c)), None)' '                rt = next((c for c in tgt.split("/") if reserved(c) and c == c.lower()), None)' sc_ltgit
+red link-target-reserved-off-monorepo '                if rt is not None:  # TARGET-GIT:' '                if False:  # TARGET-GIT:' sc_ltmono
+red special-entry-off-walk '            elif env is None:  # SPECIAL-ENTRY (walk path)' '            elif env is None:  # SPECIAL-ENTRY (walk path)
+                continue
+            elif False:' sc_spw
+red special-entry-off-git '    if suspects:  # SPECIAL-ENTRY (git path)' '    if False:  # SPECIAL-ENTRY (git path)' sc_spg
+red special-entry-ignored-not-skipped '        loose = sorted(x for x in suspects if x not in skip)' '        loose = sorted(suspects)' sc_spi
+[[ "$(id -u)" -ne 0 ]] && red unreadable-untracked-off-git '                if env is None or rel in needed or (rel + "/") not in ignored:' '                if env is None or rel in needed:' sc_unrg
+red colon-rule-off '    return (":" in c or dotgit(c)' '    return (dotgit(c)' sc_colon
+red stdout-none-guard-off '    if sys.stdout is not None:  # STDOUT-NONE' '    if True:  # STDOUT-NONE' sc_nostdout
+red stale-warning-off '    if stale:  # STALE-TMP' '    if False:  # STALE-TMP' sc_stale
+redw wrapper-monorepo 'exec python3 -I -B "$here/assemble.py" --layout single' 'exec python3 -I -B "$here/assemble.py" --layout monorepo' sc_wrap
+redw wrapper-drops-owner '--slot="OWNER=${3-mselser95}"' '--slot="OWNER=mselser95"' sc_wrap
+redw wrapper-empty-becomes-default '"SERVICE=${2-svc}"' '"SERVICE=${2:-svc}"' sc_wrap
 
 # W6: nothing of this run is left in the temp root
 tmp_after="$(tmpnames)"

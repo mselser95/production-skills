@@ -18,8 +18,8 @@ SLOT VALUES. ONE grammar for every value, checked before anything else:
   [A-Za-z0-9] and the last not `.` (`x.` is an alias of `x` on Windows): no `/`
   `\\` `&` `<` whitespace NUL newline, no leading `-` or `.`, never empty, never
   `.` or `..`, ASCII only (a byte >= 0x80 is refused)
-instantiate-template.sh enforces the same grammar and cap, so both tools accept
-and refuse exactly the same values (an EMPTY value is refused by both, exit 2).
+scripts/instantiate-template.sh is a thin wrapper over THIS tool (--layout single
+--module service-go), so it has no grammar of its own (an EMPTY value is exit 2).
 A slot may NARROW it with two FIXED options that cannot backtrack (there is no
 regex option): `max_len` (integer 1..64) and `charset` (`lower` = [a-z]+;
 `lower-digits-dash` = kebab-case [a-z0-9]+(-[a-z0-9]+)*; `identifier` =
@@ -30,7 +30,7 @@ placeholders (longest first), so a value is never re-scanned and the result does
 not depend on --slot order.
 
 Slots are literal token replacement of <NAME> in contents (bytes) and in paths,
-as instantiate-template.sh does. A literal slot ({"literal": L}, L 3 to 64
+as the original shell tool did. A literal slot ({"literal": L}, L 3 to 64
 chars, no `/`) replaces L itself, but only where L is not adjacent to [A-Za-z0-9_] on
 the sides where L starts/ends with such a character: `@acme/pkg` and `acme/x`
 hit, `acmes` and `xacme` do not (a `-` or `.` neighbour counts as a boundary).
@@ -60,14 +60,14 @@ that yields no file is refused, exit 1. Symlinks inside a module are copied AS l
 (like `cp -R`), never followed; writes use O_EXCL|O_NOFOLLOW. The template ships
 no links today.
 
-MODES (parity with instantiate-template.sh, whose `cp -R` applies the umask to
-the source mode on macOS and GNU alike): a file gets (source & ~umask) | u+w; a
+MODES (the same rule `cp -R` follows: the umask applies to the source mode on macOS
+and GNU alike): a file gets (source & ~umask) | u+w; a
 directory gets (source directory & 0777 & ~umask) | u+w, setuid/setgid/sticky
 cleared; a directory that exists only because of the monorepo placement prefix
 (`services/<SERVICE>`) gets 0755 & ~umask | u+w; the dest root gets
 0777 & ~umask | u+w. When two modules share a directory the first module's source
 directory mode wins. A directory exists only because a file or link lives in it:
-an EMPTY source directory is dropped (instantiate-template.sh removes it too).
+an EMPTY source directory is dropped (the original shell tool removed it too).
 
 INTERRUPTS. SIGINT, SIGTERM, SIGHUP and SIGQUIT remove the temp dir, print ONE
 line (`assemble: interrupted -- nothing written`) and exit 130, 143, 129 and 131.
@@ -86,7 +86,7 @@ link, path escape, collision, conflict, requires/conflicts, unused literal,
 special-mode file, reserved .git path, I/O failure while writing) - 128+N
 interrupted by signal N - 2 usage or manifest error (bad --slot, bad value, bad
 manifest) or an UNREADABLE SOURCE (a directory or file that cannot be read,
-found at plan time so nothing is written; instantiate-template.sh also exits 2).
+found at plan time so nothing is written).
 Every refusal is ONE message on stderr (plus listed items); never a traceback.
 
 MANIFEST KEYS (MANIFEST_KEYS below is the one list; unknown key -> exit 2):
@@ -122,12 +122,28 @@ GIT_CONFIG_GLOBAL=/dev/null, GIT_CONFIG_NOSYSTEM=1, -c core.excludesFile=) and
 .git/info/exclude not consulted. So these ship: every TRACKED file (working-tree
 version; tracked-but-deleted is skipped) and every UNTRACKED file that no
 .gitignore in the tree ignores. An untracked stray therefore ships; that breaks
-byte parity with instantiate-template.sh, so `--strict-tracked` refuses when any
+byte parity with `cp -R`, so `--strict-tracked` refuses when any
 untracked-not-ignored file exists in a source dir (and outside git, where
 "tracked" is undefined). It is not the default because a module under
 development is legitimately untracked; the parity selftest uses it. Outside git:
 a filesystem walk. Two modules placing the same destination is allowed only when
 kind, bytes and mode are identical after substitution, or root_merge applies.
+
+SPECIAL ENTRIES AND UNREADABLE DIRECTORIES (one rule on both candidate paths; probe()).
+ONE os.walk of the source tree, entries identified by lstat and never opened: a FIFO,
+socket or device is exit 1 naming it; a directory that cannot be listed or traversed is
+exit 2. Outside git the walk also gives the candidate list (and a `.git` is refused). In
+git the candidate LIST still comes from git, so git-ignored build output is not shipped:
+the walk visits every directory that holds a candidate or is an ancestor of one, plus
+every other directory `.gitignore` does not ignore (an untracked unreadable directory is
+an error). A special entry that git ignores (`git check-ignore`, which also reads
+.git/info/exclude) is build junk and skipped; an untracked, not-ignored one is an error.
+
+LINK TARGETS are walked component by component with the same reserved-name predicate as
+output paths (.git in any case/Unicode form, trailing dot or space, git~1, any `:`): a
+link into .git is a path to .git after `git init`. A STALE `.assemble-*` beside dest
+(a killed run) is named on one stderr line and left alone. With stdout closed (`>&-`)
+or unwritable the summary is dropped and the exit code is still 0 when the tree is done.
 """
 import argparse
 import json
@@ -228,7 +244,7 @@ def glob_re(g):
 
 
 def check_value(name, v):
-    """The value grammar and length cap, in the order instantiate-template.sh checks them."""
+    """The value grammar and length cap."""
     if len(v) > MAX_VALUE:
         die(2, "slot %s: value is %d characters; the cap is %d" % (name, len(v), MAX_VALUE))
     if not v.isascii() or VALUE_RX.fullmatch(v) is None:
@@ -258,8 +274,11 @@ def dotgit(c):
 
 def reserved(c):
     """A component no scaffold may ship: .git (any case), its NTFS aliases (a trailing dot or
-    space is dropped by Windows: `.git.` IS `.git`; `git~1` is its short name)."""
-    return dotgit(c) or (c not in (".", "..") and c.endswith((".", " "))) or fold(c) == "git~1"
+    space is dropped by Windows: `.git.` IS `.git`; `git~1` is its short name), and ANY `:`
+    (NTFS ends a name at the first `:`, so `.git:x` and `.git::$INDEX_ALLOCATION` are `.git`;
+    a `:` is not valid in a Windows checkout either, so the stricter rule costs nothing)."""
+    return (":" in c or dotgit(c) or (c not in (".", "..") and c.endswith((".", " ")))
+            or fold(c) == "git~1")
 
 
 def through_link(out, tgt, links):
@@ -377,6 +396,86 @@ def git_list(src, env, others_only):
     return [os.fsdecode(b) for b in r.stdout.split(b"\0") if b]
 
 
+def git_ignored(src, env):
+    """The paths git ignores under src, directories collapsed (`target/`); one process."""
+    r = subprocess.run(["git", "-c", "core.excludesFile=", "-C", src, "ls-files", "-z", "--others",
+                        "--ignored", "--directory", "--exclude-per-directory=.gitignore", "--", "."],
+                       capture_output=True, env=env)
+    if r.returncode != 0:
+        die(1, "git ls-files --ignored failed in %s" % src)
+    return {os.fsdecode(b) for b in r.stdout.split(b"\0") if b}
+
+
+def git_check_ignore(src, env, rels):
+    """The subset of rels git ignores (untracked ones only: a tracked path is never ignored)."""
+    r = subprocess.run(["git", "-c", "core.excludesFile=", "-C", src, "check-ignore", "-z", "--stdin"],
+                       input=b"\0".join(os.fsencode(x) for x in rels) + b"\0",
+                       capture_output=True, env=env)
+    if r.returncode not in (0, 1):
+        die(1, "git check-ignore failed in %s" % src)
+    return {os.fsdecode(b) for b in r.stdout.split(b"\0") if b}
+
+
+def probe(src, mid, env=None, needed=None):
+    """ONE os.walk of a module's source tree, nothing skipped silently, nothing opened (lstat only).
+    Refuses (exit 1) an entry that is not a regular file, a directory or a symlink (FIFO, socket,
+    device) and (exit 2) a directory it cannot list or traverse. Outside git (env None) the walk
+    also gives the candidate list and refuses a `.git`. On the git path the candidate list comes
+    from git (so ignored build output is not shipped); the walk visits every directory that holds
+    a candidate or is an ancestor of one (`needed`) and every other directory git does not ignore
+    (an untracked unreadable directory, or one holding only a FIFO, is an error); a special entry
+    or an unreadable directory that git IGNORES is build junk and is skipped. Returns the files."""
+    ignored = git_ignored(src, env) if env is not None else set()
+    suspects, files = [], []
+
+    def walk_error(e):
+        unreadable(e.filename, e)
+
+    for dp, dns, fns in os.walk(src, onerror=walk_error, followlinks=False):
+        reld = os.path.relpath(dp, src)
+        reld = "" if reld == "." else reld.replace(os.sep, "/")
+        if not os.access(dp, os.R_OK | os.X_OK):
+            unreadable(dp, PermissionError(13, "Permission denied"))
+        dns.sort()
+        descend = []
+        for n in dns + sorted(fns):
+            if dotgit(n):
+                if env is None:  # SOURCE-GIT: a module directory that is a git checkout
+                    die(1, "module %s: source tree %s contains %r: a module directory that is itself a "
+                        "git checkout is a packaging mistake (a planted .git/hooks file would run on the "
+                        "user's next git command); nothing written" % (mid, src, os.path.join(dp, n)))
+                continue  # on the git path a .git is never listed, never entered
+            full = os.path.join(dp, n)
+            rel = (reld + "/" + n) if reld else n
+            try:
+                m = os.lstat(full).st_mode
+            except OSError as e:
+                unreadable(full, e)
+            if stat.S_ISLNK(m):
+                if env is None:
+                    files.append(rel)
+            elif stat.S_ISDIR(m):
+                if env is None or rel in needed or (rel + "/") not in ignored:
+                    descend.append(n)
+            elif stat.S_ISREG(m):
+                if env is None:
+                    files.append(rel)
+            elif env is None:  # SPECIAL-ENTRY (walk path)
+                die(1, "module %s: %s is not a regular file, directory or link (FIFO, socket or device); "
+                    "refused, never opened; nothing written" % (mid, full))
+            else:
+                suspects.append(rel)
+        dns[:] = descend
+    if suspects:  # SPECIAL-ENTRY (git path): only what git ignores is junk
+        skip = git_check_ignore(src, env, suspects)
+        loose = sorted(x for x in suspects if x not in skip)
+        if loose:
+            die(1, "module %s: %s is not a regular file, directory or link (FIFO, socket or device) and "
+                "git does not ignore it; refused, never opened; nothing written"
+                % (mid, os.path.join(src, loose[0])))
+    return files
+
+
 def candidates(src, strict, mid):
     """Relative paths of files (and symlinks) under src, sorted."""
     env = git_env()
@@ -406,22 +505,13 @@ def candidates(src, strict, mid):
             if stat.S_ISDIR(st.st_mode):
                 continue  # a submodule
             out.add(rel)
+        needed = {""}
+        for rel in out:
+            parts = rel.split("/")[:-1]
+            needed.update("/".join(parts[:k + 1]) for k in range(len(parts)))
+        probe(src, mid, env, needed)
         return sorted(out)
-
-    def walk_error(e):
-        unreadable(e.filename, e)
-
-    entries = []
-    for dp, dns, fns in os.walk(src, onerror=walk_error):
-        dns.sort()
-        for n in dns + fns:
-            if dotgit(n):  # SOURCE-GIT: a module directory that is a git checkout
-                die(1, "module %s: source tree %s contains %r: a module directory that is itself a "
-                    "git checkout is a packaging mistake (a planted .git/hooks file would run on the "
-                    "user's next git command); nothing written" % (mid, src, os.path.join(dp, n)))
-        for n in sorted(fns) + [d for d in dns if os.path.islink(os.path.join(dp, d))]:
-            entries.append(os.path.relpath(os.path.join(dp, n), src))
-    return sorted(entries)
+    return sorted(probe(src, mid))
 
 
 def load_manifest(mid, mdir):
@@ -696,6 +786,12 @@ def run():
                 if os.path.isabs(tgt) or "\0" in tgt or norm == ".." or norm.startswith("../"):
                     bad_link.append("%s -> %s (module %s)" % (out, tgt, mid))
                     continue
+                rt = next((c for c in tgt.split("/") if reserved(c)), None)
+                if rt is not None:  # TARGET-GIT: a link INTO .git is a path to .git after `git init`
+                    bad_link.append("%s -> %s (module %s): target component %r is reserved (.git in "
+                                    "any case, a trailing dot or space, git~1, a colon)"
+                                    % (out, tgt, mid, rt))
+                    continue
                 ent = {"kind": "link", "data": tgt, "mode": 0}
             elif stat.S_ISREG(st.st_mode):
                 if st.st_mode & SPECIAL:
@@ -817,6 +913,10 @@ def run():
     anc = os.path.dirname(dest_abs)
     while not os.path.lexists(anc):
         anc = os.path.dirname(anc)
+    stale = sorted(n for n in os.listdir(anc) if n.startswith(".assemble-")) if os.path.isdir(anc) else []
+    if stale:  # STALE-TMP: a killed run's leftover; named, never deleted
+        sys.stderr.write("assemble: stale temp dir(s) from an earlier killed run beside dest, left alone: %s\n"
+                         % ", ".join(os.path.join(anc, n) for n in stale[:5]))
     try:
         block(True)  # no signal between mkdtemp and the assignment that lets cleanup() remove it
         try:
@@ -841,14 +941,17 @@ def run():
             block(False)
     finally:
         cleanup()
-    try:
-        print("assemble: ok -- %d file(s), layout %s, slots remaining: 0" % (len(plan), a.layout))
-        sys.stdout.flush()
-    except BrokenPipeError:  # the reader went away; the tree is complete, so this is success
+    if sys.stdout is not None:  # STDOUT-NONE: `>&-` leaves no sys.stdout; the tree is complete either way
         try:
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            print("assemble: ok -- %d file(s), layout %s, slots remaining: 0" % (len(plan), a.layout))
+            sys.stdout.flush()
         except (OSError, ValueError):
-            pass
+            # a closed pipe, a full disk (/dev/full): the summary is lost, the tree is complete, so
+            # this is success; point fd 1 at /dev/null so the flush at exit cannot fail again
+            try:
+                os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            except (OSError, ValueError):
+                pass
 
 
 def main():
