@@ -19,7 +19,7 @@ Codex: exported `CODEX_API_KEY` (no file at all), else the real `auth.json` is c
 
 **Credential contract (Codex), nothing leaves the cell.** (1) The copy is made once, before the CLI starts, with
 `O_NOFOLLOW` (a symlinked or non-regular real `auth.json` is refused, exit 78), into a NEW file, mode 0600. (2) It is **never
-written back**, with or without the sandbox. (3) It is deleted after the CLI exits and on every exit path (EXIT, TERM, INT, HUP).
+written back**, with or without the sandbox. (3) It is scrubbed after the CLI exits and on the exit paths listed under **Scrub** below (NOT "every exit path": SIGKILL is not one).
 **Write-back history:** the adapter used to write a changed copy back to the real file so a refresh token rotated mid-cell was not lost. The
 agent owns the cell home, so it chose the bytes of the user's real login: `echo '{"tokens":"X"}' >$HOME/auth.json`, or `ln -s ~/.ssh/id $HOME/auth.json`
 (the adapter followed the link, the next cell read the key). Closed by deleting the write-back (selftest 14n, 14v, 14v2, 14v4).
@@ -28,7 +28,42 @@ agent owns the cell home, so it chose the bytes of the user's real login: `echo 
 no write, mv-over, ln -sf, rm, link or chmod works); whether Codex STARTS with a read-only auth file is NOT VALIDATED (needs one paid run), hence off by default.
 **Results.** The answer and the usage are parsed from the stdout/stderr the ADAPTER captured into its own `sbx.*` dir (never re-allowed), not from any file in the
 cell home (the old `.eval-codex.jsonl`, `-last.txt`, `.eval-claude.json` could be forged by rename-over; selftest 19x, 19x2). Codex's `-o` is no longer passed.
-**Grader.** It runs OUTSIDE the sandbox, so a `workspace-write` task (the agent writes the tree the grader executes) is refused: row `error:"grader-unconfined"`, `pass:false` (selftest 19y); a sandboxed grader is a later task.
+**Scrub (the agent writes the cell home, so it can make the copy undeletable).** The agent may `chmod 000` / `500` a directory, `chflags uchg` a file (settable
+under the profile: probed), or `ln` the credential to another name in its tmp/gocache. Sequence, in order: (1) **permission reset** from outside (`lib/scrub.py reset`: owner-rwx
+on every directory, immutable flags cleared, symlinks never followed); (2) **fd wipe**: at staging, `lib/scrub.py hold` keeps an open descriptor on the staged INODE in a small
+background process (pid in `sbx.*/holder.pid`); closing the adapter's end of its FIFO (or SIGTERM/HUP/INT, or the adapter dying) makes it overwrite with zeros, `ftruncate(0)` and
+`fsync` through that descriptor, which destroys the bytes for EVERY hard link whatever its name or directory mode (a write through an open fd works even with `uchg`: probed);
+(3) **unlink** the name; (4) **cell removal** by `run.sh` (reset, `rm -rf`, one retry) of `home gocache celltmp work sbx.*` BEFORE the row is written; (5) **verification**:
+the path must not exist; (6) **error path**: anything that remains gives row `error:"scrub-failed: <path>"`, `run.sh` exit 4 (a live loop STOPS), and a loud `SCRUB FAILED` stderr
+line naming the directory that may still hold a credential copy; the adapter exits 80 and prints the same. An agent's own `cp` of the credential is a different inode: it lives
+until the cell removal (which the reset makes reliable) and is the one reason for steps 4-6. Scrubbing runs on normal exit, a failing CLI, a timeout (limited.py kills the group,
+the holder wipes on SIGTERM), TERM/INT/HUP of the adapter or `run.sh`, and `EVAL_KEEP=1` (dirs kept, credential never). **A SIGKILL of both adapter and `run.sh` is NOT covered
+by the trap**: the holder sees EOF on its FIFO and wipes the content when the adapter dies (so the file is empty), but a 0600 file and the cell dir remain until the next harness
+start: every `run.sh` start runs a **startup sweep**: `eval-cell.*` dirs it owns (same uid, real directory, never a symlink, name prefix only) under its temp root older than
+`EVAL_SWEEP_MINUTES` (default 180, minimum 30), without a `.eval-keep` marker, are removed with the same reset-then-remove and listed on stderr; anything else is never touched
+(selftest 21h). Claude: nothing secret is written into the cell (the token is in the environment only, passed by name); `run.sh` still removes a `.credentials.json` there.
+Whether the Claude CLI persists a token into its config dir on its own is NOT VALIDATED without a model run.
+**Grader.** It runs OUTSIDE the sandbox, so it only ever reads a workdir the agent could not write. One predicate, `grade_ok` in `run.sh`, used BEFORE the host starts (no model call
+is spent on a cell that cannot be graded; `lib/live.sh` asks `run.sh --preflight` and skips such cells with a reason) and again after it:
+
+| sandbox of the cell | `agent_mode` | graded? |
+|---|---|---|
+| `seatbelt` | `read-only` | yes (the profile denies every write to the workdir), subject to the tamper check |
+| `n/a` (the stub host, no agent) | `read-only` | yes, subject to the tamper check |
+| `seatbelt`, `n/a` | `workspace-write` | no: `grader-unconfined`, host never started |
+| `off` (`EVAL_CLAUDE_NO_SANDBOX`/`EVAL_NO_SANDBOX`) or `codex` (`EVAL_NO_SANDBOX` on Codex: its `-s workspace-write` makes the workdir writable in EVERY mode) | any | no: `grader-unconfined`, host never started |
+
+Tamper check: the digest of the workdir's git metadata (everything under `.git` except objects/index/logs/refs/packed-refs, plus every `.gitattributes` and `.gitmodules`) is taken after the workdir
+is prepared and BEFORE the CLI starts and compared after it; a difference gives `workdir-tampered`, no grading. The grader's git runs neutralised (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`,
+env-injected `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.sshCommand`, `core.pager`, `core.editor`, `core.attributesFile`, `credential.helper`, `protocol.ext.allow=never`, `GIT_EXTERNAL_DIFF`): that list can
+not be complete (`diff.external`, `filter.*`, aliases, `include.path` ... live in the repo-local config), so the digest is the control and the env is defence in depth. `EVAL_SKIP_GRADER=1` runs
+the host without grading (tests of the host wiring; row `grader-skipped`); `live.sh` refuses it. **NOT done:** the grader is not itself run under a read-only seatbelt profile (next task).
+The only git runs inside a cell after the CLI starts are the grader's (`ls-files -s`, `status`); the harness's own (`workdir.sh` init/commit, `fixture.setup.sh`, `--exec-path`, `git log` of the harness repo) run before the CLI or outside the cell.
+**Stream integrity (Codex).** `lib/parse_codex.py` accepts exactly one terminal `turn.completed` and nothing after it, and one final agent message after the last tool call; otherwise exit 3, row `error:"stream-trailing-data"`,
+no answer, no usage. RESIDUAL: a tool shares the CLI's stdout, so it can write well-formed events BEFORE the terminal event and the harness cannot tell them from the CLI's own; usage numbers are therefore "as reported by the CLI process tree".
+**Processes outliving the cell.** The CLI's stdout is read by `lib/limited.py --capture` (outside the cell); after the CLI's process group is killed the pipe gets ONE 2 s grace and is closed;
+if it was still held, row `error:"orphan-process"` (adapter exit 81). Not fixable here: seatbelt has no operation that denies `setsid`, and the CLI must fork, so a determined agent can leave a sandboxed,
+network-capable process running until it exits or the user logs out; one that does not hold the stdout pipe is undetectable (no pid is known).
 
 **Confinement (`agent_mode`).** On macOS BOTH hosts run under ONE seatbelt profile (`sandbox-exec -f`,
 generated per cell by `lib/seatbelt.py`, same `agent_mode` semantics), so their rows are comparable
