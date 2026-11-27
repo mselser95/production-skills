@@ -46,29 +46,53 @@ BASELINE="${MUTATION_BASELINE_FILE:-benchmarks/mutation-baseline.md}"
 # Counts come from RUNNING each selftest, never from grepping it for `check`
 # calls: a case that is present in the source and never reached is exactly what
 # this is supposed to notice, and a static count would report it as covered.
-declare -a NAMES=() COUNTS=()
-total=0
+#
+# "Running" no longer means a second, third and fourth run of every suite per CI job.
+# `make selftests` already runs each suite once, through scripts/run-once.sh, which
+# stores the suite's own count next to its exit code. CHECK mode takes the count from
+# that line when run-once.sh vouches for it -- the same suite path, the same command
+# string, a zero exit, the same tree identity (HEAD, clean or dirty content hash), the
+# same run id, within the age limit, no conflicting duplicate -- and executes the suite
+# itself when there is no such line. A count is therefore still the number a suite
+# EXECUTED, only measured once. --write is a maintainer action and always executes.
+declare -a NAMES=() COUNTS=() TID=() TCNT=()
+total=0; nt=0; from_pass=0
+if [[ "${1:-}" != "--write" ]]; then
+  while IFS=$'\t' read -r cid ccmd ccnt; do
+    [[ "$cid" == selftest:* && "$ccmd" == "bash ${cid#selftest:}" && "$ccnt" =~ ^[0-9]+$ ]] || continue
+    TID[nt]="${cid#selftest:}"; TCNT[nt]="$ccnt"; nt=$((nt+1))
+  done < <(bash scripts/run-once.sh counts 2>/dev/null)
+fi
 # MUTATION_BASELINE_SUITES (selftest only) is a word list of suite paths
 SUITES=(_shared/probes/*-selftest.sh _shared/probes/tests/*-selftest.sh scripts/tests/*-selftest.sh)
 [[ -n "${MUTATION_BASELINE_SUITES:-}" ]] && read -ra SUITES <<<"$MUTATION_BASELINE_SUITES"
 for t in "${SUITES[@]}"; do
   [[ -f "$t" ]] || continue
   name="$(basename "$t")"
-  out=$(bash "$t" 2>&1); rc=$?
-  if (( rc != 0 )); then
-    echo "mutation-baseline: $name FAILED (rc=$rc) -- counting cases from a failing" >&2
-    echo "  suite would record a number nobody can trust. Fix the selftest first." >&2
-    exit 2
+  n=""; i=0
+  while (( i < nt )); do
+    if [[ "${TID[i]}" == "$t" ]]; then n="${TCNT[i]}"; from_pass=$((from_pass+1)); break; fi
+    i=$((i+1))
+  done
+  if [[ -z "$n" ]]; then
+    out=$(bash "$t" 2>&1); rc=$?
+    if (( rc != 0 )); then
+      echo "mutation-baseline: $name FAILED (rc=$rc) -- counting cases from a failing" >&2
+      echo "  suite would record a number nobody can trust. Fix the selftest first." >&2
+      exit 2
+    fi
+    # Every selftest here ends with a summary carrying its own case count. Take the
+    # first integer of the last line that has one, so a suite that changes its
+    # wording still reports.
+    # The number that PRECEDES `ok` or `case`, anywhere on the line -- suites word
+    # their summary differently ("12 ok, 0 failed", "60 case(s), every verdict...",
+    # "probe-self gate selftest: 29 ok"). Anchoring at line start missed the last
+    # of those, and matching any integer would have picked up the "0 failed".
+    # run-once.sh carries the same expression for the recorded path;
+    # scripts/tests/run-once-selftest.sh pins that the two agree.
+    n=$(printf '%s\n' "$out" | grep -oE '[0-9]+ (ok|case)' | tail -1 | grep -oE '^[0-9]+')
+    [[ -n "$n" ]] || { echo "mutation-baseline: cannot read a case count from $name" >&2; exit 2; }
   fi
-  # Every selftest here ends with a summary carrying its own case count. Take the
-  # first integer of the last line that has one, so a suite that changes its
-  # wording still reports.
-  # The number that PRECEDES `ok` or `case`, anywhere on the line -- suites word
-  # their summary differently ("12 ok, 0 failed", "60 case(s), every verdict...",
-  # "probe-self gate selftest: 29 ok"). Anchoring at line start missed the last
-  # of those, and matching any integer would have picked up the "0 failed".
-  n=$(printf '%s\n' "$out" | grep -oE '[0-9]+ (ok|case)' | tail -1 | grep -oE '^[0-9]+')
-  [[ -n "$n" ]] || { echo "mutation-baseline: cannot read a case count from $name" >&2; exit 2; }
   NAMES+=("$name"); COUNTS+=("$n"); total=$((total + n))
 done
 
@@ -135,4 +159,5 @@ if (( fell > 0 )); then
   exit 1
 fi
 
+(( from_pass == 0 )) || echo "mutation-baseline: $from_pass of ${#NAMES[@]} suite count(s) read from the single recorded pass, the rest executed"
 echo "mutation-baseline: ${#NAMES[@]} suite(s), $total case(s), none fell"

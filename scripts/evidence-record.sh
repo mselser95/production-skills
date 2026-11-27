@@ -23,9 +23,39 @@
 # So a dirty tree gets a name that cannot be mistaken for an attestation, and
 # carries tree_clean:false.
 #
+# ATTEST MODE (`--attest`, what `make evidence` passes)
+#
+# This record used to EXECUTE every gate below, although almost all of them had
+# already run earlier in the same CI job (`make check-fast`, `make selftests`):
+# 484 of the job's 847 seconds, spent proving what was already proven. The property
+# the repetition protected, written into the workflow next to this step, was that a
+# record assembled from another step's exit codes attests to what the YAML says ran,
+# not to what ran. It is kept by a different mechanism: the Makefile runs each gate
+# through scripts/run-once.sh, which is the thing that executes it and writes one line
+# (command string, exit code, output hash, tree identity, run id, time). In attest mode a
+# gate is taken from that file ONLY when a well-formed line exists for the same id, the
+# same command string, the same tree identity (HEAD, clean or dirty, and the dirty
+# content hash) and the same run, within the age limit, with no conflicting duplicate.
+# Anything else -- no file, an empty one, a malformed one, another HEAD, another command
+# string, a dirtied tree, conflicting lines -- falls back to EXECUTING the gate here, as
+# before, and the record says so. A recorded non-zero exit makes the record fail exactly
+# as an executed failure does. Every gate in the record carries `source`: executed or
+# attested, and an attested one names the results-file line it came from.
+#
+# Usage: evidence-record.sh [--attest] [--check-wiring]
+#   --check-wiring  run the two guards below and stop (exit 0 = consistent)
 # Exit: 0 every gate passed · 1 a gate failed (recorded, then reported) · 2 refused
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.." || exit 2
+
+attest=0; check_wiring=0
+for a in "$@"; do
+  case "$a" in
+    --attest) attest=1 ;;
+    --check-wiring) check_wiring=1 ;;
+    *) echo "evidence-record: unknown argument '$a'" >&2; exit 2 ;;
+  esac
+done
 
 command -v python3 >/dev/null || { echo "evidence-record: python3 required for JSON escaping" >&2; exit 2; }
 
@@ -75,7 +105,7 @@ if [[ -r Makefile ]]; then
     [[ -n "$probe" ]] || continue
     grep -qF "$probe" <<<"$gates_text" || uncovered+=("$probe")
   done < <(sed -n '/^gates:/,/^$/p' Makefile | grep -vE '^[[:space:]]*#' \
-             | grep -oE '[A-Za-z0-9_./$()-]+\.sh' | sed 's|.*/||' | sort -u)
+             | grep -oE '[A-Za-z0-9_./$()-]+\.sh' | sed 's|.*/||' | grep -vx 'run-once.sh' | sort -u)
   if (( ${#uncovered[@]} > 0 )); then
     echo "evidence-record: ${#uncovered[@]} gate(s) run by \`make gates\` are absent from this script's GATES list:" >&2
     printf '  uncovered: %s\n' "${uncovered[@]}" >&2
@@ -84,6 +114,35 @@ if [[ -r Makefile ]]; then
     exit 2
   fi
 fi
+
+# SECOND GUARD: attesting only works when `make gates` runs a gate under the SAME id
+# and command string this list holds for it. A drift between the two is not unsafe
+# (the gate is simply not attested and runs twice) but it silently brings the double
+# execution back, so it is refused here rather than discovered in the job's duration.
+# `make -n` prints the expanded recipe without running it (gates uses no $(MAKE)).
+if [[ -r Makefile ]] && grep -qE '^gates:' Makefile; then
+  mk_plan=$(make --no-print-directory -n gates 2>&1) || {
+    echo "evidence-record: \`make -n gates\` failed, cannot cross-check the run-once ids:" >&2
+    printf '%s\n' "$mk_plan" | tail -5 >&2; exit 2; }
+  drifted=()
+  while IFS= read -r line; do
+    [[ "$line" == "bash scripts/run-once.sh "* ]] || continue
+    rest=${line#bash scripts/run-once.sh }
+    [[ "$rest" == *" -- "* ]] || continue
+    rid=${rest%% -- *}; rcmd=${rest#* -- }
+    for g in "${GATES[@]}"; do
+      [[ "${g%%|*}" == "$rid" ]] || continue
+      [[ "${g#*|}" == "$rcmd" ]] || drifted+=("$rid: make gates runs [$rcmd], GATES holds [${g#*|}]")
+    done
+  done <<<"$mk_plan"
+  if (( ${#drifted[@]} > 0 )); then
+    echo "evidence-record: ${#drifted[@]} gate(s) run by \`make gates\` under a different command string than GATES:" >&2
+    printf '  drift: %s\n' "${drifted[@]}" >&2
+    echo "  Attest would never match them: they would run twice again. Make the two strings identical." >&2
+    exit 2
+  fi
+fi
+(( check_wiring == 0 )) || { echo "evidence-record: wiring consistent (${#GATES[@]} gates)"; exit 0; }
 
 jstr() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'; }
 
@@ -102,11 +161,13 @@ sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # Reproduced locally: with the tree otherwise clean, `git status --porcelain`
 # returned exactly `?? .prod/evidence/`.
 #
+# .evidence is the same kind of thing: the results file run-once.sh appends to.
+#
 # Everything else still counts, and is NAMED in the record: a bare
 # tree_clean:false says the attestation is void and gives nobody a way to find
 # out why. Measured 2026-08-29 on CI run 33284769197, whose artifact was
 # dirty-d480857-*.json from a fresh checkout with no way to tell what touched it.
-dirty_paths=$(git status --porcelain 2>/dev/null | grep -vE '^\?\? \.prod/evidence/?$' | head -20)
+dirty_paths=$(git status --porcelain 2>/dev/null | grep -vE '^\?\? (\.prod/evidence|\.evidence)/?$' | head -20)
 if [[ -n "$dirty_paths" ]]; then
   tree_clean=false
   record=".prod/evidence/dirty-${sha}-$(date -u +%Y%m%dT%H%M%SZ).json"
@@ -116,42 +177,37 @@ else
 fi
 mkdir -p .prod/evidence || exit 2
 
-passes=0; fails=0
+passes=0; fails=0; n_exec=0; n_att=0
 declare -a LINES=()
 for g in "${GATES[@]}"; do
   name="${g%%|*}"; cmd="${g#*|}"
-  out=$(eval "$cmd" 2>&1); rc=$?
-  # The last non-empty UNINDENTED line. Every gate here ends with its own summary
-  # at column 0 ("52 keys -- 52 scored", "TCB verified: 309 files") and puts
-  # detail underneath it indented. A plain `tail -1` captured the DETAIL instead:
-  # probe-wiring's record read "excused: verify-standard.sh ..." rather than
-  # "13 invoked + 1 declared-exception of 15", which is the number a reader
-  # actually wants. Measured on the first run of this script.
-  #
-  # A record holding rc and no evidence is a boolean pretending to be an
-  # attestation, so a gate that prints nothing on success is a gate to invoke
-  # through its Makefile target instead -- `make actionlint` says "workflows
-  # valid", bare actionlint says nothing at all.
-  # make's own recursion chatter is filtered as well as suppressed. CI runs GNU
-  # make 4.x, which prints `make[1]: Entering/Leaving directory '...'` around
-  # every sub-make; those lines are unindented, so the rule above picked THEM as
-  # the summary. Measured on run 33284769197: three of nine gates recorded
-  # "make[1]: Leaving directory '/home/runner/work/production-skills/...'" as
-  # their evidence -- the record failing at its one job while the step showed
-  # green.
-  #
-  # --no-print-directory is passed to those gates too, but it is not enough on
-  # its own to rely on: macOS ships GNU make 3.81, which does not emit the lines
-  # at all, so the flag's effect CANNOT be observed on the machine this was
-  # written on. A filter can be, and is, below.
-  ev=$(printf '%s\n' "$out" \
-        | grep -vE "^make(\\[[0-9]+\\])?: (Entering|Leaving) directory" \
-        | grep -vE '^[[:space:]]*$|^[[:space:]]+' | tail -1)
-  [[ -n "$ev" ]] || ev=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
-  [[ -n "$ev" ]] || ev="(gate produced no output; verdict from exit code $rc alone)"
+  src=executed; why=""; rline=null; from=""
+  if (( attest )); then
+    res=$(bash scripts/run-once.sh resolve "$name" "$cmd")
+    IFS=$'\t' read -r kind r1 r2 r3 r4 r5 r6 <<<"$res"
+    if [[ "$kind" == attested ]]; then
+      src=attested; rc=$r1; rline=$r2; ev=$r6
+      from=$(printf '{ "results_file": %s, "line": %s, "duration_ms": %s, "output_sha256": "%s", "recorded_utc": "%s" }' \
+        "$(jstr "${EVIDENCE_RESULTS:-.evidence/results.tsv}")" "$r2" "$r3" "$r4" "$r5")
+    else
+      why="${r1:-unresolved}"
+    fi
+  fi
+  if [[ "$src" == executed ]]; then
+    out=$(eval "$cmd" 2>&1); rc=$?
+    # the one-line evidence is cut by run-once.sh's summary, the same code that wrote
+    # the evidence column of the results file, so both sources read alike
+    ev=$(printf '%s\n' "$out" | bash scripts/run-once.sh summary "$rc")
+    n_exec=$((n_exec+1))
+  else
+    n_att=$((n_att+1))
+  fi
   if (( rc == 0 )); then verdict=PASS; passes=$((passes+1)); else verdict=FAIL; fails=$((fails+1)); fi
-  printf '  %-24s %-4s %s\n' "$name" "$verdict" "${ev:0:96}"
-  LINES+=("    { \"gate\": $(jstr "$name"), \"command\": $(jstr "$cmd"), \"verdict\": \"$verdict\", \"evidence\": $(jstr "$ev") }")
+  printf '  %-24s %-4s %-8s %s\n' "$name" "$verdict" "$src" "${ev:0:84}"
+  extra=""
+  [[ -z "$from" ]] || extra=", \"attested_from\": $from"
+  [[ -z "$why" ]] || extra="$extra, \"why_executed\": $(jstr "$why")"
+  LINES+=("    { \"gate\": $(jstr "$name"), \"command\": $(jstr "$cmd"), \"verdict\": \"$verdict\", \"source\": \"$src\", \"results_line\": $rline, \"evidence\": $(jstr "$ev")${extra} }")
 done
 
 {
@@ -162,7 +218,8 @@ done
   printf '  "spec": "production.yaml",\n'
   printf '  "tier": "%s",\n' "$(grep -m1 -E '^[[:space:]]*tier:' production.yaml 2>/dev/null | tr -d ' ' | cut -d: -f2)"
   printf '  "toolchain_note": "verify-standard.sh is Go-only and refuses to run in this repo; these gates are its equivalent here",\n'
-  printf '  "totals": { "pass": %d, "fail": %d },\n' "$passes" "$fails"
+  printf '  "attest_mode": %s,\n' "$([[ $attest == 1 ]] && echo true || echo false)"
+  printf '  "totals": { "pass": %d, "fail": %d, "executed": %d, "attested": %d },\n' "$passes" "$fails" "$n_exec" "$n_att"
   printf '  "gates": [\n'
   first=1
   for l in "${LINES[@]}"; do [[ $first -eq 1 ]] || printf ',\n'; first=0; printf '%s' "$l"; done
@@ -172,4 +229,4 @@ done
 echo "evidence record: $record"
 [[ "$tree_clean" == true ]] || echo "  (working tree DIRTY: this record is NOT an attestation for commit $sha)"
 (( fails == 0 )) || { echo "VERDICT: INCOMPLETE -- $fails gate(s) failed; each is a finding, not a reason to soften the gate." >&2; exit 1; }
-echo "VERDICT: COMPLETE -- ${passes}/${#GATES[@]} gates passed"
+echo "VERDICT: COMPLETE -- ${passes}/${#GATES[@]} gates passed (${n_att} attested, ${n_exec} executed)"
