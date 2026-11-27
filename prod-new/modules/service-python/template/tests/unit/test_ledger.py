@@ -1,6 +1,11 @@
 import pytest
 
-from <PACKAGE>.domain.errors import InsufficientFunds, InvalidEvent
+from <PACKAGE>.domain.errors import (
+    AmountLimitExceeded,
+    InsufficientFunds,
+    InvalidEvent,
+    ZeroAmount,
+)
 from <PACKAGE>.domain.ledger import (
     Event,
     EventType,
@@ -10,7 +15,10 @@ from <PACKAGE>.domain.ledger import (
     conserved,
     replay,
 )
-from <PACKAGE>.domain.money import Amount
+from <PACKAGE>.domain.money import (
+    MAX_MINOR,
+    Amount,
+)
 
 
 def deposit(event_id: str, minor: int) -> Event:
@@ -73,3 +81,22 @@ def test_conserved_detects_a_state_that_disagrees_with_its_log() -> None:
 def test_an_event_needs_a_bounded_non_empty_id(bad_id: str) -> None:
     with pytest.raises(InvalidEvent):
         deposit(bad_id, 1)
+
+
+# provenance: derived
+# verifies: units_ledger/conservation
+def test_a_zero_amount_event_is_refused_for_both_kinds() -> None:
+    with pytest.raises(ZeroAmount):
+        deposit("a", 0)
+    with pytest.raises(ZeroAmount):
+        withdraw("a", 0)
+
+
+# provenance: derived
+# verifies: units_ledger/conservation
+def test_a_deposit_past_the_bound_is_refused_and_leaves_the_state_alone() -> None:
+    state = replay([deposit("a", MAX_MINOR)])
+    with pytest.raises(AmountLimitExceeded):
+        apply(state, deposit("b", 1))
+    assert state.balance == Amount(MAX_MINOR)
+    assert state.version == 1

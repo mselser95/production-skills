@@ -8,5 +8,6 @@ tests/architecture/test_boundaries.py):
     adapters  inbound (HTTP) and outbound (stores); the shell
     platform  clock, ids, config (the only reader of the environment), observability
 
-The composition root is ``<PACKAGE>.__main__``: the one module that sees them all.
+The composition root is the package's ``__main__`` module: the one module that sees them
+all.
 """

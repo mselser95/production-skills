@@ -15,3 +15,11 @@ class InvalidEvent(DomainError):  # noqa: N818
 
 class InsufficientFunds(DomainError):  # noqa: N818
     """A withdrawal exceeds the balance; the balance is never allowed to go negative."""
+
+
+class AmountLimitExceeded(InvalidAmount):
+    """An amount or a balance would exceed the one upper bound (``money.MAX_MINOR``)."""
+
+
+class ZeroAmount(InvalidAmount):
+    """A deposit or withdrawal of zero minor units: it changes nothing, so it is no event."""

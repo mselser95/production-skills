@@ -5,16 +5,20 @@ import threading
 
 import pytest
 
-from <PACKAGE> import __main__ as root
-from <PACKAGE>.platform.config import Config
+from <PACKAGE> import (
+    __main__ as root,
+)
+from <PACKAGE>.platform.config import (
+    Config,
+)
 
 
 def cfg(port: int = 0) -> Config:
-    return Config("127.0.0.1", port, "t" * 16, "rev-1")
+    return Config("127.0.0.1", port, "t" * 32, "rev-1")
 
 
 # provenance: derived
-# verifies: composition_root/wiring
+# verifies: composition_wiring
 def test_build_wires_the_service_and_emits_build_info() -> None:
     runtime = root.build(cfg())
     response = runtime.api.handle("GET", "/metrics", {}, b"")
@@ -22,7 +26,7 @@ def test_build_wires_the_service_and_emits_build_info() -> None:
 
 
 # provenance: derived
-# verifies: composition_root/clean_shutdown
+# verifies: clean_shutdown
 def test_run_serves_until_stopped_then_releases_the_port() -> None:
     stop, ready = threading.Event(), threading.Event()
     ports: list[int] = []
@@ -48,16 +52,16 @@ def test_run_serves_until_stopped_then_releases_the_port() -> None:
 
 
 # provenance: derived
-# verifies: composition_root/refuses_bad_config
+# verifies: refuses_bad_config
 def test_main_exits_2_without_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SVC_API_TOKEN", raising=False)
     assert root.main() == 2
 
 
 # provenance: derived
-# verifies: composition_root/clean_shutdown
+# verifies: clean_shutdown
 def test_main_shuts_down_cleanly_on_sigterm(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SVC_API_TOKEN", "t" * 16)
+    monkeypatch.setenv("SVC_API_TOKEN", "t" * 32)
     monkeypatch.setenv("SVC_PORT", "0")
     saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     timer = threading.Timer(0.3, os.kill, args=(os.getpid(), signal.SIGTERM))

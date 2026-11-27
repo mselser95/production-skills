@@ -6,10 +6,24 @@ working code.
 
 ## Names
 
-| slot | value | example |
+| slot | rule | example |
 |---|---|---|
-| `<SERVICE>` | distribution and CLI name, lowercase kebab-case | `order-book` |
-| `<PACKAGE>` | import package: `<SERVICE>` with `-` turned into `_` (lowercase identifier, up to 20 characters keeps `ruff format` stable) | `order_book` |
+| `<SERVICE>` | distribution and CLI name: lowercase kebab-case `[a-z0-9]+(-[a-z0-9]+)*`, at most 40 characters (no dots, no underscores) | `order-book` |
+| `<PACKAGE>` | import package: `<SERVICE>` with `-` turned into `_`; a lowercase identifier `[a-z_][a-z0-9_]*`, at most 40 characters | `order_book` |
+| `<OWNER>` | GitHub user or organisation, at most 39 characters | `acme` |
+
+The assembler enforces the charsets and lengths above (`module.json`) and refuses anything
+else before writing a file. It cannot know the rest, so the scaffold's own tests
+(`tests/unit/test_scaffold_name.py`) fail in the new repository when `<PACKAGE>` is a Python
+keyword or soft keyword (`class`, `match`), shadows a standard-library module (`json`,
+`logging`), is `tests`, or does not agree with the distribution name in `pyproject.toml`.
+Pick another name; nothing else needs to change.
+
+Why 40: `ruff format` wraps lines by length, and a long package name used to make a source
+file fail `ruff format --check`. Every `from <PACKAGE>... import` here is written in the
+parenthesised one-name-per-line form with a trailing comma, which the formatter never
+re-wraps, so the same source is format-stable at every length; 40 is the longest length
+verified (1, 2, 8, 20, 30 and 40 characters). Keep that import form in code you add.
 
 ## The example domain
 
@@ -52,21 +66,52 @@ spans are not exported yet (exporter wiring is a later step).
 ```
 uv sync --locked
 uv run pytest
-SVC_API_TOKEN=<at least 16 characters> uv run <SERVICE>
+SVC_API_TOKEN=<at least 32 characters> uv run <SERVICE>
 ```
 
-Configuration: `SVC_API_TOKEN` (required), `SVC_HOST` (default `127.0.0.1`), `SVC_PORT`
-(default `8080`), `SVC_REVISION`. Routes: `GET /healthz`, `GET /metrics`, `GET /v1/balance`,
+Configuration: `SVC_API_TOKEN` (required: at least 32 characters, only `A-Z a-z 0-9 . _ ~ + / = -`;
+anything shorter or with other characters, whitespace included, refuses to start with exit 2),
+`SVC_HOST` (default `127.0.0.1`), `SVC_PORT` (default `8080`), `SVC_REVISION`. Routes: `GET /healthz`, `GET /metrics`, `GET /v1/balance`,
 `POST /v1/deposits` and `POST /v1/withdrawals` (bearer token; body
 `{"amount": "12.34", "event_id": "optional-idempotency-key"}`, amount as a string).
+
+## The HTTP surface: what is bounded and what is not
+
+The inbound adapter is stdlib `http.server`. It is **not hardened for the open internet**.
+
+Bounded by the adapter (constants in `adapters/inbound/http_server.py`):
+
+- a whole-request deadline of 10 s from accept to the last body byte, enforced on every read
+  (a client trickling one byte at a time is cut at the deadline, answer 408);
+- a head deadline of 2 s: a connection that has not delivered its request head is closed and
+  its slot freed; connections are capped at 128 (threads never exceed it; extra connections
+  get a fixed `503` with `Retry-After` on the accept thread) and requests past their head at
+  64, so `GET /healthz` and `/metrics` stay served while slow clients hold the rest;
+- a 4096-byte body cap (413), strict framing (one `Content-Length` of at most 10 digits, no
+  `Transfer-Encoding`, no body on GET) and an exception barrier: no request raises.
+
+Shutdown: SIGTERM/SIGINT closes the listener (new connections are refused), lets in-flight
+requests finish for up to 10 s, then exits `0` if drained, `3` if requests were abandoned
+at the grace deadline (`2` is a refused configuration).
+
+NOT provided: TLS, per-client rate limits, per-client connection limits, slow-read
+protection beyond a write timeout. A flood of
+new stalled connections faster than 128 per 2 s can still occupy the head phase. Put a
+reverse proxy / TLS terminator in front and have it enforce: TLS, client read and write
+timeouts, a request-size limit, and connection and rate limits per client.
 
 ## Checks that run today
 
 ```
-uv run pytest                       # strict config: warnings are errors, strict markers
-uv run ruff check && uv run ruff format --check
-uv run mypy                         # --strict, from pyproject.toml
-HYPOTHESIS_PROFILE=ci uv run pytest # derandomised property tests
+make check-fast   # uv sync --locked; ruff check; ruff format --check; mypy; pytest -q
+make verify       # check-fast, then HYPOTHESIS_PROFILE=ci pytest -q (derandomised properties)
 ```
 
-Gates, CI and the Makefile fragment are a later step.
+Each target is the plain `uv` commands above, in order; pytest runs with a strict config
+(warnings are errors, strict markers). `production.yaml` names exactly these two gates.
+NOT implemented yet, and not claimed anywhere: import-linter, pip-audit, coverage
+thresholds, mutation testing, an advisory (candidate) test lane, CI wiring.
+
+Test headers: every test carries `# provenance: derived` and `# verifies: <clause>` directly
+above it, where `<clause>` is declared in `production.yaml` (`tests/unit/test_provenance.py`
+checks this). Nothing is `ratified` until a human ratifies an invariant.

@@ -7,7 +7,9 @@
 #
 # Test ids below are pytest node ids relative to this directory. The per-language
 # named-test runner that cashes them is a later task (the design's T16); until it exists
-# they are claims read by people, not yet executed by the probe.
+# the probe does not execute them. What IS checked today, in every scaffolded repo, by
+# tests/unit/test_provenance.py: each id names a test that exists and cites its own clause,
+# and every test header cites a clause declared in this file.
 
 version: v1
 
@@ -22,9 +24,11 @@ service:
   policy: production-skills (single source, main)
 
 # Ratified invariants resolve to verification/ratified/. None are ratified yet for this
-# scaffold: the property tests in tests/unit/test_ledger_properties.py assert the
-# candidates (conservation, idempotency) and carry `derived` provenance from the
-# capability clauses below until a human ratifies them.
+# scaffold, so no test header may be `ratified` or cite an invariant. Every shipped test
+# is `derived`: its `# verifies:` line names a clause declared below -- a capability
+# clause (`<capability id>/<key under verified>`) or a key under `implemented` -- the same
+# convention as the Go template. The property tests in tests/unit/test_ledger_properties.py
+# assert the candidate invariants (conservation, idempotency) the same way.
 invariants: []
 
 capabilities:
@@ -40,6 +44,9 @@ capabilities:
       recovery_rebuild_from_log: tests/unit/test_ledger_properties.py::test_replaying_the_admitted_log_rebuilds_the_state
       journal_before_state: tests/unit/test_ledger_service.py::test_a_failing_journal_leaves_the_state_unchanged
       write_authn: tests/unit/test_http_api.py::test_writes_without_the_exact_bearer_token_are_refused_and_do_nothing
+      http_surface: tests/unit/test_http_api.py::test_deposit_then_read_the_balance
+      event_validity: tests/unit/test_ledger.py::test_an_event_needs_a_bounded_non_empty_id
+      single_writer: tests/unit/test_ledger_service.py::test_concurrent_deposits_are_all_counted
     semantics:
       consistency: single-writer, immediately consistent (one lock in app.LedgerService
         serialises the read-modify-write of the in-memory state)
@@ -48,12 +55,25 @@ capabilities:
     package: src/<PACKAGE>/adapters/inbound
     verified:
       observability_contract_checked: tests/contract/test_observability_contract.py::test_a_real_scrape_matches_the_metrics_manifest_both_ways
+      metrics: tests/unit/test_http_api.py::test_metrics_endpoint_serves_prometheus_text
+      spans: tests/unit/test_ledger_service.py::test_each_command_runs_inside_its_span_and_sets_the_balance_gauge
+      manifest_parser: tests/unit/test_manifest_parser.py::test_the_accepted_subset_parses
     semantics:
       contract: observability/emitted-metrics.yaml (series) + observability/spans.yaml (spans)
 
 implemented:
+  gates_exist: tests/unit/test_provenance.py::test_every_gate_production_yaml_names_is_a_real_make_target_with_a_recipe
+  provenance_headers: tests/unit/test_provenance.py::test_every_cited_clause_is_declared_in_production_yaml
+  package_name_usable: tests/unit/test_scaffold_name.py::test_the_installed_package_name_is_usable
   zones_enforced: tests/architecture/test_boundaries.py::test_the_dependency_direction_holds
   clean_shutdown: tests/unit/test_main.py::test_run_serves_until_stopped_then_releases_the_port
+  domain_is_pure: tests/architecture/test_boundaries.py::test_domain_imports_only_pure_standard_library_and_itself
+  no_float_money: tests/architecture/test_boundaries.py::test_no_float_in_domain_or_app
+  config_in_one_place: tests/architecture/test_boundaries.py::test_only_platform_config_reads_the_environment
+  composition_wiring: tests/unit/test_main.py::test_build_wires_the_service_and_emits_build_info
+  refuses_bad_config: tests/unit/test_main.py::test_main_exits_2_without_a_token
+  platform_config: tests/unit/test_platform.py::test_config_defaults_and_overrides
+  platform_clock_ids: tests/unit/test_platform.py::test_clocks_and_id_generators
 
 driven:
   composition_root: <PACKAGE>.__main__.build
@@ -78,7 +98,10 @@ data_lifecycle:
   retention_policy: process-lifetime-only
   deletion_mechanism: no_subject_data
 
+# Both targets exist in this directory's Makefile and run real commands. There is no
+# `advisory` gate: this module ships no advisory (candidate) lane, so none is claimed.
+# Fuller gates (import-linter, pip-audit, coverage thresholds, mutation testing) are a
+# later change and are not claimed here.
 gates:
   cheap: "make check-fast"
   presubmit: "make verify"
-  advisory: "make test-advisory"
