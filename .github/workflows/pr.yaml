@@ -26,6 +26,11 @@ permissions:
 jobs:
   gates:
     runs-on: ubuntu-latest
+    env:
+      # Ties every line scripts/run-once.sh writes to THIS run: `make evidence` attests
+      # only to lines carrying the same id, so a stale results file (a re-run on a
+      # reused workspace, a cache) can never be attested.
+      EVIDENCE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       # fetch-depth: 0 is what makes the secret scan below mean anything.
       # actions/checkout defaults to depth 1, so `gitleaks detect` over history
@@ -66,60 +71,33 @@ jobs:
           command -v shellcheck
           shellcheck --version | grep '^version:'
 
-      # PROVE THE VERIFIER BEFORE TRUSTING ITS VERDICT.
+      # RUN ONCE. This place used to hold three named steps -- the skills-static
+      # selftest, skills-static itself, and a hand list of twelve commands (nine
+      # selftests plus the policy-coverage, agents-budget and skill-weight gates). Every
+      # one of them was run again, in the same job, by `make selftests` or `make
+      # check-fast` below; measured, each selftest suite executed three to four times per
+      # run. Each is now run exactly once, below, and each property its comment protected
+      # is kept by a mechanism that does not need the repetition:
       #
-      # The selftest runs first and deliberately precedes the probe it tests: a
-      # green skills-static.sh means nothing if its rules cannot fire. 13 cases,
-      # each a fixture where one rule's property is FALSE, plus a green baseline
-      # (without which every case could "pass" because the probe fails on
-      # everything) and a zero-subjects case that must exit 2 rather than 0.
-      - name: skills-static selftest (the verifier of the verifier)
-        run: bash _shared/probes/skills-static-selftest.sh
-
-      - name: skills-static (SKILL.md frontmatter across the nine)
-        run: bash _shared/probes/skills-static.sh
-
-      # Listed individually, never globbed. `for f in _shared/probes/*-selftest.sh`
-      # reports success over an empty glob if the directory is ever renamed,
-      # which is the fail-open shape these files exist to refuse.
+      #  * "prove the verifier before trusting its verdict": the selftests step runs
+      #    BEFORE check-fast in the single step below, and the job is red if either is.
+      #  * "listed individually, never globbed -- a glob over a renamed directory reports
+      #    success over nothing": the Makefile's REQUIRED_SELFTESTS lists the ten suites
+      #    this hand list named, and `make selftests` exits 2 if any of them is missing
+      #    or was not among the suites the glob ran. That is the fail-closed half the
+      #    list was for, with no second execution.
+      #  * "a hand list is exactly what let two selftests sit red for weeks": the glob is
+      #    the denominator, as the check-fast step's own comment says.
+      #  * policy-coverage, agents-budget and skill-weight are gates in `make gates`.
       #
-      # probe-self-gate-selftest was ADDED here 2026-08-29. It had been the only
-      # canonical selftest that can run from this repo's root -- the other three
-      # hardcode template-relative `scripts/` paths and exit 2 here -- and
-      # nothing ran it. That matters more than it sounds: verify-standard.sh is
-      # EDITED in this repo and EXECUTED only in scaffolded ones, so a
-      # self-gating regression to the canonical probe landed here with no signal
-      # at all until somebody scaffolded a repo. Verified from the framework
-      # root: 29 ok, 0 failed.
-      # ALL FIVE, as of 2026-08-29. Three of them -- check-registries,
-      # non-vacuity, sbom-ordering -- could not run here at all until today:
-      # they resolved their target as `scripts/<f>`, which exists only in an
-      # INSTANTIATED repo, and exited 1 or 2 from this root. They failed closed,
-      # correctly, and the consequence was still bad: verify-standard.sh and
-      # check-registries.sh are EDITED here and EXECUTED there, so every edit to
-      # the canonical probe went unverified by its own selftest unless somebody
-      # instantiated a template by hand. Two probe changes had left them RED for
-      # weeks on exactly that gap.
-      #
-      # They now try `scripts/<f>` first (so an instantiated repo keeps testing
-      # its own vendored copy -- proven by breaking the template's PYSBOM marker
-      # and watching the selftest fail while the canonical copy was fine) and
-      # fall back to `_shared/probes/<f>`. Still fail closed when neither
-      # exists: rc 1/2/2, naming the canonical path.
-      - name: probe selftests
+      # The one exception is skill-weight, kept as named lines. The existing
+      # _shared/probes/skill-weight-selftest.sh wiring check greps THIS file for exactly
+      # these two standalone lines, and a selftest may not be edited to accommodate a
+      # workflow change; removing them turns that selftest red.
+      - name: skill-weight (the two lines skill-weight-selftest.sh's wiring check pins)
         run: |
-          bash _shared/probes/load-rows-selftest.sh
-          bash _shared/probes/tests/probe-self-gate-selftest.sh
-          bash _shared/probes/check-registries-selftest.sh
-          bash _shared/probes/non-vacuity-selftest.sh
-          bash _shared/probes/sbom-ordering-selftest.sh
-          bash _shared/probes/policy-coverage.sh
-          bash _shared/probes/agents-budget-selftest.sh
-          bash _shared/probes/agents-budget.sh
           bash _shared/probes/skill-weight-selftest.sh
           bash _shared/probes/skill-weight.sh
-          bash _shared/probes/prove-mutation-selftest.sh
-          bash _shared/probes/acceptance-coverage-selftest.sh
 
       # The eval harness's own gate (benchmarks/eval: runner, host adapters,
       # grader plumbing, corpus lint). A harness whose runner or grader is
@@ -212,21 +190,23 @@ jobs:
       #
       # actionlint is installed by the step above; PATH does not survive between
       # steps, so it is re-exported rather than reinstalled.
-      - name: make check-fast (the entrypoint the pre-commit hook runs)
+      - name: make selftests + make check-fast (each gate and suite runs once, here)
         run: |
           GOBIN="$(go env GOPATH)/bin"
           export PATH="$GOBIN:$PATH"
-          make check-fast
-          # `make selftests` too, and NOT because check-fast is incomplete.
+          # `make selftests` first, and it is NOT redundant with check-fast.
           # check-fast runs the gates; selftests runs the verifiers OF those
-          # gates, and it enumerates them by GLOB. The step above lists
-          # selftests by hand -- deliberately, see its comment -- and a hand
-          # list is exactly what let two selftests sit red for weeks here.
-          # This change adds two more (probe-wiring, no-unfilled-slots) and
-          # neither is in that list; the glob picks them up with nothing to
-          # remember. Both surfaces run, so a selftest is covered whichever
-          # one somebody forgets to update.
+          # gates, and it enumerates them by GLOB (plus the REQUIRED_SELFTESTS
+          # guard). A hand list is exactly what let two selftests sit red for
+          # weeks here; the glob picks a new suite up with nothing to
+          # remember, so a selftest is covered whichever surface somebody
+          # forgets to update. It runs before the gates it verifies, so a gate's
+          # green is never read without its verifier having been proven.
+          # Both go through scripts/run-once.sh, which leaves one line per gate
+          # and per suite in .evidence/results.tsv -- the lines `make evidence`
+          # and mutation-baseline.sh read below instead of running them again.
           make selftests
+          make check-fast
 
       # End-to-end on the installer itself, into a throwaway config dir, so the
       # TCB manifest and the staleness branch are exercised rather than assumed.
@@ -291,9 +271,21 @@ jobs:
       # `contents: read`, and a durable record is not worth granting a job write
       # access to master. The run that produced it is its provenance.
       #
-      # It re-runs the gates rather than reusing the steps above, deliberately --
-      # a record assembled from another step's exit codes attests to what the
-      # YAML says ran, not to what ran.
+      # It no longer re-runs the gates the steps above already ran. The old comment
+      # here said it did so DELIBERATELY -- "a record assembled from another step's
+      # exit codes attests to what the YAML says ran, not to what ran" -- and that
+      # property is kept, by a different mechanism: the record is not assembled from
+      # step exit codes. The Makefile runs every gate through scripts/run-once.sh,
+      # which is the process that EXECUTES it and writes its line (command string, exit
+      # code, hash of the output, tree identity, this run's id). `make evidence`
+      # (evidence-record.sh --attest) takes a gate from that file only for a
+      # well-formed line with the same id, the same command string, the same tree
+      # (HEAD, clean, or dirty plus a content hash) and this run's id, and with no
+      # conflicting duplicate; anything else it executes itself, and the record names
+      # which gates were `executed` and which `attested`, with the results-file line.
+      # What still executes here: mutation-trend (it reads the suite counts the
+      # selftests step recorded), ratified-invariants, tcb-integrity (it needs the
+      # installer step above), and any gate the single pass did not cover.
       - name: evidence record (dimension 11)
         env:
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/cfg
