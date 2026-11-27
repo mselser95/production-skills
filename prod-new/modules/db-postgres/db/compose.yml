@@ -1,0 +1,81 @@
+# compose.yml — PostgreSQL 18 with the hardened baseline (plain variant).
+#
+#   cp .env.example .env     # then replace every value; .env is git-ignored
+#   docker compose up -d
+#
+# The Timescale variant is this file plus the override:
+#   docker compose -f compose.yml -f compose.timescale.yml up -d
+#
+# Images are pinned by tag AND digest and must equal db/image.lock
+# (scripts/db-pin-check.sh --compose compose.yml compose.timescale.yml).
+# No host port is published by default.
+services:
+  # One-shot: writes a self-signed DEVELOPMENT certificate into the dbtls
+  # volume when none exists (neither database image has the openssl CLI).
+  # The alpine/openssl pin is not in image.lock yet; tag and digest are both
+  # required here, as for the database image.
+  tls-init:
+    image: alpine/openssl:3.5.9@sha256:9698e7956c08e713265da24c4587205beba3eaa6af2b319d73575d30a6ff033e
+    entrypoint: ["sh", "/bootstrap/tls-init.sh"]
+    network_mode: none
+    restart: "no"
+    cpus: 0.5
+    mem_limit: 128m
+    volumes:
+      - dbtls:/tls
+      - ./bootstrap/tls-init.sh:/bootstrap/tls-init.sh:ro
+
+  db:
+    image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    depends_on:
+      tls-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 1g
+    shm_size: 256m
+    pids_limit: 256
+    stop_grace_period: 30s
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      # Values come from .env (see .env.example); an unset one stops `up`.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_SUPERUSER_PASSWORD:?set DB_SUPERUSER_PASSWORD in .env}
+      POSTGRES_DB: app
+      DB_MIGRATOR_PASSWORD: ${DB_MIGRATOR_PASSWORD:?set DB_MIGRATOR_PASSWORD in .env}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?set DB_APP_PASSWORD in .env}
+      DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:?set DB_READONLY_PASSWORD in .env}
+      DB_MONITOR_PASSWORD: ${DB_MONITOR_PASSWORD:?set DB_MONITOR_PASSWORD in .env}
+    volumes:
+      # PostgreSQL 18 images keep the cluster in /var/lib/postgresql/18/docker
+      # (PGDATA), so the volume mounts at the PARENT /var/lib/postgresql, not
+      # at .../data as before 18. Mounting .../data would silently put the
+      # cluster on the container's writable layer.
+      - pgdata:/var/lib/postgresql
+      - dbtls:/tls:ro
+      - ./conf:/etc/postgresql:ro
+      - ./bootstrap:/bootstrap:ro
+      - ./bootstrap/10-roles.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+      - ./bootstrap/20-extensions.sql:/docker-entrypoint-initdb.d/20-extensions.sql:ro
+    # No host port by default. Opt in, localhost only, with:
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    healthcheck:
+      # A real authenticated query over TLS as the monitoring role: it fails on a
+      # wrong password, a missing role, ssl off and a server that is only up
+      # on the init-time unix socket (the temporary server listens on no TCP
+      # port). pg_isready is NOT used: it never checks credentials.
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$DB_MONITOR_PASSWORD" PGCONNECT_TIMEOUT=3 PGSSLMODE=require
+          psql -X -h 127.0.0.1 -U app_monitor -d app -tAc 'SELECT 1' | grep -qx 1
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+volumes:
+  pgdata:
+  dbtls:
