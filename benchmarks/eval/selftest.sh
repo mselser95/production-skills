@@ -40,13 +40,13 @@ nrows() { grep -c . "$1" 2>/dev/null || echo 0; }
 
 # ---- fixtures ---------------------------------------------------------------
 # mktask <root> <skill> <id> <split> <grader: good|always0|always1|jsonobj> [prompt]
-#   TASK_KIND=<kind> (default seeded) is written as task.json "kind".
+#   TASK_KIND=<kind> (default seeded) is written as task.json "kind"; TASK_LANG=<lang> (default go) as "language".
 #   jsonobj: passes iff the agent output file is a JSON object with found==1; its reference writes
 #   {"found":1} (or $REF_OUT) to the output file instead of touching done.txt.
 mktask() {
   local d="$1/$2/$3"; mkdir -p "$d/fixture" "$d/reference"
-  printf '{"id":"%s","skill":"%s","split":"%s","kind":"%s","prompt":"%s","timeout_s":%s,"max_budget_usd":0.5,"agent_mode":"read-only"}\n' \
-    "$3" "$2" "$4" "${TASK_KIND:-seeded}" "${6:-Create done.txt in the repo.}" "${TASK_TIMEOUT:-20}" >"$d/task.json"
+  printf '{"id":"%s","skill":"%s","split":"%s","kind":"%s","language":"%s","prompt":"%s","timeout_s":%s,"max_budget_usd":0.5,"agent_mode":"read-only"}\n' \
+    "$3" "$2" "$4" "${TASK_KIND:-seeded}" "${TASK_LANG:-go}" "${6:-Create done.txt in the repo.}" "${TASK_TIMEOUT:-20}" >"$d/task.json"
   echo "fixture file" >"$d/fixture/README.md"
   case "$5" in
     good) printf '#!/usr/bin/env bash\nif [ -f "$1/done.txt" ]; then echo "{\\"found\\":1,\\"false_positives\\":0}"; exit 0; fi\necho "{\\"found\\":0,\\"false_positives\\":0}"; exit 1\n' >"$d/grade.sh" ;;
@@ -154,7 +154,7 @@ python3 -I -B - "$1" <<'PY'
 import json, sys
 rows = []
 def add(skill, split, arm, tid, rep, ok, model="m1"):
-    rows.append({"task": tid, "skill": skill, "split": split, "kind": "seeded", "arm": arm, "host": "claude", "model": model, "rep": rep, "pass": ok,
+    rows.append({"task": tid, "skill": skill, "split": split, "kind": "seeded", "language": "go", "arm": arm, "host": "claude", "model": model, "rep": rep, "pass": ok,
                  "metrics": {"false_positives": 0 if ok else 1}, "tokens_in": 1000 if ok else 3000,
                  "tokens_out": 200 if ok else 600, "duration_s": 5.0 if ok else 15.0})
 for t in range(10):
@@ -177,31 +177,31 @@ PY
 syn="$tmp/syn.jsonl"; mkrep "$syn"
 rep="$(python3 -I -B "$here/report.py" "$syn" 2>&1)"
 line() { echo "$rep" | grep -E "$1" || true; }
-l="$(line '^prod-review +claude +m1 +n/a +heldout +seeded +skill ')"
+l="$(line '^prod-review +claude +m1 +n/a +heldout +go +seeded +skill ')"
 if [[ "$l" == *"100.0% (20/20)"* && "$l" == *"1.00 (k=2)"* ]]; then r=0; else r=1; fi
 note "8a report: exact rate and pass^k with k printed (skill arm)" "$r" "$l"
-l="$(line '^prod-review +claude +m1 +n/a +heldout +seeded +bare ')"
+l="$(line '^prod-review +claude +m1 +n/a +heldout +go +seeded +bare ')"
 if [[ "$l" == *"20.0% (4/20)"* && "$l" == *"0.20 (k=2)"* && "$l" =~ [[:space:]]0\.80[[:space:]]+n/a$ ]]; then r=0; else r=1; fi
 note "8b report: bare arm 4/20, pass^k 0.20, false_pos mean per row 0.80 (16 over 20 rows)" "$r" "$l"
 # cost = ALL spend / passing rows: bare spent 4*1200 + 16*3600 = 62400 tok over 4 resolved = 15600; 4*5+16*15=260 s / 4 = 65.0
 if [[ "$l" == *" 15600 "* && "$l" == *" 65.0 "* ]]; then r=0; else r=1; fi
 note "8c cost per resolved = total spend over all rows / passing rows" "$r" "$l"
-l="$(line '^prod-ops +claude +m1 +n/a +heldout +seeded +bare ')"
+l="$(line '^prod-ops +claude +m1 +n/a +heldout +go +seeded +bare ')"
 if [[ "$l" == *"0.00 (k=2)"* && "$l" == *"45.0% (9/20)"* ]]; then r=0; else r=1; fi
 note "8d pass^k is share of tasks with ALL reps passing, not k/n" "$r" "$l"
-l="$(line '^prod-review +claude +m1 +n/a +heldout +seeded +\+')"
+l="$(line '^prod-review +claude +m1 +n/a +heldout +go +seeded +\+')"
 if [[ "$l" == *"+80.0 pp"* && "$l" == *helps ]]; then r=0; else r=1; fi
 note "8e verdict: clear helps (task-clustered bootstrap)" "$r" "$l"
-l="$(line '^prod-spec +claude +m1 +n/a +heldout +seeded +-')"
+l="$(line '^prod-spec +claude +m1 +n/a +heldout +go +seeded +-')"
 if [[ "$l" == *"-90.0 pp"* && "$l" == *hurts ]]; then r=0; else r=1; fi
 note "8f verdict: clear hurts" "$r" "$l"
-l="$(line '^prod-ops +claude +m1 +n/a +heldout +seeded +[-+]')"
+l="$(line '^prod-ops +claude +m1 +n/a +heldout +go +seeded +[-+]')"
 if [[ "$l" == *"+5.0 pp"* && "$l" == *"no evidence" ]]; then r=0; else r=1; fi
 note "8g verdict: no evidence" "$r" "$l"
-l="$(line '^prod-review +claude +m1 +n/a +dev +seeded +skill ')"
+l="$(line '^prod-review +claude +m1 +n/a +dev +go +seeded +skill ')"
 if [[ "$l" == *"0.0% (0/2)"* ]]; then r=0; else r=1; fi
 note "8h dev and heldout are separate rows (never pooled)" "$r" "$l"
-l="$(line '^prod-review +claude +m2 +n/a +heldout +seeded +skill ')"; l2="$(line '^prod-review +claude +m2 +n/a +heldout +seeded +[-+]')"
+l="$(line '^prod-review +claude +m2 +n/a +heldout +go +seeded +skill ')"; l2="$(line '^prod-review +claude +m2 +n/a +heldout +go +seeded +[-+]')"
 if [[ "$l" == *"100.0% (2/2)"* && "$l2" == *"insufficient tasks (n=1)"* ]]; then r=0; else r=1; fi
 note "8i models are never pooled; too few paired tasks -> insufficient tasks" "$r" "$l / $l2"
 python3 -I -B "$here/report.py" "$syn" >"$tmp/rep.a" 2>&1; python3 -I -B "$here/report.py" "$syn" >"$tmp/rep.b" 2>&1
@@ -225,7 +225,7 @@ rows = []
 for arm in ("skill", "bare"):
     for t in range(6):
         for rep in range(2 if arm == "skill" else 3):
-            rows.append({"task": "t%d" % t, "skill": "prod-ops", "split": "dev", "kind": "seeded", "arm": arm, "host": "codex", "model": None, "rep": rep, "pass": True, "metrics": {}})
+            rows.append({"task": "t%d" % t, "skill": "prod-ops", "split": "dev", "kind": "seeded", "language": "go", "arm": arm, "host": "codex", "model": None, "rep": rep, "pass": True, "metrics": {}})
 with open(sys.argv[1], "w") as f:
     for r in rows: f.write(json.dumps(r) + "\n")
 PY
@@ -252,10 +252,10 @@ with open(f, "w") as o:
     for arm, v in (("skill", sk), ("bare", ba)):
         for t, x in enumerate(v):
             for rep in (1, 2):
-                o.write(json.dumps({"task": "t%d" % t, "skill": "prod-spec", "split": "heldout", "kind": "seeded", "arm": arm, "host": "claude", "model": "m", "rep": rep, "pass": x == "1", "metrics": {}}) + "\n")
+                o.write(json.dumps({"task": "t%d" % t, "skill": "prod-spec", "split": "heldout", "kind": "seeded", "language": "go", "arm": arm, "host": "claude", "model": "m", "rep": rep, "pass": x == "1", "metrics": {}}) + "\n")
 PY
 }
-vline() { python3 -I -B "$here/report.py" "$1" 2>&1 | grep -E '^prod-spec +claude +m +n/a +heldout +seeded +[-+n]' || true; }
+vline() { python3 -I -B "$here/report.py" "$1" 2>&1 | grep -E '^prod-spec +claude +m +n/a +heldout +go +seeded +[-+n]' || true; }
 mkpair "$tmp/p1.jsonl" "1 1 1 1 1 1" "0 0 0 0 0 0"; l="$(vline "$tmp/p1.jsonl")"
 if [[ "$l" == *helps ]]; then r=0; else r=1; fi; note "8p 6 paired tasks, skill clearly wins -> helps" "$r" "$l"
 mkpair "$tmp/p2.jsonl" "0 0 0 0 0 0" "1 1 1 1 1 1"; l="$(vline "$tmp/p2.jsonl")"
@@ -649,10 +649,10 @@ with open(sys.argv[1], "w") as o:
     for t in range(5):
         for rep, sp in enumerate((True, False, False)):
             for arm, ok in (("skill", sp), ("bare", False)):
-                o.write(json.dumps({"task": "t%d" % t, "skill": "prod-spec", "split": "heldout", "kind": "seeded", "arm": arm, "host": "claude",
+                o.write(json.dumps({"task": "t%d" % t, "skill": "prod-spec", "split": "heldout", "kind": "seeded", "language": "go", "arm": arm, "host": "claude",
                                     "model": "m", "rep": rep, "pass": ok, "metrics": {}}) + "\n")
 PY
-l="$(python3 -I -B "$here/report.py" "$tmp/w1.jsonl" 2>&1 | grep -E '^prod-spec +claude +m +n/a +heldout +seeded +\+' || true)"
+l="$(python3 -I -B "$here/report.py" "$tmp/w1.jsonl" 2>&1 | grep -E '^prod-spec +claude +m +n/a +heldout +go +seeded +\+' || true)"
 # Two-level bootstrap on this data gives about [+13, +60] (task-only resampling would print [+33.3, +33.3]).
 # The whole interval is above 0 -- every task shows the skill ahead -- so the verdict is "helps", but wide.
 if [[ "$l" == *"+33.3 pp"* && "$l" != *"[+33.3, +33.3]"* && "$l" == *"[+1"* && "$l" == *helps ]]; then ok=0; else ok=1; fi
@@ -663,20 +663,20 @@ import json, sys
 rows = [{"task": "a", "tokens_in": 100, "tokens_out": 50}, {"task": "b"}, {"task": "c", "tokens_in": None, "tokens_out": None}]
 with open(sys.argv[1], "w") as o:
     for r in rows:
-        r.update({"skill": "prod-ops", "split": "dev", "kind": "seeded", "arm": "skill", "host": "codex", "model": "m", "rep": 1, "pass": True, "metrics": {}})
+        r.update({"skill": "prod-ops", "split": "dev", "kind": "seeded", "language": "go", "arm": "skill", "host": "codex", "model": "m", "rep": 1, "pass": True, "metrics": {}})
         o.write(json.dumps(r) + "\n")
     for r in rows[:1]:
         pass
 PY
-l="$(python3 -I -B "$here/report.py" "$tmp/w5.jsonl" 2>&1 | grep -E '^prod-ops +codex +m +n/a +dev +seeded +skill ' || true)"
+l="$(python3 -I -B "$here/report.py" "$tmp/w5.jsonl" 2>&1 | grep -E '^prod-ops +codex +m +n/a +dev +go +seeded +skill ' || true)"
 if [[ "$l" == *"150 (2 no usage)"* ]]; then ok=0; else ok=1; fi
 note "16h report: rows with no usage are excluded from the token mean and counted" $ok "$l"
 python3 -I -B - "$tmp/w5b.jsonl" <<'PY'
 import json, sys
 with open(sys.argv[1], "w") as o:
-    o.write(json.dumps({"task": "a", "skill": "prod-ops", "split": "dev", "kind": "seeded", "arm": "skill", "host": "codex", "model": "m", "rep": 1, "pass": True, "metrics": {}}) + "\n")
+    o.write(json.dumps({"task": "a", "skill": "prod-ops", "split": "dev", "kind": "seeded", "language": "go", "arm": "skill", "host": "codex", "model": "m", "rep": 1, "pass": True, "metrics": {}}) + "\n")
 PY
-l="$(python3 -I -B "$here/report.py" "$tmp/w5b.jsonl" 2>&1 | grep -E '^prod-ops +codex +m +n/a +dev +seeded +skill ' || true)"
+l="$(python3 -I -B "$here/report.py" "$tmp/w5b.jsonl" 2>&1 | grep -E '^prod-ops +codex +m +n/a +dev +go +seeded +skill ' || true)"
 if [[ "$l" == *"n/a (1 no usage)"* ]]; then ok=0; else ok=1; fi
 note "16i report: all rows without usage -> n/a" $ok "$l"
 # sandbox modes are never pooled
@@ -685,10 +685,10 @@ import json, sys
 with open(sys.argv[1], "w") as o:
     for sb in ("seatbelt", "off"):
         for arm in ("skill", "bare"):
-            o.write(json.dumps({"task": "a", "skill": "prod-ops", "split": "dev", "kind": "seeded", "arm": arm, "host": "claude", "model": "m", "sandbox": sb, "rep": 1, "pass": True, "metrics": {}}) + "\n")
+            o.write(json.dumps({"task": "a", "skill": "prod-ops", "split": "dev", "kind": "seeded", "language": "go", "arm": arm, "host": "claude", "model": "m", "sandbox": sb, "rep": 1, "pass": True, "metrics": {}}) + "\n")
 PY
 out="$(python3 -I -B "$here/report.py" "$tmp/sbx.jsonl" 2>&1)"
-if [[ "$(echo "$out" | grep -cE '^prod-ops +claude +m +seatbelt +dev +seeded +skill ')" == 1 && "$(echo "$out" | grep -cE '^prod-ops +claude +m +off +dev +seeded +skill ')" == 1 ]]; then ok=0; else ok=1; fi
+if [[ "$(echo "$out" | grep -cE '^prod-ops +claude +m +seatbelt +dev +go +seeded +skill ')" == 1 && "$(echo "$out" | grep -cE '^prod-ops +claude +m +off +dev +go +seeded +skill ')" == 1 ]]; then ok=0; else ok=1; fi
 note "16j report: rows with different sandbox values are never pooled" $ok "$(echo "$out" | head -6 | tr '\n' '|')"
 
 # ---- 18: per-kind reports (seeded recall vs clean false-positive control) --------------------
@@ -702,7 +702,7 @@ with open(f, "w") as o:
             for rep in (1, 2):
                 for arm in ("skill", "bare"):
                     win = (arm == "skill") == (kind == "seeded")   # seeded: skill passes; clean: bare passes
-                    o.write(json.dumps({"task": "%s%d" % (kind[0], t), "skill": "prod-review", "split": "heldout", "kind": kind, "arm": arm,
+                    o.write(json.dumps({"task": "%s%d" % (kind[0], t), "skill": "prod-review", "split": "heldout", "kind": kind, "language": "go", "arm": arm,
                                         "host": "claude", "model": "m", "rep": rep, "pass": win,
                                         "metrics": {"found": 2 if arm == "skill" else 1, "false_positives": 0 if win else 1}}) + "\n")
 PY
@@ -713,14 +713,14 @@ l1="$(echo "$out" | grep -E '^recall \(seeded\)' || true)"; l2="$(echo "$out" | 
 if [[ "$l1" == *helps && "$l2" == *hurts ]]; then r=0; else r=1; fi
 note "18a skill wins on seeded and LOSES on clean -> recall line helps, false-positive line hurts" "$r" "$l1 // $l2"
 vl="$(echo "$out" | verdict_lines)"; nv="$(echo "$vl" | grep -c . || true)"; nk="$(echo "$vl" | grep -cE 'seeded|clean' || true)"
-d1="$(echo "$vl" | grep -E '^prod-review +claude +m +n/a +heldout +seeded ' || true)"; d2="$(echo "$vl" | grep -E '^prod-review +claude +m +n/a +heldout +clean ' || true)"
+d1="$(echo "$vl" | grep -E '^prod-review +claude +m +n/a +heldout +go +seeded ' || true)"; d2="$(echo "$vl" | grep -E '^prod-review +claude +m +n/a +heldout +go +clean ' || true)"
 if [[ "$nv" == 4 && "$nk" == 4 && "$d1" == *helps && "$d2" == *hurts ]]; then r=0; else r=1; fi
 note "18b no pooled verdict: exactly 4 verdict lines (2 kinds x diff row + named line), every one names its kind" "$r" "n=$nv named=$nk // $vl"
 mkkinds "$tmp/k2.jsonl" 3 6; out="$(python3 -I -B "$here/report.py" "$tmp/k2.jsonl" 2>&1)"
 l1="$(echo "$out" | grep -E '^recall \(seeded\)' || true)"; l2="$(echo "$out" | grep -E '^false-positive control \(clean\)' || true)"
 if [[ "$l1" == *"insufficient tasks (n=3)" && "$l2" != *insufficient* && "$l2" == *hurts ]]; then r=0; else r=1; fi
 note "18c <5 paired seeded tasks but 6 clean: 'insufficient tasks' on the seeded line ONLY" "$r" "$l1 // $l2"
-l="$(echo "$out" | grep -E '^prod-review +claude +m +n/a +heldout +seeded +skill ' || true)"
+l="$(echo "$out" | grep -E '^prod-review +claude +m +n/a +heldout +go +seeded +skill ' || true)"
 if [[ "$l" =~ [[:space:]]0\.00[[:space:]]+2\.00$ ]]; then r=0; else r=1; fi
 note "18d report: mean false_positives and found per row printed per arm and kind (seeded skill: 0.00 / 2.00)" "$r" "$l"
 { head -n 1 "$tmp/k1.jsonl"; sed 1d "$tmp/k1.jsonl" | head -n 1 | python3 -I -B -c 'import json,sys; r=json.loads(sys.stdin.read()); del r["kind"]; print(json.dumps(r))'; } >"$tmp/nokind.jsonl"
@@ -730,6 +730,27 @@ note "18e a row without kind -> non-zero exit naming file:line (no silent defaul
 python3 -I -B "$here/report.py" "$tmp/k1.jsonl" >"$tmp/k.a" 2>&1; python3 -I -B "$here/report.py" "$tmp/k1.jsonl" >"$tmp/k.b" 2>&1
 cmp -s "$tmp/k.a" "$tmp/k.b"; r=$?
 note "18f kinds report: same seed twice -> identical output" "$r" "outputs differ"
+# 18g: two languages are never pooled. Python rows: 6 seeded + 6 clean tasks (skill wins seeded, loses clean);
+# Rust rows: 3 seeded tasks, skill LOSES. Pooled it would be 9 seeded tasks and a mixed number.
+mkkinds "$tmp/lp.jsonl" 6 6; mkkinds "$tmp/lr0.jsonl" 3 0
+python3 -I -B - "$tmp/lp.jsonl" "$tmp/lr0.jsonl" "$tmp/lang.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[3], "w") as o:
+    for f, lang, flip in ((sys.argv[1], "python", False), (sys.argv[2], "rust", True)):
+        for line in open(f):
+            r = json.loads(line); r["language"] = lang
+            if flip and r["kind"] == "seeded": r["pass"] = (r["arm"] == "bare")
+            o.write(json.dumps(r) + "\n")
+PY
+out="$(python3 -I -B "$here/report.py" "$tmp/lang.jsonl" 2>&1)"
+lp="$(echo "$out" | grep -E '^recall \(seeded\): .*/python ' || true)"; lr="$(echo "$out" | grep -E '^recall \(seeded\): .*/rust ' || true)"
+nrec="$(echo "$out" | grep -cE '^recall \(seeded\)' || true)"; ncl="$(echo "$out" | grep -cE '^false-positive control \(clean\)' || true)"
+if [[ "$nrec" == 2 && "$ncl" == 1 && "$lp" == *"tasks=6"*helps && "$lr" == *"tasks=3"*"insufficient tasks (n=3)" ]]; then r=0; else r=1; fi
+note "18g two languages are never pooled: one recall line per language (python 6 tasks helps / rust 3 tasks insufficient), clean only for python" "$r" "n=$nrec/$ncl // $lp // $lr"
+{ head -n 1 "$tmp/k1.jsonl"; sed 1d "$tmp/k1.jsonl" | head -n 1 | python3 -I -B -c 'import json,sys; r=json.loads(sys.stdin.read()); del r["language"]; print(json.dumps(r))'; } >"$tmp/nolang.jsonl"
+msg="$(python3 -I -B "$here/report.py" "$tmp/nolang.jsonl" 2>&1 >/dev/null)"; rc=$?
+if [[ $rc -ne 0 && "$msg" == *"nolang.jsonl:2:"* && "$msg" == *language* ]]; then r=0; else r=1; fi
+note "18h a row without language -> non-zero exit naming file:line (no silent default)" "$r" "rc=$rc $msg"
 
 # ---- 19: the output schema mechanism, the row, lint ---------------------------------------------
 sch="$tmp/schema/output.schema.json"; mkdir -p "$tmp/schema"
@@ -801,6 +822,9 @@ note "19o no schema for the skill -> output_valid:null" $ok "row: $(cut -c1-300 
 ck="$(TASK_KIND=clean mktask "$tmp/kcorp" prod-review t-clean heldout good)"; r="$tmp/r19f.jsonl"; cell "$r" "$ck" skill solve
 if [[ "$(rowval "$r" kind)" == clean ]]; then ok=0; else ok=1; fi
 note "19p row kind is copied from task.json (clean)" $ok "row: $(cut -c1-300 "$r" 2>&1)"
+cl="$(TASK_LANG=rust mktask "$tmp/lcorp" prod-review t-rust heldout good)"; r="$tmp/r19f2.jsonl"; cell "$r" "$cl" skill solve
+if [[ "$(rowval "$r" language)" == rust ]]; then ok=0; else ok=1; fi
+note "19p2 row language is copied from task.json (rust)" $ok "row: $(cut -c1-300 "$r" 2>&1)"
 # through run.sh with the FAKE hosts: the 9th adapter argument really carries the schema
 echo '{"result":"x","is_error":false,"usage":{},"structured_output":{"found":1,"findings":[]}}' >"$frec/claude.out"
 runclaude "$jt" "$tmp/r19g.jsonl"
@@ -823,6 +847,12 @@ lint_case "19s lint RED on a task.json without kind" "$tmp/l-nokind" 1 "missing 
 mktask "$tmp/l-emptykind" prod-review t-ek heldout good >/dev/null
 sed 's/"kind":"seeded"/"kind":" "/' "$tmp/l-emptykind/prod-review/t-ek/task.json" >"$tmp/ek.json" && cp "$tmp/ek.json" "$tmp/l-emptykind/prod-review/t-ek/task.json"
 lint_case "19t lint RED on a blank kind" "$tmp/l-emptykind" 1 "key 'kind' has the wrong type"
+mktask "$tmp/l-nolang" prod-review t-nolang heldout good >/dev/null
+python3 -I -B - "$tmp/l-nolang/prod-review/t-nolang/task.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); del t["language"]; json.dump(t, open(sys.argv[1], "w"))
+PY
+lint_case "19s2 lint RED on a task.json without language" "$tmp/l-nolang" 1 "missing key 'language'"
 REF_OUT="the reference wrote prose" mktask "$tmp/l-sbad" prod-review t-sb heldout jsonobj >/dev/null; mkdir -p "$tmp/l-sbad/prod-review/_lib"; cp "$sch" "$tmp/l-sbad/prod-review/_lib/"
 lint_case "19u lint RED when the reference output is not a JSON object under a schema" "$tmp/l-sbad" 1 "did not write a JSON object"
 mktask "$tmp/l-sok" prod-review t-so heldout jsonobj >/dev/null; mkdir -p "$tmp/l-sok/prod-review/_lib"; cp "$sch" "$tmp/l-sok/prod-review/_lib/"

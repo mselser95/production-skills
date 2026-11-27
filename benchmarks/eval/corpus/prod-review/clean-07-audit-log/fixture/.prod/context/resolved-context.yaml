@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Make Close release the destination it was given, and have OpenFile write an opening entry and not leak its file when that fails.
+tier: 2
+services: [auditlog]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [go build ./..., go vet ./..., go test ./...]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new module dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml

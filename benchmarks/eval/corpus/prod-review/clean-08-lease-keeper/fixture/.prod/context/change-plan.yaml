@@ -1,0 +1,42 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+  - introduces_state
+
+files:
+  - path: keeper.go
+    action: create
+    zone: orchestration
+
+new_states: [lease_table]
+new_effects: []
+new_dependencies: []
+
+recovery:
+  - state: lease_table
+    crash_here: held in memory only; a restart starts empty and every lease is gone
+    retry: guarded
+    reconciled_by: none; callers own persistence and re-acquire after a restart
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Add Keeper, a named lease table with acquire, renew and release on an injected clock.
+    files: [keeper.go]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one package, no new dependencies
+    acceptance: []
+    depends_on: []

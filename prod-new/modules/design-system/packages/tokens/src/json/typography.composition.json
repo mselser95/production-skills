@@ -1,0 +1,19 @@
+{
+  "$description": "Layer 3. Named text styles composed from family, size, weight, line height and tracking.",
+  "typography": {
+    "$type": "typography",
+    "display": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.5xl}", "fontWeight": "{font.weight.bold}", "lineHeight": "{lineHeight.tight}", "letterSpacing": "{letterSpacing.tight}" } },
+    "h1": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.4xl}", "fontWeight": "{font.weight.bold}", "lineHeight": "{lineHeight.tight}", "letterSpacing": "{letterSpacing.tight}" } },
+    "h2": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.3xl}", "fontWeight": "{font.weight.semibold}", "lineHeight": "{lineHeight.tight}", "letterSpacing": "{letterSpacing.tight}" } },
+    "h3": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.2xl}", "fontWeight": "{font.weight.semibold}", "lineHeight": "{lineHeight.snug}", "letterSpacing": "{letterSpacing.normal}" } },
+    "h4": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.xl}", "fontWeight": "{font.weight.semibold}", "lineHeight": "{lineHeight.snug}", "letterSpacing": "{letterSpacing.normal}" } },
+    "title": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.lg}", "fontWeight": "{font.weight.medium}", "lineHeight": "{lineHeight.snug}", "letterSpacing": "{letterSpacing.normal}" } },
+    "bodyLg": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.lg}", "fontWeight": "{font.weight.regular}", "lineHeight": "{lineHeight.relaxed}", "letterSpacing": "{letterSpacing.normal}" } },
+    "body": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.md}", "fontWeight": "{font.weight.regular}", "lineHeight": "{lineHeight.normal}", "letterSpacing": "{letterSpacing.normal}" } },
+    "bodySm": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.sm}", "fontWeight": "{font.weight.regular}", "lineHeight": "{lineHeight.normal}", "letterSpacing": "{letterSpacing.normal}" } },
+    "label": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.sm}", "fontWeight": "{font.weight.medium}", "lineHeight": "{lineHeight.snug}", "letterSpacing": "{letterSpacing.wide}" } },
+    "caption": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.xs}", "fontWeight": "{font.weight.regular}", "lineHeight": "{lineHeight.snug}", "letterSpacing": "{letterSpacing.wide}" } },
+    "overline": { "$value": { "fontFamily": "{font.family.sans}", "fontSize": "{fontSize.2xs}", "fontWeight": "{font.weight.semibold}", "lineHeight": "{lineHeight.snug}", "letterSpacing": "{letterSpacing.caps}" } },
+    "code": { "$value": { "fontFamily": "{font.family.mono}", "fontSize": "{fontSize.sm}", "fontWeight": "{font.weight.regular}", "lineHeight": "{lineHeight.normal}", "letterSpacing": "{letterSpacing.normal}" } }
+  }
+}

@@ -1,0 +1,38 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+  - changes_critical_calculation
+
+files:
+  - path: meter.go
+    action: modify
+    zone: orchestration
+
+new_states: []
+new_effects: []
+new_dependencies: []
+
+recovery: []
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Expire usage older than the window when charging, and add Remaining to read the units left.
+    files: [meter.go]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one file, no new dependencies
+    acceptance: []
+    depends_on: []

@@ -7,8 +7,8 @@
 # When this changes, EVERY repo scaffolded from an older template is behind.
 # That is the point: the change has to be acknowledged in the commit that
 # makes it, rather than discovered by whoever scaffolds next.
-digest: 06cdcb2dee8d5b6e5c1f8e5c4b9ee6c9b170a67dc55531c660f6d633abbd0556
-short: 06cdcb2dee8d
+digest: c65b9313415f44bdd232e6018df876c26b1d3632c93065290f5735e9c610d747
+short: c65b9313415f
 files: 40
 per_file:
   benchmarks/load/loadgen.go: 2fcb46b5651583525be4bd799422437b5858447b8ff4a5716783b92067799a5f
@@ -19,7 +19,7 @@ per_file:
   scripts/check-template-drift.sh: 277411db2c3b54801c413e70e09d76a42b5f956023e7f62f818d8edb96e339be
   scripts/coverage.sh: 9ca791aaa31b8ce26ea7ede20c81d2085dffac5fdca0409f971530f3c64a19cd
   scripts/error-handling-fitness.sh: cfb96953c7727fa872db162123963cfe5aca65102eeb6168cb7d08c7c9dd1327
-  scripts/gate-hygiene-fitness.sh: 19ba625dadf1af456715c4a3305e08ce252341e890fd6633df61ebd30375859f
+  scripts/gate-hygiene-fitness.sh: 1ded5cf6e47459e654427d4b1a18f9f13c252c42e8e5fbad0a51f37a0c97f831
   scripts/gate-run.sh: 129bf396e14b711dd7e50fd2a0b50b806dac37e5fc2cf4b44099794efa66d5b0
   scripts/kill-durability.sh: 494dd7a07342e9087aa4a08068ccf1c1c3d26d423bede409957f38475fde3652
   scripts/no-unfilled-slots.sh: d175595ad719026b7d0e240bebe4b46620f5c33b53ecc1409c32105ebbe848e8

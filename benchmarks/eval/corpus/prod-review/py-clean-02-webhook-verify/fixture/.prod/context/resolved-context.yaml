@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Verify a webhook delivery's signature header and freshness.
+tier: 2
+services: [webhooks]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [python3 -m compileall -q ., python3 -m unittest discover -s tests -v]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new dependencies
+  - public API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml
