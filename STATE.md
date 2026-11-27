@@ -361,3 +361,37 @@ Switch-over order once #19 #20 #27 #28 #30 #31 #34 and the train PR are closed o
 4. Skill text: _shared/dispatch.md, prod-spec change-plan format, prod-implement gate step,
    prod-validator, prod-ops (train + bisection).
 Merged today so far: #14-#18 #21-#26 #29 #32 #33.
+
+## Checkpoint 2026-11-27 19:58 (session d1e79d60)
+
+Master: green at 85fcab0. Merged today: #14-#18 #21-#26 #29 #32 #33.
+Owner decision: everything open lands as ONE merge → PR #37 (`stack/all`, worktree .wt/stack)
+= merge of the nine branches below. Merge each fix into it again; it is mergeable only when
+all nine have an Opus OK and the joined tree is green (install + selftests + check-fast +
+evidence once in the container via tmp/ci-measure.sh, plus its CI).
+
+| PR | Branch | Opus so far | State |
+|---|---|---|---|
+| 19 | ci/gate-cache | 4x CHANGES REQUIRED | redesigned (lint each REAL file once, no sharing) 5449f1c; round 5 running |
+| 20 | mod/assemble | 3x | fadbef5 (.git paths refused, walk errors, cleanup); round 4 running |
+| 27 | eval/sandbox-allowlist | 2x | fix in progress (scrub that cannot fail; grader confinement) |
+| 28 | mod/hosts-codex | 1x | dac7958 (symlinks, ownership by manifest, staging, lock); round 2 running; selftest 42-61 s: must be split |
+| 34 | ops/plan-dag | 1x | 0ddb240 (overlap oracle 0 false negatives; PyYAML differential); round 2 running |
+| 35 | ci/evidence-attest | 1x | fix in progress (three attested-PASS forgeries). CI gates 14m07s -> 7m59s measured |
+| 36 | ops/integration-train | 1x | fix in progress (fresh worktree per verify, env/hooks isolation, recovery pass) |
+| 30 | mod/service-rust | 1x | fix in progress (workspace, no_std domain, request deadline) |
+| 31 | mod/service-python | 1x | fix split S1..S6: S1 S3 S4 S5 done (uncommitted in .wt/mod-service-python); S2 running; S6 = assemble + commit |
+
+Known joined-tree issue: mutation baseline cannot count a suite whose summary is not
+`<N> ok, <M> failed` (train selftest fixed in its round-2 brief; plan-dag fixed). The
+baseline file needs regenerating in a container once the stack settles (new suites).
+
+Process lessons added today:
+- A brief with 4 blockers + 7 warnings is several tasks: implementers BAIL (correctly). Split
+  by disjoint files up front; keep the reviewer's findings in a notes file the sub-tasks read.
+- container-commit.sh runs the selftests a change touches (and plain `selftest.sh` above a
+  changed file); this caught two Linux-only failures before CI.
+- Text-scan checks (zone purity, source-following prediction, dot-means-file) lose to a
+  reviewer every time: replace them with construction (no_std crate, lint real files, prefix
+  rule) instead of adding patterns.
+- Never run a command a subagent was refused; surface it to the owner.
