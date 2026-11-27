@@ -1,0 +1,23 @@
+# resolved-context.yaml
+task: Keep named leases with an expiry on an injected clock, with acquire, renew and release.
+tier: 2
+services: [lease]
+
+capabilities:
+  touched: []
+  obligations: []
+
+invariants: []
+
+required_evidence:
+  gates: [go build ./..., go vet ./..., go test ./...]
+  signals: [test results]
+
+constraints:
+  - standard library only; no new module dependencies
+  - exported API stays source-compatible for existing callers
+
+do_not_touch:
+  - verification/ratified/**
+  - .prod/**
+  - production.yaml
