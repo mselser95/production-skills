@@ -25,7 +25,7 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline eval eval-live
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -37,6 +37,8 @@ help:
 	@echo "mutation-baseline  re-record benchmarks/mutation-baseline.md after adding/removing cases"
 	@echo "token-report    agent token cost per (agentType, model) from ~/.claude* transcripts; exit 1 if tokens/completed rose >25%"
 	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
+	@echo "eval        skill-eval harness: selftest + corpus lint (hermetic, no agent, not in check-fast)"
+	@echo "eval-live   PAID: every corpus task x claude,codex x skill,bare x N reps; needs EVAL_LIVE=1 (make eval-live EVAL_LIVE=1 N=3)"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates
@@ -263,3 +265,15 @@ token-report:
 
 token-baseline:
 	@bash scripts/token-report.sh --write
+
+# ---- skill-eval harness (benchmarks/eval/README.md) --------------------------
+# eval: hermetic. The corpus may not exist yet; only then is an empty lint allowed.
+eval:
+	@bash benchmarks/eval/selftest.sh
+	@bash benchmarks/eval/lib/libtests.sh
+	@if [ -d benchmarks/eval/corpus ]; then bash benchmarks/eval/lint.sh; else bash benchmarks/eval/lint.sh --allow-empty; fi
+
+# eval-live: spends money (real agent runs). Refuses unless EVAL_LIVE=1; prints the plan either way.
+N ?= 3
+eval-live:
+	@N=$(N) bash benchmarks/eval/lib/live.sh

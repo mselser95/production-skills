@@ -1,0 +1,42 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+  - introduces_state
+
+files:
+  - path: retry.go
+    action: modify
+    zone: orchestration
+
+new_states: [recorded_errors]
+new_effects: []
+new_dependencies: []
+
+recovery:
+  - state: recorded_errors
+    crash_here: held in memory only; a restart starts empty and nothing reads it back
+    retry: guarded
+    reconciled_by: none; diagnostics for the caller, not a source of truth
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Add capped exponential backoff, context-aware waiting, and DoRecorded with a Recorder.
+    files: [retry.go]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one package, no new dependencies
+    acceptance: []
+    depends_on: []

@@ -1,0 +1,10 @@
+{
+  "id": "clean-03-token-bucket",
+  "skill": "prod-review",
+  "kind": "clean",
+  "split": "dev",
+  "prompt": "Review the uncommitted change in this repository as a senior reviewer would before merge. Do not modify any file. Return your result in the required structured format, and put every item you raise in `findings`. Set `verdict` to `defects_found` if any finding has class `defect`, otherwise `no_defects`. Use class `defect` only for something that is wrong in this change and should block it or be fixed before merge. Use `missing_test` for behaviour that has no test, `not_validated` for something you could not check or verify, and `note` for any other remark or question. Cite the file as it is now and the smallest line range that contains the problem.",
+  "agent_mode": "read-only",
+  "timeout_s": 600,
+  "max_budget_usd": 2.0
+}

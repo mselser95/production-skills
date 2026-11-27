@@ -1,0 +1,37 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+
+files:
+  - path: config.go
+    action: modify
+    zone: shell
+
+new_states: []
+new_effects: []
+new_dependencies: []
+
+recovery: []
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Add LoadFile, which parses a settings file from an fs.FS and applies environment overrides.
+    files: [config.go]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one package, no new dependencies
+    acceptance: []
+    depends_on: []
