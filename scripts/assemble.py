@@ -14,18 +14,23 @@ root. Layout `monorepo`: unit is services/<SERVICE>, and a module that places
 anything as `unit` must declare (and be given) the SERVICE slot, else exit 2.
 
 SLOT VALUES. ONE grammar for every value, checked before anything else:
-  [A-Za-z0-9][A-Za-z0-9._-]*   (full match: no `/` `\\` `&` `<` whitespace NUL
-  newline, no leading `-` or `.`, never `.` or `..`, ASCII only)
-instantiate-template.sh enforces the same regex, so both tools accept and
-refuse exactly the same values. A slot may NARROW it with a `pattern` (a regex,
-full match, applied in addition); the grammar can never be widened. Because a
-value cannot contain `<`, a substituted value is never a placeholder; and
-substitution is ONE pass over all placeholders (longest first), so a value is
-never re-scanned and the result does not depend on --slot order.
+  1 to 64 characters (the length cap), each in [A-Za-z0-9._-], the first in
+  [A-Za-z0-9]: no `/` `\\` `&` `<` whitespace NUL newline, no leading `-` or
+  `.`, never empty, never `.` or `..`, ASCII only (a byte >= 0x80 is refused)
+instantiate-template.sh enforces the same grammar and cap, so both tools accept
+and refuse exactly the same values (an EMPTY value is refused by both, exit 2).
+A slot may NARROW it with two FIXED options that cannot backtrack (there is no
+regex option): `max_len` (integer 1..64) and `charset` (`lower` = [a-z]+;
+`lower-digits-dash` = kebab-case [a-z0-9]+(-[a-z0-9]+)*; `identifier` =
+[a-z_][a-z0-9_]*, a Python package name, whose leading `_` the grammar still
+refuses). The grammar can never be widened. Because a value cannot contain `<`,
+a substituted value is never a placeholder; and substitution is ONE pass over all
+placeholders (longest first), so a value is never re-scanned and the result does
+not depend on --slot order.
 
 Slots are literal token replacement of <NAME> in contents (bytes) and in paths,
-as instantiate-template.sh does. A literal slot ({"literal": L}, L at least 3
-chars) replaces L itself, but only where L is not adjacent to [A-Za-z0-9_] on
+as instantiate-template.sh does. A literal slot ({"literal": L}, L 3 to 64
+chars, no `/`) replaces L itself, but only where L is not adjacent to [A-Za-z0-9_] on
 the sides where L starts/ends with such a character: `@acme/pkg` and `acme/x`
 hit, `acmes` and `xacme` do not (a `-` or `.` neighbour counts as a boundary).
 
@@ -35,10 +40,28 @@ dest). The whole tree is PLANNED first (no write until every check passed), then
 written into a fresh temp dir created next to dest and renamed into place only
 on full success; on any failure the temp dir is removed and dest is untouched.
 Plan refusals: a file/link planned at a path that is also a proper prefix of
-another entry (file vs dir, link redirect); a link whose target is absolute or
-leaves the module's source tree. Symlinks inside a module are copied AS links
-(like `cp -R`), never followed; writes use O_EXCL|O_NOFOLLOW. The template
-ships no links today.
+another entry (file vs dir, link redirect); two planned paths that are equal
+after Unicode NFC normalisation and case folding (they are ONE file on a
+case-insensitive filesystem; refused on every platform, so a tree assembled on
+Linux is safe to check out on macOS), and the same fold for the prefix check; a
+link whose target is absolute or, resolved from the link's OUTPUT location
+(`dirname(out)/target`, target never substituted), leaves dest; a source file
+with a setuid/setgid/sticky bit. Symlinks inside a module are copied AS links
+(like `cp -R`), never followed; writes use O_EXCL|O_NOFOLLOW. The template ships
+no links today.
+
+MODES (parity with instantiate-template.sh, whose `cp -R` applies the umask to
+the source mode on macOS and GNU alike): a file gets (source & ~umask) | u+w; a
+directory gets (source directory & 0777 & ~umask) | u+w, setuid/setgid/sticky
+cleared; a directory that exists only because of the monorepo placement prefix
+(`services/<SERVICE>`) gets 0755 & ~umask | u+w; the dest root gets
+0777 & ~umask | u+w. When two modules share a directory the first module's source
+directory mode wins. A directory exists only because a file or link lives in it:
+an EMPTY source directory is dropped (instantiate-template.sh removes it too).
+
+INTERRUPTS. SIGINT, SIGTERM and SIGHUP remove the temp dir, print ONE line
+(`assemble: interrupted -- nothing written`) and exit 130, 143 and 129. A signal
+after the final rename is ignored (the tree is complete).
 
 DEST CONTRACT: dest must not exist, or be an empty directory (it is replaced by
 the finished tree via rename; its own mode is not kept). A symlink dest is
@@ -46,19 +69,21 @@ refused. Missing parent dirs are created only after success.
 
 Exit: 0 ok - 1 refused input (leftover slot, unplaced file, dest not empty or a
 link, path escape, collision, conflict, requires/conflicts, unused literal,
-I/O failure) - 2 usage or manifest error (bad --slot, bad value, bad manifest).
+special-mode file, I/O failure) - 128+N interrupted by signal N - 2 usage or manifest error (bad --slot, bad value, bad manifest).
 Every refusal is ONE message on stderr (plus listed items); never a traceback.
 
 MANIFEST KEYS (MANIFEST_KEYS below is the one list; unknown key -> exit 2):
   id            required; ^[a-z][a-z0-9-]*$ and equal to the directory name.
-  source        required; relative path from the module dir. `..` is allowed
-                only because service-go's source is ../../template: the real
-                path must lie inside the modules dir's parent (prod-new/).
+  source        required; relative path from the module dir. It must resolve to
+                the module's own directory or a subdirectory of it, OR be exactly
+                `../../template` resolving to <modules-dir>/../template (the
+                legacy Go template). Nothing else.
   placement     required; {glob: "root"|"unit"}.
   requires      [module ids] each must also be selected, else exit 1.
   conflicts     [module ids] none may also be selected, else exit 1.
   unit_kind     optional string (informational).
-  exclude       [globs] never placed, never reported unplaced. When `source` is
+  exclude       [globs] never placed, never reported unplaced; a glob containing
+                `..` or starting with `/` is exit 2. When `source` is
                 the module dir itself, module.json at its root is always excluded.
   root_merge    {glob: "union-lines"} destinations that may be merged when two
                 modules place different bytes there: the later module's lines
@@ -70,7 +95,8 @@ MANIFEST KEYS (MANIFEST_KEYS below is the one list; unknown key -> exit 2):
                 refusal (paths are always checked), unless listed in slot_allow.
   slot_allow    [tokens] names (without <>) tolerated by strict_slots.
   slots         NAME -> description string or {"description", "literal",
-                "pattern"}. A literal that never occurs is an error.
+                "max_len", "charset"}. A literal that never occurs is an error.
+Duplicate JSON keys at any depth are exit 2 (nothing is "last wins").
 
 CANDIDATE FILES. Inside a git work tree: `git ls-files --cached --others
 --exclude-per-directory=.gitignore` restricted to the source dir, with user and
@@ -89,23 +115,46 @@ kind, bytes and mode are identical after substitution, or root_merge applies.
 import argparse
 import json
 import os
+import posixpath
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 VALUE_RX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SLOT_NAME_RX = re.compile(r"[A-Z][A-Z0-9_]*")
 MODULE_ID_RX = re.compile(r"[a-z][a-z0-9-]*")
 MANIFEST_KEYS = ("id", "source", "placement", "requires", "conflicts", "unit_kind",
                  "exclude", "root_merge", "strict_slots", "slot_allow", "slots")
-SLOT_KEYS = ("description", "literal", "pattern")
+SLOT_KEYS = ("description", "literal", "max_len", "charset")
+CHARSETS = ("lower", "lower-digits-dash", "identifier")
+MAX_VALUE = 64
+LOWER = "abcdefghijklmnopqrstuvwxyz"
+DIGITS = "0123456789"
+SPECIAL = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+SIGNALS = tuple(getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, n))
 LAYOUTS = ("single", "monorepo")
 STRATEGIES = ("union-lines",)
 TOKEN = re.compile(rb"<([A-Z][A-Z0-9_]*)>")
 WORD = re.compile(r"[A-Za-z0-9_]")
+
+
+class Interrupted(BaseException):
+    """A signal arrived; code is 128 + the signal number."""
+
+    def __init__(self, code):
+        BaseException.__init__(self, code)
+        self.code = code
+
+
+def on_signal(signum, frame):
+    for s in SIGNALS:  # one interrupt is enough: the cleanup must not be interrupted again
+        signal.signal(s, signal.SIG_IGN)
+    raise Interrupted(128 + signum)
 
 
 def die(code, msg):
@@ -130,10 +179,35 @@ def glob_re(g):
 
 
 def check_value(name, v):
-    """The value grammar. Same regex as instantiate-template.sh."""
-    if VALUE_RX.fullmatch(v) is None:
+    """The value grammar and length cap, in the order instantiate-template.sh checks them."""
+    if len(v) > MAX_VALUE:
+        die(2, "slot %s: value is %d characters; the cap is %d" % (name, len(v), MAX_VALUE))
+    if not v.isascii() or VALUE_RX.fullmatch(v) is None:
         die(2, "slot %s: value %r is outside the value grammar "
-            "[A-Za-z0-9][A-Za-z0-9._-]*" % (name, v))
+            "[A-Za-z0-9][A-Za-z0-9._-]* (1 to %d characters, ASCII only)" % (name, v, MAX_VALUE))
+
+
+def charset_ok(cs, v):
+    """Fixed character-set tests, string methods only (nothing here can backtrack)."""
+    if cs == "lower":
+        return v != "" and all(c in LOWER for c in v)
+    if cs == "lower-digits-dash":
+        return v != "" and all(p != "" and all(c in LOWER + DIGITS for c in p) for p in v.split("-"))
+    return v != "" and v[0] in LOWER + "_" and all(c in LOWER + DIGITS + "_" for c in v)
+
+
+def fold(p):
+    """The key two paths must NOT share: NFC, case-folded, NFC again."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", p).casefold())
+
+
+def no_dups(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("duplicate key %r" % k)
+        d[k] = v
+    return d
 
 
 def escapes(root, rel):
@@ -265,7 +339,7 @@ def load_manifest(mid, mdir):
 
     try:
         with open(mp, encoding="utf-8") as f:
-            m = json.load(f)
+            m = json.load(f, object_pairs_hook=no_dups)
     except (ValueError, RecursionError, OSError) as e:
         die(2, "unreadable manifest %s: %s" % (mp, e))
     if not isinstance(m, dict):
@@ -291,6 +365,9 @@ def load_manifest(mid, mdir):
         v = m.get(key, [])
         if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
             bad("key %r must be a list of strings" % key)
+    for g in m.get("exclude", []):
+        if ".." in g or g.startswith("/") or "\0" in g:
+            bad("key 'exclude': glob %r must not contain `..`, start with `/` or hold NUL" % g)
     for key in ("requires", "conflicts"):
         for x in m.get(key, []):
             if not MODULE_ID_RX.fullmatch(x):
@@ -308,7 +385,7 @@ def load_manifest(mid, mdir):
     mslots = m.get("slots", {})
     if not isinstance(mslots, dict):
         bad("key 'slots' must be an object")
-    m["_ph"], m["_lit"], m["_pat"] = {}, {}, {}
+    m["_ph"], m["_lit"], m["_cs"], m["_ml"] = {}, {}, {}, {}
     for k, v in mslots.items():
         if not SLOT_NAME_RX.fullmatch(k):
             bad("slot name %r must match [A-Z][A-Z0-9_]*" % k)
@@ -322,21 +399,63 @@ def load_manifest(mid, mdir):
         if "description" in v and not isinstance(v["description"], str):
             bad("slot %s: description must be a string" % k)
         if "literal" in v:
-            if not isinstance(v["literal"], str) or len(v["literal"]) < 3:
-                bad("slot %s: literal must be a string of at least 3 characters" % k)
+            if not isinstance(v["literal"], str) or not 3 <= len(v["literal"]) <= MAX_VALUE:
+                bad("slot %s: literal must be a string of at least 3 and at most %d characters"
+                    % (k, MAX_VALUE))
+            if "/" in v["literal"] or "\0" in v["literal"]:
+                bad("slot %s: literal must not contain `/` or NUL" % k)
             m["_ph"][k] = m["_lit"][k] = v["literal"]
-        if "pattern" in v:
-            try:
-                if not isinstance(v["pattern"], str):
-                    raise re.error("not a string")
-                m["_pat"][k] = re.compile(v["pattern"])
-            except re.error as e:
-                bad("slot %s: pattern is not a valid regex (%s)" % (k, e))
+        if "max_len" in v:
+            if type(v["max_len"]) is not int or not 1 <= v["max_len"] <= MAX_VALUE:
+                bad("slot %s: max_len must be an integer from 1 to %d" % (k, MAX_VALUE))
+            m["_ml"][k] = v["max_len"]
+        if "charset" in v:
+            if v["charset"] not in CHARSETS:
+                bad("slot %s: charset must be one of %s" % (k, ", ".join(CHARSETS)))
+            m["_cs"][k] = v["charset"]
     return m
 
 
+def block(on):
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_BLOCK if on else signal.SIG_UNBLOCK, SIGNALS)
+
+
+def write_tree(plan, tmp, umask, dir_modes=None):
+    """Write every planned entry under tmp (an existing, empty directory), then set directory
+    modes. A path that would leave tmp, or that already exists, is refused (O_EXCL, no follow)."""
+    dir_modes = dir_modes or {}
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    dirs = set()
+    for out in sorted(plan):
+        if escapes(tmp, out):
+            die(1, "refused: %r resolves outside dest" % out)
+        p = os.path.join(tmp, out)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        parts = out.split("/")[:-1]
+        dirs.update("/".join(parts[:i + 1]) for i in range(len(parts)))
+        e = plan[out]
+        if e["kind"] == "link":
+            os.symlink(e["data"], p)
+        else:
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(e["data"])
+                os.fchmod(f.fileno(), e["mode"])
+    for d in sorted(dirs, key=lambda x: -x.count("/")):
+        dp = os.path.join(tmp, d)
+        if not os.path.islink(dp):
+            os.chmod(dp, dir_modes.get(d, (0o777 & ~umask) | stat.S_IWUSR))
+    os.chmod(tmp, (0o777 & ~umask) | stat.S_IWUSR)
+
+
 def run():
-    ap = argparse.ArgumentParser(add_help=True, allow_abbrev=False)
+    ap = argparse.ArgumentParser(
+        add_help=True, allow_abbrev=False, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Build a repo tree from prod-new modules (see the header of this file).",
+        epilog="Slot values: 1 to %d characters, ASCII, [A-Za-z0-9] first, then [A-Za-z0-9._-]; "
+               "never empty, `.` or `..`. A module may narrow a slot with max_len and charset "
+               "(lower, lower-digits-dash, identifier)." % MAX_VALUE)
     ap.add_argument("--dest", required=True)
     ap.add_argument("--layout", required=True)
     ap.add_argument("--module", action="append", default=[])
@@ -388,10 +507,14 @@ def run():
     declared = set()
     for _, m in manifests:
         declared.update(m.get("slots", {}))
-        for k, rx in m["_pat"].items():
-            if k in slots and rx.fullmatch(slots[k]) is None:
-                die(2, "module %s: slot %s: value %r does not match its pattern %r"
-                    % (m["_id"], k, slots[k], rx.pattern))
+        for k, n in m["_ml"].items():
+            if k in slots and len(slots[k]) > n:
+                die(2, "module %s: slot %s: value %r is longer than its max_len %d"
+                    % (m["_id"], k, slots[k], n))
+        for k, cs in m["_cs"].items():
+            if k in slots and not charset_ok(cs, slots[k]):
+                die(2, "module %s: slot %s: value %r is outside its charset %s"
+                    % (m["_id"], k, slots[k], cs))
     for k in slots:
         if k not in declared:
             die(2, "unknown slot %r (declared: %s)" % (k, ", ".join(sorted(declared))))
@@ -413,14 +536,20 @@ def run():
     os.umask(umask)
 
     plan = {}  # out path -> {"kind": link|file, "data", "mode", "mods": [ids], "merge": bool}
+    dir_modes = {}  # out dir -> mode (first contributor wins)
+    dstat = {}
     bad_paths, bad_content, unplaced, bad_lit, bad_esc, bad_link = [], [], [], [], [], []
     for mod_path, m in manifests:
         mid = m["_id"]
         src = os.path.normpath(os.path.join(mod_path, m["source"]))
         real_src = os.path.realpath(src)
-        pkg = os.path.realpath(os.path.dirname(os.path.abspath(mdir)))
-        if not (real_src == pkg or real_src.startswith(pkg + os.sep)):
-            die(2, "module %s: source %s resolves outside %s" % (mid, m["source"], pkg))
+        real_mod = os.path.realpath(mod_path)
+        legacy = os.path.realpath(os.path.join(mdir, "..", "template"))
+        if not (real_src == real_mod or real_src.startswith(real_mod + os.sep)
+                or (m["source"] == "../../template" and real_src == legacy)):
+            die(2, "module %s: source %s resolves outside the module directory %s "
+                "(only its own subtree, or exactly ../../template, is allowed)"
+                % (mid, m["source"], real_mod))
         if not os.path.isdir(src):
             die(2, "module %s: source %s is not a directory" % (mid, src))
         ph = {k: m["_ph"].get(k, "<%s>" % k) for k in slots}
@@ -456,12 +585,16 @@ def run():
             st = os.lstat(full)
             if stat.S_ISLNK(st.st_mode):
                 tgt = os.readlink(full)
-                norm = os.path.normpath(os.path.join(os.path.dirname(rel), tgt))
+                norm = posixpath.normpath(posixpath.join(posixpath.dirname(out), tgt))
                 if os.path.isabs(tgt) or "\0" in tgt or norm == ".." or norm.startswith("../"):
                     bad_link.append("%s -> %s (module %s)" % (out, tgt, mid))
                     continue
                 ent = {"kind": "link", "data": tgt, "mode": 0}
             elif stat.S_ISREG(st.st_mode):
+                if st.st_mode & SPECIAL:
+                    bad_link.append("%s has a setuid/setgid/sticky bit (%o) (module %s)"
+                                    % (rel, stat.S_IMODE(st.st_mode), mid))
+                    continue
                 with open(full, "rb") as f:
                     data = sub.b(f.read())
                 for k in slots:
@@ -478,6 +611,22 @@ def run():
             else:
                 bad_link.append("%s is not a regular file or link (module %s)" % (out, mid))
                 continue
+            rparts, oparts = rel.split("/")[:-1], out.split("/")[:-1]
+            plen = len(oparts) - len(rparts)
+            for i in range(len(oparts)):
+                od = "/".join(oparts[:i + 1])
+                if od in dir_modes:
+                    continue
+                if i < plen:
+                    dir_modes[od] = (0o755 & ~umask) | stat.S_IWUSR
+                    continue
+                sd = os.path.join(src, *rparts[:i - plen + 1])
+                if sd not in dstat:
+                    try:
+                        dstat[sd] = stat.S_IMODE(os.lstat(sd).st_mode) & 0o777
+                    except OSError:
+                        dstat[sd] = 0o777
+                dir_modes[od] = (dstat[sd] & ~umask) | stat.S_IWUSR
             ent["mods"] = [mid]
             ent["merge"] = any(rx.match(out) for rx in merge_rx)
             old = plan.get(out)
@@ -525,12 +674,22 @@ def run():
     if not plan:
         die(1, "nothing to assemble")
 
-    # a planned file or link may not also be a directory on the way to another entry
+    # two paths one file on a case-insensitive / normalising filesystem, and a planned file or
+    # link may not also be a directory on the way to another entry (both on the folded path)
+    kmap = {}
     for out in sorted(plan):
-        parts = out.split("/")
+        k = fold(out)
+        if k in kmap:
+            die(1, "path collision: %r (module %s) and %r (module %s) differ only by case or "
+                "Unicode normalisation; they are one file on a case-insensitive filesystem; "
+                "nothing written" % (kmap[k], " + ".join(plan[kmap[k]]["mods"]), out,
+                                     " + ".join(plan[out]["mods"])))
+        kmap[k] = out
+    for out in sorted(plan):
+        parts = fold(out).split("/")
         for i in range(1, len(parts)):
-            pre = "/".join(parts[:i])
-            if pre in plan:
+            pre = kmap.get("/".join(parts[:i]))
+            if pre is not None:
                 o, e = plan[pre], plan[out]
                 die(1, "path conflict: module %s places %s as a %s, but module %s places %s beneath it; "
                     "nothing written" % (" + ".join(o["mods"]), pre, o["kind"], " + ".join(e["mods"]), out))
@@ -542,28 +701,22 @@ def run():
         anc = os.path.dirname(anc)
     tmp = None
     try:
-        tmp = tempfile.mkdtemp(prefix=".assemble-", dir=anc)
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        for out in sorted(plan):
-            if escapes(tmp, out):
-                die(1, "refused: %r resolves outside dest" % out)
-            p = os.path.join(tmp, out)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            if escapes(tmp, out):
-                die(1, "refused: %r resolves outside dest" % out)
-            e = plan[out]
-            if e["kind"] == "link":
-                os.symlink(e["data"], p)
-            else:
-                fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
-                with os.fdopen(fd, "wb") as f:
-                    f.write(e["data"])
-                    os.fchmod(f.fileno(), e["mode"])
-        os.chmod(tmp, 0o777 & ~umask)
-        os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
-        if os.path.islink(dest) or (os.path.lexists(dest) and (not os.path.isdir(dest) or os.listdir(dest))):
-            die(1, "dest %s changed while assembling; nothing written" % dest)
-        os.rename(tmp, dest_abs)
+        block(True)  # no signal between mkdtemp and the assignment that lets `finally` remove it
+        try:
+            tmp = tempfile.mkdtemp(prefix=".assemble-", dir=anc)
+        finally:
+            block(False)
+        write_tree(plan, tmp, umask, dir_modes)
+        block(True)  # the commit: a signal now waits, and is dropped once the rename happened
+        try:
+            os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
+            if os.path.islink(dest) or (os.path.lexists(dest) and (not os.path.isdir(dest) or os.listdir(dest))):
+                die(1, "dest %s changed while assembling; nothing written" % dest)
+            os.rename(tmp, dest_abs)
+            for sg in SIGNALS:
+                signal.signal(sg, signal.SIG_IGN)
+        finally:
+            block(False)
     finally:
         if tmp is not None and os.path.lexists(tmp):
             shutil.rmtree(tmp, ignore_errors=True)
@@ -571,8 +724,13 @@ def run():
 
 
 def main():
+    for sg in SIGNALS:
+        signal.signal(sg, on_signal)
     try:
         run()
+    except (Interrupted, KeyboardInterrupt) as e:
+        sys.stderr.write("assemble: interrupted -- nothing written\n")
+        sys.exit(e.code if isinstance(e, Interrupted) else 130)
     except OSError as e:
         die(1, "I/O error, nothing written: %s" % e)
     except Exception as e:  # never a traceback for the user
