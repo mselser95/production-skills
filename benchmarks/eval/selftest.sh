@@ -20,7 +20,7 @@ note() { # name ok(0/1) detail
 # Darwin only; a case that needs one is guarded with `darwin_only <id>`, which on any other
 # platform prints `SKIP <id> (darwin-only)` and returns 1. The ONE declaration of which cases
 # those are is the next line; the accounting at the bottom fails on any drift, on either platform.
-DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14t 14u 14u2 14v 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x"
+DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14t 14u 14u2 14v 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x 15y"
 PLATFORM="$(uname)"; DO_SEEN="" DO_SKIPPED=""
 darwin_only() {
   DO_SEEN="$DO_SEEN $1"
@@ -713,6 +713,19 @@ note "15x install dir that contains the real auth/config dir: the profile is ref
 adapter claude read-only "$TOK" PATH="$tmp/inst:$fbs:$fb:$PATH"; arc=$?
 if [[ $arc -eq 0 && -e "$AH/probe.out" ]]; then ok=0; else ok=1; fi
 note "15x2 control: the same install dir with the auth dir elsewhere starts normally" $ok "rc=$arc $(head -c 300 "$tmp/adapter.err")"
+fi
+if darwin_only 15y; then
+# a re-allowed FILE (the --output-schema) is reachable by a CLI that lstat()s its ancestors: metadata only there, never data or siblings
+sy="$tmp/y15"; mkdir -p "$sy/c/lib" "$sy/c/other"; echo SCHEMA >"$sy/c/lib/s.json"; echo SIB >"$sy/c/lib/sib.json"; echo OTH >"$sy/c/other/o.txt"
+python3 -I -B "$here/lib/seatbelt.py" "$sy/cell/work" "$sy/cell/home" "$sy/cell/gc" "$sy/cell/tmp" read-only --deny-root "$tmp" --reallow-read "$sy/c/lib/s.json" >"$sy/p.sb"; prc=$?
+sby() { /usr/bin/sandbox-exec -f "$sy/p.sb" "$@" >/dev/null 2>&1 && echo ok || echo denied; }
+y1="$(sby /bin/cat "$sy/c/lib/s.json")"; y2="$(sby /usr/bin/stat "$sy/c/lib")"; y3="$(sby /usr/bin/stat "$sy/c")"; y4="$(sby /bin/cat "$sy/c/lib/sib.json")"; y5="$(sby /usr/bin/stat "$sy/c/lib/sib.json")"; y6="$(sby /bin/ls "$sy/c/lib")"; y7="$(sby /bin/cat "$sy/c/other/o.txt")"
+if [[ $prc -eq 0 && "$y1" == ok && "$y2" == ok && "$y3" == ok && "$y4" == denied && "$y5" == denied && "$y6" == denied && "$y7" == denied ]]; then ok=0; else ok=1; fi
+sl="$(mktemp -d /tmp/eval-y15.XXXXXX)"; echo SCHEMA >"$sl/s.json"   # a path through the symlinked /tmp, not its realpath
+python3 -I -B "$here/lib/seatbelt.py" "$sy/cell/work" "$sy/cell/home" "$sy/cell/gc" "$sy/cell/tmp" read-only --reallow-read "$sl/s.json" >"$sy/p2.sb"; prc2=$?
+y8="$(/usr/bin/sandbox-exec -f "$sy/p2.sb" /usr/bin/stat "$sl" >/dev/null 2>&1 && echo ok || echo denied)"; y9="$(/usr/bin/sandbox-exec -f "$sy/p2.sb" /bin/cat "$sl/s.json" >/dev/null 2>&1 && echo ok || echo denied)"; rm -rf "$sl"
+if [[ $ok -eq 0 && $prc2 -eq 0 && "$y8" == ok && "$y9" == ok ]]; then ok=0; else ok=1; fi
+note "15y re-allowed file: readable, its ancestors stat-able; sibling file (cat+stat), directory listing and other dirs stay denied" $ok "prc=$prc cat=$y1 stat-dir=$y2 stat-parent=$y3 cat-sib=$y4 stat-sib=$y5 ls=$y6 cat-other=$y7 via-symlink stat=$y8 cat=$y9"
 fi
 adapter claude read-only "$TOK" EVAL_CLAUDE_NO_SANDBOX=0 PATH="$fb:$nosb"; arc=$?
 if [[ $arc -eq 79 && ! -e "$AH/claude.argv" ]]; then ok=0; else ok=1; fi

@@ -152,6 +152,17 @@ def main():
         out.append('(deny file-read* file-write* (subpath "%s"))' % d)
     if reallow:
         out.append("(allow file-read* %s)" % subs(reallow))
+        # a re-allowed file under a denied path is reached by CLIs that lstat every ancestor first: METADATA ONLY,
+        # literals, on its ancestors (no data, no listing, no siblings). Emitted after the denies so it is effective.
+        ranc = []
+        for p in reallow:
+            for f in forms(p):   # as given too: the CLI lstat()s the symlinked /tmp itself
+                d = os.path.dirname(f)
+                while d != os.path.dirname(d):
+                    if d not in ranc:
+                        ranc.append(d)
+                    d = os.path.dirname(d)
+        out.append("(allow file-read-metadata %s)" % " ".join('(literal "%s")' % d for d in ranc))
     out.append('(deny file-read* file-write* (regex #"%s"))' % SOCK_RE)
     out.append('(deny network-outbound (remote unix-socket (path-regex #"%s")))' % SOCK_RE)
     print("\n".join(out))
