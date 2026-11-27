@@ -52,6 +52,8 @@
 #     correct code gets widened until it is gone.
 #   * anything inside a heredoc or a single-quoted block, which this pass does
 #     not tokenize.
+#   * under bash 3.2 `read` truncates a line at a NUL byte, so a line containing
+#     one is judged on its stripped-then-truncated form; bash 4+ and Linux are unaffected.
 #
 # It has no known false positives over this template, which is the other half
 # of the bargain.
@@ -111,40 +113,31 @@ findings=0
 # (normal end, early exit, INT/TERM -- bash runs the EXIT trap for those).
 strip_tmp=""
 trap '[[ -n "$strip_tmp" ]] && rm -f "$strip_tmp"' EXIT
-report() { printf '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4"; findings=$((findings+1)); }
+# In one-pass mode a file's findings are held until the file is known to be in
+# lockstep with its stripped copy (see scan_file), so a rescan cannot report twice.
+report() {
+  if (( per_line )); then
+    printf '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4"; findings=$((findings+1))
+  else
+    printf -v one '  %s:%s  %-22s %s\n' "$1" "$2" "$3" "$4"; file_out+="$one"; file_findings=$((file_findings+1))
+  fi
+}
+no_tmp=0; per_line=0; file_out=""; file_findings=0; one=""
 
-for f in "${files[@]}"; do
-  # This file documents the patterns it hunts, so scanning it finds its own
-  # prose. Named explicitly rather than skipped by a wildcard, so a future
-  # exclusion has to be argued for.
-  [[ "$f" == */gate-hygiene-fitness.sh ]] && continue
-  [[ "$f" == */gate-hygiene-fitness-selftest.sh ]] && continue
-
-  uses_set_e=0
-  grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*e' "$f" && uses_set_e=1
-  # pipefail, however it was spelled. The first version of this line required
-  # `-o` as a separate token and therefore missed `set -euo pipefail`, which is
-  # how almost every script in this repo spells it -- a rule that could not
-  # fire, found by mutation and not by reading, for the third time in this
-  # file. The lesson is in the pattern, not in the regex: a detector whose
-  # trigger condition is itself a match must be mutated too, not only the
-  # thing it detects.
-  uses_pipefail=0
-  grep -qE '^[[:space:]]*set[[:space:]].*pipefail' "$f" && uses_pipefail=1
-
-  n=0
-  # The quote-stripped text of the WHOLE file, one sed process per file (not one
-  # per line), read in lockstep with the source on fd 3. sed is line-for-line, so
-  # line N there is line N here; it is read BEFORE the comment `continue` below so
-  # a skipped line cannot shift the pairing. If sed refuses the file (an illegal
-  # byte sequence aborts it mid-stream), the file is stripped line by line instead,
-  # which is what this gate did before and reports the same.
-  strip_tmp=$(mktemp "${TMPDIR:-/tmp}/hygiene-fitness.XXXXXX") || exit 2
-  per_line=0
-  sed "s/'[^']*'//g; s/\"[^\"]*\"//g" "$f" > "$strip_tmp" 2>/dev/null || per_line=1
-  while IFS= read -r line; do
+# One file, scanned in lockstep with its quote-stripped copy on fd 3 (or, when
+# per_line is set, stripping each line itself). Returns 1 if the two went out of
+# step -- fd 3 short of the source, or lines left over at the end -- so the caller
+# can rescan that file per line instead of judging lines against the wrong text.
+scan_file() {
+  local n=0 line unquoted var rest
+  file_out=""; file_findings=0
+  {
+  while IFS= read -r line || [[ -n "$line" ]]; do
     n=$((n+1))
-    if (( ! per_line )); then IFS= read -r unquoted <&3 || unquoted=""; fi
+    if (( ! per_line )); then
+      # fd 3 ran dry before the source did: out of lockstep, rescan per line.
+      IFS= read -r unquoted <&3 || [[ -n "$unquoted" ]] || return 1
+    fi
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
 
     # `-[a-zA-Z0-9]+`, not `-[a-zA-Z]+`: the first version of this rule could
@@ -238,8 +231,57 @@ for f in "${files[@]}"; do
     if [[ "$line" =~ (^|[\;\&\|\(]|if|then|\!)[[:space:]]*bash[[:space:]]+-n[[:space:]] ]]; then
       report "$f" "$n" "BASH-N-AS-VALIDATION" "parses and executes nothing; run the gate, then break what it guards and watch it go red"
     fi
-  done < "$f" 3< "$strip_tmp"
-  rm -f "$strip_tmp"
+  done
+  if (( ! per_line )) && IFS= read -r unquoted <&3; then return 1; fi
+  } < "$f" 3< "$fd3src"
+  return 0
+}
+
+for f in "${files[@]}"; do
+  # This file documents the patterns it hunts, so scanning it finds its own
+  # prose. Named explicitly rather than skipped by a wildcard, so a future
+  # exclusion has to be argued for.
+  [[ "$f" == */gate-hygiene-fitness.sh ]] && continue
+  [[ "$f" == */gate-hygiene-fitness-selftest.sh ]] && continue
+
+  uses_set_e=0
+  grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*e' "$f" && uses_set_e=1
+  # pipefail, however it was spelled. The first version of this line required
+  # `-o` as a separate token and therefore missed `set -euo pipefail`, which is
+  # how almost every script in this repo spells it -- a rule that could not
+  # fire, found by mutation and not by reading, for the third time in this
+  # file. The lesson is in the pattern, not in the regex: a detector whose
+  # trigger condition is itself a match must be mutated too, not only the
+  # thing it detects.
+  uses_pipefail=0
+  grep -qE '^[[:space:]]*set[[:space:]].*pipefail' "$f" && uses_pipefail=1
+
+  # The quote-stripped text of the WHOLE file, one sed process per file (not one
+  # per line), read in lockstep with the source on fd 3. sed is line-for-line, so
+  # line N there is line N here; it is read BEFORE the comment `continue` in
+  # scan_file so a skipped line cannot shift the pairing. If sed refuses the file
+  # (an illegal byte sequence aborts it mid-stream), or the two fall out of step,
+  # the file is stripped line by line instead, which is what this gate did before
+  # and reports the same. If no temp file can be made at all, EVERY file is: the
+  # gate must still scan on a read-only filesystem, and must never call a scan it
+  # could not do clean.
+  per_line=$no_tmp
+  fd3src=/dev/null
+  if (( ! no_tmp )); then
+    if strip_tmp=$(mktemp "${TMPDIR:-/tmp}/hygiene-fitness.XXXXXX" 2>/dev/null); then
+      if sed "s/'[^']*'//g; s/\"[^\"]*\"//g" "$f" > "$strip_tmp" 2>/dev/null; then
+        fd3src=$strip_tmp
+      else
+        per_line=1
+      fi
+    else
+      strip_tmp=""; no_tmp=1; per_line=1
+      printf 'gate-hygiene-fitness: note: cannot create a temp file under %s; scanning line by line (slower, same result).\n' "${TMPDIR:-/tmp}" >&2
+    fi
+  fi
+  if ! scan_file; then per_line=1; fd3src=/dev/null; scan_file; fi
+  printf '%s' "$file_out"; findings=$((findings+file_findings))
+  if [[ -n "$strip_tmp" ]]; then rm -f "$strip_tmp"; strip_tmp=""; fi
 done
 
 if (( findings )); then
