@@ -1,0 +1,37 @@
+# change-plan.yaml
+context: .prod/context/resolved-context.yaml
+
+semantic_events:
+  - changes_public_api
+
+files:
+  - path: upload.go
+    action: modify
+    zone: core
+
+new_states: []
+new_effects: []
+new_dependencies: []
+
+recovery: []
+
+observability: []
+
+compatibility:
+  schema: unchanged
+  api: additive
+
+candidate_invariants: []
+
+tasks:
+  - id: T1
+    kind: implement
+    summary: Let the last chunk of an upload be shorter than the rest, accept an empty upload, and add Received to count stored bytes.
+    files: [upload.go]
+    context: []
+    focus: Does the change do what its summary says, for every input it accepts?
+    ambiguity: none
+    tier: sonnet
+    cost_rationale: one small change in one package, no new dependencies
+    acceptance: []
+    depends_on: []
