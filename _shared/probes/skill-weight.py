@@ -16,11 +16,16 @@ SETS = ("eager", "reachable")
 ANCHOR = "Read `references/preamble.md` first"
 RERECORD = "re-record with `make skill-weight-baseline` if intended"
 # One regex, whole body, any form (backticked, bare, ./, link target, <skill>/ prefix).
-REF_RE = re.compile(r"(?<![A-Za-z0-9_])references/[A-Za-z0-9_./-]+")
+# `*` not `+`: a bare `references/` (the whole directory) must match, not vanish.
+REF_RE = re.compile(r"(?<![A-Za-z0-9_])references/[A-Za-z0-9_./-]*")
+GLOB = "*?[{"  # a glob mention orders every file it matches read, exactly as a directory does
+GLOB_TAIL_RE = re.compile(r"[^\s`'\")<>]*")
+PROBES = "references/probes/"  # scripts a skill RUNS: listed and summed, never gated
 WRAP_RE = re.compile(r"(references/[A-Za-z0-9_./-]*-)[ \t]*\n[ \t]*")  # path wrapped after a hyphen
 TICK_RE = re.compile(r"`(references/[^`\s]+)`")
 HEADER = ["skill", "SKILL.md lines", "SKILL.md bytes", "eager bytes", "reachable bytes",
-          "of which probes", "eager tokens", "reachable tokens", "eager files", "reachable files"]
+          "eager probe bytes", "reachable probe bytes", "eager tokens", "reachable tokens",
+          "eager files", "reachable files"]
 
 tokens = lambda b: (b + 2) // 4
 
@@ -31,12 +36,19 @@ def slurp(path):
 
 
 def refs_in(text):
-    """Every references/<path> mention, as (start, end, path); trailing dots dropped."""
+    """Every references/<path> mention, as (start, end, path); trailing dots dropped. A bare
+    `references/` and a glob (`references/*.md`, `{a,b}`, `?`, `[x]`) are returned like any
+    other path: they resolve to no file, so measure() fails them."""
     out = []
     for m in REF_RE.finditer(text):
-        path = m.group(0).rstrip(".")
-        if path != "references/":
-            out.append((m.start(), m.start() + len(path), path))
+        end = m.end()
+        if text[end:end + 1] and text[end] in GLOB:
+            end = GLOB_TAIL_RE.match(text, end).end()
+            path = text[m.start():end]
+        else:
+            path = m.group(0).rstrip(".")
+            end = m.start() + len(path)
+        out.append((m.start(), end, path))
     return out
 
 
@@ -101,7 +113,7 @@ def measure(root, skills=SKILLS):
             if p not in mentioned:
                 mentioned.append(p)
         seen, reach, unresolved = {os.path.realpath(md)}, ["SKILL.md"], []
-        reach_bytes, probes = size, 0
+        reach_bytes, rprobes = size, 0
         for ref in sorted(mentioned):
             real, n = resolve(root, s, ref)
             if real is None:
@@ -109,15 +121,21 @@ def measure(root, skills=SKILLS):
             elif real not in seen:
                 seen.add(real)
                 reach.append(ref)
-                reach_bytes += n
-                if ref.startswith("references/probes/"):
-                    probes += n
+                if ref.startswith(PROBES):
+                    rprobes += n
+                else:
+                    reach_bytes += n
         for ref in unresolved:
-            problems[s].append("mentioned %s does not resolve to a readable file (dangling link, directory or typo)" % ref)
+            hint = ""
+            if ref.endswith("/") or any(c in ref for c in GLOB):
+                hint = "; a directory or glob mention orders every file in it read and cannot be measured: name the files explicitly"
+            problems[s].append("mentioned %s does not resolve to a readable file (dangling link, directory or typo)%s" % (ref, hint))
+        # Defence in depth: the anchor paragraph itself mentions references/preamble.md, so a
+        # skill with no mention at all already fails "no paragraph contains" below.
         if len(reach) == 1 and not unresolved:
             problems[s].append("no references/ mention found -- every skill mentions at least references/preamble.md, so the rule went blind")
         para = eager_paragraph(text)
-        eager, eager_bytes = ["SKILL.md"], size
+        eager, eager_bytes, eprobes = ["SKILL.md"], size, 0
         if para is None:
             problems[s].append("no paragraph contains %r -- the opening read-first order is gone or reworded" % ANCHOR)
         else:
@@ -132,9 +150,13 @@ def measure(root, skills=SKILLS):
                 if real is not None and real not in eseen:
                     eseen.add(real)
                     eager.append(ref)
-                    eager_bytes += n
+                    if ref.startswith(PROBES):
+                        eprobes += n
+                    else:
+                        eager_bytes += n
         rows[s] = dict(lines=lines, size=size, eager=eager, eager_bytes=eager_bytes,
-                       reachable=reach, reachable_bytes=reach_bytes, probes=probes)
+                       eager_probes=eprobes, reachable=reach, reachable_bytes=reach_bytes,
+                       reachable_probes=rprobes)
     return rows, problems, found
 
 
@@ -142,9 +164,9 @@ def table_lines(rows, skills=SKILLS):
     out = ["| " + " | ".join(HEADER) + " |", "|" + "---|" * len(HEADER)]
     for s in skills:
         r = rows[s]
-        out.append("| %s | %d | %d | %d | %d | %d | %d | %d | %s | %s |" % (
-            s, r["lines"], r["size"], r["eager_bytes"], r["reachable_bytes"], r["probes"],
-            tokens(r["eager_bytes"]), tokens(r["reachable_bytes"]),
+        out.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %s | %s |" % (
+            s, r["lines"], r["size"], r["eager_bytes"], r["reachable_bytes"], r["eager_probes"],
+            r["reachable_probes"], tokens(r["eager_bytes"]), tokens(r["reachable_bytes"]),
             ", ".join(sorted(r["eager"])), ", ".join(sorted(r["reachable"]))))
     return out
 
@@ -162,9 +184,11 @@ def write_baseline(root, rows, path, skills=SKILLS):
                 "Generated by `_shared/probes/skill-weight.sh --write` (`make skill-weight-baseline`). Do not hand-edit:\n"
                 "the last line is a checksum of the table, and `skill-weight.sh` fails when they disagree.\n"
                 "EAGER = SKILL.md + the references its opening paragraph orders read first. REACHABLE = SKILL.md + every\n"
-                "references/ file it mentions anywhere (an upper bound; `of which probes` is the part under references/probes/).\n"
-                "approx tokens = bytes/4. The probe fails when a skill's file list changes in either direction, or when\n"
-                "a set's bytes exceed its row by more than %d %%. Read the diff of this file as the review of what a skill loads.\n\n" % RATCHET_PCT)
+                "references/ file it names explicitly. Files under references/probes/ are scripts the skill RUNS, not reads:\n"
+                "they stay in the file lists but their bytes are the `probe bytes` columns, outside `eager bytes` /\n"
+                "`reachable bytes`, which are the gated numbers. approx tokens = gated bytes/4. The probe fails when a\n"
+                "skill's file list changes in either direction, or when a set's gated bytes exceed its row by more than\n"
+                "%d %%. Read the diff of this file as the review of what a skill loads.\n\n" % RATCHET_PCT)
         f.write("\n".join(tl) + "\n\n")
         f.write("checksum: %s\n" % checksum(tl))
     os.replace(tmp_path, path)  # atomic; never rewrites a file in place
@@ -196,12 +220,12 @@ def load_baseline(path, skills=SKILLS):
             errs.append("baseline has a row for %r, which is not one of the nine skills" % cells[0])
         elif cells[0] in rows:
             errs.append("baseline has two rows for %s" % cells[0])
-        elif len(cells) != len(HEADER) or not all(c.isdigit() for c in cells[1:8]):
+        elif len(cells) != len(HEADER) or not all(c.isdigit() for c in cells[1:9]):
             errs.append("baseline row for %s is malformed" % cells[0])
         else:
             rows[cells[0]] = dict(eager_bytes=int(cells[3]), reachable_bytes=int(cells[4]),
-                                  eager=[x.strip() for x in cells[8].split(",") if x.strip()],
-                                  reachable=[x.strip() for x in cells[9].split(",") if x.strip()])
+                                  eager=[x.strip() for x in cells[9].split(",") if x.strip()],
+                                  reachable=[x.strip() for x in cells[10].split(",") if x.strip()])
     return rows, errs
 
 
@@ -267,6 +291,7 @@ def run(mode, root, baseline_path=None, registry=None, today=None, skills=SKILLS
     liab, liab_errs, reg_err = load_liabilities(registry)
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
     notes, over_live, totals = [], 0, {"eager": 0, "reachable": 0}
+    ptotals = {"eager": 0, "reachable": 0}
     for s in skills:
         if s not in rows:
             continue
@@ -274,6 +299,7 @@ def run(mode, root, baseline_path=None, registry=None, today=None, skills=SKILLS
         for st in SETS:
             b, lst = r[st + "_bytes"], r[st]
             totals[st] += b
+            ptotals[st] += r[st + "_probes"]
             if base is None:
                 if st == "eager":
                     problems[s].append("no readable benchmarks/skill-weight-baseline.md -- run `make skill-weight-baseline`")
@@ -322,16 +348,17 @@ def run(mode, root, baseline_path=None, registry=None, today=None, skills=SKILLS
                 fail(s, m)
         else:
             r = rows[s]
-            out.append("  ok    %-16s %3d lines, eager %d file(s) %d bytes (~%d tok), reachable %d file(s) %d bytes (~%d tok; probes %d)"
-                  % (s, r["lines"], len(r["eager"]), r["eager_bytes"], tokens(r["eager_bytes"]),
-                     len(r["reachable"]), r["reachable_bytes"], tokens(r["reachable_bytes"]), r["probes"]))
+            out.append("  ok    %-16s %3d lines, eager %d file(s) %d bytes (~%d tok) (+ probes %d not gated), reachable %d file(s) %d bytes (~%d tok) (+ probes %d not gated)"
+                  % (s, r["lines"], len(r["eager"]), r["eager_bytes"], tokens(r["eager_bytes"]), r["eager_probes"],
+                     len(r["reachable"]), r["reachable_bytes"], tokens(r["reachable_bytes"]), r["reachable_probes"]))
     for n in notes:
         out.append("  " + n)
     if fails:
         err.append("skill-weight: %d failure(s) across %d skill(s)" % (fails, found))
         return 1, out, err
-    out.append("skill-weight: ok -- %d skill(s), eager total %d bytes (~%d tokens), reachable total %d bytes (~%d tokens), %d set(s) over ceiling under live liability"
-          % (found, totals["eager"], tokens(totals["eager"]), totals["reachable"], tokens(totals["reachable"]), over_live))
+    out.append("skill-weight: ok -- %d skill(s), eager total %d bytes (~%d tokens) (+ probes %d not gated), reachable total %d bytes (~%d tokens) (+ probes %d not gated), %d set(s) over ceiling under live liability"
+          % (found, totals["eager"], tokens(totals["eager"]), ptotals["eager"], totals["reachable"],
+             tokens(totals["reachable"]), ptotals["reachable"], over_live))
     return 0, out, err
 
 

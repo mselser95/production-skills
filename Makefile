@@ -37,7 +37,7 @@ help:
 	@echo "mutation-baseline  re-record benchmarks/mutation-baseline.md after adding/removing cases"
 	@echo "token-report    agent token cost per (agentType, model) from ~/.claude* transcripts; exit 1 if tokens/completed rose >25%"
 	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
-	@echo "skill-weight-baseline  re-record benchmarks/skill-weight-baseline.md (the eager-weight ratchet; deliberate, never part of a gate run)"
+	@echo "skill-weight-baseline  re-record benchmarks/skill-weight-baseline.md (the file-list and +5 % ratchet of the EAGER and REACHABLE sets; deliberate, never part of a gate run)"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates

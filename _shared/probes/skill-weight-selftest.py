@@ -187,6 +187,32 @@ r = mk("dirm")
 os.mkdir(sk(r, "prod-ops", "references", "probes"))
 skill_md(r, "prod-ops", P0, "see `references/probes/`")
 case("a directory mention fails", r, 1, "references/probes/ does not resolve")
+for label, txt in (("bare `references/`", "everything in `references/`"), ("bare references/ without ticks", "everything in references/ here"),
+                   ("bare references/ then a comma", "see references/, then"), ("glob `references/*.md`", "and `references/*.md`"),
+                   ("brace glob", "and `references/{a,b}.md`"), ("question-mark glob", "and `references/?.md`"),
+                   ("bracket glob", "and `references/[ab].md`"), ("glob mid-name", "and `references/a*.md`")):
+    for where in ("opening", "later"):
+        r = mk("glob")
+        if where == "opening":
+            skill_md(r, "prod-ops", P0.replace("Output formats:", "Output formats: %s;" % txt, 1), "body")
+        else:
+            skill_md(r, "prod-ops", P0, "step 7: %s." % txt)
+        case("%s in the %s text fails, naming the files explicitly" % (label, where), r, 1,
+             ("does not resolve to a readable file", "name the files explicitly"))
+r = mk("subdir2")
+skill_md(r, "prod-ops", P0, "see `references/probes/`")
+os.makedirs(sk(r, "prod-ops", "references", "probes"))
+case("a subdirectory mention still fails, naming the files explicitly", r, 1, ("references/probes/ does not resolve", "name the files explicitly"))
+r = mk("prose")
+skill_md(r, "prod-ops", P0, "the references directory holds files under `references/probes/p.sh`, (see `references/a.md`), `references/b.md`: and `references/c.md`.")
+os.makedirs(sk(r, "prod-ops", "references", "probes"))
+fill(sk(r, "prod-ops", "references", "probes", "p.sh"), 10, "s")
+rec(r)
+case("prose that merely says 'the references directory' and file mentions with trailing ) , : . resolve", r, 0, "skill-weight: ok")
+r = mk("noref")
+skill_md(r, "prod-ops", "Nothing at all to read.", "no mention either")
+case("a skill with no references/ mention at all: both the anchor and the blind guard fire", r, 1,
+     ("no paragraph contains", "no references/ mention found"))
 r = mk("sym")
 skill_md(r, "prod-ops", P0, "see `references/link.md`")
 os.symlink(os.path.join(tmp, "nowhere"), sk(r, "prod-ops", "references", "link.md"))
@@ -217,6 +243,10 @@ shape_same("semicolon-joined conditional: only the conditional clause drops, a.m
            HEAD + "Output formats: `references/a.md`; if a plan exists, also read `references/c.md`.")
 shape_same("(e.g. If ...) does not drop its sentence: measured as before",
            HEAD + "Output formats: `references/a.md` (e.g. If a plan exists). If a plan exists, also read `references/c.md`.")
+shape_same("(e.g. If ...) BEFORE the reference: the sentence stays whole, a.md counted",
+           HEAD + "Output formats (e.g. If a plan exists) see `references/a.md`. If a plan exists, also read `references/c.md`.")
+shape_same("(i.e. If ...) BEFORE the reference: the sentence stays whole, a.md counted",
+           HEAD + "Output formats (i.e. If a plan exists) see `references/a.md`. If a plan exists, also read `references/c.md`.")
 shape_same("conditional marker BEFORE a dash, reference AFTER it: conditional (c.md stays out)",
            HEAD + "Output formats: `references/a.md`. If a plan exists — also `references/c.md`.")
 shape_same("marker AFTER a dash, reference BEFORE it: conditional (c.md stays out)",
@@ -272,7 +302,7 @@ fill(sk(r, "prod-ops", "references", "late.md"), 700, "l")
 skill_md(r, "prod-ops", P0, "Step 9: read `references/late.md`.")
 rec(r)
 row = baseline_row(r, "prod-ops")
-if row[9].endswith("references/late.md, references/preamble.md") and "late.md" not in row[8]:
+if row[10].endswith("references/late.md, references/preamble.md") and "late.md" not in row[9]:
     ok("REACHABLE counts a reference named only in a late step, EAGER does not")
 else:
     bad("late step", str(row))
@@ -286,15 +316,69 @@ if got == str(want):
     ok("REACHABLE counts each file once (mentions and a symlink alias): %s" % got)
 else:
     bad("each file once", "want %d got %s" % (want, got))
-r = mk("probes")
-os.makedirs(sk(r, "prod-ops", "references", "probes"))
-fill(sk(r, "prod-ops", "references", "probes", "p.sh"), 900, "s")
-skill_md(r, "prod-ops", P0, "run `references/probes/p.sh`")
+# ---- probes: scripts a skill RUNS are listed and summed, never gated -----------------
+def probe_fixture(name, eager_probe=False, size=900, body="run `references/probes/p.sh`"):
+    r = mk(name)
+    os.makedirs(sk(r, "prod-ops", "references", "probes"), exist_ok=True)
+    fill(sk(r, "prod-ops", "references", "probes", "p.sh"), size, "s")
+    para = P0 + (" Then run `references/probes/p.sh`." if eager_probe else "")
+    skill_md(r, "prod-ops", para, body)
+    return r
+
+
+r = probe_fixture("probes")
 rec(r)
-if baseline_row(r, "prod-ops")[5] == "900":
-    ok("probes are counted and reported as a sub-total")
+row = baseline_row(r, "prod-ops")
+want = os.path.getsize(sk(r, "prod-ops", "SKILL.md")) + 1000 + 500 + 500 + 500
+if row[6] == "900" and row[5] == "0" and row[4] == str(want) and "references/probes/p.sh" in row[10]:
+    ok("a probe mention is in the file list and the sub-total, not in the gated bytes")
 else:
-    bad("probes subtotal", str(baseline_row(r, "prod-ops")))
+    bad("probes accounting", "want gated %d, probes 900: %s" % (want, row))
+case("a recorded probe passes the check", r, 0, ("skill-weight: ok", "(+ probes 900 not gated)"))
+fill(sk(r, "prod-ops", "references", "probes", "p.sh"), 1350, "s")
+case("growing a mentioned probe by 50 % does NOT fail", r, 0, "skill-weight: ok")
+fill(sk(r, "prod-ops", "references", "probes", "p.sh"), 900000, "s")
+case("a probe growing 1000x does not fail either (not gated, no ceiling)", r, 0, "skill-weight: ok")
+r = probe_fixture("probes-eager", eager_probe=True)
+rec(r)
+row = baseline_row(r, "prod-ops")
+if row[5] == "900" and "references/probes/p.sh" in row[9] and row[3] == str(int(row[2]) + 2000):
+    ok("an EAGER probe is in the EAGER file list and sub-total, not in the gated EAGER bytes")
+else:
+    bad("eager probes accounting", str(row))
+r = probe_fixture("probes-new")
+rec(r)
+os.makedirs(sk(r, "prod-ops", "references", "probes"), exist_ok=True)
+fill(sk(r, "prod-ops", "references", "probes", "q.sh"), 100, "q")
+skill_md(r, "prod-ops", P0, "run `references/probes/p.sh` and `references/probes/q.sh`")
+case("adding a NEW probe mention fails the file-list ratchet, naming it", r, 1,
+     "REACHABLE file list changed (ADDED references/probes/q.sh)")
+r = probe_fixture("probes-gone")
+rec(r)
+skill_md(r, "prod-ops", P0, "nothing to run")
+case("removing a probe mention fails the file-list ratchet, naming it", r, 1,
+     "REACHABLE file list changed (REMOVED references/probes/p.sh)")
+r = probe_fixture("probes-six")
+rec(r)
+B = int(baseline_row(r, "prod-ops")[4])
+fill(sk(r, "prod-ops", "references", "a.md"), 500 + B * 55 // 1000, "a")  # +5.5 % of the gated reachable bytes
+case("with a probe in the set, a non-probe reference growing 5.5 % still fails", r, 1, "REACHABLE set grew to")
+r = probe_fixture("probes-ceil", size=130000)
+rec(r)
+case("a set over the ceiling only when probes are counted passes with no liability", r, 0,
+     ("skill-weight: ok", "(+ probes 130000 not gated)"), ("over the 128000-byte ceiling",))
+waivers(r, ("w1", "prod-ops", "reachable", 140000, "2099-01-01"))
+case("...and a reachable liability for it is stale", r, 1, "stale liability w1")
+r = mk("stale-drop")
+fill(sk(r, "prod-ops", "references", "d.md"), 130000, "d")
+skill_md(r, "prod-ops", P0, "step 5: `references/d.md`")
+rec(r)
+waivers(r, ("w1", "prod-ops", "reachable", 140000, "2099-01-01"))
+case("a set over its ceiling under a live liability passes", r, 0, "skill-weight: ok")
+fill(sk(r, "prod-ops", "references", "d.md"), 1000, "d")
+rec(r)
+case("the set drops under its ceiling and is re-recorded: the liability is stale", r, 1, "stale liability w1")
+
 
 # ---- file-list ratchet ---------------------------------------------------------------
 r = mk("adde")

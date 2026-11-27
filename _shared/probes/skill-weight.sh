@@ -15,15 +15,26 @@
 #   REACHABLE  SKILL.md + every file under references/ that SKILL.md mentions
 #              ANYWHERE, in any form (backticked, bare, ./references/, a markdown
 #              link target, with or without a <skill>/ prefix): one regex over the
-#              whole body, no sentence or paragraph parsing. references/probes/
-#              scripts count like any other file and are also reported as a
-#              sub-total ("of which probes") so the number is interpretable.
-#              Files are de-duplicated by real path, symlinks dereferenced.
+#              whole body, no sentence or paragraph parsing. Files are
+#              de-duplicated by real path, symlinks dereferenced.
+#   PROBES     Files under references/probes/ are scripts a skill RUNS: the model
+#              reads their output, not their source. They stay in the FILE LISTS of
+#              whichever set mentions them (adding or removing a probe mention is a
+#              reviewed baseline diff) and are REPORTED as a sub-total ("+ probes N
+#              not gated"), but their bytes are EXCLUDED from the gated byte total,
+#              the +5 % byte ratchet and the ceiling, in both sets. Routine churn in
+#              a script nobody reads must not turn the gate red.
 #
 # CHECKS, per skill
 #   (a) SKILL.md has <= 500 lines (agentskills.io/specification).
-#   (b) every references/ mention resolves to a readable file (a dangling
-#       mention, or a directory, FAILS); the eager rule matched something.
+#   (b) every references/ mention resolves to a readable file. A dangling mention,
+#       a directory (`references/probes/`), the bare `references/` and any glob
+#       (`references/*.md`, `{a,b}`, `?`, `[x]`) FAIL, in both sets, with an order
+#       to name the files explicitly: a directory or glob orders every file in it
+#       read, which cannot be measured. The eager rule matched something (the
+#       "no references/ mention found" check is defence in depth: the anchor
+#       paragraph itself mentions references/preamble.md, so a skill with no
+#       mention at all already fails (c) first).
 #   (c) EAGER RULE: the backticked `references/<path>` tokens of the first
 #       blank-line-delimited paragraph containing
 #       "Read `references/preamble.md` first", minus CONDITIONAL units. A UNIT ends
@@ -61,14 +72,24 @@
 # What it can and cannot see.
 #   EAGER is wording-sensitive: a rewording can change what the rule finds. It is
 #   protected by the file-list ratchet (any change of the list is red until
-#   re-recorded and reviewed) and by the no-unbackticked-reference rule. REACHABLE
-#   is wording-insensitive but an UPPER bound: a skill may not read every
-#   reachable file in one run, and it cannot see a file named by a path the regex
-#   does not match (for example one assembled in prose). Neither can see whether
-#   a model obeys the order, reads a file partly, or reads more than named. Tokens
-#   are bytes/4, an approximation. The baseline checksum only makes a casual
-#   hand-edit red: an editor who recomputes it is not stopped by the checksum,
-#   and the file-list ratchet plus the review of the baseline diff cover that.
+#   re-recorded and reviewed) and by the no-unbackticked-reference rule.
+#   REACHABLE is wording-insensitive, and an UPPER bound ONLY over the files under
+#   references/ that SKILL.md names explicitly and the model READS: a run may not
+#   read every one of them. It is NOT an upper bound of everything a run loads:
+#   (a) Paths outside references/ are invisible to both sets: absolute paths,
+#       ../_shared/..., demos/INDEX.md. Measured: demos/INDEX.md (22,075 bytes) is
+#       mentioned by prod-test-synth, prod-bootstrap and prod-new and is not counted.
+#   (b) Transitive reads are not followed: a referenced file that tells the agent
+#       to read another is measured as the one file.
+#   (c) Executed probes are listed but not gated (see PROBES above): a script the
+#       skill runs costs its output, not its source. A skill that instead READS a
+#       probe's source is mis-measured low.
+#   Nor can it see a file named by a path the regex does not match (one assembled
+#   in prose), whether a model obeys the order, reads a file partly, or reads more
+#   than named. Tokens are gated bytes/4, an approximation. The baseline checksum
+#   only makes a casual hand-edit red: an editor who recomputes it is not stopped
+#   by the checksum, and the file-list ratchet plus the review of the baseline
+#   diff cover that.
 #
 # The measuring core is skill-weight.py (python3 + PyYAML), beside this file.
 #

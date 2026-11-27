@@ -3,7 +3,7 @@
 # Every entry: {id, obligation, owner, created, expires, reason}.
 # `expires: never` is the one legal non-date value.
 #
-# Live entries today: five skill-weight liabilities below (one per skill and
+# Live entries today: four skill-weight liabilities below (one per skill and
 # set), and nothing else. check-registries.sh distinguishes a file carrying an
 # `entries:` key (a repo saying what it has) from a missing one (a repo that
 # said nothing).
@@ -12,9 +12,10 @@
 # and carry three extra keys: `skill`, `set` (eager | reachable; default eager)
 # and `ceiling_bytes`. The skill's EAGER set may exceed the 64000-byte ceiling,
 # or its REACHABLE set the 128000-byte ceiling, up to ceiling_bytes until
-# `expires`; one entry per (skill, set). ceiling_bytes is the measured size
-# + 5 % rounded up to the next 1000, so the ratchet (+5 %) and ceiling_bytes
-# bound a waived skill, whichever is lower. check-registries.sh ignores the
+# `expires`; one entry per (skill, set). Bytes are the GATED bytes: files under
+# references/probes/ are scripts the skill runs, listed but not counted.
+# ceiling_bytes is the measured size + 5 % rounded up to the next 1000, so the
+# ratchet (+5 %) and ceiling_bytes bound a waived skill, whichever is lower. check-registries.sh ignores the
 # extra keys; the entry must be removed once the set is under its ceiling
 # (skill-weight.sh fails on a stale one).
 entries:
@@ -36,24 +37,15 @@ entries:
     created: 2026-11-27
     expires: 2027-01-31
     reason: "SKILL.md is 25504 bytes (428 lines) and references/mechanism-derivation.md adds 38391, ordered read first"
-  - id: skill-weight-reachable-prod-spec
-    obligation: skill-weight
-    skill: prod-spec
-    set: reachable
-    ceiling_bytes: 140000
-    owner: mselser95
-    created: 2026-11-27
-    expires: 2027-01-31
-    reason: "reachable set (132975 bytes) is dominated by references/tier-policy.yaml (58242, read at step 4) and SKILL.md itself (14636)"
   - id: skill-weight-reachable-prod-bootstrap
     obligation: skill-weight
     skill: prod-bootstrap
     set: reachable
-    ceiling_bytes: 710000
+    ceiling_bytes: 305000
     owner: mselser95
     created: 2026-11-27
     expires: 2027-01-31
-    reason: "reachable set (675773 bytes) is dominated by references/probes/verify-standard.sh (386157, a script it runs), references/dimensions.md (117712) and references/tier-policy.yaml (58242), read in later steps"
+    reason: "reachable set (289616 bytes, executed probes not counted) is dominated by references/dimensions.md (117712) and references/tier-policy.yaml (58242), read in later steps"
   - id: skill-weight-reachable-prod-new
     obligation: skill-weight
     skill: prod-new

@@ -196,14 +196,16 @@ Two GATEs, and they check different things. Run both.
 - **GATE:** `bash _shared/probes/skill-weight.sh` — bounds what a skill loads
   BEFORE it works, as two sets: EAGER (SKILL.md + what its opening paragraph
   orders read first, wording-sensitive) and REACHABLE (SKILL.md + every
-  `references/` file it mentions anywhere, wording-insensitive, an UPPER bound
-  since a run may not read all of it). Ceilings 64,000 and 128,000 bytes; SKILL.md
-  at most 500 lines. `benchmarks/skill-weight-baseline.md` (`make
-  skill-weight-baseline`) records each set's FILE LIST and bytes: a file added or
-  removed fails until re-recorded (a reviewed diff), growth above 5 % fails. Five
-  liabilities in `registries/waivers.yaml` (one per skill and set, until
-  2027-01-31) excuse a ceiling; a waived set is bounded by the ratchet (+5 %) and
-  by `ceiling_bytes`, whichever is lower. Neither set sees whether a model obeys.
+  `references/` file it names, wording-insensitive). Ceilings 64,000 and 128,000
+  bytes; SKILL.md at most 500 lines. A bare `references/` or a glob mention fails:
+  name the files. Files under `references/probes/` are scripts the skill runs, so
+  they are listed and reported but their bytes are not gated. The baseline
+  (`make skill-weight-baseline`) records each FILE LIST: a change fails until
+  re-recorded; growth above 5 % fails. Four liabilities in `registries/waivers.yaml`
+  (until 2027-01-31) excuse a ceiling, up to their `ceiling_bytes`. REACHABLE is an
+  upper bound only over named `references/` files that are read; it cannot see paths
+  outside `references/` (`demos/INDEX.md`, 22 KB, is uncounted), transitive reads,
+  or whether a model obeys.
 - **SIGNAL:** `bash _shared/probes/benchmark-currency.sh` — before reading any
   score, ask whether it is still ABOUT the skill it sits next to. Measured
   2026-08-29: **all seven committed scores predate the skill they measure**, by
