@@ -10,9 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from <PACKAGE>.__main__ import build
-from <PACKAGE>.domain.errors import InsufficientFunds
-from <PACKAGE>.platform.config import Config
+from <PACKAGE>.__main__ import (
+    build,
+)
+from <PACKAGE>.domain.errors import (
+    InsufficientFunds,
+)
+from <PACKAGE>.platform.config import (
+    Config,
+)
 
 from tests.support import emissions, manifest
 

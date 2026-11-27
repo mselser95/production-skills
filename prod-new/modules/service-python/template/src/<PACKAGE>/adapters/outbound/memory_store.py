@@ -3,7 +3,9 @@
 import threading
 from datetime import datetime
 
-from <PACKAGE>.domain.ledger import Event
+from <PACKAGE>.domain.ledger import (
+    Event,
+)
 
 
 class InMemoryEventStore:

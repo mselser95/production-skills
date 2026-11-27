@@ -5,7 +5,9 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol
 
-from <PACKAGE>.domain.ledger import Event
+from <PACKAGE>.domain.ledger import (
+    Event,
+)
 
 
 class Clock(Protocol):

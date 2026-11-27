@@ -3,14 +3,34 @@ from datetime import UTC, datetime
 
 import pytest
 
-from <PACKAGE>.adapters.outbound.memory_store import InMemoryEventStore
-from <PACKAGE>.app.ledger_service import LedgerService
-from <PACKAGE>.app.ports import EventStore
-from <PACKAGE>.domain.errors import InsufficientFunds, InvalidAmount
-from <PACKAGE>.domain.ledger import Event, Outcome
-from <PACKAGE>.domain.money import Amount
-from <PACKAGE>.platform.clock import ManualClock
-from <PACKAGE>.platform.ids import SequenceIds
+from <PACKAGE>.adapters.outbound.memory_store import (
+    InMemoryEventStore,
+)
+from <PACKAGE>.app.ledger_service import (
+    LedgerService,
+)
+from <PACKAGE>.app.ports import (
+    EventStore,
+)
+from <PACKAGE>.domain.errors import (
+    AmountLimitExceeded,
+    InsufficientFunds,
+    InvalidAmount,
+    ZeroAmount,
+)
+from <PACKAGE>.domain.ledger import (
+    Event,
+    Outcome,
+)
+from <PACKAGE>.domain.money import (
+    Amount,
+)
+from <PACKAGE>.platform.clock import (
+    ManualClock,
+)
+from <PACKAGE>.platform.ids import (
+    SequenceIds,
+)
 
 from tests.support.recorders import SpyRecorder
 
@@ -142,3 +162,51 @@ def test_each_command_runs_inside_its_span_and_sets_the_balance_gauge() -> None:
         ("svc_ledger_balance_minor", 100, {}),
         ("svc_ledger_balance_minor", 0, {}),
     ]
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+@pytest.mark.parametrize("text", ["0", "0.00"])
+def test_a_zero_amount_is_refused_counted_and_not_journaled(text: str) -> None:
+    service, store, spy = make()
+    with pytest.raises(ZeroAmount):
+        service.deposit(text)
+    assert store.load() == ()
+    assert spy.counters == [
+        ("svc_commands_total", {"command": "deposit", "outcome": "invalid_amount"})
+    ]
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_an_amount_with_extra_fraction_digits_is_refused_not_rounded() -> None:
+    service, store, _ = make()
+    with pytest.raises(InvalidAmount):
+        service.deposit("0.005")
+    assert store.load() == ()
+    assert service.balance() == Amount(0)
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_two_maximum_deposits_are_refused_and_the_balance_stays_parseable() -> None:
+    service, store, spy = make()
+    service.deposit("999999999999999.99")
+    with pytest.raises(AmountLimitExceeded):
+        service.deposit("0.01")
+    assert len(store.load()) == 1
+    assert Amount.parse(service.balance().format()) == service.balance()
+    assert spy.counters[-1] == (
+        "svc_commands_total",
+        {"command": "deposit", "outcome": "rejected"},
+    )
+    assert service.verify()
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_an_amount_over_the_bound_is_refused_as_invalid() -> None:
+    service, store, _ = make()
+    with pytest.raises(InvalidAmount):
+        service.deposit("1000000000000000.00")
+    assert store.load() == ()

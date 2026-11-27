@@ -10,8 +10,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 
-from <PACKAGE>.domain.errors import InvalidEvent
-from <PACKAGE>.domain.money import Amount
+from <PACKAGE>.domain.errors import (
+    InvalidEvent,
+    ZeroAmount,
+)
+from <PACKAGE>.domain.money import (
+    Amount,
+)
 
 MAX_EVENT_ID_LENGTH = 128
 
@@ -35,6 +40,8 @@ class Event:
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not 0 < len(self.id) <= MAX_EVENT_ID_LENGTH:
             raise InvalidEvent("an event id is 1 to 128 characters")
+        if self.amount.minor == 0:
+            raise ZeroAmount("a zero amount is not an event")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +58,11 @@ class Decision:
 
 
 def apply(state: State, event: Event) -> Decision:
-    """Fold one event into the state. Raises InsufficientFunds on an uncovered withdrawal."""
+    """Fold one event into the state.
+
+    Raises InsufficientFunds on an uncovered withdrawal, AmountLimitExceeded on a deposit that
+    would push the balance past the bound.
+    """
     if event.id in state.applied:
         return Decision(state, Outcome.DUPLICATE)
     if event.type is EventType.DEPOSITED:

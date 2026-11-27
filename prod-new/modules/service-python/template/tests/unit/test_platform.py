@@ -2,16 +2,27 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from <PACKAGE>.platform import config
-from <PACKAGE>.platform.clock import ManualClock, SystemClock
-from <PACKAGE>.platform.ids import SequenceIds, UuidIds
-from <PACKAGE>.platform.observability import MetricsRecorder, NullRecorder
+from <PACKAGE>.platform import (
+    config,
+)
+from <PACKAGE>.platform.clock import (
+    ManualClock,
+    SystemClock,
+)
+from <PACKAGE>.platform.ids import (
+    SequenceIds,
+    UuidIds,
+)
+from <PACKAGE>.platform.observability import (
+    MetricsRecorder,
+    NullRecorder,
+)
 
-GOOD = {"SVC_API_TOKEN": "t" * 16}
+GOOD = {"SVC_API_TOKEN": "t" * 32}
 
 
 # provenance: derived
-# verifies: platform/config
+# verifies: platform_config
 def test_config_defaults_and_overrides() -> None:
     cfg = config.load(GOOD)
     assert (cfg.host, cfg.port, cfg.revision) == ("127.0.0.1", 8080, "unknown")
@@ -20,17 +31,17 @@ def test_config_defaults_and_overrides() -> None:
 
 
 # provenance: derived
-# verifies: platform/config
+# verifies: platform_config
 def test_config_lists_every_problem_and_never_prints_the_token() -> None:
     with pytest.raises(config.ConfigError) as caught:
         config.load({"SVC_PORT": "70000", "SVC_API_TOKEN": "short"})
     assert "SVC_PORT" in str(caught.value)
     assert "SVC_API_TOKEN" in str(caught.value)
-    assert "t" * 16 not in repr(config.load(GOOD))
+    assert "t" * 32 not in repr(config.load(GOOD))
 
 
 # provenance: derived
-# verifies: platform/config
+# verifies: platform_config
 @pytest.mark.parametrize("port", ["", "-1", "http", "1e3", "\N{ARABIC-INDIC DIGIT ONE}"])
 def test_config_refuses_a_non_numeric_port(port: str) -> None:
     with pytest.raises(config.ConfigError):
@@ -38,17 +49,17 @@ def test_config_refuses_a_non_numeric_port(port: str) -> None:
 
 
 # provenance: derived
-# verifies: platform/config
+# verifies: platform_config
 def test_config_reads_the_process_environment_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SVC_API_TOKEN", "e" * 16)
-    assert config.load().api_token == "e" * 16
+    monkeypatch.setenv("SVC_API_TOKEN", "e" * 32)
+    assert config.load().api_token == "e" * 32
     monkeypatch.delenv("SVC_API_TOKEN")
     with pytest.raises(config.ConfigError):
         config.load()
 
 
 # provenance: derived
-# verifies: platform/clock_ids
+# verifies: platform_clock_ids
 def test_clocks_and_id_generators() -> None:
     assert SystemClock().now().tzinfo is not None
     clock = ManualClock(datetime(2026, 1, 1, tzinfo=UTC))

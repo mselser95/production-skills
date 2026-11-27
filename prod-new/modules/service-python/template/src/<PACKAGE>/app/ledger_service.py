@@ -3,8 +3,17 @@
 import threading
 from dataclasses import dataclass
 
-from <PACKAGE>.app.ports import Clock, EventStore, IdGenerator, Recorder
-from <PACKAGE>.domain.errors import InsufficientFunds, InvalidAmount
+from <PACKAGE>.app.ports import (
+    Clock,
+    EventStore,
+    IdGenerator,
+    Recorder,
+)
+from <PACKAGE>.domain.errors import (
+    AmountLimitExceeded,
+    InsufficientFunds,
+    InvalidAmount,
+)
 from <PACKAGE>.domain.ledger import (
     Event,
     EventType,
@@ -14,7 +23,9 @@ from <PACKAGE>.domain.ledger import (
     conserved,
     replay,
 )
-from <PACKAGE>.domain.money import Amount
+from <PACKAGE>.domain.money import (
+    Amount,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,14 +68,14 @@ class LedgerService:
     def _process(self, kind: EventType, command: str, amount: str, event_id: str | None) -> Receipt:
         try:
             parsed = Amount.parse(amount)
-        except InvalidAmount:
+            event = Event(event_id if event_id is not None else self._ids.new_id(), kind, parsed)
+        except InvalidAmount:  # unparseable, over the bound or zero: the client's input
             self._recorder.counter("svc_commands_total", command=command, outcome="invalid_amount")
             raise
-        event = Event(event_id if event_id is not None else self._ids.new_id(), kind, parsed)
         with self._lock:
             try:
                 decision = apply(self._state, event)
-            except InsufficientFunds:
+            except (InsufficientFunds, AmountLimitExceeded):
                 self._recorder.counter("svc_commands_total", command=command, outcome="rejected")
                 raise
             if decision.outcome is Outcome.APPLIED:

@@ -1,10 +1,13 @@
-from decimal import ROUND_DOWN, ROUND_HALF_UP
-
 import pytest
 
-from <PACKAGE>.domain.errors import InsufficientFunds, InvalidAmount
+from <PACKAGE>.domain.errors import (
+    AmountLimitExceeded,
+    InsufficientFunds,
+    InvalidAmount,
+)
 from <PACKAGE>.domain.money import (
-    DEFAULT_ROUNDING,
+    EXPONENT,
+    MAX_MINOR,
     Amount,
 )
 
@@ -28,22 +31,17 @@ def test_parse_is_exact_for_representable_amounts(text: str, minor: int) -> None
 
 # provenance: derived
 # verifies: units_ledger/amount_exactness
-@pytest.mark.parametrize(
-    ("text", "minor"),
-    [("0.005", 0), ("0.015", 2), ("0.025", 2), ("0.035", 4), ("1.004", 100), ("1.006", 101)],
-)
-def test_default_rounding_is_half_even(text: str, minor: int) -> None:
-    assert DEFAULT_ROUNDING == "ROUND_HALF_EVEN"
-    assert Amount.parse(text).minor == minor
+@pytest.mark.parametrize("text", ["0.005", "0.015", "1.004", "1.006", "0.001", "12.340", "1.000"])
+def test_parse_refuses_more_fraction_digits_than_the_exponent_and_never_rounds(text: str) -> None:
+    with pytest.raises(InvalidAmount):
+        Amount.parse(text)
 
 
 # provenance: derived
 # verifies: units_ledger/amount_exactness
-def test_rounding_mode_is_an_explicit_parameter() -> None:
-    assert Amount.parse("0.005", ROUND_HALF_UP).minor == 1
-    assert Amount.parse("0.019", ROUND_DOWN).minor == 1
-    with pytest.raises(InvalidAmount):
-        Amount.parse("1", "ROUND_SIDEWAYS")
+def test_parse_takes_no_rounding_parameter() -> None:
+    with pytest.raises(TypeError):
+        Amount.parse("1.00", "ROUND_HALF_UP")  # type: ignore[call-arg]
 
 
 # provenance: derived
@@ -66,6 +64,7 @@ def test_rounding_mode_is_an_explicit_parameter() -> None:
         "\N{ARABIC-INDIC DIGIT ONE}\N{ARABIC-INDIC DIGIT TWO}",
         "9" * 16,
         "0." + "1" * 19,
+        "1000000000000000.00",
     ],
 )
 def test_parse_refuses_anything_but_a_plain_bounded_decimal(text: str) -> None:
@@ -93,3 +92,51 @@ def test_minus_below_zero_raises_insufficient_funds() -> None:
     assert Amount(500).minus(Amount(500)) == Amount(0)
     with pytest.raises(InsufficientFunds):
         Amount(499).minus(Amount(500))
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_the_bound_is_the_largest_text_parse_accepts() -> None:
+    assert MAX_MINOR == 10**17 - 1
+    assert Amount.parse("999999999999999.99").minor == MAX_MINOR
+    assert Amount(MAX_MINOR).format() == "999999999999999.99"
+    with pytest.raises(AmountLimitExceeded):
+        Amount(MAX_MINOR + 1)
+    with pytest.raises(InvalidAmount):  # 16 whole digits: refused by the grammar, same bound
+        Amount.parse("1000000000000000")
+    assert len(str(MAX_MINOR // 10**EXPONENT)) == 15
+    assert 10**EXPONENT == 100  # the literal scale in money.py
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_plus_past_the_bound_raises_the_limit_error() -> None:
+    assert Amount(MAX_MINOR - 1).plus(Amount(1)) == Amount(MAX_MINOR)
+    with pytest.raises(AmountLimitExceeded):
+        Amount(MAX_MINOR).plus(Amount(1))
+    with pytest.raises(AmountLimitExceeded):
+        Amount(MAX_MINOR).plus(Amount(MAX_MINOR))
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_the_limit_error_is_an_invalid_amount() -> None:
+    assert issubclass(AmountLimitExceeded, InvalidAmount)
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_the_grammar_counts_whole_digits_exactly_and_refuses_the_next_one_itself() -> None:
+    assert Amount.parse("9" * 15).minor == (10**15 - 1) * 100  # exactly the max digits
+    assert Amount.parse("0" * 14 + "1").minor == 100
+    for text in ("1" + "0" * 15, "0" * 15 + "1", "9" * 16):
+        with pytest.raises(InvalidAmount) as caught:  # the grammar's refusal, not the limit's
+            Amount.parse(text)
+        assert type(caught.value) is InvalidAmount, text  # a 16th digit never reaches the bound
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_plus_names_its_own_overflow_in_its_message() -> None:
+    with pytest.raises(AmountLimitExceeded, match="the result exceeds"):
+        Amount(MAX_MINOR).plus(Amount(1))
