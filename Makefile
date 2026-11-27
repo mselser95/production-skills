@@ -49,69 +49,50 @@ actionlint:
 	@actionlint
 	@echo "actionlint: workflows valid"
 
-# -print0/xargs -0 is load-bearing and was learned the hard way: passing an
-# unquoted $(files) variable to shellcheck under zsh does NOT word-split, so
-# every path arrives as ONE argument and shellcheck dies with "File name too
-# long" -- exit 2, no findings, and a reader who sees a filename list scrolling
-# past reads it as a report. A lint that cannot run must not look like a lint
-# that found nothing.
+# `make lint` is `scripts/lint-cached.sh`: shellcheck at -S warning over the
+# tracked shell scripts. Three properties, each of which was a finding:
 #
-# -S warning, RAISED from -S error on 2026-08-30 after the warning tier was
-# classified and emptied: 67 findings -> 0. Raising it is the point. A tier
-# nobody enforces drifts back, and the 67 had accumulated precisely because
-# the gate stopped at error -- among them one genuinely dead expiry variable,
-# a LOC count that miscounts filenames with spaces, and 60 unguarded `cd`s in
-# a selftest, each followed by an assertion that would have measured the wrong
-# tree.
+# TRACKED FILES ONLY (`git ls-files`). The gate used to walk the working tree
+# while CI lints what the clone contains, so the two ran over different sets:
+# raising the severity turned the local gate red on gitignored per-user
+# `config.sh` files that CI has never seen, and a gate that fails only on the
+# author's machine is one they learn to bypass. `git ls-files` also covers a NEW
+# file the moment it is staged, which is when the pre-commit hook runs, so nothing
+# being committed escapes it; uncommitted scratch and per-user config are skipped.
 #
-# The config.sh files are SOURCED, never executed, so they carry
-# `# shellcheck shell=bash` instead of a shebang rather than being excluded:
-# excluding them would take the nine files most likely to be hand-edited out of
-# the only check that reads them.
-# `set -e` on the FIRST line of this recipe is the load-bearing character, and
-# it is here because the recipe without it was decorative. Measured 2026-08-29,
-# ten minutes after this file was written: appending a genuine `if [ "$$x" = ];`
-# to a probe made `shellcheck -S error` exit 1 on its own, and `make lint`
-# STAYED GREEN. A backslash-continued recipe is ONE shell command to make, so
-# only the LAST element's status is graded -- and the last element was the
-# `echo` that announces success, which cannot fail.
+# DEDUPED BY CONTENT, not a coverage compromise. install.sh mirrors the shared
+# probes into all nine skills, so `verify-standard.sh` alone appears ten times
+# byte-identically; shellcheck on identical bytes returns an identical verdict, so
+# one representative per sha256 checks the same set of distinct programs. The file
+# COUNT is printed next to the unique count (174 files -> 127 unique today) so a
+# reader sees the ratio; if the two ever converge, the mirroring broke.
 #
-# A gate whose success message is also the thing make grades is not a gate. It
-# was caught by mutating it rather than by reading it, which is the only reason
-# it is not still sitting here reporting 62 clean scripts forever. Every other
-# multi-line recipe in this file is `set -e` or one-command-per-line for the
-# same reason.
+# CACHED BY CONTENT. A verdict is a function of the bytes, the tool and the flags,
+# so a content already proven clean is not linted again, and the rest run in
+# parallel (LINT_JOBS, default cores capped at 4 and at a cgroup CPU quota).
+# Measured 2026-11-27 (174 files, 127 unique, 6 MB). The serial recipe was
+# reported at 135 s in a 16-core Linux container. Cold in an arm64 container
+# (shellcheck 0.9.0, 178 files on that tree), two runs on a loaded laptop, so
+# read the ratios rather than the seconds: --cpus 2: 1 job 10.6 s, 2 jobs 5.7 s,
+# old serial 16.4 s; --cpus 4: 1 job 26.9 s, 4 jobs 19.1 s, old serial 32.9 s.
+# Host (macOS, shellcheck 0.11.0): cold 22.0 s; warm 0.28-0.31 s; one small file
+# edited 0.95 s; the largest file (verify-standard.sh, 386 KB) edited 9.3 s.
+# The honesty conditions: ONLY A CLEAN RESULT IS CACHED (findings are
+# printed on every run); the key holds the shellcheck version, the severity
+# argument, SHELLCHECK_OPTS and any .shellcheckrc, so an upgrade invalidates
+# everything; `LINT_CACHE=verify make lint` re-lints cached entries too and FAILS
+# (exit 3, "CACHE LIE") if one now has findings; `LINT_CACHE=off` ignores the
+# cache. The cache lives in .cache/lint (gitignored). CI starts cold on the first
+# run after a shellcheck upgrade: that run costs the cold figure, then it is warm.
+#
+# Zero scripts, or zero after dedup, is exit 2: a clean lint over nothing is not a
+# clean lint. A lint that cannot run must not look like one that found nothing, so
+# the missing-tool guard stays here and exits 2 as well. The recipe is ONE command
+# on purpose: make grades its exit status directly (the old multi-line recipe once
+# stayed green over a real finding because only its trailing `echo` was graded).
 lint:
 	@command -v shellcheck >/dev/null || { echo "shellcheck missing -- brew install shellcheck" >&2; exit 2; }
-#
-# TRACKED FILES ONLY (`git ls-files`), and that alignment was itself a finding.
-# The gate used to walk the working tree while CI lints what the clone contains,
-# so the two ran over different sets: raising this to -S warning turned the local
-# gate red on gitignored per-user `config.sh` files that CI has never seen, and a
-# gate that fails only on the author's machine is one they learn to bypass.
-#
-# `git ls-files` also covers a NEW file the moment it is staged, which is exactly
-# when the pre-commit hook runs -- so nothing being committed escapes the lint.
-# What it deliberately skips is uncommitted scratch and per-user config, neither
-# of which this gate is protecting anyone from.
-#
-# DEDUPED BY CONTENT, which is not a coverage compromise. install.sh mirrors the
-# shared probes into all nine skills, so `verify-standard.sh` alone appears ten
-# times byte-identically; shellcheck on identical bytes returns an identical
-# verdict, so linting one representative per sha256 checks exactly the same set
-# of distinct programs. Measured: 62 files -> 30s, deduped -> a third of that,
-# and the file COUNT is still printed next to the unique count so a reader can
-# see the ratio rather than take the saving on trust. If the two ever converge,
-# the mirroring broke.
-	@set -e; \
-	  n=$$(git ls-files '*.sh' | grep -c .); \
-	  if [ "$$n" -eq 0 ]; then echo "lint: found ZERO shell scripts -- a clean lint over nothing is not a clean lint" >&2; exit 2; fi; \
-	  uniq_files=$$(git ls-files '*.sh' -z \
-	    | xargs -0 shasum -a 256 | sort -k1,1 -u | awk '{ $$1=""; sub(/^ +/,""); print }'); \
-	  u=$$(printf '%s\n' "$$uniq_files" | grep -c .); \
-	  if [ "$$u" -eq 0 ]; then echo "lint: deduped to ZERO files -- refusing to report clean over nothing" >&2; exit 2; fi; \
-	  printf '%s\n' "$$uniq_files" | tr '\n' '\0' | xargs -0 shellcheck -S warning; \
-	  echo "shellcheck: $$u unique script(s) of $$n clean at severity=warning"
+	@bash scripts/lint-cached.sh
 
 # The repo's own probes, run against the repo itself -- the half that was missing.
 gates:
