@@ -25,7 +25,7 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -37,6 +37,7 @@ help:
 	@echo "mutation-baseline  re-record benchmarks/mutation-baseline.md after adding/removing cases"
 	@echo "token-report    agent token cost per (agentType, model) from ~/.claude* transcripts; exit 1 if tokens/completed rose >25%"
 	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
+	@echo "skill-weight-baseline  re-record benchmarks/skill-weight-baseline.md (the eager-weight ratchet; deliberate, never part of a gate run)"
 
 # ---- the cheap gate -------------------------------------------------------
 check-fast: actionlint lint gates
@@ -115,6 +116,7 @@ lint:
 gates:
 	@bash $(PROBES)/skills-static.sh
 	@bash $(PROBES)/agents-budget.sh
+	@bash $(PROBES)/skill-weight.sh
 	@bash $(PROBES)/policy-coverage.sh
 	@bash $(PROBES)/row-vacuity-sweep.sh
 	@bash $(PROBES)/check-registries.sh
@@ -263,3 +265,7 @@ token-report:
 
 token-baseline:
 	@bash scripts/token-report.sh --write
+
+# Deliberate re-recording of the skill eager-weight ratchet, like the other baselines.
+skill-weight-baseline:
+	@bash $(PROBES)/skill-weight.sh --write

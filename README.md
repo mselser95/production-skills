@@ -193,6 +193,17 @@ Two GATEs, and they check different things. Run both.
   rule's property is false — 13 cases, including a green baseline (without which
   every case could "pass" because the probe fails on everything) and a
   zero-subjects case that exits 2 rather than 0.
+- **GATE:** `bash _shared/probes/skill-weight.sh` — bounds what a skill loads
+  BEFORE it works, as two sets: EAGER (SKILL.md + what its opening paragraph
+  orders read first, wording-sensitive) and REACHABLE (SKILL.md + every
+  `references/` file it mentions anywhere, wording-insensitive, an UPPER bound
+  since a run may not read all of it). Ceilings 64,000 and 128,000 bytes; SKILL.md
+  at most 500 lines. `benchmarks/skill-weight-baseline.md` (`make
+  skill-weight-baseline`) records each set's FILE LIST and bytes: a file added or
+  removed fails until re-recorded (a reviewed diff), growth above 5 % fails. Five
+  liabilities in `registries/waivers.yaml` (one per skill and set, until
+  2027-01-31) excuse a ceiling; a waived set is bounded by the ratchet (+5 %) and
+  by `ceiling_bytes`, whichever is lower. Neither set sees whether a model obeys.
 - **SIGNAL:** `bash _shared/probes/benchmark-currency.sh` — before reading any
   score, ask whether it is still ABOUT the skill it sits next to. Measured
   2026-08-29: **all seven committed scores predate the skill they measure**, by

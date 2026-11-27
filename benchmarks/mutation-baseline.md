@@ -40,6 +40,7 @@ here would be a threshold nobody derived.
 | `sbom-ordering-selftest.sh` | 10 |
 | `shard-selftest.sh` | 41 |
 | `single-suite-run-selftest.sh` | 106 |
+| `skill-weight-selftest.sh` | 89 |
 | `skills-static-selftest.sh` | 21 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
@@ -47,4 +48,4 @@ here would be a threshold nobody derived.
 | `template-vendored-list-selftest.sh` | 5 |
 | `template-workflow-pins-selftest.sh` | 573 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **1735** |
+| **total** | **1824** |

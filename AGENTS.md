@@ -109,6 +109,7 @@ mutation-proven:
 | gate | what it refuses to let through |
 |---|---|
 | `_shared/probes/skills-static.sh` | a skill whose SKILL.md is missing, unparseable, or whose name contradicts its directory |
+| `_shared/probes/skill-weight.sh` | a skill whose SKILL.md exceeds 500 lines, whose EAGER set (what it orders read first) or REACHABLE set (every `references/` file it mentions) changes its file list or grows more than 5 % over `benchmarks/skill-weight-baseline.md`, or passes 64000 / 128000 bytes without a live liability |
 | `_shared/probes/policy-coverage.sh` | a tier-policy key that nothing scores |
 | `_shared/probes/row-vacuity-sweep.sh` | a probe presence-check satisfied only by comments |
 | `_shared/probes/benchmark-currency.sh` | a score that no longer describes the skill it sits beside |
