@@ -6,7 +6,7 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
-use svc::domain::{DomainError, Event, EventId, Kind, Outcome, State};
+use svc_domain::{DomainError, Event, EventId, Kind, Outcome, State};
 
 struct Rng(u64);
 
@@ -126,4 +126,31 @@ fn overdraw_is_always_refused_with_the_true_balance() {
             requested: 11
         })
     );
+}
+
+#[test]
+fn an_applied_id_reused_with_different_content_is_always_a_conflict() {
+    for seed in 1..=100u64 {
+        let mut rng = Rng(seed.wrapping_mul(0xC6BC_2796_92B6_5A41) | 1);
+        let mut state = State::new();
+        for _ in 0..150 {
+            let ev = random_event(&mut rng);
+            let before = state.clone();
+            let prior = state.applied().get(ev.id()).copied();
+            let got = state.apply(&ev);
+            match prior {
+                Some((k, u)) if k == ev.kind() && u == ev.units() => {
+                    assert_eq!(got, Ok(Outcome::Duplicate), "seed {seed}");
+                }
+                Some(_) => {
+                    assert_eq!(got, Err(DomainError::IdConflict), "seed {seed}");
+                    assert_eq!(
+                        state, before,
+                        "a conflict must change nothing (seed {seed})"
+                    );
+                }
+                None => {}
+            }
+        }
+    }
 }

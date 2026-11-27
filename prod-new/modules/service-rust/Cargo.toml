@@ -1,28 +1,37 @@
-[package]
-name = "svc"
-version = "0.1.0"
+# The workspace IS the architecture: each zone is a crate, and a zone can only
+# name what its Cargo.toml lists. `tests/architecture.rs` pins those lists.
+#
+#   domain   no dependencies, #![no_std]            (pure rules)
+#   app      domain only, #![no_std] + alloc        (use-cases over ports)
+#   adapter  app + domain                           (HTTP in, memory store out)
+#   platform app (+ ctrlc)                          (clock, ids, config, signals)
+#   svc      all four                               (composition root, this package)
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/domain",
+    "crates/app",
+    "crates/adapter",
+    "crates/platform",
+]
+default-members = [
+    ".",
+    "crates/domain",
+    "crates/app",
+    "crates/adapter",
+    "crates/platform",
+]
+
+[workspace.package]
 edition = "2021"
 rust-version = "1.99"
-publish = false
-description = "<SERVICE>: a units ledger service (zones: domain, app, adapter, platform)"
-repository = "https://github.com/<OWNER>/<SERVICE>"
 
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "svc"
-path = "src/main.rs"
-
-[dependencies]
-# Signal handling for graceful shutdown (SIGINT + SIGTERM). Platform zone only.
-ctrlc = { version = "=3.5.3", features = ["termination"] }
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
@@ -31,3 +40,41 @@ float_arithmetic = "deny"
 todo = "deny"
 dbg_macro = "deny"
 as_conversions = "deny"
+
+[package]
+name = "svc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "<SERVICE>: a units ledger service (zones: domain, app, adapter, platform)"
+repository = "https://github.com/<OWNER>/<SERVICE>"
+
+[[bin]]
+name = "svc"
+path = "src/main.rs"
+
+[dependencies]
+svc-domain = { path = "crates/domain" }
+svc-app = { path = "crates/app" }
+svc-adapter = { path = "crates/adapter" }
+svc-platform = { path = "crates/platform" }
+
+[lints]
+workspace = true
+
+# Release profile. Decision: panic = "unwind" (the default), NOT "abort".
+# A panic in one connection thread unwinds, its drop guards free the slots,
+# and the process keeps serving: requests are independent, and the ledger
+# writes only after every check (a poisoned lock is recovered), so a dead
+# request cannot corrupt the state. Abort would turn one bad request into a
+# full outage and lose the in-memory ledger; the test
+# `a_panicking_connection_frees_its_slot_and_the_server_keeps_serving` pins
+# the chosen behaviour. Overflow checks stay on: money arithmetic is already
+# checked, this catches a mistake anywhere else. `debug = 1` keeps line
+# tables for backtraces. lto / codegen-units stay at their defaults: nothing
+# here is measured to need them.
+[profile.release]
+overflow-checks = true
+debug = 1
+panic = "unwind"

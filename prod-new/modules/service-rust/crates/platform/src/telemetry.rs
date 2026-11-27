@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
 
-use crate::app::{MetricsSource, SpanId, Telemetry};
+use svc_app::{Counter, Gauge, MetricsSource, SpanId, SpanName, Telemetry};
 
 const KEEP_SPANS: usize = 256;
 const MAX_SERIES: usize = 2048;
@@ -42,9 +42,15 @@ pub struct Recorder {
     inner: Mutex<Inner>,
 }
 
-fn labels_text(labels: &[(&'static str, &str)]) -> String {
+/// `k="v"` pairs in the declared key order. `None` when the number of values
+/// differs from the number of declared keys: the call is dropped rather than
+/// mislabelled.
+fn labels_text(keys: &[&'static str], values: &[&str]) -> Option<String> {
+    if keys.len() != values.len() {
+        return None;
+    }
     let mut out = String::new();
-    for (i, (k, v)) in labels.iter().enumerate() {
+    for (i, (k, v)) in keys.iter().zip(values).enumerate() {
         if i > 0 {
             out.push(',');
         }
@@ -60,7 +66,7 @@ fn labels_text(labels: &[(&'static str, &str)]) -> String {
         }
         out.push('"');
     }
-    out
+    Some(out)
 }
 
 impl Recorder {
@@ -83,8 +89,12 @@ impl Recorder {
 }
 
 impl Telemetry for Recorder {
-    fn counter_inc(&self, name: &'static str, labels: &[(&'static str, &str)]) {
-        let key = (name, labels_text(labels));
+    fn counter_inc(&self, counter: Counter, values: &[&str]) {
+        let spec = counter.spec();
+        let Some(labels) = labels_text(spec.labels, values) else {
+            return;
+        };
+        let key = (spec.name, labels);
         let mut g = self.lock();
         if g.counters.len() >= MAX_SERIES && !g.counters.contains_key(&key) {
             return;
@@ -93,8 +103,12 @@ impl Telemetry for Recorder {
         *c = c.saturating_add(1);
     }
 
-    fn gauge_set(&self, name: &'static str, value: i64, labels: &[(&'static str, &str)]) {
-        let key = (name, labels_text(labels));
+    fn gauge_set(&self, gauge: Gauge, value: i64, values: &[&str]) {
+        let spec = gauge.spec();
+        let Some(labels) = labels_text(spec.labels, values) else {
+            return;
+        };
+        let key = (spec.name, labels);
         let mut g = self.lock();
         if g.gauges.len() >= MAX_SERIES && !g.gauges.contains_key(&key) {
             return;
@@ -102,7 +116,8 @@ impl Telemetry for Recorder {
         g.gauges.insert(key, value);
     }
 
-    fn span_start(&self, name: &'static str, attrs: &[(&'static str, &str)]) -> SpanId {
+    fn span_start(&self, span: SpanName, values: &[&str]) -> SpanId {
+        let spec = span.spec();
         let mut g = self.lock();
         g.next_span = g.next_span.saturating_add(1);
         let id = g.next_span;
@@ -110,8 +125,8 @@ impl Telemetry for Recorder {
             g.open.insert(
                 id,
                 OpenSpan {
-                    name,
-                    attrs: labels_text(attrs),
+                    name: spec.name,
+                    attrs: labels_text(spec.labels, values).unwrap_or_default(),
                 },
             );
         }
@@ -169,19 +184,19 @@ mod tests {
     #[test]
     fn counters_gauges_and_spans_are_recorded_and_rendered() {
         let r = Recorder::new(false);
-        r.counter_inc("svc_x_total", &[("k", "a\"b")]);
-        r.counter_inc("svc_x_total", &[("k", "a\"b")]);
-        r.gauge_set("svc_y", -3, &[]);
-        let id = r.span_start("svc.op", &[("event_type", "t")]);
+        r.counter_inc(Counter::Events, &["deposit", "a\"b"]);
+        r.counter_inc(Counter::Events, &["deposit", "a\"b"]);
+        r.gauge_set(Gauge::BalanceUnits, -3, &[]);
+        let id = r.span_start(SpanName::Deposit, &["t"]);
         r.span_end(id, false);
         let text = r.render();
-        assert!(text.contains("# TYPE svc_x_total counter\n"));
-        assert!(text.contains("svc_x_total{k=\"a\\\"b\"} 2\n"));
-        assert!(text.contains("svc_y -3\n"));
+        assert!(text.contains("# TYPE svc_events_total counter\n"));
+        assert!(text.contains("svc_events_total{kind=\"deposit\",outcome=\"a\\\"b\"} 2\n"));
+        assert!(text.contains("svc_balance_units -3\n"));
         assert_eq!(
             r.finished_spans(),
             vec![FinishedSpan {
-                name: "svc.op",
+                name: "svc.deposit",
                 attrs: "event_type=\"t\"".into(),
                 ok: false
             }]
@@ -189,10 +204,29 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_number_of_label_values_is_dropped_not_mislabelled() {
+        let r = Recorder::new(false);
+        r.counter_inc(Counter::Events, &["deposit"]);
+        r.counter_inc(Counter::Events, &["a", "b", "c"]);
+        r.counter_inc(Counter::UnitsConservedViolations, &["x"]);
+        assert_eq!(r.render(), "");
+    }
+
+    #[test]
+    fn one_increment_is_one() {
+        let r = Recorder::new(false);
+        r.counter_inc(Counter::UnitsConservedViolations, &[]);
+        assert_eq!(
+            r.render(),
+            "# TYPE svc_units_conserved_violations_total counter\nsvc_units_conserved_violations_total 1\n"
+        );
+    }
+
+    #[test]
     fn the_span_ring_is_bounded() {
         let r = Recorder::new(false);
         for _ in 0..(KEEP_SPANS + 10) {
-            let id = r.span_start("svc.op", &[]);
+            let id = r.span_start(SpanName::Withdraw, &["withdraw"]);
             r.span_end(id, true);
         }
         assert_eq!(r.finished_spans().len(), KEEP_SPANS);

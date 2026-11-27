@@ -1,7 +1,7 @@
 //! The system clock behind the `Clock` port.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::app::Clock;
+use svc_app::Clock;
 
 /// Reads the operating system's wall clock.
 #[derive(Debug, Default, Clone, Copy)]

@@ -19,7 +19,7 @@ service:
 
 # Ratified invariants resolve to verification/ratified/. None is ratified yet:
 # units_conserved and duplicate_event_single_effect exist as executable
-# property tests (tests/ledger_properties.rs) in the candidate lane and wait
+# property tests (crates/domain/tests/ledger_properties.rs) in the candidate lane and wait
 # for a human ratification. Listing them here before then would be a claim the
 # standard's probe cannot cash.
 invariants: []
@@ -27,33 +27,30 @@ invariants: []
 capabilities:
   - id: units_ledger
     class: source_of_truth
-    package: src/domain, src/app
+    package: crates/domain, crates/app
   - id: health_metrics_surface
     class: external_read
-    package: src/adapter/http
+    package: crates/adapter/src/http.rs
 
 # Mechanisms proven by a named test: "<file> <test fn>".
 implemented:
-  zone_boundaries: tests/architecture.rs every_zone_imports_only_what_its_direction_allows
-  observability_contract: tests/observability_contract.rs counters_match_the_manifest_both_ways
-  conservation_property: tests/ledger_properties.rs conservation_holds_over_generated_event_sequences
-  graceful_shutdown: tests/http_e2e.rs serves_the_ledger_and_stops_gracefully
+  zone_boundaries: tests/architecture.rs the_dependency_graph_is_exactly_the_zone_rule
+  observability_contract: tests/observability_contract.rs the_typed_table_matches_the_manifests_both_ways
+  conservation_property: crates/domain/tests/ledger_properties.rs conservation_holds_over_generated_event_sequences
+  graceful_shutdown: tests/process.rs sigterm_closes_the_listener_drains_the_in_flight_request_and_exits_0
+  write_surface_authn: tests/http_e2e.rs write_routes_need_the_bearer_token_and_reads_stay_open
 
 # Mechanisms paired with the symbol that must survive linking into the binary.
 driven:
-  tracing_recorder: svc::platform::telemetry::Recorder
-  graceful_shutdown: svc::platform::shutdown::install
-  config_single_reader: svc::platform::config::Config::from_env
+  tracing_recorder: svc_platform::telemetry::Recorder
+  graceful_shutdown: svc_platform::shutdown::install
+  config_single_reader: svc_platform::config::Config::from_env
 
 out_of_scope:
   - compatibility: >
       This scaffold publishes no wire format to a reader it does not own beyond
       a plain-text and tiny JSON HTTP surface it also owns the consumers of.
       This decline lapses when a second consumer appears: pin the shape then.
-  - write_surface_authn: >
-      The HTTP write routes (POST /deposit, /withdraw) are unauthenticated and
-      bind 127.0.0.1 by default. This decline lapses the moment the listen
-      address is anything but loopback.
   - deployment_resource_limits: >
       Nothing ships this scaffold yet, so there is no deployment artifact to
       carry a memory or CPU limit. Lapses with the first deployment.
@@ -84,16 +81,21 @@ scalability:
   durability_trade: no_durable_writes
 
 load_baseline:
+  # A target, not a measurement: no load baseline has been taken.
   margin_target: 3x
 
 auto_recovery:
+  # A target, not a measurement: nothing here supervises or restarts the
+  # process, and the ledger is memory, so a restart starts empty.
   recovery_bound: 30s
 
 data_lifecycle:
   retention_policy: process-lifetime
   deletion_mechanism: no_subject_data
 
+# The Makefile ships exactly these two targets, both the real cargo commands.
+# The fuller unit gates (cargo-deny, coverage, mutation testing) and an
+# advisory lane are a later change and are NOT claimed here.
 gates:
   cheap: "make check-fast"
   presubmit: "make verify"
-  advisory: "make test-advisory"

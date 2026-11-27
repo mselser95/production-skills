@@ -1,9 +1,12 @@
 # Checked-in manifest of every metric series this service emits.
 #
-# Contract: tests/observability_contract.rs diffs this file against the
-# literal names passed to `counter_inc(` / `gauge_set(` in src/, in both
-# directions. A metric in code but not here fails; a metric here that no code
-# emits fails. Names start `svc_`; counters end `_total`.
+# Contract: the ONLY way code names a metric is the typed table in
+# crates/app/src/telemetry.rs (an enum per kind; a string does not compile).
+# tests/observability_contract.rs compares that table with this file in both
+# directions: name, type and label KEYS. A variant without an entry fails; an
+# entry without a variant fails; a changed type or label key fails. Names start
+# `svc_`; counters end `_total`. Label VALUES are passed in the declared key
+# order.
 #
 # Fields:
 #   name   - the series name (exactly as emitted)
@@ -25,10 +28,10 @@
   labels: []
   note: >
     Ratified invariant units_conserved. Must stay 0 in production;
-    app::Ledger checks State::conservation_holds after every command and
-    increments this the instant it disagrees (and saves nothing). The
+    app::Ledger checks State::conservation_holds before applying every command
+    and increments this the instant it disagrees (and applies nothing). The
     deliberate-violation proof is the app test
-    a_corrupt_store_fires_the_violation_counter_and_saves_nothing.
+    a_corrupt_store_fires_the_violation_counter_and_applies_nothing.
 
 - name: svc_events_total
   type: counter

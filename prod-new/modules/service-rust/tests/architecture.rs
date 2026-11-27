@@ -1,323 +1,319 @@
-//! Zone boundary test. DECISION: one Cargo package with four modules and a
-//! source-level check, not four crates. Crates would make the compiler enforce
-//! the direction, but at the price of a workspace, four manifests and a slower
-//! cold build for a scaffold this size; a crate split is the upgrade path when
-//! a zone outgrows a module. To keep the check honest it parses `use` trees
-//! (grouped imports included) AND scans for fully-qualified paths and for
-//! forbidden tokens, so `std::{fs}` and `std::time::Instant::now()` both fail.
+//! What the Cargo workspace cannot express by itself.
 //!
-//! Direction: adapter -> app -> domain; platform -> app -> domain.
+//! Enforced by the COMPILER, not here: `domain` and `app` are `#![no_std]`
+//! (no file, socket, clock, environment or thread to reach) and name only the
+//! crates their `Cargo.toml` lists. This file pins those lists (a changed
+//! dependency list is a RED test), pins that `extern crate std` cannot sneak
+//! `std` back in, and holds the two rules that are test-enforced and weaker:
+//! only `config.rs` reads the environment, and the bearer token is compared
+//! through the constant-time helper (both are source scans).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing
 )]
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-/// (first segment, second segment or "*") pairs a zone may import.
-struct Zone {
-    dir: &'static str,
-    allow: &'static [(&'static str, &'static str)],
-    /// Tokens that must not appear anywhere in the zone's code.
-    banned: &'static [&'static str],
+fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-const ZONES: &[Zone] = &[
-    Zone {
-        dir: "domain",
-        allow: &[
-            ("std", "collections"),
-            ("std", "fmt"),
-            ("std", "error"),
-            ("std", "cmp"),
-            ("core", "*"),
-            ("self", "*"),
-            ("super", "*"),
-            ("crate", "domain"),
-        ],
-        banned: &[
-            "std::fs",
-            "std::net",
-            "std::io",
-            "std::env",
-            "std::process",
-            "std::thread",
-            "std::time",
-            "std::sync",
-            "SystemTime",
-            "Instant",
-            "tokio",
-            "async ",
-            ".await",
-            "rand::",
-            "f32",
-            "f64",
-            "crate::app",
-            "crate::adapter",
-            "crate::platform",
-        ],
-    },
-    Zone {
-        dir: "app",
-        allow: &[
-            ("std", "collections"),
-            ("std", "fmt"),
-            ("std", "error"),
-            ("std", "cmp"),
-            ("std", "sync"),
-            ("core", "*"),
-            ("self", "*"),
-            ("super", "*"),
-            ("crate", "domain"),
-            ("crate", "app"),
-        ],
-        banned: &[
-            "std::fs",
-            "std::net",
-            "std::io",
-            "std::env",
-            "std::process",
-            "std::thread",
-            "std::time",
-            "SystemTime",
-            "Instant",
-            "tokio",
-            "async ",
-            ".await",
-            "rand::",
-            "f32",
-            "f64",
-            "crate::adapter",
-            "crate::platform",
-        ],
-    },
-    Zone {
-        dir: "adapter",
-        allow: &[
-            ("std", "*"),
-            ("core", "*"),
-            ("self", "*"),
-            ("super", "*"),
-            ("crate", "domain"),
-            ("crate", "app"),
-            ("crate", "adapter"),
-        ],
-        banned: &["crate::platform", "std::env", "f32", "f64"],
-    },
-    Zone {
-        dir: "platform",
-        allow: &[
-            ("std", "*"),
-            ("core", "*"),
-            ("self", "*"),
-            ("super", "*"),
-            ("ctrlc", "*"),
-            ("crate", "app"),
-            ("crate", "platform"),
-        ],
-        banned: &["crate::adapter", "crate::domain", "f32", "f64"],
-    },
-];
+// ---- a minimal JSON reader, enough for `cargo metadata` (no dependency) ----
+
+#[derive(Debug)]
+enum Json {
+    Obj(Vec<(String, Json)>),
+    Arr(Vec<Json>),
+    Str(String),
+    Other,
+}
+
+struct P<'a>(&'a [u8], usize);
+
+impl P<'_> {
+    fn ws(&mut self) {
+        while self.0.get(self.1).is_some_and(u8::is_ascii_whitespace) {
+            self.1 += 1;
+        }
+    }
+    fn eat(&mut self, b: u8) {
+        self.ws();
+        assert_eq!(self.0.get(self.1), Some(&b), "json at {}", self.1);
+        self.1 += 1;
+    }
+    fn peek(&mut self) -> u8 {
+        self.ws();
+        *self.0.get(self.1).unwrap()
+    }
+    fn string(&mut self) -> String {
+        self.eat(b'"');
+        let mut out = Vec::new();
+        loop {
+            let b = self.0[self.1];
+            self.1 += 1;
+            match b {
+                b'"' => return String::from_utf8(out).unwrap(),
+                b'\\' => {
+                    let e = self.0[self.1];
+                    self.1 += 1;
+                    if e == b'u' {
+                        self.1 += 4; // names here are ASCII; skip the escape
+                        out.push(b'?');
+                    } else {
+                        out.push(match e {
+                            b'n' => b'\n',
+                            b't' => b'\t',
+                            b'r' => b'\r',
+                            other => other,
+                        });
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+    }
+    fn value(&mut self) -> Json {
+        match self.peek() {
+            b'{' => {
+                self.eat(b'{');
+                let mut fields = Vec::new();
+                while self.peek() != b'}' {
+                    let k = self.string();
+                    self.eat(b':');
+                    fields.push((k, self.value()));
+                    if self.peek() == b',' {
+                        self.eat(b',');
+                    }
+                }
+                self.eat(b'}');
+                Json::Obj(fields)
+            }
+            b'[' => {
+                self.eat(b'[');
+                let mut items = Vec::new();
+                while self.peek() != b']' {
+                    items.push(self.value());
+                    if self.peek() == b',' {
+                        self.eat(b',');
+                    }
+                }
+                self.eat(b']');
+                Json::Arr(items)
+            }
+            b'"' => Json::Str(self.string()),
+            _ => {
+                while !matches!(self.0.get(self.1), Some(b',' | b'}' | b']') | None) {
+                    self.1 += 1;
+                }
+                Json::Other
+            }
+        }
+    }
+}
+
+fn field<'a>(o: &'a Json, key: &str) -> &'a Json {
+    let Json::Obj(fields) = o else {
+        panic!("not an object: {o:?}")
+    };
+    &fields.iter().find(|(k, _)| k == key).unwrap().1
+}
+
+fn text(j: &Json) -> &str {
+    let Json::Str(s) = j else {
+        panic!("not a string: {j:?}")
+    };
+    s
+}
+
+/// package -> sorted dependency names (normal + dev + build), straight from
+/// Cargo's own view of the workspace.
+fn dependency_graph() -> BTreeMap<String, Vec<String>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let out = Command::new(cargo)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
+        .current_dir(root())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = P(&out.stdout, 0).value();
+    let Json::Arr(packages) = field(&json, "packages") else {
+        panic!("no packages")
+    };
+    packages
+        .iter()
+        .map(|p| {
+            let Json::Arr(deps) = field(p, "dependencies") else {
+                panic!("no dependencies")
+            };
+            let mut names: Vec<String> = deps
+                .iter()
+                .map(|d| text(field(d, "name")).to_owned())
+                .collect();
+            names.sort();
+            (text(field(p, "name")).to_owned(), names)
+        })
+        .collect()
+}
+
+#[test]
+fn the_dependency_graph_is_exactly_the_zone_rule() {
+    let want: BTreeMap<String, Vec<String>> = [
+        ("svc-domain", vec![]),
+        ("svc-app", vec!["svc-domain"]),
+        ("svc-adapter", vec!["svc-app", "svc-domain"]),
+        ("svc-platform", vec!["ctrlc", "svc-app"]),
+        (
+            "svc",
+            vec!["svc-adapter", "svc-app", "svc-domain", "svc-platform"],
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.into_iter().map(str::to_owned).collect()))
+    .collect();
+    assert_eq!(
+        dependency_graph(),
+        want,
+        "a zone's dependency list changed: that IS the architecture"
+    );
+}
+
+#[test]
+fn every_member_inherits_the_workspace_lints() {
+    for member in [
+        "Cargo.toml",
+        "crates/domain/Cargo.toml",
+        "crates/app/Cargo.toml",
+        "crates/adapter/Cargo.toml",
+        "crates/platform/Cargo.toml",
+    ] {
+        let t = squash(&fs::read_to_string(root().join(member)).unwrap());
+        assert!(t.contains("[lints]workspace=true"), "{member}");
+    }
+}
+
+#[test]
+fn the_release_profile_keeps_overflow_checks_and_unwinds() {
+    let t = squash(&fs::read_to_string(root().join("Cargo.toml")).unwrap());
+    assert!(t.contains("[profile.release]"));
+    assert!(t.contains("overflow-checks=true"));
+    assert!(t.contains("panic=\"unwind\""));
+}
+
+// ---- source scans ----
+
+/// Source without comments and without any whitespace, so `std :: fs` and
+/// `std::fs` look the same.
+fn squash(src: &str) -> String {
+    src.lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<String>()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    entries.sort();
-    for p in entries {
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
         if p.is_dir() {
             rust_files(&p, out);
-        } else if p.extension().is_some_and(|e| e == "rs") {
+        } else if p.extension().is_some_and(|x| x == "rs") {
             out.push(p);
         }
     }
 }
 
-/// Drops `//` comments and string/char literal contents so prose and
-/// messages cannot trip (or hide) a check.
-fn code_only(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '/' if chars.peek() == Some(&'/') => {
-                for n in chars.by_ref() {
-                    if n == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '"' => {
-                out.push('"');
-                while let Some(n) = chars.next() {
-                    if n == '\\' {
-                        chars.next();
-                    } else if n == '"' {
-                        break;
-                    }
-                }
-                out.push('"');
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Expands `a::{b, c::{d, e}}` into full paths.
-fn expand(prefix: &str, tree: &str, out: &mut Vec<String>) {
-    let tree = tree.trim();
-    match tree.find('{') {
-        None => out.push(format!("{prefix}{tree}")),
-        Some(open) => {
-            let head = format!("{prefix}{}", &tree[..open]);
-            let inner = &tree[open + 1..tree.rfind('}').unwrap()];
-            let (mut depth, mut start) = (0usize, 0usize);
-            let mut parts = Vec::new();
-            for (i, ch) in inner.char_indices() {
-                match ch {
-                    '{' => depth += 1,
-                    '}' => depth -= 1,
-                    ',' if depth == 0 => {
-                        parts.push(&inner[start..i]);
-                        start = i + 1;
-                    }
-                    _ => {}
-                }
-            }
-            parts.push(&inner[start..]);
-            for p in parts.into_iter().filter(|p| !p.trim().is_empty()) {
-                expand(&head, p, out);
-            }
-        }
-    }
-}
-
-fn use_paths(code: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for stmt in code.split(';') {
-        let s = stmt.trim_start();
-        let s = s.strip_prefix("pub ").unwrap_or(s);
-        let s = s.strip_prefix("pub(crate) ").unwrap_or(s);
-        if let Some(rest) = s.strip_prefix("use ") {
-            let flat: String = rest.split_whitespace().collect::<Vec<_>>().join("");
-            expand("", &flat, &mut paths);
-        }
-    }
-    paths
-}
-
-fn allowed(allow: &[(&str, &str)], path: &str) -> bool {
-    let mut segs = path.split("::");
-    let first = segs.next().unwrap_or("");
-    let second = segs.next().unwrap_or("*");
-    allow
-        .iter()
-        .any(|(a, b)| *a == first && (*b == "*" || *b == second))
-}
-
-/// Violations of one zone's rules in one source text.
-fn violations(zone: &Zone, code: &str) -> Vec<String> {
-    let mut v = Vec::new();
-    for p in use_paths(code) {
-        if !allowed(zone.allow, &p) {
-            v.push(format!("use {p}"));
-        }
-    }
-    for t in zone.banned {
-        if code.contains(t) {
-            v.push(format!("token {t:?}"));
-        }
-    }
-    v
-}
-
-fn check_zone(zone: &Zone) -> Vec<String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(zone.dir);
+fn src_files(crate_dir: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    rust_files(&root, &mut files);
-    assert!(!files.is_empty(), "zone {} has no sources", zone.dir);
-    let mut out = Vec::new();
-    for f in files {
-        let code = code_only(&fs::read_to_string(&f).unwrap());
-        for v in violations(zone, &code) {
-            out.push(format!("{}: {v}", f.display()));
-        }
-    }
-    out
+    rust_files(&root().join(crate_dir).join("src"), &mut files);
+    files
 }
 
 #[test]
-fn every_zone_imports_only_what_its_direction_allows() {
-    let all: Vec<String> = ZONES.iter().flat_map(check_zone).collect();
-    assert!(
-        all.is_empty(),
-        "zone boundary violations:\n  {}",
-        all.join("\n  ")
-    );
-}
-
-#[test]
-fn the_checker_itself_flags_what_it_claims_to() {
-    let domain = &ZONES[0];
-    let bad = [
-        "use std::time::Instant;",
-        "use std::{fs, collections::BTreeSet};",
-        "use crate::adapter::http::Server;",
-        "use rand::Rng;",
-        "fn f() { let _ = std::env::var(\"X\"); }",
-        "fn f(x: f64) {}",
-    ];
-    for src in bad {
-        assert!(!violations(domain, src).is_empty(), "not flagged: {src}");
-    }
-    let good =
-        "use std::collections::BTreeSet;\nuse std::{fmt, error::Error};\nuse crate::domain::State;";
-    assert!(violations(domain, good).is_empty());
-}
-
-#[test]
-fn only_the_config_module_reads_the_environment() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    rust_files(&root, &mut files);
-    let offenders: Vec<_> = files
-        .iter()
-        .filter(|f| !f.ends_with("platform/config.rs"))
-        .filter(|f| {
-            let c = code_only(&fs::read_to_string(f).unwrap());
-            c.contains("std::env") || c.contains("env::var") || c.contains("env::args")
-        })
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "env read outside platform/config.rs: {offenders:?}"
-    );
-}
-
-#[test]
-fn no_unsafe_and_no_unwrap_in_non_test_code() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    rust_files(&root, &mut files);
-    for f in files {
-        let text = fs::read_to_string(&f).unwrap();
-        let code = code_only(text.split("#[cfg(test)]").next().unwrap_or(""));
-        for bad in ["unsafe ", ".unwrap()", ".expect("] {
-            assert_eq!(code.matches(bad).count(), 0, "{}: {bad}", f.display());
-        }
-        if f.ends_with("lib.rs") || f.ends_with("main.rs") {
-            assert!(
-                code.contains("#![forbid(unsafe_code)]"),
-                "{}: missing forbid",
+fn domain_and_app_are_no_std_and_cannot_link_std_back_in() {
+    for krate in ["crates/domain", "crates/app"] {
+        let lib = fs::read_to_string(root().join(krate).join("src/lib.rs")).unwrap();
+        let lines: Vec<&str> = lib.lines().map(str::trim).collect();
+        assert!(lines.contains(&"#![no_std]"), "{krate}: #![no_std] missing");
+        assert!(
+            lines.contains(&"#![forbid(unsafe_code)]"),
+            "{krate}: forbid(unsafe_code) missing"
+        );
+        for f in src_files(krate) {
+            let s = squash(&fs::read_to_string(&f).unwrap());
+            // The one allowed `extern crate` is `alloc`; `extern crate std
+            // as s;` would link std back in and defeat no_std.
+            assert_eq!(
+                s.matches("externcrate").count(),
+                s.matches("externcratealloc;").count(),
+                "{}: an `extern crate` other than alloc",
                 f.display()
             );
+            // `#[path]` can only point at files of this same crate, which is
+            // itself no_std, but it is how code gets smuggled between zones.
+            assert!(!s.contains("#[path"), "{}: #[path]", f.display());
+            assert!(!s.contains("#[macro_use"), "{}: #[macro_use]", f.display());
         }
+    }
+}
+
+#[test]
+fn only_config_rs_reads_the_environment() {
+    let allowed = root().join("crates/platform/src/config.rs");
+    let mut files: Vec<PathBuf> = ["domain", "app", "adapter", "platform"]
+        .iter()
+        .flat_map(|c| src_files(&format!("crates/{c}")))
+        .collect();
+    files.push(root().join("src/main.rs"));
+    let banned = ["std::env", "env::var", "env::args", "env!(", "option_env!("];
+    for f in &files {
+        if *f == allowed {
+            continue;
+        }
+        let s = squash(&fs::read_to_string(f).unwrap());
+        for token in banned {
+            assert!(!s.contains(token), "{}: {token}", f.display());
+        }
+    }
+    // The single allowed occurrences, pinned.
+    let cfg = squash(&fs::read_to_string(&allowed).unwrap());
+    assert_eq!(cfg.matches("option_env!(").count(), 1, "build-time read");
+    assert_eq!(cfg.matches("std::env::var(").count(), 1, "runtime read");
+    assert_eq!(cfg.matches("env::var").count(), 1, "no other runtime read");
+}
+
+#[test]
+fn the_token_is_compared_through_the_constant_time_helper_only() {
+    let http = squash(&fs::read_to_string(root().join("crates/adapter/src/http.rs")).unwrap());
+    assert!(
+        http.contains("ct_eq(token.as_bytes(),self.opts.auth_token.as_bytes())"),
+        "the token check must go through ct_eq"
+    );
+    for plain in [
+        "auth_token==",
+        "==self.opts.auth_token",
+        "auth_token!=",
+        "auth_token.as_bytes()==",
+        "==self.opts.auth_token.as_bytes()",
+        "auth_token.as_bytes()!=",
+    ] {
+        assert!(
+            !http.contains(plain),
+            "plain comparison of the token: {plain}"
+        );
     }
 }
