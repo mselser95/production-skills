@@ -28,7 +28,7 @@ emitted (UNVERIFIED mapping).
 | Skill discovery path | copies nine skills to `$cfg/skills/<s>` | copies nine skills to `$CODEX_HOME/skills/<s>` | VERIFIED 2026-11-27 for `$CODEX_HOME/skills` by `codex debug prompt-input` (section below; the other roots were not tried). Older note: no help text names a skills directory. The notes list `$CODEX_HOME/skills` as seen in the binary and `~/.agents/skills` / `.agents/skills` as documented, and call it a CONFLICT. Chosen: the binary-referenced one. `codex features list` shows `skip_host_skill_discovery` (under development), which only implies host-level discovery exists. Strings of the binary were not read: it lives under the real `~/.codex`, off limits here |
 | `references/` symlinks | dereferenced into real files | dereferenced the same way (no symlink survives in the tree) | VERIFIED by selftest; whether Codex resolves relative paths inside a skill is UNVERIFIED |
 | Skill frontmatter | `name`, `description`, `allowed-tools` etc. kept as is | kept as is | UNVERIFIED: Codex handling of unknown keys (`allowed-tools` is "not documented" there) |
-| Agent / role definitions | copies every `agents/*.md` to `$cfg/agents/` | generates `$CODEX_HOME/agents/<name>.toml` for each `agents/prod-*.md` only (other agent files are NOT installed for Codex; stderr says so): `name`, `description`, `developer_instructions` (= markdown body + restrictions block), `model` only if env-set. Strings are TOML basic strings with `\`, `"` and every control character escaped; every file is parsed back and compared with the intended values before anything is written | VERIFIED 2026-11-27 that `name` and `description` are read and the role is listed (`codex debug prompt-input`, section below); UNVERIFIED for `developer_instructions` and `model`. `codex --help` and `codex features list` do not mention role files. `codex agents` exists but is a session browser, not role loading |
+| Agent / role definitions | copies every `agents/*.md` to `$cfg/agents/` | generates `$CODEX_HOME/agents/<name>.toml` for each `agents/prod-*.md` only (other agent files are NOT installed for Codex; stderr says so): `name`, `description`, `developer_instructions` (= markdown body + restrictions block), `model` only if env-set. Strings are TOML basic strings with `\`, `"` and every control character escaped; when python3 has `tomllib` every file is parsed back and compared with the intended values before anything is written (otherwise UTF-8 validity + the escaper, see below) | VERIFIED 2026-11-27 that `name` and `description` are read and the role is listed (`codex debug prompt-input`, section below); UNVERIFIED for `developer_instructions` and `model`. `codex --help` and `codex features list` do not mention role files. `codex agents` exists but is a session browser, not role loading |
 | Per-role model | frontmatter `model:` | see the mapping table | UNVERIFIED, DEGRADED: roles inherit the session model unless the operator sets a name, so the cheap-implementer / strong-validator split is not enforced |
 | Per-role tool allow-list (`tools:`) | honoured by the host | restated in WORDS at the end of `developer_instructions`, derived from `tools:` (no Edit/Write -> "must not edit, create or delete files"; no Bash -> "must not run shell commands"; no Agent -> "must not spawn other agents"). A role with NO `tools:` line gets the sentence "declares no tool restriction" and no bans (on Claude Code it inherits every tool) | DEGRADED: instruction-only; Codex has only `features.*` switches (notes, UNVERIFIED). A hook that enforces it does not exist yet |
 | Per-role sandbox | `permissionMode` | nothing emitted; role inherits the parent | DEGRADED (notes: not overridable, UNVERIFIED) |
@@ -50,8 +50,9 @@ Exit codes of `install.sh` (old = the script on master; new adds 4-7, nothing el
 | 3 | TCB WRITABLE (verify) | yes | yes |
 | 4 | destination is a symlink (Codex tree) | - | new |
 | 5 | destination exists and is not ours (Codex), `--adopt` not given | - | new |
-| 6 | another install holds the lock | - | new |
-| 7 | a copy / move / chmod failed; the host was rolled back, no manifest written | - | new |
+| 6 | the lock exists: live owner, dead owner or unreadable owner (the message says which; never stolen) | - | new |
+| 7 | a copy / move / chmod failed, or the lock directory / the private work directory could not be created; the host was rolled back, no manifest written | - | new |
+| 129, 130, 143 | HUP, INT, TERM: the commit finished or was rolled back first; never half-installed (a signal after the commit point lets the install complete, exit 0) | - | new |
 
 (`2` is both "STALE INSTALL" on `--verify` and "usage" on a bad `--host`, as on master.)
 
@@ -59,39 +60,75 @@ Exit codes of `install.sh` (old = the script on master; new adds 4-7, nothing el
   generated role file are `lstat`-ed before anything is written; a symlink at any of them is
   refused (exit 4), even with `--adopt`: it is the user's. Nothing is ever written, `chmod`-ed or
   removed through a symlink: units are moved aside whole by `mv` (a rename acts on the link
-  itself), the trash is unlocked with `find ! -type l`, `rm -rf` never follows links, and the
-  manifest is replaced by rename. `$CODEX_HOME` itself may be a symlink (a dotfiles layout).
+  itself), the work directory is made writable with `find -type d -exec chmod` (no `-L`) before it
+  is removed, `rm -rf` never follows links, and the manifest is replaced by rename. `$CODEX_HOME` itself may be a symlink (a dotfiles layout).
 - **Ownership, Codex:** a destination (skill dir or role file) is replaced only if the host's
   PREVIOUS manifest lists it. Otherwise: exit 5 `refusing to overwrite <path>: not installed by
   this tool; move it away or pass --adopt`, with nothing installed (all destinations of the chosen
   hosts are checked before the first write). `--adopt` (per run) moves each such destination to
-  `<path>.bak.<timestamp>` and installs; nothing is ever deleted that this tool did not install.
-  Foreign files are never `chmod`-ed read-only either.
+  `<config root>/.prod-backups/<UTC timestamp>-<random>/{skills,agents}/` (created by `mktemp -d`, so
+  two adoptions in one second get two directories; outside `skills/` and `agents/`, so Codex never
+  discovers a backed-up `SKILL.md` as a duplicate skill) and prints that path; installs; nothing is
+  ever deleted that this tool did not install. Foreign files are never `chmod`-ed read-only either.
 - **Claude keeps its historical behaviour** (a KNOWN LIMITATION, to be fixed under its own
   change): it replaces `skills/<our nine names>` and every `agents/*.md` of the same name with no
   ownership check and no symlink refusal, `--adopt` is ignored, and a symlinked `skills/` or
   `agents/` directory is followed. The Codex path is stricter. What is NOT changed on Claude:
   the default flow's output, tree, modes and manifest.
-- **Staging, all-or-nothing per host:** every skill and role is built beside its destination
-  (`.prod-stage.<pid>.*`); only when all are built does the commit start: each existing
-  destination is renamed to trash (or `.bak.<ts>`), its stage renamed in; any failure renames
-  everything back. The manifest is built last in a temp file, `chmod 0444` (Codex), and renamed
-  into place as the final step, so an incomplete install never leaves a manifest. The replaced
-  copies are deleted only after that. A failed first install leaves nothing behind. `--host both`
-  is per host: a second host failing leaves the first installed.
+- **One private work directory per host per run; all-or-nothing:** right after the lock, the
+  installer creates `<config root>/.prod-work.XXXXXXXX` with `mktemp -d` (random name, created
+  atomically, mode 0700, inside the config root so every rename stays on one filesystem; a
+  `skills/` that is a symlink to another filesystem makes the rename a copy, which is yours to
+  avoid). EVERYTHING temporary lives in it: `stage/skills/<name>`, `stage/agents/<file>`,
+  `trash/skills/<name>`, `trash/agents/<file>`, `chk/` (the TOML-check sidecar files) and
+  `manifest.new`. There is no pid-derived or otherwise predictable name anywhere, and a
+  directory that was created a moment ago by `mktemp -d` cannot contain anything planted, so
+  `cp -R`, `>` and `mv` into it never follow somebody else's symlink. The commit then renames: each
+  existing destination into `work/trash` (or into the `--adopt` backup directory), its stage into
+  place, after checking that the destination name is free (it was just moved away; if something
+  appeared in between the host is rolled back). A failure renames everything back; a SIGINT,
+  SIGTERM or SIGHUP only sets a flag that the commit loop reads BETWEEN units, so it never exits
+  between "moved aside" and "moved in": it rolls back what it renamed and exits 130/143/129. The
+  manifest is built in `work/manifest.new`, `chmod 0444` (Codex), and renamed into place as the
+  final step (the commit point; a symlinked manifest is removed as a link first, because `mv` would
+  move INTO a link to a directory). The replaced copies are deleted only after that, with the
+  work directory. A failed first install leaves nothing behind. `--host both` is per host: when the
+  second host fails after the first committed, stderr says so (`install: claude: installed; codex:
+  rolled back (exit 7)`) and the exit code is the second host's; the first stays installed.
+  Cleanup removes only the exact work directory this run created; a leftover `.prod-work.*` from a
+  killed run (SIGKILL cannot be caught) is never touched: one stderr line names it
+  (`stale work directory from an interrupted install: <path>; it is safe to delete`; if one of our
+  skills is missing from the home, its previous copy may be under `<path>/trash`). A rollback
+  that cannot put a previous copy back keeps the work directory and says where it is. Outside
+  the work directory the installer only creates the config root and the two destination
+  directories, takes the lock, and performs the renames above (plus a `chmod u+w` of the top
+  directory of a read-only unit it is about to move, because on Linux a read-only directory cannot
+  change parent; undone on rollback).
 - **Lock:** `<config root>/.prod-skills.lock` (a `mkdir`), taken for every chosen host before any
-  check, removed on exit by a trap. A held lock exits 6; one older than 10 minutes is reported
-  as stale with its pid and is never stolen: remove it by hand once no install is running.
+  check, removed on exit by a trap. If it exists the installer reads the owner pid safely (a
+  regular file, not a symlink or FIFO; at most 16 bytes; digits only; anything else is "owner
+  unreadable" and no file content is ever echoed) and says which case it is: a live owner
+  (`another install is running`), a dead one (`stale lock ... its owner, pid N, is not running`,
+  with the exact `rm -rf '<lock>'` to run), or unreadable; exit 6 each time, and it is never
+  stolen. A directory that cannot be created for another reason (a read-only config root) is exit
+  7 with the reason, not "another install is running".
 - **Verify compares (path, hash) rows,** not hashes: every file the source would install must
   be in the manifest at that path with that hash (STALE otherwise), the manifest's skill rows
   must be exactly those paths (an extra path, or a file at the wrong place, is STALE, exit 2,
   named as `extra:`), every source agent must be installed (Claude: by hash; Codex: one
-  `prod-*.toml` per `agents/prod-*.md`, exactly). Not checked on Codex: whether a generated role
-  file still matches what the CURRENT source would generate (the source has no hash for it;
-  tampering is caught by the manifest, a source edit that is not reinstalled is not).
-- **Modes, Codex:** the install runs under an explicit `umask 022` (directories 0755, files from
-  the source's own modes, then read-only; manifest 0444), whatever the caller's umask. Claude
-  inherits the caller's umask as before.
+  `prod-*.toml` per `agents/prod-*.md`, exactly). On Codex the roles are REGENERATED from the
+  current source (the installer's own generator, into a scratch directory inside a private
+  `mktemp -d` under `$TMPDIR`) and compared as (hash, path) rows, like Claude's verbatim copies.
+  Same situation, same code on both hosts: an installed role/agent edited and the manifest
+  rewritten to match is 2 STALE (the row the source would install is not in the manifest); a source
+  agent edited and not reinstalled is 2; an installed role edited with the manifest untouched is
+  1 DRIFT. Run verify with the same `PROD_CODEX_MODEL_*` variables as the install, or the
+  regenerated role differs (STALE).
+- **Modes, Codex:** `umask 022` is set before ANY directory is created (the lock step creates
+  `$CODEX_HOME` itself when it is missing) and the installer chmods the directories it creates
+  (`$CODEX_HOME`, `skills/`, `agents/`) to 0755, whatever the caller's umask; files take the
+  source's own modes, then are made read-only; manifest 0444; the private work directory is 0700.
+  Claude inherits the caller's umask as before. A directory that already existed keeps its mode.
 - **Source symlinks:** a dangling symlink anywhere in a skill source is an error for Codex
   (exit 1, naming it, nothing written). Claude keeps dropping it silently.
 - **Healthy-flow differences on Claude** (the only ones): `--verify` is path-aware and also
@@ -106,16 +143,20 @@ Exit codes of `install.sh` (old = the script on master; new adds 4-7, nothing el
   `.system`, roles and `config.toml`; hashing them would raise a drift alarm on every
   unrelated edit. The Claude manifest keeps hashing the whole `agents/` dir, unchanged.
 - Foreign files in the Codex home are never chmodded read-only. They are never deleted or
-  overwritten either, unless you pass `--adopt`, which moves them to `<path>.bak.<timestamp>`
-  first (see the contract above).
+  overwritten either, unless you pass `--adopt`, which moves them under
+  `<config root>/.prod-backups/` first (see the contract above).
 - `--host both`: source-consistency (mirror pairs) runs once. Verify runs both hosts, names the
   failing one(s) on stderr (`install.sh: verify FAILED for: codex(exit 1)`), and exits with the
   lowest non-zero code (1 outranks 2 outranks 3).
 - Role files are TOML basic strings, so no body is un-representable (`'''`, `"""`, CR, tabs,
-  control characters, non-ASCII are escaped); a NUL byte, invalid UTF-8, a frontmatter `name`
-  that is not `^[a-z][a-z0-9-]*$` or differs from the file name are refused. The parse check
-  needs python3 with `tomllib` (3.11+); without it the installer says so on stderr and relies
-  on the escaper alone.
+  control characters are escaped; non-ASCII passes through); a NUL byte, invalid UTF-8 (checked
+  on the whole source file with `iconv`, else python3's strict decoder, else refused: never
+  written unvalidated), a frontmatter `name` that is not `^[a-z][a-z0-9-]*$` or differs from the
+  file name are refused. For valid UTF-8 the escaper is total. The parse check needs python3 with
+  `tomllib` (3.11+); without it (stock macOS python3 is 3.9) the installer says so on stderr and
+  relies on the UTF-8 check plus the escaper, which the selftest proves with a strict reader of
+  exactly the subset the generator emits. Role texts reach python through files, never argv (a 2
+  MB body works).
 
 ## What `codex features list` says about multi-agent support (re-checked 2026-11-27)
 
