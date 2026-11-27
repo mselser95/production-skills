@@ -39,6 +39,7 @@ GATES=(
   "agents-token-budget|bash _shared/probes/agents-budget.sh"
   "policy-coverage|bash _shared/probes/policy-coverage.sh"
   "row-vacuity|bash _shared/probes/row-vacuity-sweep.sh"
+  "row-catalogue|bash _shared/probes/row-catalogue.sh"
   "liability-registries|bash _shared/probes/check-registries.sh"
   "gate-hygiene|bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts"
   "gates-are-driven|bash _shared/probes/probe-wiring.sh"
