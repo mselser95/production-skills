@@ -7,7 +7,16 @@ platform  never imports app or adapters
 config    only platform/config.py touches the process environment
 money     no float anywhere in domain or app
 purity    domain and app: no I/O or reflection builtins, no true division, no float/clock/
-          randomness/I-O members (aliases resolved), app imports no clock/random/I-O module
+          randomness/I-O members (aliases resolved)
+app       imports ONLY APP_ALLOWED (an allowlist, like the domain's) and the project's own
+          domain and app packages; anything else fails, naming file:line and the module
+clock     in domain and app, an attribute named now/utcnow/today/time/monotonic/... on any
+          expression fails unless the receiver is the injected clock port (a name or an
+          attribute called `clock` / `_clock`); datetime.min.now() and date.today() fail
+
+A guard-rail against mistakes, not a sandbox: deliberate evasion (`__float__`,
+`object.__getattribute__`, `int.__dict__`, rebinding a module to another name in an adapter)
+is out of scope.
 """
 
 import ast
@@ -54,12 +63,22 @@ BANNED_MEMBERS = frozenset(
      "datetime.date.today", "datetime.datetime.fromtimestamp",
      "functools.reduce"}
 )  # fmt: skip
-# The app may use datetime only as a TYPE (the Clock port); it imports none of these.
-APP_FORBIDDEN_MODULES = frozenset(
-    {"math", "cmath", "random", "secrets", "time", "os", "posix", "nt", "sys", "io", "pathlib",
-     "socket", "subprocess", "builtins", "importlib", "ctypes", "pickle", "tempfile", "shutil",
-     "urllib", "http", "logging", "uuid", "operator"}
+# Everything `app` may import besides the project's own domain and app packages: the domain's
+# pure set plus exactly what the app code needs today. Anything else (statistics, sqlite3,
+# asyncio, json, glob, ssl, signal, zoneinfo, concurrent, multiprocessing, os, time, ...)
+# fails. Add a module here, with its reason, only when the app really needs it.
+APP_ALLOWED = DOMAIN_ALLOWED | {
+    "contextlib",  # AbstractContextManager: the unit-of-work port's return type
+    "datetime",  # a TYPE only (the Clock port); the clock rule below bans now/today/utcnow
+    "threading",  # the service's lock around read-decide-append
+}
+# Attribute names that read the wall clock or a monotonic counter. They are refused on any
+# expression in domain and app unless the receiver is the injected clock port.
+CLOCK_ATTRIBUTES = frozenset(
+    {"now", "utcnow", "today", "time", "time_ns", "monotonic", "monotonic_ns", "perf_counter",
+     "perf_counter_ns", "process_time", "process_time_ns", "sleep"}
 )  # fmt: skip
+CLOCK_PORT_NAMES = frozenset({"clock", "_clock"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +107,13 @@ def imported_modules(source: str, module: str, is_package: bool) -> list[tuple[i
             func = node.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
             if name in {"__import__", "import_module"}:
-                found.append((node.lineno, "<dynamic import>"))
+                arg = node.args[0] if node.args else None
+                literal = (
+                    arg.value
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    else "?"
+                )
+                found.append((node.lineno, f"<dynamic import: {literal}>"))
     return found
 
 
@@ -104,14 +129,44 @@ def forbidden_imports(source: str, module: str, forbidden: tuple[str, ...]) -> l
     ]
 
 
-def impure_domain_imports(source: str, module: str) -> list[Finding]:
+def zone_import_findings(source: str, module: str, zone: str) -> list[Finding]:
+    """Every import in a domain or app source that is not on the zone's allowlist.
+
+    Covers `import x`, `from x import y`, `import x.y`, relative imports (resolved), imports in
+    functions and under TYPE_CHECKING, and `import_module("x")` / `__import__("x")` (always
+    refused, with the literal named).
+    """
+    allowed = DOMAIN_ALLOWED if zone == "domain" else APP_ALLOWED
+    own = (f"{PACKAGE}.domain",) if zone == "domain" else (f"{PACKAGE}.domain", f"{PACKAGE}.app")
     findings: list[Finding] = []
     for line, name in imported_modules(source, module, False):
         root = name.split(".")[0]
-        if name == "<dynamic import>" or not (
-            root in DOMAIN_ALLOWED or _is_under(name, f"{PACKAGE}.domain")
+        if name.startswith("<dynamic import") or not (
+            root in allowed or any(_is_under(name, prefix) for prefix in own)
         ):
             findings.append(Finding(f"{module}:{line}", name))
+    return findings
+
+
+def impure_domain_imports(source: str, module: str) -> list[Finding]:
+    return zone_import_findings(source, module, "domain")
+
+
+def app_forbidden_modules(source: str, module: str) -> list[Finding]:
+    return zone_import_findings(source, module, "app")
+
+
+def clock_reads(source: str, module: str) -> list[Finding]:
+    """A clock-reading attribute on any expression, unless it goes through the clock port."""
+    findings = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr in CLOCK_ATTRIBUTES:
+            receiver = node.value
+            port = (isinstance(receiver, ast.Name) and receiver.id in CLOCK_PORT_NAMES) or (
+                isinstance(receiver, ast.Attribute) and receiver.attr in CLOCK_PORT_NAMES
+            )
+            if not port:
+                findings.append(Finding(f"{module}:{node.lineno}", f".{node.attr}"))
     return findings
 
 
@@ -211,14 +266,6 @@ def banned_members(source: str, module: str) -> list[Finding]:
     return findings
 
 
-def app_forbidden_modules(source: str, module: str) -> list[Finding]:
-    return [
-        Finding(f"{module}:{line}", name)
-        for line, name in imported_modules(source, module, False)
-        if name == "<dynamic import>" or name.split(".")[0] in APP_FORBIDDEN_MODULES
-    ]
-
-
 def purity_findings(source: str, module: str, zone: str) -> list[Finding]:
     """Every purity rule for one domain or app source."""
     allowed = APP_ALLOWED_BUILTINS if zone == "app" else frozenset()
@@ -227,6 +274,7 @@ def purity_findings(source: str, module: str, zone: str) -> list[Finding]:
         *banned_arithmetic(source, module),
         *banned_members(source, module),
         *float_uses(source, module),
+        *clock_reads(source, module),
     ]
 
 
@@ -556,3 +604,104 @@ def test_the_environment_checker_ignores_lookalikes() -> None:
     assert not environment_reads("import os\nos.path.join('a')\nconfig.environ", "m")
     assert not environment_reads("from os import path as p\np.join('a')", "m")
     assert not environment_reads("environ = {}\nenviron['A']", "m")
+
+
+def app_findings(source: str, module: str = APP_MODULE) -> list[Finding]:
+    """Everything the app zone refuses: imports off the allowlist, plus every purity rule."""
+    return [*zone_import_findings(source, module, "app"), *purity_findings(source, module, "app")]
+
+
+# provenance: derived
+# verifies: domain_is_pure
+@pytest.mark.parametrize(
+    ("source", "named"),
+    [
+        ("import statistics\nstatistics.mean([1, 2])", "statistics"),
+        ('import sqlite3\nsqlite3.connect("ledger.db")', "sqlite3"),
+        ("import asyncio\nasyncio.open_connection", "asyncio"),
+        ("import glob\nglob.glob('*')", "glob"),
+        ("import json\njson.loads('1.5')", "json"),
+        ("import select\nselect.select", "select"),
+        ("import ssl", "ssl"),
+        ("import signal", "signal"),
+        ("import multiprocessing", "multiprocessing"),
+        ("import concurrent.futures", "concurrent.futures"),
+        ("from concurrent import futures", "concurrent"),
+        ("import zoneinfo", "zoneinfo"),
+        ("from datetime import datetime\ndatetime.min.now()", ".now"),
+        ("import datetime\ndatetime.datetime.now()", ".now"),
+        ("from datetime import date\ndate.today()", ".today"),
+        ("from datetime import datetime\ndatetime.utcnow()", ".utcnow"),
+        # every import form, including the hidden ones
+        ("from statistics import mean", "statistics"),
+        ("import statistics as st", "statistics"),
+        ("def f():\n    import sqlite3", "sqlite3"),
+        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import ssl", "ssl"),
+        ("from .. import platform", f"{PACKAGE}.platform"),
+        ("from ..platform import clock", f"{PACKAGE}.platform"),
+        ("from ...other import x", "other"),
+        (f"from {PACKAGE} import platform", f"{PACKAGE}"),
+        (f"import {PACKAGE}.adapters.inbound", f"{PACKAGE}.adapters"),
+        ("import os.path", "os.path"),
+        ("importlib_ = 1\nfrom importlib import import_module\nimport_module('glob')", "glob"),
+        ("__import__('sqlite3')", "sqlite3"),
+        ("import importlib\nimportlib.import_module('statistics')", "statistics"),
+    ],
+)
+def test_the_app_zone_refuses_each_evasion_the_review_found(source: str, named: str) -> None:
+    findings = app_findings(source)
+    assert findings, source
+    assert any(named in f.what for f in findings), (source, findings)
+    assert all(f.where.startswith(f"{APP_MODULE}:") for f in findings)  # file:line is named
+
+
+# provenance: derived
+# verifies: domain_is_pure
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from __future__ import annotations",
+        "import threading\nlock = threading.Lock()",
+        "from datetime import datetime\ndef f(at: datetime) -> None: ...",
+        "from contextlib import AbstractContextManager",
+        "from collections.abc import Sequence",
+        "from dataclasses import dataclass",
+        "from typing import Protocol",
+        "import enum, functools, itertools, re, abc, decimal, fractions, collections",
+        f"from {PACKAGE}.domain.ledger import Event",
+        f"from {PACKAGE}.app.ports import Clock",
+        "from ..domain import ledger",
+        "from . import ports",
+        "from ..domain.money import Amount",
+        "self._clock.now()",
+        "clock.now()",
+    ],
+)
+def test_the_app_zone_allows_what_it_really_needs(source: str) -> None:
+    assert not app_findings(source), source
+
+
+# provenance: derived
+# verifies: domain_is_pure
+def test_the_real_app_and_domain_code_pass_the_allowlists_and_the_clock_rule() -> None:
+    app_files, domain_files = sources("app"), sources("domain")
+    assert len(app_files) >= 3
+    assert_clean([f for m, s in app_files for f in app_findings(s, m)], "app")
+    assert_clean([f for m, s in domain_files for f in clock_reads(s, m)], "domain clock")
+    assert_clean([f for m, s in domain_files for f in impure_domain_imports(s, m)], "domain")
+
+
+# provenance: derived
+# verifies: domain_is_pure
+def test_the_clock_rule_applies_to_the_domain_too() -> None:
+    for source in ("import datetime\ndatetime.datetime.now()", "x.min.now()", "t.monotonic()"):
+        assert purity_findings(source, DOMAIN_MODULE, "domain"), source
+    assert not purity_findings("self._clock.now()", DOMAIN_MODULE, "domain")
+
+
+# provenance: derived
+# verifies: domain_is_pure
+def test_the_app_allowlist_is_the_domain_set_plus_three_reasoned_modules() -> None:
+    assert {"contextlib", "datetime", "threading"} == APP_ALLOWED - DOMAIN_ALLOWED
+    assert set(sys.stdlib_module_names) >= APP_ALLOWED
+    assert not APP_ALLOWED & {"math", "operator", "time", "os", "random", "statistics", "json"}

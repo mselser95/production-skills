@@ -46,6 +46,11 @@ HEALTH_PATHS = frozenset({"/healthz", "/metrics"})
 _DIGITS = re.compile(rf"[0-9]{{1,{MAX_LENGTH_DIGITS}}}", re.ASCII)
 _UNSAFE = re.compile(r"[^\x21-\x7e]", re.ASCII)
 _BODYLESS = frozenset({"GET", "HEAD"})
+_KNOWN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+# Headers that must appear at most once: last-wins collection would let a second one override
+# the first (an Authorization smuggled behind a bad one, a split Host).
+_SINGLETON_HEADERS = frozenset({"authorization", "host"})
+_BARE_CR = re.compile(rb"\r(?!\n)")
 _MIN_TIMEOUT = 0.001
 _SHED_LOG_EVERY = 100
 _DRAIN_BYTES = 65536
@@ -120,6 +125,9 @@ def respond(
         framed = frame(method, headers)
         if not isinstance(framed, int):
             return framed
+        names = [name.lower() for name, _ in headers if name.lower() in _SINGLETON_HEADERS]
+        if len(set(names)) != len(names):
+            return _refuse(400, "duplicate_header")
         body = read(framed) if framed else b""
         response = api.handle(method, raw_path, {k.lower(): v for k, v in headers}, body)
     except DeadlineExceededError:
@@ -131,6 +139,23 @@ def respond(
         _LOG.error("request failed: %s", type(error).__name__)
         return _refuse(500, "internal_error")
     return response.status, response.body, response.content_type
+
+
+class _HeadReader(io.BufferedReader):
+    """Buffered reader that keeps every line read with ``readline`` (the request head).
+
+    The stdlib header parser splits on a bare CR as well as on CRLF; the recorded raw bytes let
+    the handler refuse such a head before trusting the parsed headers.
+    """
+
+    def __init__(self, raw: io.RawIOBase) -> None:
+        super().__init__(raw)
+        self.head = bytearray()
+
+    def readline(self, size: int | None = -1, /) -> bytes:
+        line = super().readline(size)
+        self.head += line
+        return line
 
 
 class _Budget:
@@ -262,6 +287,7 @@ def make_server(  # noqa: PLR0913
         timeout = request_deadline
         server: BoundedServer
         budget: _Budget
+        head_reader: _HeadReader
         answered = False
 
         def setup(self) -> None:
@@ -271,7 +297,16 @@ def make_server(  # noqa: PLR0913
             self.requestline = ""
             self.command = ""
             self.budget = _Budget(self.server.head_deadline, self.server.request_deadline)
-            self.rfile = io.BufferedReader(_DeadlineReader(self.request, self.budget))
+            self.head_reader = _HeadReader(_DeadlineReader(self.request, self.budget))
+            self.rfile = self.head_reader
+
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            if _BARE_CR.search(bytes(self.head_reader.head)) is not None:
+                self._answer(400, _refuse(400, "invalid_framing")[1], JSON)
+                return False
+            return True
 
         def handle(self) -> None:
             try:
@@ -329,10 +364,15 @@ def make_server(  # noqa: PLR0913
             _LOG.info(
                 "%s %s %s -> %s",
                 self.address_string(),
-                printable(str(getattr(self, "command", None) or "-"), 8),
+                self._logged_method(),
                 log_path(str(getattr(self, "path", ""))),
                 code,
             )
+
+        def _logged_method(self) -> str:
+            # A fixed token for anything outside the known set: a client must not pick log text.
+            command = str(getattr(self, "command", None) or "-")
+            return command if command in _KNOWN_METHODS or command == "-" else "OTHER"
 
         def log_error(self, format: str, *args: object) -> None:  # noqa: A002, ARG002
             # The stdlib puts the raw request line (query string included) in these messages.

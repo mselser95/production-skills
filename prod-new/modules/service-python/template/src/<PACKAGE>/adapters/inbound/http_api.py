@@ -55,12 +55,11 @@ def _reject_constant(name: str) -> NoReturn:
     raise ValueError(f"constant {name} is not JSON")
 
 
-def _too_deep(body: bytes) -> bool:
+def _too_deep(text: str) -> bool:
     """True when the JSON nests deeper than MAX_JSON_DEPTH (a scan; never recurses)."""
     depth = 0
     in_string = escaped = False
-    for byte in body:
-        char = chr(byte)
+    for char in text:
         if in_string:
             if escaped:
                 escaped = False
@@ -80,12 +79,17 @@ def _too_deep(body: bytes) -> bool:
 
 
 def _parse(body: bytes) -> object:
-    """Strict JSON: no duplicate keys, no NaN/Infinity, bounded depth. Raises ValueError."""
-    if _too_deep(body):
+    """Strict JSON: UTF-8 only, no duplicate keys, no NaN/Infinity, bounded depth.
+
+    The body is decoded here, strictly, so the depth scan and the parser read the same text
+    (``json.loads(bytes)`` would auto-detect UTF-16/32 and a BOM). Raises ValueError.
+    """
+    text = body.decode("utf-8", "strict")  # UnicodeDecodeError is a ValueError
+    if _too_deep(text):
         raise ValueError("too deep")
     try:
         return json.loads(
-            body, object_pairs_hook=_reject_duplicates, parse_constant=_reject_constant
+            text, object_pairs_hook=_reject_duplicates, parse_constant=_reject_constant
         )
     except RecursionError as error:
         raise ValueError("too deep") from error

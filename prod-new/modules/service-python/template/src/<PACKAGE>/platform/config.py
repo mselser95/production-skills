@@ -8,6 +8,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+MAX_PORT = 65535
+MAX_PORT_DIGITS = 5
+_PORT_TEXT = re.compile(rf"[0-9]{{1,{MAX_PORT_DIGITS}}}", re.ASCII)
 MIN_TOKEN_LENGTH = 32
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]{32,}", re.ASCII)
 
@@ -31,7 +34,8 @@ def load(environ: Mapping[str, str] | None = None) -> Config:
     host = env.get("SVC_HOST", "127.0.0.1")
     port_text = env.get("SVC_PORT", "8080")
     port = 0
-    if port_text.isascii() and port_text.isdigit() and 0 <= int(port_text) <= 65535:  # noqa: PLR2004
+    # Bound the length BEFORE int(): a 5000-digit string would raise (the int-string limit).
+    if _PORT_TEXT.fullmatch(port_text) and int(port_text) <= MAX_PORT:
         port = int(port_text)
     else:
         problems.append("SVC_PORT must be an integer in 0..65535")

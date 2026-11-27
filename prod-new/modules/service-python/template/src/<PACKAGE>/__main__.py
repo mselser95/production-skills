@@ -1,11 +1,13 @@
 """Composition root: wires ports to adapters, runs the server, shuts down cleanly.
 
 No business logic lives here. ``build`` is the wiring (testable without a socket);
-``run`` serves until ``stop`` is set; ``main`` binds SIGINT and SIGTERM to ``stop``.
+``run`` serves until ``stop`` is set; ``main`` binds SIGINT, SIGTERM and SIGHUP to ``stop``.
 
 Shutdown sequence: stop accepting, close the listening socket (new connections are refused),
 let in-flight requests finish for up to ``SHUTDOWN_GRACE_SECONDS``, then exit. Exit codes:
 0 drained (or idle), 2 configuration refused, 3 requests were abandoned at the grace deadline.
+SIGHUP drains like SIGTERM (there is no config reload). A second signal during the drain is
+ignored: it does not shorten the grace period.
 """
 
 import logging
@@ -105,7 +107,7 @@ def main() -> int:
         _LOG.error("configuration refused: %s", err)
         return EXIT_CONFIG
     stop = threading.Event()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda _signum, _frame: stop.set())
     return run(cfg, stop)
 

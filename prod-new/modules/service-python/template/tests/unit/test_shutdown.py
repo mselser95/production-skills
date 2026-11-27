@@ -181,3 +181,26 @@ def test_a_request_that_finishes_inside_the_grace_gives_exit_code_0() -> None:
     assert reply.startswith(b"HTTP/1.0 200 "), reply
     assert_complete(reply)
     assert codes == [0]
+
+
+# provenance: derived
+# verifies: clean_shutdown
+def test_sighup_drains_like_sigterm_and_a_second_signal_does_not_shorten_the_drain() -> None:
+    with child_service() as (proc, port):
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.sendall(HEAD + BODY[:SPLIT])  # in flight
+        time.sleep(0.2)
+        proc.send_signal(signal.SIGHUP)  # default action would kill the process
+        wait_refused(port)
+        proc.send_signal(signal.SIGTERM)  # a second signal during the drain: ignored
+        time.sleep(0.3)
+        assert proc.poll() is None  # still draining the in-flight request
+        client.sendall(BODY[SPLIT:])
+        reply = read_response(client)
+        client.close()
+        code = proc.wait(timeout=10)
+        err = proc.stderr.read() if proc.stderr else b""
+    assert reply.startswith(b"HTTP/1.0 200 "), reply
+    assert_complete(reply)
+    assert code == 0
+    assert b"Traceback" not in err

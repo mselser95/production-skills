@@ -122,3 +122,21 @@ def test_plus_past_the_bound_raises_the_limit_error() -> None:
 # verifies: units_ledger/amount_exactness
 def test_the_limit_error_is_an_invalid_amount() -> None:
     assert issubclass(AmountLimitExceeded, InvalidAmount)
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_the_grammar_counts_whole_digits_exactly_and_refuses_the_next_one_itself() -> None:
+    assert Amount.parse("9" * 15).minor == (10**15 - 1) * 100  # exactly the max digits
+    assert Amount.parse("0" * 14 + "1").minor == 100
+    for text in ("1" + "0" * 15, "0" * 15 + "1", "9" * 16):
+        with pytest.raises(InvalidAmount) as caught:  # the grammar's refusal, not the limit's
+            Amount.parse(text)
+        assert type(caught.value) is InvalidAmount, text  # a 16th digit never reaches the bound
+
+
+# provenance: derived
+# verifies: units_ledger/amount_exactness
+def test_plus_names_its_own_overflow_in_its_message() -> None:
+    with pytest.raises(AmountLimitExceeded, match="the result exceeds"):
+        Amount(MAX_MINOR).plus(Amount(1))

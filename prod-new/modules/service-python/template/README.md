@@ -40,12 +40,32 @@ src/<PACKAGE>/domain      pure decisions: stdlib allowlist only (dataclasses, de
 src/<PACKAGE>/app         use-cases over ports (typing.Protocol) declared in app/ports.py
 src/<PACKAGE>/adapters    inbound/ (HTTP, stdlib) and outbound/ (in-memory event store)
 src/<PACKAGE>/platform    clock, ids, config (the ONLY reader of os.environ), observability
-src/<PACKAGE>/__main__.py composition root: wires ports to adapters, shuts down on SIGTERM
+src/<PACKAGE>/__main__.py composition root: wires ports to adapters, shuts down on SIGTERM, SIGINT or SIGHUP
 ```
 
 Dependency direction, enforced by `tests/architecture/test_boundaries.py` (it reads the
-sources with `ast`; it fails on a forbidden import, a float in domain or app, or an
-environment read outside `platform/config.py`):
+sources with `ast`). What it enforces:
+
+- `domain` and `app` each have an ALLOW-list of importable standard-library modules
+  (`DOMAIN_ALLOWED`; `APP_ALLOWED` = that set plus `contextlib`, `datetime` as a type and
+  `threading`), plus the project's own `domain` (and, for `app`, `app`) package. Any other
+  import fails, naming file:line and the module: `import x`, `from x import y`, `import x.y`,
+  relative imports, imports inside functions or under `TYPE_CHECKING`, and
+  `import_module("x")` / `__import__("x")` (always refused);
+- in `domain` and `app`, an attribute named `now`, `utcnow`, `today`, `time`, `monotonic`,
+  `perf_counter`, `sleep` (and the `_ns` forms) on ANY expression fails unless the receiver is
+  the injected clock port (`clock` / `_clock`), so `datetime.min.now()` is refused too;
+- floats in `domain` and `app`: it catches the name `float`, a float literal, true division
+  `/` and `/=`, and `**` with a non-literal exponent. It does NOT catch a float that arrives
+  without being written (a function from an allowed module that returns one, a `__float__`
+  method): the import allow-list is what keeps float-producing modules out;
+- the process environment is read only in `platform/config.py`.
+
+These boundary tests are a guard-rail against mistakes, not a sandbox: deliberate evasion
+(`__float__`, `object.__getattribute__`, `int.__dict__`, rebinding a module to another name in
+an adapter) is out of scope and is not claimed to be caught.
+
+The zone direction rules:
 
 - `domain` imports only an allowlist of pure standard-library modules and itself
 - `app` never imports `adapters` or `platform`
@@ -88,11 +108,16 @@ Bounded by the adapter (constants in `adapters/inbound/http_server.py`):
   get a fixed `503` with `Retry-After` on the accept thread) and requests past their head at
   64, so `GET /healthz` and `/metrics` stay served while slow clients hold the rest;
 - a 4096-byte body cap (413), strict framing (one `Content-Length` of at most 10 digits, no
-  `Transfer-Encoding`, no body on GET) and an exception barrier: no request raises.
+  `Transfer-Encoding`, no body on GET), at most one `Authorization` and one `Host` header
+  (a duplicate is a 400 before auth), a 400 for a bare CR anywhere in the request head (the
+  stdlib parser would split headers on it), a body that must be strict UTF-8 JSON (a BOM,
+  UTF-16/32 or a lone surrogate is a 400), and an exception barrier: no request raises.
 
-Shutdown: SIGTERM/SIGINT closes the listener (new connections are refused), lets in-flight
-requests finish for up to 10 s, then exits `0` if drained, `3` if requests were abandoned
-at the grace deadline (`2` is a refused configuration).
+Shutdown: SIGTERM, SIGINT or SIGHUP (there is no config reload, so a hangup drains like a
+term) closes the listener (new connections are refused), lets in-flight requests finish for
+up to 10 s, then exits `0` if drained, `3` if requests were abandoned at the grace deadline
+(`2` is a refused configuration). A second signal during the drain is ignored: it does not
+shorten the 10 s.
 
 NOT provided: TLS, per-client rate limits, per-client connection limits, slow-read
 protection beyond a write timeout. A flood of
