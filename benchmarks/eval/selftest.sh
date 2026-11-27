@@ -20,7 +20,7 @@ note() { # name ok(0/1) detail
 # Darwin only; a case that needs one is guarded with `darwin_only <id>`, which on any other
 # platform prints `SKIP <id> (darwin-only)` and returns 1. The ONE declaration of which cases
 # those are is the next line; the accounting at the bottom fails on any drift, on either platform.
-DARWIN_ONLY_DECLARED="15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x"
+DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14t 14u 14u2 14v 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x"
 PLATFORM="$(uname)"; DO_SEEN="" DO_SKIPPED=""
 darwin_only() {
   DO_SEEN="$DO_SEEN $1"
@@ -385,6 +385,7 @@ an=0
 adapter() {
   local h="$1" m="$2"; shift 2; an=$((an + 1))
   # ABASE=<dir> (default $tmp) puts the cell dirs elsewhere; AGIT=1 makes the workdir a git repo with one commit and one uncommitted edit
+  local cxnosb=(); [[ "$h" == codex && -z "${CXSB:-}" ]] && cxnosb=(EVAL_NO_SANDBOX=1)   # CXSB=1 adapter codex ... keeps the sandbox ON
   local base="$tmp" gitw="" denyroots="" a rest=(); for a in "$@"; do case "$a" in ABASE=*) base="${a#ABASE=}" ;; AGIT=*) gitw="${a#AGIT=}" ;; DENYROOTS=*) denyroots="${a#DENYROOTS=}" ;; *) rest+=("$a") ;; esac; done
   set -- ${rest[@]+"${rest[@]}"}
   AH="$base/ahome$an"; AW="$base/awork$an"; AG="$base/agocache$an"; mkdir -p "$AH" "$AW" "$AG"; echo "do the thing" >"$tmp/ap.txt"; echo "workdir file" >"$AW/README.md"
@@ -392,7 +393,7 @@ adapter() {
     && git -c user.name=e -c user.email=e@e.invalid -c commit.gpgsign=false commit -q -m i && echo more >>README.md ) >/dev/null 2>&1; fi
   rm -f "${frec:?}/codex.argv" "${frec:?}/codex.env" "${frec:?}/codex.cwd" "${frec:?}/codex.hadauth" "${frec:?}/codex.stdin"
   ( cd "$tmp" && env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u CODEX_API_KEY \
-      ${nosb_default[@]+"${nosb_default[@]}"} PATH="$fb:$PATH" HOME="$realhome" OLDPWD=/some/repo CLAUDECODE=1 CLAUDE_EFFORT=high CLAUDE_CODE_SESSION_ID=sess-x \
+      ${nosb_default[@]+"${nosb_default[@]}"} ${cxnosb[@]+"${cxnosb[@]}"} PATH="$fb:$PATH" HOME="$realhome" OLDPWD=/some/repo CLAUDECODE=1 CLAUDE_EFFORT=high CLAUDE_CODE_SESSION_ID=sess-x \
       CLAUDE_CODE_MESSAGING_TOKEN=msgtok CLAUDE_CODE_CHILD_SESSION=1 EVAL_CANARY=canary-var \
       EVAL_GOCACHE="$AG" EVAL_CODEX_REAL_HOME="$realcodex" EVAL_CLAUDE_AUTH_DIR="$realclaude" \
       "$@" \
@@ -431,17 +432,42 @@ adapter claude workspace-write CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_CLAU
 if [[ "$(argafter "$av" --permission-mode)" == acceptEdits && "$(argafter "$av" --allowedTools)" == "Read Glob Grep Edit Write $RO_BASH Bash(gofmt:*)" \
    && "$(argafter "$av" --disallowedTools)" == "NotebookEdit WebFetch WebSearch $ESC" ]]; then ok=0; else ok=1; fi
 note "14e claude workspace-write, sandbox OFF: acceptEdits + Edit/Write + gofmt, still no web" $ok "$(tr '\n' '|' <"$av")"
-bad=""
+# A PROBE codex that records into its own isolated home (the only place a sandboxed host may write): argv, and whether an
+# OUTSIDE write is denied (= it runs under the outer seatbelt wrapper). `fcx` is its install dir (readable under the profile).
+fcx="$tmp/fakebin-cx"; mkdir -p "$fcx"
+cat >"$fcx/codex" <<FAKE
+#!/usr/bin/env bash
+R="\$CODEX_HOME"; cat >/dev/null
+printf '%s\n' "\$@" >"\$R/codex.argv"; env >"\$R/codex.env"
+if touch "$tmp/outside/canary-cx" 2>/dev/null; then echo wrapped=no >"\$R/codex.wrapped"; rm -f "$tmp/outside/canary-cx"; else echo wrapped=yes >"\$R/codex.wrapped"; fi
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+FAKE
+chmod +x "$fcx/codex"
+# 14f: bypassPermissions / --dangerously never appear (either host, either mode); and codex's `danger-full-access`
+# appears ONLY together with the outer sandbox-exec wrapper (the probe codex sees whether it is wrapped). Before the sandbox
+# work this asserted that danger-full-access never appeared at all; the protection is the same: Codex's own sandbox is
+# never turned off in a run whose only confinement it would have been.
+bad=""; sbn=0
 for m in read-only workspace-write; do
   adapter claude "$m" CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123; ac="$(cat "$AH/claude.argv")"
-  adapter codex "$m" CODEX_API_KEY=k; ax="$(cat "$frec/codex.argv")"
-  if [[ "$ac$ax" == *bypassPermissions* || "$ac$ax" == *danger-full-access* || "$ac$ax" == *dangerously* ]]; then bad="$bad $m"; fi
+  CXSB=1 adapter codex "$m" CODEX_API_KEY=k PATH="$fcx:$PATH"; arc=$?; ax="$(cat "$AH/codex.argv" 2>/dev/null)"; wr="$(cat "$AH/codex.wrapped" 2>/dev/null)"
+  [[ "$ac$ax" == *bypassPermissions* || "$ac$ax" == *dangerously* ]] && bad="$bad bypass/$m"
+  if [[ "$ax" == *danger-full-access* && "$wr" != wrapped=yes ]]; then bad="$bad unwrapped-danger/$m"; fi
+  if [[ "$PLATFORM" == Darwin ]]; then   # sandbox ON (default): the wrapper must be there and danger-full-access with it
+    [[ $arc -eq 0 && "$ax" == *danger-full-access* && "$wr" == wrapped=yes ]] && sbn=$((sbn + 1)) || bad="$bad sandboxed-run/$m"
+  fi
+  adapter codex "$m" CODEX_API_KEY=k PATH="$fcx:$PATH"; ax="$(cat "$AH/codex.argv" 2>/dev/null)"; wr="$(cat "$AH/codex.wrapped" 2>/dev/null)"   # opt-out
+  if [[ "$ax" == *danger-full-access* || "$wr" != wrapped=no || "$ax" != *workspace-write* ]]; then bad="$bad optout/$m"; fi
 done
 if [[ -z "$bad" ]]; then ok=0; else ok=1; fi
-note "14f bypassPermissions / danger-full-access / --dangerously never appear" $ok "found in modes:$bad"
-adapter codex read-only CODEX_API_KEY=k; xv="$frec/codex.argv"
-if [[ "$(argafter "$xv" -s)" == workspace-write && "$(argafter "$xv" --add-dir)" == "$AG" && "$(argafter "$xv" -C)" == "$AW" ]] && grep -qx -- --ignore-user-config "$xv"; then ok=0; else ok=1; fi
-note "14g codex: -s workspace-write, --add-dir <gocache>, -C <workdir>, --ignore-user-config" $ok "$(tr '\n' '|' <"$xv")"
+note "14f bypassPermissions/--dangerously never appear; danger-full-access appears only with the sandbox-exec wrapper (and always with it on macOS)" $ok "problems:$bad"
+# 14g: before, every codex run asserted `-s workspace-write`, `--add-dir <gocache>`, -C, --ignore-user-config; now that is the
+# contract of the OPT-OUT path (EVAL_NO_SANDBOX=1, Codex's own sandbox), the sandboxed argv is asserted by 14t.
+adapter codex read-only CODEX_API_KEY=k EVAL_NO_SANDBOX=1; xv="$frec/codex.argv"
+if [[ "$(argafter "$xv" -s)" == workspace-write && "$(argafter "$xv" --add-dir)" == "$AG" && "$(argafter "$xv" -C)" == "$AW" ]] && grep -qx -- --ignore-user-config "$xv" \
+   && ! grep -q 'danger-full-access\|approval_policy' "$xv"; then ok=0; else ok=1; fi
+note "14g codex opt-out (EVAL_NO_SANDBOX=1): -s workspace-write, --add-dir <gocache>, -C <workdir>, --ignore-user-config, no danger-full-access" $ok "$(tr '\n' '|' <"$xv")"
 adapter claude other CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123; rc=$?
 if [[ $rc -ne 0 && ! -e "$AH/claude.argv" ]]; then ok=0; else ok=1; fi
 note "14h an unknown agent_mode is refused before the host starts" $ok "rc=$rc"
@@ -478,7 +504,7 @@ if [[ $arc -eq 0 && "$(cat "$frec/codex.hadauth")" == no && "$(grep -c '^CODEX_A
 note "14o codex: an exported CODEX_API_KEY is preferred and no auth.json is copied" $ok "rc=$arc"
 # EVAL_KEEP=1 through run.sh: the dir stays, the credential does not
 keeptmp="$tmp/keeptmp"; mkdir -p "$keeptmp"; ktask="$(mktask "$corpus" prod-review t-keep dev good)"
-env -u CODEX_API_KEY PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$keeptmp" EVAL_KEEP=1 EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" \
+env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$keeptmp" EVAL_KEEP=1 EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$ktask" --arm skill --host codex --rep 1 --out "$tmp/r14p.jsonl" >/dev/null 2>&1; rc=$?
 if [[ $rc -eq 0 && "$(nrows "$tmp/r14p.jsonl")" == 1 && -n "$(find "$keeptmp" -mindepth 1 -maxdepth 1 -name 'eval-cell.*' | head -1)" \
    && -z "$(find "$keeptmp" -name auth.json | head -1)" && "$(cat "$frec/codex.hadauth")" == yes ]]; then ok=0; else ok=1; fi
@@ -740,6 +766,163 @@ note "15l non-Darwin through run.sh: row error:sandbox, pass:false, exit 3" $ok 
 runclaude "$good" "$tmp/r15l.jsonl" EVAL_CLAUDE_NO_SANDBOX=1 PATH="$fu:$fb:$PATH"; rc=$?
 if [[ $rc -eq 0 && "$(rowval "$tmp/r15l.jsonl" sandbox)" == off && "$(rowval "$tmp/r15l.jsonl" error)" != sandbox && "$(cat "$tmp/runclaude.err")" == *UNCONFINED* ]]; then ok=0; else ok=1; fi
 note "15m non-Darwin + EVAL_CLAUDE_NO_SANDBOX=1: runs, row sandbox:off, warning on stderr" $ok "rc=$rc row: $(cut -c1-300 "$tmp/r15l.jsonl" 2>&1)"
+# ---- 14q-14z: the Codex adapter runs under the SAME seatbelt profile as Claude (probe codex, REAL sandbox-exec) ----
+# 14q: the generator refuses a Codex re-allow that would contain what stays denied (pure python, runs on both platforms)
+qd="$tmp/q14"; mkdir -p "$qd/h/.codex/packages/rel/bin" "$qd/w"
+python3 -I -B "$here/lib/seatbelt.py" "$qd/w" "$qd/home" "$qd/gc" "$qd/tmp" read-only --deny-root "$qd/h" --deny-read "$qd/h/.codex" --reallow-read "$qd/h/.codex" >/dev/null 2>"$qd/e1"; q1=$?
+python3 -I -B "$here/lib/seatbelt.py" "$qd/w" "$qd/home" "$qd/gc" "$qd/tmp" read-only --deny-root "$qd/h" --deny-read "$qd/h/.codex" --reallow-read "$qd/h/.codex/packages/rel/bin" >"$qd/p.sb" 2>"$qd/e2"; q2=$?
+python3 -I -B "$here/lib/seatbelt.py" "$qd/w" "$qd/home" "$qd/gc" "$qd/tmp" read-only --deny-root "$qd/h" --protect "$qd/h/.codex/packages" --reallow-read "$qd/h/.codex/packages/rel" >/dev/null 2>"$qd/e3"; q3=$?
+if [[ $q1 -eq 2 && $q2 -eq 0 && $q3 -eq 2 ]] && grep -q 'lies at or above' "$qd/e1" && [[ "$(grep -c '^(allow file-read\* (subpath "[^"]*/packages/rel/bin"))$' "$qd/p.sb")" == 1 ]]; then ok=0; else ok=1; fi
+note "14q seatbelt --reallow-read: refused when it contains a denied/protected path (the whole Codex home), accepted for its install dir only" $ok "rc=$q1/$q2/$q3 $(head -c 160 "$qd/e1")"
+kcn=0
+runcodex() { # runcodex <task> <outfile> [env...] -> row file; kept cell dir in $KC
+  KC="$tmp/kc$((++kcn))"; mkdir -p "$KC"; local task="$1" res="$2"; shift 2
+  env HOME="$realhome" TMPDIR="$KC" EVAL_KEEP=1 CODEX_API_KEY=k EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" PATH="$fb:$PATH" "$@" \
+    bash "$here/run.sh" --task "$task" --arm bare --host codex --rep 1 --out "$res" >/dev/null 2>"$tmp/runcodex.err"
+}
+# fake Codex install under a fake caller home: the real binary sits INSIDE the real Codex home, next to the auth stand-in,
+# the config, a sibling file of its install dir and a sibling of the packages dir. $FT/$FHOME/$FREPO come from 15p.
+CXR="$FHOME/.codex"; CXREL="$CXR/packages/standalone/releases/9.9.9"; mkdir -p "$CXREL/bin" "$CXR/packages/standalone/other" "$FHOME/.local/bin"
+echo '{"canary":"CODEX-AUTH-CANARY"}' >"$CXR/auth.json"; chmod 600 "$CXR/auth.json"; echo CODEX-CFG-CANARY >"$CXR/config.toml"
+echo SIBLING-CANARY >"$CXREL/sibling-canary"; echo PKG-CANARY >"$CXR/packages/standalone/other/canary"; echo BIN-CANARY >"$CXREL/bin/bin-canary"
+cat >"$CXREL/bin/codex" <<FAKE
+#!/usr/bin/env bash
+R="\$CODEX_HOME"; cat >/dev/null
+out="\$R/probe.out"; : >"\$out"
+p() { echo "\$1=\$2" >>"\$out"; }
+r() { if cat "\$2" >/dev/null 2>&1; then p "\$1" read; else p "\$1" denied; fi; }
+w() { if touch "\$2" 2>/dev/null; then p "\$1" written; else p "\$1" denied; fi; }
+printf '%s\n' "\$@" >"\$R/codex.argv"
+r realauth "$CXR/auth.json"; r realcfg "$CXR/config.toml"; r sibling "$CXREL/sibling-canary"; r pkgother "$CXR/packages/standalone/other/canary"
+pv=""; for a in "\$@"; do if [ "\$pv" = --output-schema ]; then r schema "\$a"; r schemadir "\$(dirname "\$a")/sibling-secret"; fi; pv="\$a"; done
+r instbin "\$(dirname "\$0")/bin-canary"; r ssh "$FHOME/.ssh/id"; r corpus "$FREPO/benchmarks/eval/corpus/x/grade.sh"
+if ls "$CXR" >/dev/null 2>&1; then p lscodexhome listed; else p lscodexhome denied; fi
+if git --git-dir="$FREPO/.git" cat-file -p "$GITOBJ" >/dev/null 2>&1; then p gitobj read; else p gitobj denied; fi
+prof="\$(cat "$frec/sbx.profile" 2>/dev/null)"; if [ -n "\$prof" ]; then p profknown yes; else p profknown no; fi
+if [ -n "\$prof" ] && cat "\$prof" >/dev/null 2>&1; then p profile read; else p profile denied; fi
+r homeauth "\$R/auth.json"; r workfile "\$PWD/README.md"
+if git status --short >/dev/null 2>&1; then p gitstatus ok; else p gitstatus failed; fi
+w home "\$R/canary"; w gocache "\$GOCACHE/canary"; w tmp "\$TMPDIR/canary"; w work "\$PWD/canary"
+if [ -f "$frec/rotate-cx" ]; then echo '{"canary":"ROTATED-CX"}' >"\$R/auth.json"; fi
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+FAKE
+chmod +x "$CXREL/bin/codex"; ln -sf "$CXREL/bin/codex" "$FHOME/.local/bin/codex"
+CXP="$FHOME/.local/bin:$fbs:$fb:$PATH"
+rprobe() { python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
+if darwin_only 14r; then
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?; PH="$AH"
+if [[ $arc -eq 0 ]] && pvg "$PH" realauth=denied && pvg "$PH" realcfg=denied && pvg "$PH" sibling=denied && pvg "$PH" pkgother=denied && pvg "$PH" lscodexhome=denied \
+   && pvg "$PH" ssh=denied && pvg "$PH" corpus=denied && pvg "$PH" gitobj=denied && pvg "$PH" profknown=yes && pvg "$PH" profile=denied \
+   && pvg "$PH" instbin=read && pvg "$PH" homeauth=read && pvg "$PH" workfile=read && [[ ! -e "$AH/auth.json" ]] && grep -q CODEX-AUTH-CANARY "$CXR/auth.json"; then ok=0; else ok=1; fi
+note "14r codex under the profile: the real Codex home (auth, config, a sibling of its install dir, the packages dir), ~/.ssh, the corpus, the .git object store and the profile are unreadable; its own install dir, its home's auth copy and the workdir are readable; the copy is scrubbed" $ok "rc=$arc probe: $(pvs "$PH") $(head -c 200 "$tmp/adapter.err")"
+fi
+if darwin_only 14s; then
+ok=1; pvg "$PH" work=denied && pvg "$PH" home=written && pvg "$PH" gocache=written && pvg "$PH" tmp=written && pvg "$PH" gitstatus=ok && ok=0
+CXSB=1 adapter codex workspace-write ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+if [[ $arc -eq 0 && $ok -eq 0 ]] && pvg "$AH" work=written && pvg "$AH" home=written && pvg "$AH" gitstatus=ok && pvg "$AH" workfile=read && pvg "$AH" realauth=denied && pvg "$AH" sibling=denied; then ok=0; else ok=1; fi
+note "14s codex workdir write: denied in read-only, allowed in workspace-write (home/GOCACHE/TMPDIR always writable, workdir readable, git status runs, secrets still denied)" $ok "ww probe: $(pvs "$AH")"
+fi
+if darwin_only 14s2; then
+# codex reads its --output-schema FILE itself: that file (under a denied root) is readable, a sibling of it is not
+mkdir -p "$FT/schemas"; echo '{}' >"$FT/schemas/output.schema.json"; echo SCHEMA-SIB >"$FT/schemas/sibling-secret"
+ADAPTER_SCHEMA="$FT/schemas/output.schema.json" CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+if [[ $arc -eq 0 ]] && pvg "$AH" schema=read && pvg "$AH" schemadir=denied && pvg "$AH" realauth=denied && pvg "$AH" ssh=denied; then ok=0; else ok=1; fi
+note "14s2 codex --output-schema: the schema file under a denied root is readable under the profile, a sibling file next to it is not" $ok "rc=$arc probe: $(pvs "$AH") $(head -c 200 "$tmp/adapter.err")"
+fi
+if darwin_only 14t; then
+# through run.sh with the DEFAULT roots: both hosts are 'seatbelt'; the argv is the sandboxed one; only the install dir is re-allowed
+runcodex "$ttask" "$tmp/r14t.jsonl" PATH="$CXP" EVAL_CODEX_REAL_HOME="$CXR"; rc=$?
+cav="$(find "$KC" -name codex.argv | head -1)"; binrp="$(rprobe "$CXREL/bin")"; relrp="$(rprobe "$CXREL")"
+if [[ $rc -eq 0 && -n "$cav" && "$(rowval "$tmp/r14t.jsonl" sandbox)" == seatbelt && "$(argafter "$cav" -s)" == danger-full-access && "$(argafter "$cav" -c)" == approval_policy=never ]] \
+   && ! grep -q -- '--add-dir\|workspace-write\|dangerously' "$cav" && grep -qx -- --ignore-user-config "$cav" && grep -qx -- - "$cav" \
+   && grep '^(allow file-read\*' "$frec/sbx.copy" | grep -qF "(subpath \"$binrp\")" && ! grep '^(allow file-read\*' "$frec/sbx.copy" | grep -qF "(subpath \"$relrp\")" \
+   && grep -qF "(deny file-read* file-write* (subpath \"$(rprobe "$CXR")\"))" "$frec/sbx.copy"; then ok=0; else ok=1; fi
+note "14t codex via run.sh: row sandbox:seatbelt, argv -s danger-full-access + approval_policy=never (no --add-dir/workspace-write), profile re-allows ONLY the install dir and denies the real Codex home" $ok "rc=$rc row: $(cut -c1-160 "$tmp/r14t.jsonl" 2>&1) argv: $(tr '\n' '|' <"$cav" 2>/dev/null)"
+fi
+if darwin_only 14u; then
+# the REAL codex must START under the generated profile (--version, no model call): the adapter's resolution is replayed against seatbelt.py
+if cx="$(command -v codex)" && [[ -n "$cx" ]]; then
+  vroot="$tmp/ucell"; mkdir -p "$vroot/work" "$vroot/home"; xreal="$(rprobe "$cx")"; xbin="$(dirname "$xreal")"; xhome="${EVAL_CODEX_REAL_HOME:-$HOME/.codex}"
+  case "$xbin" in "$(rprobe "$xhome")"/*) xflag=--reallow-read ;; *) xflag=--allow-read ;; esac
+  python3 -I -B "$here/lib/seatbelt.py" "$vroot/work" "$vroot/home" "$vroot/gocache" "$vroot/tmp" read-only "$xflag" "$xbin" \
+    --deny-read "$(cd "$here/../.." && pwd)" --deny-read "$xhome" >"$vroot/p.sb"; prc=$?
+  vout="$( (cd "$vroot/work" && env -i PATH="$PATH" HOME="$vroot/home" CODEX_HOME="$vroot/home" TMPDIR="$vroot/tmp" /usr/bin/sandbox-exec -f "$vroot/p.sb" "$xreal" --version) 2>&1)"; vrc=$?
+  if [[ $prc -eq 0 && $vrc -eq 0 && "$vout" == *codex-cli* ]]; then ok=0; else ok=1; fi
+  note "14u the real codex binary starts under the generated profile (codex --version exits 0)" $ok "prc=$prc vrc=$vrc out: $(echo "$vout" | head -c 200)"
+else
+  printf '  SKIP  14u (no codex on PATH; not counted)\n'
+fi
+fi
+if darwin_only 14v; then
+# credential lifecycle under the profile: the sandboxed process rotates the copy in its home; the write-back and the scrub still happen
+cp "$CXR/auth.json" "$tmp/cxauth.orig"; : >"$frec/rotate-cx"
+CXSB=1 adapter codex read-only ABASE="$FCELLS" AGIT=1 HOME="$FHOME" PATH="$CXP" DENYROOTS="$DR" EVAL_TASK_DIR="$ttask" EVAL_CODEX_REAL_HOME="$CXR"; arc=$?
+rm -f "$frec/rotate-cx"; perm="$(python3 -I -B -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$CXR/auth.json")"
+if [[ $arc -eq 0 && ! -e "$AH/auth.json" && "$(cat "$CXR/auth.json")" == *ROTATED-CX* && "$perm" == 0o600 && -z "$(find "$CXR" -name '.auth.*' | head -1)" ]]; then ok=0; else ok=1; fi
+cp "$tmp/cxauth.orig" "$CXR/auth.json"
+note "14v codex under the profile: a token rotated by the sandboxed process is written back (600) and the copy scrubbed" $ok "rc=$arc perm=$perm $(head -c 200 "$tmp/adapter.err")"
+fi
+# 14w-14z: no usable sandbox (both platforms: fake uname / PATH without sandbox-exec)
+CXSB=1 adapter codex read-only CODEX_API_KEY=k PATH="$fu:$fb:$PATH"; arc=$?
+if [[ $arc -eq 79 && ! -e "$frec/codex.argv" && ! -e "$AH/auth.json" && "$(cat "$tmp/adapter.err")" == *"macOS-only"* ]]; then ok=0; else ok=1; fi
+note "14w codex, non-Darwin (fake uname=Linux), no opt-out: exit 79, host never starts, no credential staged" $ok "rc=$arc $(head -c 160 "$tmp/adapter.err")"
+runcodex "$good" "$tmp/r14w.jsonl" PATH="$fu:$fb:$PATH"; rc=$?
+if [[ $rc -eq 3 && "$(rowval "$tmp/r14w.jsonl" error)" == sandbox && "$(rowval "$tmp/r14w.jsonl" pass)" == false ]]; then ok=0; else ok=1; fi
+note "14x codex non-Darwin through run.sh: row error:sandbox, pass:false, exit 3" $ok "rc=$rc row: $(cut -c1-200 "$tmp/r14w.jsonl" 2>&1)"
+adapter codex read-only CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fu:$fb:$PATH"; arc=$?; wtxt="$(cat "$tmp/adapter.err")"
+runcodex "$good" "$tmp/r14y.jsonl" EVAL_NO_SANDBOX=1 PATH="$fu:$fb:$PATH"; rc=$?; cav="$(find "$KC" -name codex.argv | head -1)"
+[[ -n "$cav" ]] || cav="$frec/codex.argv"
+if [[ $arc -eq 0 && "$wtxt" == *WARNING*"READS ARE NOT"* && $rc -eq 0 && "$(rowval "$tmp/r14y.jsonl" sandbox)" == codex && "$(rowval "$tmp/r14y.jsonl" error)" != sandbox \
+   && "$(cat "$tmp/runcodex.err")" == *"reads are unconfined"* && "$(argafter "$frec/codex.argv" -s)" == workspace-write ]] && ! grep -q danger-full-access "$frec/codex.argv"; then ok=0; else ok=1; fi
+note "14y codex non-Darwin + EVAL_NO_SANDBOX=1: runs under Codex's own -s workspace-write, row sandbox:codex, warnings on stderr (reads unconfined)" $ok "arc=$arc rc=$rc row: $(cut -c1-300 "$tmp/r14y.jsonl" 2>&1) argv-s: $(argafter "$frec/codex.argv" -s)"
+CXSB=1 adapter codex read-only CODEX_API_KEY=k EVAL_NO_SANDBOX=0 PATH="$fb:$nosb"; arc=$?
+if [[ $arc -eq 79 && ! -e "$frec/codex.argv" && ! -e "$AH/auth.json" ]]; then ok=0; else ok=1; fi
+note "14z codex with no sandbox-exec on PATH: exit 79, host never starts (no silent unconfined run)" $ok "rc=$arc $(head -c 160 "$tmp/adapter.err")"
+# ---- 14q2 / 14u2: metadata-only access to the ancestors of the cell (CLIs canonicalise their home) ----
+if darwin_only 14q2; then
+ad="$tmp/anc14"; mkdir -p "$ad/cell/work"; echo SIB >"$ad/sibling-file"; echo SIB2 >"$ad/cell/sibling2"
+python3 -I -B "$here/lib/seatbelt.py" "$ad/cell/work" "$ad/cell/home" "$ad/cell/gc" "$ad/cell/tmp" read-only --deny-root "$tmp" >"$ad/p.sb"; prc=$?
+sbt() { /usr/bin/sandbox-exec -f "$ad/p.sb" "$@" >/dev/null 2>&1 && echo ok || echo denied; }
+r1="$(sbt /usr/bin/stat "$ad")"; r2="$(sbt /bin/ls "$ad")"; r3="$(sbt /bin/cat "$ad/sibling-file")"; r4="$(sbt /usr/bin/stat "$ad/sibling-file")"; r5="$(sbt /bin/cat "$ad/cell/sibling2")"
+if [[ $prc -eq 0 && "$r1" == ok && "$r2" == denied && "$r3" == denied && "$r4" == denied && "$r5" == denied ]] && grep -q '^(allow file-read-metadata (literal ' "$ad/p.sb" && ! grep '^(allow file-read-metadata' "$ad/p.sb" | grep -q subpath; then ok=0; else ok=1; fi
+note "14q2 ancestors of the cell: stat works, but ls, cat of a sibling file and stat of a sibling file are all denied (metadata rule is literals only)" $ok "prc=$prc stat=$r1 ls=$r2 cat-sibling=$r3 stat-sibling=$r4 cat-sibling-of-cell=$r5"
+fi
+if darwin_only 14u2; then
+# the REAL `codex exec` must get past its start (no credential, no model call): its first event or its auth error, never `Operation not permitted`
+if cx="$(command -v codex)" && [[ -n "$cx" ]]; then
+  u2fail=""; u2tmp="$(mktemp -d /tmp/eval-u2.XXXXXX)"   # a /var/folders path AND a path through the symlinked /tmp (not its realpath)
+  for vroot in "$tmp/u2cell" "$u2tmp/u2cell"; do
+  mkdir -p "$vroot/work" "$vroot/home"; xreal="$(rprobe "$cx")"; xbin="$(dirname "$xreal")"; xhome="${EVAL_CODEX_REAL_HOME:-$HOME/.codex}"
+  case "$xbin" in "$(rprobe "$xhome")"/*) xflag=--reallow-read ;; *) xflag=--allow-read ;; esac
+  python3 -I -B "$here/lib/seatbelt.py" "$vroot/work" "$vroot/home" "$vroot/gocache" "$vroot/tmp" read-only "$xflag" "$xbin" \
+    --deny-read "$(cd "$here/../.." && pwd)" --deny-read "$xhome" >"$vroot/p.sb"; prc=$?
+  echo hi >"$vroot/prompt"
+  uout="$(cd "$vroot/work" && env -i PATH="$PATH" HOME="$vroot/home" CODEX_HOME="$vroot/home" TMPDIR="$vroot/tmp" PF="$vroot/prompt" python3 -I -B -c '
+import os, subprocess, sys, threading
+p = subprocess.Popen(sys.argv[1:], stdin=open(os.environ["PF"]), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+t = threading.Timer(20, p.kill); t.start()
+first = p.stdout.readline(); p.kill(); t.cancel()
+try: err = p.communicate(timeout=3)[1]
+except Exception: err = ""
+print(first.strip()); print(err.strip()[:300])' /usr/bin/sandbox-exec -f "$vroot/p.sb" "$xreal" exec --json --skip-git-repo-check --ignore-user-config -C "$vroot/work" --ephemeral -s danger-full-access -c approval_policy=never - 2>&1)"
+  if [[ $prc -ne 0 || "$uout" != *thread.started* || "$uout" == *"Operation not permitted"* ]]; then u2fail="$u2fail [$vroot: prc=$prc $(echo "$uout" | head -c 200)]"; fi
+  done
+  rm -rf "$u2tmp"
+  if [[ -z "$u2fail" ]]; then ok=0; else ok=1; fi
+  note "14u2 the real codex exec starts under the generated profile with a no-credential home, home under /var/folders and under /tmp (first event printed, no 'Operation not permitted')" $ok "$u2fail"
+else
+  printf '  SKIP  14u2 (no codex on PATH; not counted)\n'
+fi
+fi
+# neutral opt-out name on the Claude host (the alias EVAL_CLAUDE_NO_SANDBOX is 15d/15g)
+adapter claude read-only "$TOK" EVAL_CLAUDE_NO_SANDBOX=0 EVAL_NO_SANDBOX=1; arc=$?; th="$AH/claude.touch"
+if [[ $arc -eq 0 ]] && grep -qx 'outside=written' "$th" && grep -q 'WARNING.*UNCONFINED' "$tmp/adapter.err"; then ok=0; else ok=1; fi
+rm -f "$tmp/outside/canary"
+note "15d2 EVAL_NO_SANDBOX=1 (neutral name) on the claude adapter: runs unconfined WITH a loud stderr warning" $ok "rc=$arc touch: $(tr '\n' ' ' <"$th" 2>&1)"
+runclaude "$good" "$tmp/r15d2.jsonl" EVAL_CLAUDE_NO_SANDBOX=0 EVAL_NO_SANDBOX=1
+if [[ "$(rowval "$tmp/r15d2.jsonl" sandbox)" == off && "$(cat "$tmp/runclaude.err")" == *UNCONFINED* ]]; then ok=0; else ok=1; fi
+note "15g2 EVAL_NO_SANDBOX=1 through run.sh on the claude host: row sandbox:off and a warning" $ok "sandbox=$(rowval "$tmp/r15d2.jsonl" sandbox)"
 # W2: nothing under benchmarks/eval evaluates an environment value as code
 hits="$(grep -rnE 'bash -c "\$|(^|[;&| (])eval ' "$here" --include='*.sh' --exclude-dir=corpus --exclude=selftest.sh | grep -v '^[^:]*:[0-9]*: *#' || true)"
 if [[ -z "$hits" ]]; then ok=0; else ok=1; fi
@@ -970,7 +1153,7 @@ if [[ "$(rowval "$tmp/r19g.jsonl" output_valid)" == true && "$(rowval "$tmp/r19g
 note "19q run.sh -> claude adapter: schema passed, structured document graded, row output_valid:true" $ok "row: $(cut -c1-300 "$tmp/r19g.jsonl" 2>&1)"
 rm -f "$frec/claude.out"
 printf '%s\n' '{"found":1,"findings":[]}' >"$frec/codex.last"
-env CODEX_API_KEY=k PATH="$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
+env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$jt" --arm bare --host codex --rep 1 --out "$tmp/r19h.jsonl" >/dev/null 2>&1; rc=$?
 rm -f "$frec/codex.last"
 if [[ $rc -eq 0 && "$(rowval "$tmp/r19h.jsonl" output_valid)" == true && "$(rowval "$tmp/r19h.jsonl" pass)" == true && "$(argafter "$frec/codex.argv" --output-schema)" == "$(cd "$scorp" && pwd)/prod-review/_lib/output.schema.json" ]]; then ok=0; else ok=1; fi

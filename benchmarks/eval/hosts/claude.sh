@@ -48,8 +48,8 @@ source "$here/../lib/auth.sh"
 gocache="${EVAL_GOCACHE:-$home/gocache}"; celltmp="${EVAL_CELL_TMPDIR:-$home/tmp}"
 case "$mode" in read-only|workspace-write) ;; *) echo "claude.sh: unknown agent_mode '$mode'" >&2; exit 2 ;; esac
 sb_exec=() sandboxed=0 claude_bin=claude
-if [[ "${EVAL_CLAUDE_NO_SANDBOX:-0}" == 1 ]]; then
-  echo "claude.sh: WARNING: EVAL_CLAUDE_NO_SANDBOX=1 -- the agent runs UNCONFINED (row sandbox:off); results are not comparable with sandboxed rows" >&2
+if [[ "${EVAL_CLAUDE_NO_SANDBOX:-0}" == 1 || "${EVAL_NO_SANDBOX:-0}" == 1 ]]; then
+  echo "claude.sh: WARNING: EVAL_NO_SANDBOX=1 / EVAL_CLAUDE_NO_SANDBOX=1 -- the agent runs UNCONFINED (row sandbox:off); results are not comparable with sandboxed rows" >&2
 else
   # seatbelt exists on macOS only; `uname` is resolved from PATH (tests put a fake first)
   if [[ "$(uname)" != Darwin ]]; then
