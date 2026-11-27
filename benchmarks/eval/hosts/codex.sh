@@ -2,11 +2,11 @@
 # codex.sh -- Codex CLI adapter. Contract:
 #   <workdir> <host-home> <prompt-file> <output-file> <usage-json> <model> <budget-usd> <agent_mode> [<schema-file>]
 # <schema-file> (9th, optional, "" = none) is corpus/<skill>/_lib/output.schema.json when the
-# skill has one (run.sh decides). Present -> `--output-schema <file>` and `-o <home>/.eval-codex-last.txt`
-# (`codex exec --help`: --output-schema "Path to a JSON Schema file describing the model's final
-# response shape"; -o/--output-last-message "file where the last message from the agent should be
-# written"). The final message is the document; lib/parse_codex.py prefers the -o file and falls
-# back to the last agent_message item of the JSONL.
+# skill has one (run.sh decides). Present -> `--output-schema <file>` (`codex exec --help`: "Path to a JSON
+# Schema file describing the model's final response shape"). The answer and the usage are parsed from the
+# `--json` EVENT STREAM the adapter captured on stdout (lib/parse_codex.py: the last agent_message item, the
+# summed turn.completed usage). `-o/--output-last-message` is NOT passed and no file inside the cell is ever
+# read back: the agent writes the cell home, so such a file could be forged (selftest 19x).
 # STDIN: `codex exec [PROMPT]` reads stdin when the prompt is `-` or absent, and appends it as a
 # <stdin> block when it is piped; on a pipe that never closes it prints "Reading additional input
 # from stdin..." and hangs. The prompt is passed as `-` with stdin redirected FROM THE PROMPT FILE,
@@ -29,46 +29,38 @@
 # key and the user's files are readable); loud warning, row sandbox:"codex". Selftest-only 10th/11th
 # arguments `--deny-roots a:b` replace the denied roots (as in claude.sh); run.sh never passes them.
 # Isolation: lib/runenv.py (no inherited environment; HOME and CODEX_HOME = the
-# throwaway <host-home>; cwd = workdir). Auth: an exported CODEX_API_KEY is
-# preferred; else the real auth.json is COPIED (mode 600) into the isolated
-# home. Codex may rotate the refresh token inside the copy, so after the run a
-# changed copy is written back to the real file (atomic, 600, only if the real
-# file is still what we copied) or the user's real login would be invalidated.
-# The copy is deleted on every exit path, signals included. Never printed.
-# LIMITS of the write-back (compare-then-rename, not a lock): there is a TOCTOU
-# window between the comparison and the rename; a token rotated right before a
-# SIGKILL (limited.py's last resort) is lost; and a concurrent interactive
-# `codex` can invalidate the refresh token under us. For unattended live runs
-# export CODEX_API_KEY instead: then no auth.json is touched at all.
+# throwaway <host-home>; cwd = workdir; TMPDIR = the cell tmp). CREDENTIAL CONTRACT (nothing leaves the cell):
+#  - an exported CODEX_API_KEY is preferred and passed by name: no file at all;
+#  - else the real <real home>/auth.json is COPIED into the cell home, once, before the CLI starts: opened with
+#    O_NOFOLLOW (a symlink or a non-regular file is refused, exit 78), written to a NEW file (O_EXCL) mode 0600;
+#  - it is NEVER written back. The sandboxed agent controls the cell home, so anything copied out of it would let
+#    the model choose the bytes of the user's real login (history: selftest 14v / README "Write-back"). If Codex
+#    rotates its refresh token during a cell the real file may be left stale: log in again, or export
+#    CODEX_API_KEY. Opt-in EVAL_CODEX_AUTH_READONLY=1 (sandboxed only) additionally makes the staged copy
+#    unwritable for the agent so Codex cannot rotate inside a cell (selftest 14v3; whether Codex starts with a
+#    read-only auth file is NOT VALIDATED without a model run, hence off by default);
+#  - the copy is deleted after the CLI exits and on every exit path, TERM/INT/HUP included. Never printed.
 # <budget-usd> is NOT enforced: codex has no spend cap; only timeout_s binds.
 set -uo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 workdir="$1" home="$2" prompt="$3" out="$4" usage="$5" model="${6:-}" _budget="${7:-1}" mode="${8:-read-only}" schema="${9:-}"
 denyroots=""; if [[ "${10:-}" == --deny-roots ]]; then denyroots="${11:-}"; fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib/sha256.sh
-source "$here/../lib/sha256.sh"
 case "$mode" in read-only|workspace-write) ;; *) echo "codex.sh: unknown agent_mode '$mode'" >&2; exit 2 ;; esac
 
 real="${EVAL_CODEX_REAL_HOME:-$HOME/.codex}"
-copy="$home/auth.json" start_sha="" auth_pass=()
-finish_auth() { # write a rotated copy back, then scrub the copy. Idempotent.
-  { set +x; } 2>/dev/null
-  if [[ -f "$copy" ]]; then
-    local now cur d t
-    now="$(eval_sha256 <"$copy")"
-    cur="$(eval_sha256 <"$real/auth.json" 2>/dev/null)"
-    if [[ -n "$start_sha" && "$now" != "$start_sha" && "$cur" == "$start_sha" ]]; then
-      d="$(dirname "$real/auth.json")"
-      t="$(umask 077; mktemp "$d/.auth.XXXXXX")" && { cat "$copy" >"$t"; chmod 600 "$t"; mv -f "$t" "$real/auth.json"; }
-    fi
-    rm -f "$copy"
-  fi
+copy="$home/auth.json" auth_pass=() child="" pipe="" sbxdir=""
+scrub_auth() { { set +x; } 2>/dev/null; rm -f "$copy"; }   # the copy never outlives the CLI; nothing is ever copied back out
+cleanup() {
+  if [[ -n "$sbxdir" && -s "$sbxdir/pid" ]]; then child="$(cat "$sbxdir/pid")"; kill -TERM "$child" 2>/dev/null; fi
+  if [[ -n "$pipe" ]]; then wait "$pipe" 2>/dev/null; pipe=""; fi
+  scrub_auth; [[ -n "$sbxdir" ]] && rm -rf "$sbxdir"; return 0
 }
-sbxdir=""
-cleanup() { finish_auth; [[ -n "$sbxdir" ]] && rm -rf "$sbxdir"; return 0; }
 trap cleanup EXIT
-trap 'exit 143' TERM INT HUP
+trap 'exit 143' TERM INT HUP   # `wait` below (not a foreground child) lets the trap fire at once; the EXIT trap scrubs
+# the adapter's own dir, in the cell's temp root next to the home: the profile (sandboxed) and the CLI's captured
+# stdout/stderr live here. The profile never re-allows it, so the agent cannot read, forge or replace them.
+sbxdir="$(mktemp -d "$(dirname "$home")/sbx.XXXXXX")" || { sbxdir=""; echo "codex.sh: cannot create the adapter dir (error: sandbox)" >&2; exit 79; }
 
 gc="${EVAL_GOCACHE:-$home/gocache}"; celltmp="${EVAL_CELL_TMPDIR:-$home/tmp}"
 sb_exec=() sandboxed=0 codex_bin=codex
@@ -79,7 +71,6 @@ else
     echo "codex.sh: no seatbelt sandbox on $(uname) -- refusing an unconfined run (error: sandbox). Live codex runs are macOS-only unless EVAL_NO_SANDBOX=1." >&2; exit 79
   fi
   sbx="$(command -v sandbox-exec)" || { echo "codex.sh: sandbox-exec not found; refusing an unconfined run (error: sandbox). Set EVAL_NO_SANDBOX=1 to opt out explicitly." >&2; exit 79; }
-  sbxdir="$(mktemp -d "$(dirname "$home")/sbx.XXXXXX")" || { sbxdir=""; echo "codex.sh: cannot create the sandbox profile dir (error: sandbox)" >&2; exit 79; }
   profile="$sbxdir/p.sb"
   rp() { python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
   repo_root="$(cd "$here/../../.." && pwd)"
@@ -96,6 +87,7 @@ else
   gx="$(git --exec-path 2>/dev/null)" && [[ -n "$gx" ]] && sb_args+=(--allow-read "$gx")
   # denied AGAIN after the re-allows: the repo (answer key, .git object store), the REAL Codex home (auth, config), the profile dir
   sb_args+=(--deny-read "$repo_root" --deny-read "$real" --protect "$sbxdir")
+  [[ "${EVAL_CODEX_AUTH_READONLY:-0}" == 1 ]] && sb_args+=(--readonly-file "$copy")
   [[ -n "${EVAL_TASK_DIR:-}" ]] && sb_args+=(--protect "$EVAL_TASK_DIR")
   if [[ -n "$denyroots" ]]; then
     IFS=: read -r -a dr <<<"$denyroots"
@@ -108,17 +100,31 @@ fi
 
 if [[ -n "${CODEX_API_KEY:-}" ]]; then
   auth_pass=(--pass CODEX_API_KEY)
-elif [[ -f "$real/auth.json" ]]; then
+elif [[ -e "$real/auth.json" || -L "$real/auth.json" ]]; then
   { set +x; } 2>/dev/null
-  ( umask 077; cp "$real/auth.json" "$copy" ) || { echo "codex.sh: cannot stage auth" >&2; exit 78; }
-  chmod 600 "$copy"
-  start_sha="$(eval_sha256 <"$copy")"
+  # O_NOFOLLOW + regular-file check + a NEW file (O_EXCL) at 0600; the content is never inspected or printed
+  python3 -I -B -c 'import os,stat,sys
+src,dst=sys.argv[1:3]
+try:
+    fd=os.open(src,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+except OSError as e:
+    sys.exit("auth.json is a symlink or cannot be opened (%s): refused" % e.strerror)
+st=os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_size>(1<<20):
+    sys.exit("auth.json is not a small regular file: refused")
+data=b""
+while True:
+    c=os.read(fd,65536)
+    if not c: break
+    data+=c
+o=os.open(dst,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+os.fchmod(o,0o600); os.write(o,data); os.close(o)' "$real/auth.json" "$copy" || { scrub_auth; echo "codex.sh: cannot stage auth (credential)" >&2; exit 78; }
 else
   echo "codex.sh: no usable credential (auth)" >&2; exit 78
 fi
 
 mkdir -p "$gc"
-raw="$home/.eval-codex.jsonl"
+raw="$sbxdir/events.jsonl" errf="$sbxdir/stderr.txt"   # opened HERE, outside the cell: the CLI inherits the descriptors
 args=(exec --json --skip-git-repo-check --ignore-user-config -C "$workdir" --ephemeral)
 if [[ $sandboxed -eq 1 ]]; then   # the outer seatbelt is the sandbox; danger-full-access ONLY in this branch
   args+=(-s danger-full-access -c approval_policy=never)
@@ -126,12 +132,13 @@ else
   args+=(-s workspace-write --add-dir "$gc")
 fi
 [[ -n "$model" ]] && args+=(-m "$model")
-last=""
-if [[ -n "$schema" ]]; then last="$home/.eval-codex-last.txt"; args+=(--output-schema "$schema" -o "$last"); fi
-python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gc" --tmpdir "$celltmp" \
-  --set "CODEX_HOME=$home" ${auth_pass[@]+"${auth_pass[@]}"} -- ${sb_exec[@]+"${sb_exec[@]}"} "$codex_bin" "${args[@]}" - <"$prompt" >"$raw" 2>"$home/.eval-codex.err"
-rc=$?
-finish_auth
-if [[ -s "$home/.eval-codex.err" ]]; then tail -n 5 "$home/.eval-codex.err" | cut -c1-200 >&2; fi
-python3 -I -B "$here/../lib/parse_codex.py" "$raw" "$out" "$usage" ${last:+"$last"} || { [[ $rc -eq 0 ]] && rc=3; }
+[[ -n "$schema" ]] && args+=(--output-schema "$schema")
+{ python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gc" --tmpdir "$celltmp" \
+  --set "CODEX_HOME=$home" ${auth_pass[@]+"${auth_pass[@]}"} -- ${sb_exec[@]+"${sb_exec[@]}"} "$codex_bin" "${args[@]}" - <"$prompt" 2>"$errf" &
+echo $! >"$sbxdir/pid"; wait $!; echo $? >"$sbxdir/rc"; } | cat >"$raw" &   # stdout through a pipe read OUTSIDE the cell (/bin/cat cannot write a file fd under the profile: EPERM)
+pipe=$!
+wait "$pipe"; rc="$(cat "$sbxdir/rc" 2>/dev/null)"; rc="${rc:-1}"
+scrub_auth
+if [[ -s "$errf" ]]; then tail -n 5 "$errf" | cut -c1-200 >&2; fi
+python3 -I -B "$here/../lib/parse_codex.py" "$raw" "$out" "$usage" || { [[ $rc -eq 0 ]] && rc=3; }
 exit "$rc"

@@ -48,6 +48,11 @@ source "$here/../lib/auth.sh"
 gocache="${EVAL_GOCACHE:-$home/gocache}"; celltmp="${EVAL_CELL_TMPDIR:-$home/tmp}"
 case "$mode" in read-only|workspace-write) ;; *) echo "claude.sh: unknown agent_mode '$mode'" >&2; exit 2 ;; esac
 sb_exec=() sandboxed=0 claude_bin=claude
+# The adapter's own dir, in the cell's temp root next to the home (never re-allowed by the profile): it holds the
+# profile and the CLI's captured stdout/stderr, so the agent can neither read nor forge the result the grader row
+# is built from (the old `<home>/.eval-claude.json` sat in the agent-writable home: a rename-over forged tokens, cost and answer).
+sbxdir="$(mktemp -d "$(dirname "$home")/sbx.XXXXXX")" || { echo "claude.sh: cannot create the adapter dir (error: sandbox)" >&2; exit 79; }
+trap 'rm -rf "$sbxdir"' EXIT
 if [[ "${EVAL_CLAUDE_NO_SANDBOX:-0}" == 1 || "${EVAL_NO_SANDBOX:-0}" == 1 ]]; then
   echo "claude.sh: WARNING: EVAL_NO_SANDBOX=1 / EVAL_CLAUDE_NO_SANDBOX=1 -- the agent runs UNCONFINED (row sandbox:off); results are not comparable with sandboxed rows" >&2
 else
@@ -56,11 +61,7 @@ else
     echo "claude.sh: no seatbelt sandbox on $(uname) -- refusing an unconfined run (error: sandbox). Live claude runs are macOS-only unless EVAL_CLAUDE_NO_SANDBOX=1." >&2; exit 79
   fi
   sbx="$(command -v sandbox-exec)" || { echo "claude.sh: sandbox-exec not found; refusing an unconfined run (error: sandbox). Set EVAL_CLAUDE_NO_SANDBOX=1 to opt out explicitly." >&2; exit 79; }
-  # The profile names the cell's paths: it lives in its OWN dir next to the home (inside the cell's temp
-  # root, under a denied root and never re-allowed), so the agent can neither read nor list it. Random
-  # name, nothing of the task in it.
-  sbxdir="$(mktemp -d "$(dirname "$home")/sbx.XXXXXX")" || { echo "claude.sh: cannot create the sandbox profile dir (error: sandbox)" >&2; exit 79; }
-  trap 'rm -rf "$sbxdir"' EXIT
+  # The profile names the cell's paths and lives in $sbxdir (random name, nothing of the task in it).
   profile="$sbxdir/p.sb"
   # realpath through every symlink (python3 is already a hard dependency)
   rp() { python3 -I -B -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
@@ -113,7 +114,7 @@ else
   esac
 fi
 
-raw="$home/.eval-claude.json"
+raw="$sbxdir/result.json" errf="$sbxdir/stderr.txt"   # opened by the adapter, outside the cell
 args=(-p --output-format json --permission-mode "$pm" --allowedTools "$allowed" --disallowedTools "$denied"
       --no-session-persistence --strict-mcp-config --max-budget-usd "$budget")
 [[ -n "$model" ]] && args+=(--model "$model")
@@ -123,9 +124,9 @@ if [[ -n "$schema" ]]; then
   args+=(--json-schema "$schema_json")
 fi
 python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gocache" --tmpdir "$celltmp" \
-  --set "CLAUDE_CONFIG_DIR=$home" --set "CLAUDE_CODE_TMPDIR=$celltmp" --pass "$EVAL_AUTH_VAR" -- ${sb_exec[@]+"${sb_exec[@]}"} "$claude_bin" "${args[@]}" <"$prompt" >"$raw" 2>"$home/.eval-claude.err"
-rc=$?
-if [[ -s "$home/.eval-claude.err" ]]; then tail -n 5 "$home/.eval-claude.err" | cut -c1-200 >&2; fi
+  --set "CLAUDE_CONFIG_DIR=$home" --set "CLAUDE_CODE_TMPDIR=$celltmp" --pass "$EVAL_AUTH_VAR" -- ${sb_exec[@]+"${sb_exec[@]}"} "$claude_bin" "${args[@]}" <"$prompt" 2>"$errf" | cat >"$raw"   # stdout through a pipe read OUTSIDE the cell: /bin/cat cannot write a file fd under the profile (EPERM, found by trial)
+rc=${PIPESTATUS[0]}
+if [[ -s "$errf" ]]; then tail -n 5 "$errf" | cut -c1-200 >&2; fi
 python3 -I -B "$here/../lib/parse_claude.py" "$raw" "$out" "$usage"
 prc=$?
 if [[ $rc -eq 0 && $prc -ne 0 ]]; then rc=$prc; fi

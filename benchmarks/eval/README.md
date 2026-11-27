@@ -10,22 +10,25 @@ it?** Each task (x arm x host x rep, one `run.sh` call = one JSONL row) is grade
 | Hosts | `claude` (Claude Code, `claude -p`), `codex` (`codex exec --json`). `stub` is a fake host for the selftest only. |
 | Grading | `grade.sh <workdir> <agent-output-file>`: exit 0 pass / 1 fail / 2 grader error, one JSON metrics line on stdout. |
 
-**Isolation.** Every cell gets a fresh workdir (fixture, `git init`, one commit, optional
-`fixture.setup.sh`) and a throwaway host home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`): the user's
-real `~/.claude*` / `~/.codex` would contaminate BOTH arms. `lib/runenv.py` is the one
-**environment allowlist**: `PATH LANG LC_ALL TERM`, `HOME` = the isolated home, the config-dir
-var, per-cell `GOCACHE` and `TMPDIR`, `GOTOOLCHAIN=local`, `GOPROXY=off`, and the single auth
-variable passed BY NAME (never in argv). No `CLAUDECODE`, session ids or `OLDPWD`. Skills are
-copied with `cp -RL` (`references/` are symlinks into `_shared/`).
+**Isolation.** Every cell gets a fresh workdir (fixture, `git init`, one commit, optional `fixture.setup.sh`) and a throwaway host home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`): the user's real `~/.claude*` / `~/.codex` would contaminate BOTH arms. `lib/runenv.py` is the one **environment allowlist**: `PATH LANG LC_ALL TERM`, `HOME` = the isolated home, the config-dir var, per-cell `GOCACHE` and `TMPDIR`, `GOTOOLCHAIN=local`, `GOPROXY=off`, and the single auth variable passed BY NAME (never in argv). No `CLAUDECODE`, session ids or `OLDPWD`. Skills are copied with `cp -RL` (`references/` are symlinks into `_shared/`).
 
 **Auth order** (never printed; credential lines run with xtrace off). Claude: exported
 `CLAUDE_CODE_OAUTH_TOKEN`, else `ANTHROPIC_API_KEY`, else the ACCESS token (never the refresh
 token) from the real config dir's `.credentials.json` / the macOS keychain via `security`.
-Codex: exported `CODEX_API_KEY`, else `auth.json` copied (600) into the isolated home; a
-rotated copy is written back (compare-then-rename, only if the real file is unchanged since
-the copy) and the copy is deleted on every exit path. Limits: a TOCTOU window; a token
-rotated right before a SIGKILL is lost; a concurrent interactive `codex` can invalidate the
-refresh token, so use `CODEX_API_KEY` unattended. No credential: exit 78, row `error:"auth"`.
+Codex: exported `CODEX_API_KEY` (no file at all), else the real `auth.json` is copied into the isolated home. No credential: exit 78, row `error:"auth"`.
+
+**Credential contract (Codex), nothing leaves the cell.** (1) The copy is made once, before the CLI starts, with
+`O_NOFOLLOW` (a symlinked or non-regular real `auth.json` is refused, exit 78), into a NEW file, mode 0600. (2) It is **never
+written back**, with or without the sandbox. (3) It is deleted after the CLI exits and on every exit path (EXIT, TERM, INT, HUP).
+**Write-back history:** the adapter used to write a changed copy back to the real file so a refresh token rotated mid-cell was not lost. The
+agent owns the cell home, so it chose the bytes of the user's real login: `echo '{"tokens":"X"}' >$HOME/auth.json`, or `ln -s ~/.ssh/id $HOME/auth.json`
+(the adapter followed the link, the next cell read the key). Closed by deleting the write-back (selftest 14n, 14v, 14v2, 14v4).
+**Consequence:** if Codex rotates its refresh token during a cell the real file may be left stale and you may have to log in again; avoid it with
+`CODEX_API_KEY`. Opt-in `EVAL_CODEX_AUTH_READONLY=1` (sandboxed only) makes the staged copy unwritable, so Codex cannot rotate inside a cell (14v3 proves
+no write, mv-over, ln -sf, rm, link or chmod works); whether Codex STARTS with a read-only auth file is NOT VALIDATED (needs one paid run), hence off by default.
+**Results.** The answer and the usage are parsed from the stdout/stderr the ADAPTER captured into its own `sbx.*` dir (never re-allowed), not from any file in the
+cell home (the old `.eval-codex.jsonl`, `-last.txt`, `.eval-claude.json` could be forged by rename-over; selftest 19x, 19x2). Codex's `-o` is no longer passed.
+**Grader.** It runs OUTSIDE the sandbox, so a `workspace-write` task (the agent writes the tree the grader executes) is refused: row `error:"grader-unconfined"`, `pass:false` (selftest 19y); a sandboxed grader is a later task.
 
 **Confinement (`agent_mode`).** On macOS BOTH hosts run under ONE seatbelt profile (`sandbox-exec -f`,
 generated per cell by `lib/seatbelt.py`, same `agent_mode` semantics), so their rows are comparable
@@ -44,7 +47,7 @@ TMPDIR (read+write), the workdir (read; write only in `workspace-write`), the in
 the Go toolchain / git exec path only if a denied root hides them. The repo (`.git`, `corpus/`,
 `results/`) and the real config/auth dirs are denied again afterwards; the task dir is only kept
 from re-allows (never named). The profile sits in its own `sbx.XXXXXX` dir beside the cell home
-(never re-allowed) and names no task. `stat` (metadata only, literals, no listing) of the cell's ancestor dirs is allowed (CLIs canonicalise their home). A re-allow covering something denied fails closed
+(never re-allowed) and names no task. `stat` (metadata only, literals, no listing) is allowed on the ancestors of the cell (`/private/var/folders[/<xx>[/<yyyy>[/T[/eval-cell.X]]]]` and the `/var` form, or `/tmp`, `/private/tmp`) and, for Codex's re-allowed `bin/`, on `/Users`, `~`, `~/.codex`, `~/.codex/packages`, `.../standalone`, `.../releases`, `.../releases/<ver>` (CLIs canonicalise their home). **Existence oracle:** `stat` of a denied path that exists answers EPERM, of a missing one ENOENT, so names under those dirs can be enumerated by guessing; contents and listings stay denied. A re-allow covering something denied fails closed
 (`error:"sandbox"`). Sandbox ON: `Read Glob Grep Bash` unrestricted (`dontAsk`; `workspace-write`
 adds Edit/Write), no pattern list. Sandbox OFF (opt-out): only a narrow allowlist (`go
 version|build|vet|test`, `git status|diff|log|show`) plus escape-flag deny patterns (`go test
@@ -59,25 +62,11 @@ send out. Readable by design: the workdir, the cell's home/GOCACHE/TMPDIR, the C
 denied roots (a share not under `/Volumes`), is exposed. **TCP is NOT blocked for either host**
 (seatbelt cannot filter by host; Claude's WebFetch/WebSearch are denied) and the model's own credential
 is in the cell (Claude: the process environment; Codex: its `auth.json` copy in the isolated home, or
-`CODEX_API_KEY`), so a hostile fixture could exfiltrate it.
+`CODEX_API_KEY`), so a hostile fixture could exfiltrate it. **Known noise:** `/bin/bash` 3.2 here-docs ignore `TMPDIR` and write `/tmp` (denied; `TMPDIR` itself is exported, selftest 15z4), and `xcrun` shims print cache errors; no write rule outside the cell is added for either.
 
-**Structured output.** If `corpus/<skill>/_lib/output.schema.json` exists, `run.sh` passes it as the
-adapter's 9th argument (empty = none; the stub ignores it) and the agent must answer with ONE JSON
-document. claude: `--json-schema <schema as one line of JSON>` (`--help` shows it inline; it does
-NOT name the result field, so `lib/parse_claude.py` takes `structured_output` if an object, else
-`result`). codex: `--output-schema <file>` + `-o <home>/.eval-codex-last.txt` (JSONL `agent_message`
-is the fallback); its prompt is `-` with stdin redirected from the prompt file, so a caller's open
-pipe cannot hang it. No schema file: no flag. Rows carry `kind` and `language` (from `task.json`) and `output_valid`:
-`null` without a schema, else `true` iff the output file parses as a JSON OBJECT. Prose or nothing
-still yields a row (`output_valid:false`; the grader runs and fails it).
+**Structured output.** If `corpus/<skill>/_lib/output.schema.json` exists, `run.sh` passes it as the adapter's 9th argument (empty = none; the stub ignores it) and the agent must answer with ONE JSON document. claude: `--json-schema <schema as one line of JSON>` (`--help` shows it inline; it does NOT name the result field, so `lib/parse_claude.py` takes `structured_output` if an object, else `result`). codex: `--output-schema <file>` (the answer is the last JSONL `agent_message` of the captured stdout; stream shape NOT VALIDATED without a model run); its prompt is `-` with stdin redirected from the prompt file, so a caller's open pipe cannot hang it. No schema file: no flag. Rows carry `kind` and `language` (from `task.json`) and `output_valid`: `null` without a schema, else `true` iff the output file parses as a JSON OBJECT. Prose or nothing still yields a row (`output_valid:false`; the grader runs and fails it).
 
-**Hidden graders.** `grade.sh`, `reference/`, `task.json` live beside `fixture/`, never enter
-the workdir; the grader runs after the agent with cwd outside. **Failures still count.** A host
-that will not start, a timeout (process group killed), a crash, an auth failure or a grader exit 2
-each produce a row with `pass:false` and an `error`. `pass` = grader exit 0 AND host exit 0 AND no
-timeout. TERM/INT on `run.sh` kills the host process group and removes the temp dirs.
-**Held-out rule.** `heldout` tasks never tune a skill, and every skill with tasks keeps at least
-one (lint enforces it). Reports never pool splits, models, sandbox modes, kinds or languages.
+**Hidden graders.** `grade.sh`, `reference/`, `task.json` live beside `fixture/`, never enter the workdir; the grader runs after the agent with cwd outside. **Failures still count.** A host that will not start, a timeout (process group killed), a crash, an auth failure or a grader exit 2 each produce a row with `pass:false` and an `error`. `pass` = grader exit 0 AND host exit 0 AND no timeout. TERM/INT on `run.sh` kills the host process group and removes the temp dirs. **Held-out rule.** `heldout` tasks never tune a skill, and every skill with tasks keeps at least one (lint enforces it). Reports never pool splits, models, sandbox modes, kinds or languages.
 
 ## Reading the report
 `python3 benchmarks/eval/report.py results.jsonl [--markdown]`
