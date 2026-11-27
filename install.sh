@@ -12,6 +12,11 @@
 #   install.sh            install/update the copy and (re)write the manifest
 #   install.sh --verify   compare the installed tree against the manifest
 #   install.sh --diff     show what drifted
+#   install.sh --host claude|codex|both   which host to install/verify for
+#                         (default claude: byte-for-byte the historical behaviour).
+#                         Codex: skills + generated role files under $CODEX_HOME
+#                         (default ~/.codex); see _shared/hosts.md for what is
+#                         VERIFIED, UNVERIFIED and DEGRADED there.
 #
 # Exit non-zero on verification failure, so it can gate a session or a cron.
 # The code says WHICH failure, because the three call for different actions:
@@ -21,8 +26,41 @@
 
 set -uo pipefail
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-manifest="$cfg/prod-skills.manifest"
+
+usage() { echo "usage: install.sh [--verify|--diff] [--host claude|codex|both]" >&2; exit 2; }
+host=claude; mode=""
+while (( $# )); do
+  case "$1" in
+    --host)   [[ $# -ge 2 ]] || usage; host="$2"; shift 2 ;;
+    --host=*) host="${1#--host=}"; shift ;;
+    *)        [[ -n "$mode" ]] || mode="$1"; shift ;;
+  esac
+done
+mode="${mode:-install}"
+case "$host" in
+  claude) hosts=(claude) ;;
+  codex)  hosts=(codex) ;;
+  both)   hosts=(claude codex) ;;
+  *) echo "install.sh: unknown host '$host' (want claude, codex or both)" >&2; usage ;;
+esac
+
+# Per-host roots. cfg is the host's config root; agent_glob is what OUR agent
+# definitions look like there, so the write-guard and the Codex manifest touch
+# only prod-* files and never a user's own roles.
+set_host() {
+  cur_host="$1"
+  case "$1" in
+    claude) cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; agent_glob='prod-*.md' ;;
+    codex)  cfg="${CODEX_HOME:-$HOME/.codex}";         agent_glob='prod-*.toml' ;;
+  esac
+  manifest="$cfg/prod-skills.manifest"
+}
+# The agents half of the trusted set. Claude hashes the whole agents/ dir (as it
+# always did); Codex hashes only our generated prod-*.toml.
+agents_hash() {
+  if [[ "$cur_host" == claude ]]; then hash_tree "$cfg/agents" . 2>/dev/null
+  else hash_tree "$cfg/agents" . -maxdepth 1 -name "$agent_glob" 2>/dev/null; fi
+}
 # prod-new belongs here like every other skill. It was previously symlinked into
 # the config dir by hand, which put it OUTSIDE the manifest entirely: --verify
 # reported the whole trusted set as intact while the skill that scaffolds brand
@@ -58,10 +96,9 @@ hash_tree() { # print "<sha256>  <relative path>" for every tracked TCB file
       | sort -z | xargs -0 shasum -a 256 )
 }
 
-case "${1:-install}" in
-  --verify|--diff)
+verify_host() {
     [[ -f "$manifest" ]] || { echo "no manifest at $manifest — run install.sh first" >&2; exit 1; }
-    current=$(hash_tree "$cfg/skills" "${skills[@]}"; hash_tree "$cfg/agents" . 2>/dev/null)
+    current=$(hash_tree "$cfg/skills" "${skills[@]}"; agents_hash)
     if diff -q <(sort "$manifest") <(echo "$current" | sort) >/dev/null; then
       echo "TCB verified: $(wc -l <"$manifest" | tr -d ' ') files match the manifest"
       # Integrity is not currency. The check above answers "has the INSTALLED
@@ -129,7 +166,7 @@ case "${1:-install}" in
             ! -name 'config.sh' ! -path '*/benchmark-results/*' \
             \( -perm -u+w -o -perm -g+w -o -perm -o+w \) 2>/dev/null
         done
-        find "$cfg"/agents -maxdepth 1 -name 'prod-*.md' -type f \
+        find "$cfg"/agents -maxdepth 1 -name "$agent_glob" -type f \
           \( -perm -u+w -o -perm -g+w -o -perm -o+w \) 2>/dev/null)
       wcount=$(printf '%s' "$writable" | grep -c . || true)
       if (( wcount > 0 )); then
@@ -170,13 +207,30 @@ case "${1:-install}" in
       exit 0
     fi
     echo "TCB DRIFT — the installed skills no longer match the manifest:" >&2
-    [[ "$1" == --diff ]] && diff <(sort "$manifest") <(echo "$current" | sort) >&2
+    [[ "$mode" == --diff ]] && diff <(sort "$manifest") <(echo "$current" | sort) >&2
     diff <(sort "$manifest") <(echo "$current" | sort) 2>/dev/null | grep -E '^[<>]' | \
       awk '{print ($1==">" ? "  changed/added: " : "  missing/was:   ") $3}' | sort -u >&2
     echo "Re-run install.sh only after reviewing the change: this is the trusted set." >&2
     exit 1
-    ;;
-esac
+}
+if [[ "$mode" == --verify || "$mode" == --diff ]]; then
+  # Each host verifies in its own subshell so verify_host's exits stay local.
+  # One host: its exit code is the process's, messages untouched. Both: every
+  # host runs, a failing one is NAMED, and the exit is the lowest non-zero code
+  # (1 TCB DRIFT outranks 2 STALE INSTALL outranks 3 TCB WRITABLE).
+  rc=0; failed=""
+  for h in "${hosts[@]}"; do
+    set_host "$h"
+    (( ${#hosts[@]} > 1 )) && echo "== host: $h =="
+    ( verify_host ); r=$?
+    if (( r != 0 )); then
+      failed="$failed $h(exit $r)"
+      (( rc == 0 || r < rc )) && rc=$r
+    fi
+  done
+  if (( rc != 0 && ${#hosts[@]} > 1 )); then echo "install.sh: verify FAILED for:$failed" >&2; fi
+  exit "$rc"
+fi
 
 # Wire the repo's own hooks, because core.hooksPath is LOCAL CONFIG and does
 # not travel with a clone. Without this the mirroring hook exists in the tree
@@ -323,6 +377,60 @@ if (( drift )); then
 fi
 echo "source consistency: ${#mirrors[@]} mirrored file(s) match _shared"
 
+# --- Codex role files, generated from agents/*.md ---------------------------
+#
+# Codex does not read agents/*.md. Each agent becomes <codex home>/agents/<name>.toml
+# with keys name, description, developer_instructions (+ model when asked for).
+# Location and keys are UNVERIFIED against the binary (see _shared/hosts.md).
+#
+# model: Claude names (sonnet/opus/haiku) have no VERIFIED Codex equivalent, so
+# `model` is OMITTED (the role inherits) unless PROD_CODEX_MODEL_<ROLE> is set,
+# <ROLE> = agent name without the prod- prefix, upper-cased, - as _.
+#
+# tools: has no Codex equivalent. The restriction is restated in WORDS at the end
+# of developer_instructions, derived from the tools list. DEGRADED: instruction-
+# only until a hook enforces it.
+fm_field() { # fm_field <file> <key> -> value, folded scalars joined by spaces
+  awk -v k="$2" '
+    NR==1 && $0=="---" { infm=1; next }
+    infm && $0=="---" { exit }
+    !infm { next }
+    $0 ~ "^" k ":" { cap=1; v=$0; sub("^" k ":[ \t]*","",v); if (v ~ /^[>|][-+]?$/) v=""; out=v; next }
+    cap && /^[ \t]/ { l=$0; gsub(/^[ \t]+/,"",l); out = (out=="" ? l : out " " l); next }
+    cap { cap=0 }
+    END { print out }' "$1"
+}
+role_body() { awk 'NR==1 && $0=="---" {fm=1; next} fm && $0=="---" {fm=0; c=1; next} c' "$1"; }
+toml_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+gen_codex_role() {
+  local f="$1" name desc tools model_var model body restr=""
+  local lit="'''"
+  name="$(fm_field "$f" name)"; desc="$(fm_field "$f" description)"; tools="$(fm_field "$f" tools)"
+  [[ -n "$name" && -n "$desc" ]] || { echo "install: $f has no name/description frontmatter" >&2; return 1; }
+  body="$(role_body "$f")"
+  if [[ "$body" == *"$lit"* ]]; then
+    echo "install: $f body contains $lit and cannot be a TOML literal string" >&2; return 1
+  fi
+  case ", $tools," in *", Edit,"*|*", Write,"*) ;; *)
+    restr="$restr You must not edit, create or delete files; use shell commands only to read, search and run the gates (a temporary mutation that your instructions above tell you to revert before finishing is the only exception)." ;;
+  esac
+  case ", $tools," in *", Bash,"*) ;; *) restr="$restr You must not run shell commands." ;; esac
+  case ", $tools," in *", Agent,"*|*", Task,"*) ;; *) restr="$restr You must not spawn other agents." ;; esac
+  model_var="PROD_CODEX_MODEL_$(printf '%s' "${name#prod-}" | tr 'a-z-' 'A-Z_')"
+  model="${!model_var:-}"
+  printf 'name = "%s"\n' "$(toml_str "$name")"
+  printf 'description = "%s"\n' "$(toml_str "$desc")"
+  if [[ -n "$model" ]]; then
+    [[ "$model" =~ ^[A-Za-z0-9._:/-]+$ ]] || { echo "install: $model_var has characters outside [A-Za-z0-9._:/-]" >&2; return 1; }
+    printf 'model = "%s"\n' "$model"
+  fi
+  printf 'developer_instructions = %s\n' "$lit"
+  role_body "$f"
+  printf '\n## Host restrictions (Codex)\nThe tool allow-list of this role (%s) cannot be enforced by this host, so it is stated here and you are bound by it.%s\n' "${tools:-none declared}" "$restr"
+  printf '%s\n' "$lit"
+}
+
+install_host() {
 mkdir -p "$cfg/skills" "$cfg/agents"
 # The installed copy is left READ-ONLY at the end of this script, so make it
 # writable again before rewriting it. install.sh is the only legitimate writer:
@@ -331,7 +439,14 @@ mkdir -p "$cfg/skills" "$cfg/agents"
 # a repo's registries/ or verification/ratified/ (those receive legitimate
 # edits constantly, and a guard that blocks normal work is a guard that gets
 # turned off).
-chmod -R u+w "$cfg/skills" "$cfg/agents" 2>/dev/null || true
+if [[ "$cur_host" == claude ]]; then
+  chmod -R u+w "$cfg/skills" "$cfg/agents" 2>/dev/null || true
+else
+  # Codex homes hold other people's skills and roles (.system, user roles):
+  # unlock only what this installer owns.
+  for s in "${skills[@]}"; do chmod -R u+w "$cfg/skills/$s" 2>/dev/null || true; done
+  chmod u+w "$cfg"/agents/$agent_glob 2>/dev/null || true
+fi
 for s in "${skills[@]}"; do
   rm -rf "$cfg/skills/$s"
   cp -R "$src/$s" "$cfg/skills/$s"
@@ -354,13 +469,23 @@ done
 # of the manifest entirely in one config dir while they were hashed in the
 # other. Agent definitions carry the write-masks that bound what a cheap model
 # may touch; an unhashed one is an unverified security instruction.
-for a in "$src"/agents/*.md; do
-  [[ -e "$a" ]] || continue
-  rm -f "$cfg/agents/$(basename "$a")"
-  cp "$a" "$cfg/agents/$(basename "$a")"
-done
+if [[ "$cur_host" == claude ]]; then
+  for a in "$src"/agents/*.md; do
+    [[ -e "$a" ]] || continue
+    rm -f "$cfg/agents/$(basename "$a")"
+    cp "$a" "$cfg/agents/$(basename "$a")"
+  done
+else
+  for a in "$src"/agents/*.md; do
+    [[ -e "$a" ]] || continue
+    n="$(basename "$a" .md)"
+    gen_codex_role "$a" > "$cfg/agents/.gen.$$" || { rm -f "$cfg/agents/.gen.$$"; echo "install: cannot generate Codex role for $a" >&2; exit 1; }
+    rm -f "$cfg/agents/$n.toml"
+    mv "$cfg/agents/.gen.$$" "$cfg/agents/$n.toml"
+  done
+fi
 
-{ hash_tree "$cfg/skills" "${skills[@]}"; hash_tree "$cfg/agents" . 2>/dev/null; } | sort > "$manifest"
+{ hash_tree "$cfg/skills" "${skills[@]}"; agents_hash; } | sort > "$manifest"
 
 # Read-only, AFTER the manifest is written. This does not stop a determined
 # writer -- it can be undone with one chmod -- and it is not meant to. It
@@ -369,9 +494,15 @@ done
 # the drift check, or not at all. Prevention is impossible under
 # bypassPermissions; making the act explicit is not.
 for s in "${skills[@]}"; do chmod -R a-w "$cfg/skills/$s" 2>/dev/null || true; done
-chmod -R a-w "$cfg"/agents/prod-*.md 2>/dev/null || true
+chmod -R a-w "$cfg"/agents/$agent_glob 2>/dev/null || true
 echo "installed ${#skills[@]} skills + $(ls "$src"/agents/*.md 2>/dev/null | wc -l | tr -d ' ') agents as verified copies"
 echo "manifest: $manifest ($(wc -l <"$manifest" | tr -d ' ') files)"
 echo
 echo "Verify at any time (and from a cron or session hook):"
-echo "  bash $src/install.sh --verify"
+echo "  bash $src/install.sh --verify$( [[ "$cur_host" == claude ]] || echo " --host $cur_host" )"
+}
+for h in "${hosts[@]}"; do
+  set_host "$h"
+  (( ${#hosts[@]} > 1 )) && echo "== host: $h =="
+  install_host || exit $?
+done
