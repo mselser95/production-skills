@@ -1,0 +1,113 @@
+{
+  "$description": "Layer 1. Raw scales. Never consumed by components directly; the semantic layer references these.",
+  "palette": {
+    "$type": "color",
+    "neutral": {
+      "0": { "$value": "#ffffff" },
+      "50": { "$value": "#f8f9fa" },
+      "100": { "$value": "#f1f3f5" },
+      "200": { "$value": "#e4e7eb" },
+      "300": { "$value": "#d0d5dc" },
+      "400": { "$value": "#a3abb8" },
+      "500": { "$value": "#78818f" },
+      "600": { "$value": "#5b6471" },
+      "700": { "$value": "#424a56" },
+      "800": { "$value": "#2b323c" },
+      "900": { "$value": "#1b2028" },
+      "950": { "$value": "#11151b" },
+      "1000": { "$value": "#000000" }
+    },
+    "accent": {
+      "50": { "$value": "#eef4ff" },
+      "100": { "$value": "#dce8ff" },
+      "200": { "$value": "#b9d1ff" },
+      "300": { "$value": "#8cb3ff" },
+      "400": { "$value": "#5d90f5" },
+      "500": { "$value": "#3b72e0" },
+      "600": { "$value": "#2559c4" },
+      "700": { "$value": "#1c46a0" },
+      "800": { "$value": "#17377d" },
+      "900": { "$value": "#122a5e" }
+    },
+    "positive": {
+      "50": { "$value": "#ecf8f0" },
+      "100": { "$value": "#d3f0de" },
+      "200": { "$value": "#a8e1bf" },
+      "300": { "$value": "#74cd9a" },
+      "400": { "$value": "#43b377" },
+      "500": { "$value": "#299a5f" },
+      "600": { "$value": "#1c7f4b" },
+      "700": { "$value": "#17653c" },
+      "800": { "$value": "#134f31" },
+      "900": { "$value": "#0f3d27" }
+    },
+    "negative": {
+      "50": { "$value": "#fdeded" },
+      "100": { "$value": "#fbd9d9" },
+      "200": { "$value": "#f6b2b2" },
+      "300": { "$value": "#ef8585" },
+      "400": { "$value": "#e55a5a" },
+      "500": { "$value": "#d33a3a" },
+      "600": { "$value": "#b82a2a" },
+      "700": { "$value": "#952222" },
+      "800": { "$value": "#741d1d" },
+      "900": { "$value": "#571717" }
+    },
+    "caution": {
+      "50": { "$value": "#fff6e5" },
+      "100": { "$value": "#ffeac2" },
+      "200": { "$value": "#ffd685" },
+      "300": { "$value": "#fbbd3f" },
+      "400": { "$value": "#eba012" },
+      "500": { "$value": "#c98300" },
+      "600": { "$value": "#a06600" },
+      "700": { "$value": "#7c4e00" },
+      "800": { "$value": "#5d3b00" },
+      "900": { "$value": "#442b00" }
+    },
+    "alpha": {
+      "black": {
+        "5": { "$value": "#0000000d" },
+        "10": { "$value": "#0000001a" },
+        "20": { "$value": "#00000033" },
+        "40": { "$value": "#00000066" }
+      },
+      "white": {
+        "5": { "$value": "#ffffff0d" },
+        "10": { "$value": "#ffffff1a" },
+        "20": { "$value": "#ffffff33" },
+        "40": { "$value": "#ffffff66" }
+      }
+    }
+  },
+  "font": {
+    "family": {
+      "$type": "fontFamily",
+      "sans": { "$value": ["system-ui", "-apple-system", "Segoe UI", "Roboto", "Helvetica Neue", "Arial", "sans-serif"] },
+      "serif": { "$value": ["ui-serif", "Georgia", "Cambria", "Times New Roman", "serif"] },
+      "mono": { "$value": ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "Liberation Mono", "monospace"] }
+    },
+    "weight": {
+      "$type": "fontWeight",
+      "regular": { "$value": 400 },
+      "medium": { "$value": 500 },
+      "semibold": { "$value": 600 },
+      "bold": { "$value": 700 }
+    }
+  },
+  "spacing": {
+    "$type": "dimension",
+    "0": { "$value": "0rem" },
+    "1": { "$value": "0.25rem" },
+    "2": { "$value": "0.5rem" },
+    "3": { "$value": "0.75rem" },
+    "4": { "$value": "1rem" },
+    "5": { "$value": "1.25rem" },
+    "6": { "$value": "1.5rem" },
+    "8": { "$value": "2rem" },
+    "10": { "$value": "2.5rem" },
+    "12": { "$value": "3rem" },
+    "16": { "$value": "4rem" },
+    "20": { "$value": "5rem" }
+  }
+}

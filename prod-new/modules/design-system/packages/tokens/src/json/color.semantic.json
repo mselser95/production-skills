@@ -1,0 +1,663 @@
+{
+  "$description": "Layer 2. Semantic colour roles per theme. Every leaf references the primitives. Both themes must carry the same key set.",
+  "$extensions": {
+    "contrast.pairs": [
+      {
+        "fg": "color.text.primary",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.surface.hover",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.surface.pressed",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.surface.selected",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.secondary",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.muted",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.link",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.linkHover",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.positive",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.negative",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.caution",
+        "bg": "color.surface.page",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.secondary",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.muted",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.link",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.linkHover",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.positive",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.negative",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.caution",
+        "bg": "color.surface.raised",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.secondary",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.muted",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.link",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.linkHover",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.positive",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.negative",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.caution",
+        "bg": "color.surface.sunken",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.inverse",
+        "bg": "color.surface.inverse",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.onAction",
+        "bg": "color.action.primary.default",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.onAction",
+        "bg": "color.action.primary.hover",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.onAction",
+        "bg": "color.action.primary.pressed",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.onAction",
+        "bg": "color.action.destructive.default",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.onAction",
+        "bg": "color.action.destructive.hover",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.onAction",
+        "bg": "color.action.destructive.pressed",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.action.secondary.default",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.action.secondary.hover",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.text.primary",
+        "bg": "color.action.secondary.pressed",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.feedback.info.text",
+        "bg": "color.feedback.info.bg",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.feedback.positive.text",
+        "bg": "color.feedback.positive.bg",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.feedback.negative.text",
+        "bg": "color.feedback.negative.bg",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.feedback.caution.text",
+        "bg": "color.feedback.caution.bg",
+        "min": 4.5,
+        "kind": "body"
+      },
+      {
+        "fg": "color.border.strong",
+        "bg": "color.surface.page",
+        "min": 3,
+        "kind": "ui"
+      },
+      {
+        "fg": "color.border.focus",
+        "bg": "color.surface.page",
+        "min": 3,
+        "kind": "ui"
+      },
+      {
+        "fg": "color.action.primary.default",
+        "bg": "color.surface.page",
+        "min": 3,
+        "kind": "ui"
+      },
+      {
+        "fg": "color.action.destructive.default",
+        "bg": "color.surface.page",
+        "min": 3,
+        "kind": "ui"
+      },
+      {
+        "fg": "color.border.strong",
+        "bg": "color.surface.raised",
+        "min": 3,
+        "kind": "ui"
+      },
+      {
+        "fg": "color.border.focus",
+        "bg": "color.surface.raised",
+        "min": 3,
+        "kind": "ui"
+      },
+      {
+        "fg": "color.action.primary.default",
+        "bg": "color.surface.raised",
+        "min": 3,
+        "kind": "ui"
+      },
+      {
+        "fg": "color.action.destructive.default",
+        "bg": "color.surface.raised",
+        "min": 3,
+        "kind": "ui"
+      }
+    ]
+  },
+  "light": {
+    "$type": "color",
+    "color": {
+      "text": {
+        "primary": {
+          "$value": "{palette.neutral.900}"
+        },
+        "secondary": {
+          "$value": "{palette.neutral.700}"
+        },
+        "muted": {
+          "$value": "{palette.neutral.600}"
+        },
+        "disabled": {
+          "$value": "{palette.neutral.400}"
+        },
+        "inverse": {
+          "$value": "{palette.neutral.0}"
+        },
+        "link": {
+          "$value": "{palette.accent.700}"
+        },
+        "linkHover": {
+          "$value": "{palette.accent.800}"
+        },
+        "onAction": {
+          "$value": "{palette.neutral.0}"
+        },
+        "positive": {
+          "$value": "{palette.positive.700}"
+        },
+        "negative": {
+          "$value": "{palette.negative.700}"
+        },
+        "caution": {
+          "$value": "{palette.caution.700}"
+        }
+      },
+      "surface": {
+        "page": {
+          "$value": "{palette.neutral.50}"
+        },
+        "raised": {
+          "$value": "{palette.neutral.0}"
+        },
+        "sunken": {
+          "$value": "{palette.neutral.100}"
+        },
+        "overlay": {
+          "$value": "{palette.neutral.0}"
+        },
+        "inverse": {
+          "$value": "{palette.neutral.900}"
+        },
+        "hover": {
+          "$value": "{palette.neutral.100}"
+        },
+        "pressed": {
+          "$value": "{palette.neutral.200}"
+        },
+        "selected": {
+          "$value": "{palette.accent.50}"
+        },
+        "disabled": {
+          "$value": "{palette.neutral.100}"
+        }
+      },
+      "border": {
+        "subtle": {
+          "$value": "{palette.neutral.200}"
+        },
+        "default": {
+          "$value": "{palette.neutral.300}"
+        },
+        "strong": {
+          "$value": "{palette.neutral.500}"
+        },
+        "focus": {
+          "$value": "{palette.accent.600}"
+        },
+        "disabled": {
+          "$value": "{palette.neutral.200}"
+        }
+      },
+      "action": {
+        "primary": {
+          "default": {
+            "$value": "{palette.accent.600}"
+          },
+          "hover": {
+            "$value": "{palette.accent.700}"
+          },
+          "pressed": {
+            "$value": "{palette.accent.800}"
+          },
+          "disabled": {
+            "$value": "{palette.neutral.200}"
+          }
+        },
+        "secondary": {
+          "default": {
+            "$value": "{palette.neutral.100}"
+          },
+          "hover": {
+            "$value": "{palette.neutral.200}"
+          },
+          "pressed": {
+            "$value": "{palette.neutral.300}"
+          },
+          "disabled": {
+            "$value": "{palette.neutral.100}"
+          }
+        },
+        "destructive": {
+          "default": {
+            "$value": "{palette.negative.600}"
+          },
+          "hover": {
+            "$value": "{palette.negative.700}"
+          },
+          "pressed": {
+            "$value": "{palette.negative.800}"
+          },
+          "disabled": {
+            "$value": "{palette.neutral.200}"
+          }
+        }
+      },
+      "feedback": {
+        "info": {
+          "bg": {
+            "$value": "{palette.accent.50}"
+          },
+          "border": {
+            "$value": "{palette.accent.300}"
+          },
+          "text": {
+            "$value": "{palette.accent.800}"
+          }
+        },
+        "positive": {
+          "bg": {
+            "$value": "{palette.positive.50}"
+          },
+          "border": {
+            "$value": "{palette.positive.300}"
+          },
+          "text": {
+            "$value": "{palette.positive.800}"
+          }
+        },
+        "negative": {
+          "bg": {
+            "$value": "{palette.negative.50}"
+          },
+          "border": {
+            "$value": "{palette.negative.300}"
+          },
+          "text": {
+            "$value": "{palette.negative.800}"
+          }
+        },
+        "caution": {
+          "bg": {
+            "$value": "{palette.caution.50}"
+          },
+          "border": {
+            "$value": "{palette.caution.300}"
+          },
+          "text": {
+            "$value": "{palette.caution.800}"
+          }
+        }
+      },
+      "overlay": {
+        "scrim": {
+          "$value": "{palette.alpha.black.40}"
+        }
+      }
+    }
+  },
+  "dark": {
+    "$type": "color",
+    "color": {
+      "text": {
+        "primary": {
+          "$value": "{palette.neutral.50}"
+        },
+        "secondary": {
+          "$value": "{palette.neutral.300}"
+        },
+        "muted": {
+          "$value": "{palette.neutral.400}"
+        },
+        "disabled": {
+          "$value": "{palette.neutral.600}"
+        },
+        "inverse": {
+          "$value": "{palette.neutral.900}"
+        },
+        "link": {
+          "$value": "{palette.accent.300}"
+        },
+        "linkHover": {
+          "$value": "{palette.accent.200}"
+        },
+        "onAction": {
+          "$value": "{palette.neutral.950}"
+        },
+        "positive": {
+          "$value": "{palette.positive.300}"
+        },
+        "negative": {
+          "$value": "{palette.negative.300}"
+        },
+        "caution": {
+          "$value": "{palette.caution.300}"
+        }
+      },
+      "surface": {
+        "page": {
+          "$value": "{palette.neutral.950}"
+        },
+        "raised": {
+          "$value": "{palette.neutral.900}"
+        },
+        "sunken": {
+          "$value": "{palette.neutral.1000}"
+        },
+        "overlay": {
+          "$value": "{palette.neutral.800}"
+        },
+        "inverse": {
+          "$value": "{palette.neutral.50}"
+        },
+        "hover": {
+          "$value": "{palette.neutral.800}"
+        },
+        "pressed": {
+          "$value": "{palette.neutral.700}"
+        },
+        "selected": {
+          "$value": "{palette.accent.900}"
+        },
+        "disabled": {
+          "$value": "{palette.neutral.800}"
+        }
+      },
+      "border": {
+        "subtle": {
+          "$value": "{palette.neutral.800}"
+        },
+        "default": {
+          "$value": "{palette.neutral.700}"
+        },
+        "strong": {
+          "$value": "{palette.neutral.500}"
+        },
+        "focus": {
+          "$value": "{palette.accent.400}"
+        },
+        "disabled": {
+          "$value": "{palette.neutral.800}"
+        }
+      },
+      "action": {
+        "primary": {
+          "default": {
+            "$value": "{palette.accent.400}"
+          },
+          "hover": {
+            "$value": "{palette.accent.300}"
+          },
+          "pressed": {
+            "$value": "{palette.accent.200}"
+          },
+          "disabled": {
+            "$value": "{palette.neutral.700}"
+          }
+        },
+        "secondary": {
+          "default": {
+            "$value": "{palette.neutral.800}"
+          },
+          "hover": {
+            "$value": "{palette.neutral.700}"
+          },
+          "pressed": {
+            "$value": "{palette.neutral.600}"
+          },
+          "disabled": {
+            "$value": "{palette.neutral.800}"
+          }
+        },
+        "destructive": {
+          "default": {
+            "$value": "{palette.negative.400}"
+          },
+          "hover": {
+            "$value": "{palette.negative.300}"
+          },
+          "pressed": {
+            "$value": "{palette.negative.200}"
+          },
+          "disabled": {
+            "$value": "{palette.neutral.700}"
+          }
+        }
+      },
+      "feedback": {
+        "info": {
+          "bg": {
+            "$value": "{palette.accent.900}"
+          },
+          "border": {
+            "$value": "{palette.accent.600}"
+          },
+          "text": {
+            "$value": "{palette.accent.200}"
+          }
+        },
+        "positive": {
+          "bg": {
+            "$value": "{palette.positive.900}"
+          },
+          "border": {
+            "$value": "{palette.positive.600}"
+          },
+          "text": {
+            "$value": "{palette.positive.200}"
+          }
+        },
+        "negative": {
+          "bg": {
+            "$value": "{palette.negative.900}"
+          },
+          "border": {
+            "$value": "{palette.negative.600}"
+          },
+          "text": {
+            "$value": "{palette.negative.200}"
+          }
+        },
+        "caution": {
+          "bg": {
+            "$value": "{palette.caution.900}"
+          },
+          "border": {
+            "$value": "{palette.caution.600}"
+          },
+          "text": {
+            "$value": "{palette.caution.200}"
+          }
+        }
+      },
+      "overlay": {
+        "scrim": {
+          "$value": "{palette.alpha.black.40}"
+        }
+      }
+    }
+  }
+}
