@@ -1,0 +1,4 @@
+id	dimension	group	bucket	scope	property	source
+fuzz	3	fuzzbench	tool-run	unit	Every declared fuzz target is actually executed for a bounded time without finding a crash.	1938
+benchmarks	6	fuzzbench	tool-run	unit	Benchmarks exist, run to completion, and have a recorded baseline.	2384
+profiling	6	fuzzbench	source-grep	unit	The unit offers an on-demand profile capture, a live profiling endpoint, and a continuous profiling signal.	2534

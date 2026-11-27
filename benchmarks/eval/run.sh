@@ -10,7 +10,7 @@
 # error still writes a row (pass:false + error): a missing row would inflate
 # the success rate.
 #
-# Row also carries kind (task.json) and output_valid (null without a schema, else: did the agent's
+# Row also carries kind and language (task.json) and output_valid (null without a schema, else: did the agent's
 #   output parse as a JSON object).
 # Usage: run.sh --task <task-dir> --arm skill|bare --host claude|codex|stub
 #               --rep N --out <results.jsonl> [--model M]
@@ -60,6 +60,7 @@ timeout_s="$(jget timeout_s)" || die "task.json has no timeout_s"
 budget="$(jget max_budget_usd)" || die "task.json has no max_budget_usd"
 agent_mode="$(jget agent_mode)" || die "task.json has no agent_mode"
 jget kind >/dev/null || die "task.json has no kind"   # required; the row copies it from task.json
+jget language >/dev/null || die "task.json has no language"   # required; the row copies it from task.json
 [[ "$agent_mode" == read-only || "$agent_mode" == workspace-write ]] || die "agent_mode must be read-only|workspace-write"
 
 # the skill's output schema, when it has one: corpus/<skill>/_lib/output.schema.json beside the task dirs.

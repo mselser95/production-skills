@@ -25,7 +25,7 @@
 
 SHELL := /usr/bin/env bash
 PROBES := _shared/probes
-.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline eval eval-live
+.PHONY: help check-fast verify selftests lint actionlint gates tcb evidence template-digest mutation mutation-baseline invariants token-report token-baseline skill-weight-baseline eval eval-live
 
 help:
 	@echo "check-fast  the cheap local gate (lint + workflow validation + the repo's own probes)"
@@ -37,6 +37,7 @@ help:
 	@echo "mutation-baseline  re-record benchmarks/mutation-baseline.md after adding/removing cases"
 	@echo "token-report    agent token cost per (agentType, model) from ~/.claude* transcripts; exit 1 if tokens/completed rose >25%"
 	@echo "token-baseline  re-record benchmarks/token-baseline.md (a trend, not a gate; reads \$$HOME, not in check-fast)"
+	@echo "skill-weight-baseline  re-record benchmarks/skill-weight-baseline.md (the file-list and +5 % ratchet of the EAGER and REACHABLE sets; deliberate, never part of a gate run)"
 	@echo "eval        skill-eval harness: selftest + corpus lint (hermetic, no agent, not in check-fast)"
 	@echo "eval-live   PAID: every corpus task x claude,codex x skill,bare x N reps; needs EVAL_LIVE=1 (make eval-live EVAL_LIVE=1 N=3)"
 
@@ -117,8 +118,10 @@ lint:
 gates:
 	@bash $(PROBES)/skills-static.sh
 	@bash $(PROBES)/agents-budget.sh
+	@bash $(PROBES)/skill-weight.sh
 	@bash $(PROBES)/policy-coverage.sh
 	@bash $(PROBES)/row-vacuity-sweep.sh
+	@bash $(PROBES)/row-catalogue.sh
 	@bash $(PROBES)/check-registries.sh
 # The shell files this repo VENDORS into scaffolds are held to the template's own
 # gate-hygiene rules HERE, before a consumer's check-fast finds them: the
@@ -265,6 +268,10 @@ token-report:
 
 token-baseline:
 	@bash scripts/token-report.sh --write
+
+# Deliberate re-recording of the skill eager-weight ratchet, like the other baselines.
+skill-weight-baseline:
+	@bash $(PROBES)/skill-weight.sh --write
 
 # ---- skill-eval harness (benchmarks/eval/README.md) --------------------------
 # eval: hermetic. The corpus may not exist yet; only then is an empty lint allowed.

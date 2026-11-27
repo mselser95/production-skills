@@ -116,6 +116,8 @@ jobs:
           bash _shared/probes/policy-coverage.sh
           bash _shared/probes/agents-budget-selftest.sh
           bash _shared/probes/agents-budget.sh
+          bash _shared/probes/skill-weight-selftest.sh
+          bash _shared/probes/skill-weight.sh
           bash _shared/probes/prove-mutation-selftest.sh
           bash _shared/probes/acceptance-coverage-selftest.sh
 

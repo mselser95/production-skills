@@ -67,7 +67,7 @@ document. claude: `--json-schema <schema as one line of JSON>` (`--help` shows i
 NOT name the result field, so `lib/parse_claude.py` takes `structured_output` if an object, else
 `result`). codex: `--output-schema <file>` + `-o <home>/.eval-codex-last.txt` (JSONL `agent_message`
 is the fallback); its prompt is `-` with stdin redirected from the prompt file, so a caller's open
-pipe cannot hang it. No schema file: no flag. Rows carry `kind` (from `task.json`) and `output_valid`:
+pipe cannot hang it. No schema file: no flag. Rows carry `kind` and `language` (from `task.json`) and `output_valid`:
 `null` without a schema, else `true` iff the output file parses as a JSON OBJECT. Prose or nothing
 still yields a row (`output_valid:false`; the grader runs and fails it).
 
@@ -77,11 +77,11 @@ that will not start, a timeout (process group killed), a crash, an auth failure 
 each produce a row with `pass:false` and an `error`. `pass` = grader exit 0 AND host exit 0 AND no
 timeout. TERM/INT on `run.sh` kills the host process group and removes the temp dirs.
 **Held-out rule.** `heldout` tasks never tune a skill, and every skill with tasks keeps at least
-one (lint enforces it). Reports never pool splits, models, sandbox modes or kinds.
+one (lint enforces it). Reports never pool splits, models, sandbox modes, kinds or languages.
 
 ## Reading the report
 `python3 benchmarks/eval/report.py results.jsonl [--markdown]`
-- per (skill, host, model, sandbox, split, **kind**, arm): n, success rate with a Wilson 95% interval
+- per (skill, host, model, sandbox, split, **language**, **kind**, arm): n, success rate with a Wilson 95% interval
   labelled **rep-level (optimistic)** (reps of one task are not independent), pass^k (share
   of tasks whose k reps ALL passed; k printed; unequal reps across arms print a WARNING),
   the mean per row of `false_positives` and `found` (descriptive), and tokens / seconds **spent per
@@ -95,15 +95,22 @@ one (lint enforces it). Reports never pool splits, models, sandbox modes or kind
   data", NOT "no effect"). Under 5 paired tasks: `insufficient tasks (n=k)`.
 - **Kinds are never pooled**: all of the above is per `kind`, with no verdict across kinds, so more
   real finds cannot be netted against more false alarms. For kinds `seeded` and `clean` two named
-  lines per (skill, host, model, sandbox, split): `recall (seeded)` = paired skill-minus-bare pass
+  lines per (skill, host, model, sandbox, split, language): `recall (seeded)` = paired skill-minus-bare pass
   rate on seeded tasks; `false-positive control (clean)` = the same on clean tasks (passing = no
   false defect raised, so `helps` still means better). `helps` + `hurts` = finds more, cries wolf more.
-  Each has an interval and verdict; `insufficient tasks (n=k)` under 5 paired tasks of THAT kind.
-- an unparseable line, or a row without `kind` (old file), is an error (file:line, exit 1).
+  Each has an interval and verdict; `insufficient tasks (n=k)` under 5 paired tasks of THAT kind and language.
+- **Languages are never pooled either** (`task.json` `"language": "go|rust|python"`, required): every
+  block and both named verdicts are per language. The 5-paired-task floor therefore applies per
+  (kind, language, split). Today's corpus (prod-review) has, per split (dev and heldout alike):
+  Go 4 seeded + 2 clean, Rust 2 seeded + 1 clean, Python 2 seeded + 1 clean. No (kind, language,
+  split) reaches 5, so every verdict this corpus can give today is `insufficient tasks (n=k)`; a
+  `helps`/`hurts` needs at least 5 paired tasks in that cell (Go seeded needs 1 more per split,
+  Go clean 3 more, Rust/Python seeded 3 more, Rust/Python clean 4 more).
+- an unparseable line, or a row without `kind` or `language` (old file), is an error (file:line, exit 1).
 ## Adding a task
 `corpus/<skill>/<task-id>/` (`<skill>` is one of the nine skill dirs, `<task-id>` = `id`):
 ```
-task.json            {"id","skill","split":"dev|heldout","kind":"<opaque, required>","prompt",
+task.json            {"id","skill","split":"dev|heldout","kind":"<opaque, required>","language":"<non-empty, required>","prompt",
                       "timeout_s","max_budget_usd","agent_mode":"read-only|workspace-write"}
 fixture/             what the agent sees
 fixture.setup.sh     optional, beside fixture/; runs in the workdir before the agent
@@ -114,7 +121,7 @@ The prompt is host-neutral and must not name the skill. JSON only. Every python 
 `python3 -I -B` and the scripts export `PYTHONDONTWRITEBYTECODE`; the selftest fails on any
 `__pycache__` under `benchmarks/eval/` outside `corpus/`. A `corpus/_*` dir (e.g. `_lib`) is shared
 helper code: lint skips it; each executable `corpus/*/_lib/*-selftest.sh` runs under `make eval`.
-Lint needs `kind`, shows each grader RED on the unsolved fixture and GREEN on the reference.
+Lint needs `kind` and `language`, shows each grader RED on the unsolved fixture and GREEN on the reference.
 
 ## Running
 ```
