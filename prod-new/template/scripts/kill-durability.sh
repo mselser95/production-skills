@@ -92,7 +92,8 @@
 # sourceable seam its newest assertion would be the kind of code that is only
 # ever executed by the environment least able to debug it.
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
+cd "${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" || exit 2
 
 IMAGE="${IMAGE:-<SERVICE>-kill-durability:scenario}"
 NAME="${NAME:-<SERVICE>-kill-durability}"

@@ -25,7 +25,8 @@
 #
 # Exit: 0 no slots remain · 1 slots remain (named) · 2 refused to answer
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
+cd "${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" || exit 2
 
 # The slot vocabulary, ASSEMBLED AT RUNTIME rather than written literally, and
 # that is not a style choice -- it is the fix for this script destroying itself.

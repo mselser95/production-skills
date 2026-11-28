@@ -83,7 +83,8 @@
 # because "0 findings" over 0 files and over 400 files is the same line and
 # the opposite fact.
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
+cd "${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" || exit 2
 
 # `"${@:-.}"` rather than a length test: bash 3.2 (the macOS system shell, and
 # therefore part of the portability floor every script here holds) treats

@@ -33,7 +33,8 @@ spec_only=0
 [[ "${1:-}" == "--spec-only" ]] && { spec_only=1; shift; }
 spec="${1:-}"
 [[ -n "$spec" && -r "$spec" ]] || { echo "acceptance-coverage: no readable spec given -- nothing checked is not a pass" >&2; exit 2; }
-root="${2:-$(cd "$(dirname "$spec")" && git rev-parse --show-toplevel 2>/dev/null || dirname "$spec")}"
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
+root="${2:-${PROD_UNIT_ROOT:-$(cd "$(dirname "$spec")" && git rev-parse --show-toplevel 2>/dev/null || dirname "$spec")}}"
 command -v python3 >/dev/null || { echo "acceptance-coverage: python3 unavailable -- unparsed is not valid" >&2; exit 2; }
 
 SPEC="$spec" ROOT="$root" SPEC_ONLY="$spec_only" python3 - <<'PY'
