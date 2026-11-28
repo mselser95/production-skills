@@ -57,6 +57,13 @@ jobs:
         run: |
           python3 -m pip install --quiet 'PyYAML==6.0.2'
           python3 -c "import yaml; print('PyYAML', yaml.__version__)"
+      # The Python service template's gate selftest proves each gate can fail by building
+      # the template's locked environment; without uv it skips those cases as one. uv is
+      # installed from the template's own hash-pinned requirements file.
+      - name: uv (hash-pinned, for the Python service gates selftest)
+        run: |
+          python3 -m pip install --quiet --require-hashes --only-binary=:all: -r prod-new/modules/service-python/template/ci/uv-requirements.txt
+          uv --version
 
       # Installed ahead of PATH so `make lint` picks up the pinned binary rather
       # than the image's. Verified in the same run by printing the version the
