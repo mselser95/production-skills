@@ -2041,11 +2041,28 @@ check "signal after delivery: the delivered branch exists and the caller's objec
 check "signal after delivery: no itrain-* left" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
 ident_end "signal after delivery" "$NC" objects
 
+# ONE helper for "the tool printed no traceback": every signal driver below imports it (the invariant is a clean
+# stderr, not only the right exit status; a SIG_IGN set while a second signal is queued prints "Exception ignored
+# ... Signal N ignored due to race condition" and still exits 128+n)
+cat >"$S/errmarks.py" <<'PYEOF'
+MARKS = ("Traceback", "Exception ignored", "OSError", "race condition", "BrokenPipe")
+
+
+def bad_stderr(text):
+    """The marks of a traceback found in the tool's stderr text (empty list = clean)."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    return [m for m in MARKS if m in text]
+PYEOF
+
 # (f) EARLY signals, deterministic: the tool pauses right after its handlers are installed and writes the
 # ready file first; a signal sent once it exists must end in a NORMAL exit 128+n (handler), never death by
 # the signal (the shell's $? hides that difference, so a python driver reads the real returncode)
 cat >"$S/early.py" <<'PYEOF'
 import os, signal, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from errmarks import bad_stderr
 
 script, repo, ready, sig, want, wt = sys.argv[1:7]
 env = dict(os.environ, TRAIN_SELFTEST="1", TRAIN_TEST_PAUSE_AFTER_HANDLERS="0.5", TRAIN_TEST_READY_FILE=ready)
@@ -2063,11 +2080,17 @@ else:
 for one in sig.split("+"):  # "TERM+INT": two different signals back to back; want = "143,130" (either is fine)
     p.send_signal(getattr(signal, "SIG" + one))
 try:
-    rc = p.wait(timeout=20)
+    out, _ = p.communicate(timeout=20)
+    rc = p.returncode
 except subprocess.TimeoutExpired:
     p.kill()
+    p.communicate()
     rc = "hang"
-print("ok" if rc in [int(x) for x in want.split(",")] else "rc %s, wanted a normal exit %s" % (rc, want))
+    out = b""
+if bad_stderr(out):
+    print("traceback marks %s" % bad_stderr(out))
+else:
+    print("ok" if rc in [int(x) for x in want.split(",")] else "rc %s, wanted a normal exit %s" % (rc, want))
 PYEOF
 for sg in HUP TERM INT; do
     case $sg in HUP) want=129 ;; TERM) want=143 ;; INT) want=130 ;; esac
@@ -2082,12 +2105,15 @@ done
 
 # (f1) TWO DIFFERENT signals 1 ms apart on the EARLY path: the first one's handler starts the exit and CPython's
 # finalization resets Python-level handlers to SIG_DFL, so a second signal arriving there kills the process with
-# the default action unless the tool blocks and ignores INT/TERM/HUP first. The hook holds the process INSIDE
+# the default action unless the tool blocks INT/TERM/HUP first (BLOCK only: SIG_IGN prints a race message). The hook holds the process INSIDE
 # module teardown (TRAIN_TEST_EARLY_EXIT_WINDOW) so the second signal lands in that window every time.
 # Invariant asserted: every run EXITED (returncode > 0, never a death by signal) with 128+n, n one of the two
 # signals sent. Which n wins is reported as a note, not asserted.
 cat >"$S/early2.py" <<'PYEOF'
 import collections, os, signal, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from errmarks import bad_stderr
 
 script, ready, tmpdir, reps = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 bad, wins = [], collections.Counter()
@@ -2100,7 +2126,7 @@ for order in ("HUP+INT", "INT+HUP", "INT+TERM", "TERM+INT"):
         env = dict(os.environ, TRAIN_SELFTEST="1", TRAIN_TEST_PAUSE_AFTER_HANDLERS="0.5", TRAIN_TEST_READY_FILE=ready,
                    TRAIN_TEST_EARLY_EXIT_WINDOW="0.25", TMPDIR=tmpdir)
         p = subprocess.Popen([sys.executable, "-I", "-B", script, "--repo", tmpdir], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, env=env)
+                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
         for _ in range(400):
             if os.path.exists(ready):
                 break
@@ -2114,11 +2140,15 @@ for order in ("HUP+INT", "INT+HUP", "INT+TERM", "TERM+INT"):
         time.sleep(0.001)
         p.send_signal(getattr(signal, "SIG" + sent[1]))
         try:
-            rc = p.wait(timeout=20)
+            _, err = p.communicate(timeout=20)
+            rc = p.returncode
         except subprocess.TimeoutExpired:
             p.kill()
-            p.wait()
+            p.communicate()
             rc = "hang"
+            err = b""
+        if bad_stderr(err):
+            bad.append("%s: stderr marks %s" % (order, bad_stderr(err)))
         if rc not in allowed:
             bad.append("%s: rc %s%s" % (order, rc, " (KILLED by signal %d)" % -rc if isinstance(rc, int) and rc < 0 else ""))
         else:
@@ -2217,6 +2247,9 @@ check "item 0: --no-recover leaves the red-alone member exactly as measured (no 
 cat >"$S/deliv.py" <<'PYEOF'
 import json, os, random, shutil, signal, subprocess, sys, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from errmarks import bad_stderr
+
 G = os.environ["REAL_GIT"]
 mode = sys.argv[1]
 script, caller, ready, tmpdir, wt = sys.argv[2:7]
@@ -2268,7 +2301,7 @@ def tool(extra_env, sig, delay, anchor=None):
                            capture_output=True, text=True).stdout.split()
     for lk in locks:
         os.unlink(lk)
-    return {"rc": p.returncode, "ref": len(rs), "line": len(lines), "lock": len(locks),
+    return {"rc": p.returncode if not bad_stderr(err) else "STDERR%s" % bad_stderr(err), "ref": len(rs), "line": len(lines), "lock": len(locks),
             "lockc": int(kept == "planted by another process\n"),
             "dyes": int("DOES exist" in js.get("delivery_error", "")),
             "json": int(bool(named) and named in [r.split()[0] for r in rs]),
@@ -2342,7 +2375,7 @@ elif mode == "pipe":  # the reader closes stdout before the tool writes: no trac
     for x in os.listdir(tmpdir):
         if x.startswith("itrain-"):
             shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
-    print("rc=%s traceback=%d ref=%d" % (p.returncode, int("Traceback" in err or "BrokenPipe" in err), len(rs)))
+    print("rc=%s traceback=%d ref=%d" % (p.returncode, int(bool(bad_stderr(err))), len(rs)))
 elif mode == "early":  # a signal 0-30 ms after spawn, maybe inside CPython's own start-up
     n, seed = int(sys.argv[7]), int(sys.argv[8])
     rng = random.Random(seed)

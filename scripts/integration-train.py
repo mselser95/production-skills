@@ -722,8 +722,7 @@ class Train:
         if self.cleaned:
             return
         self.cleaned = True
-        for sig in SIGS:
-            signal.signal(sig, signal.SIG_IGN)
+        _no_more_signals()  # the mask, never SIG_IGN: see the helper
         killed = bool(self.children)
         for proc in list(self.children):  # first stop everything that could still write, THEN remove
             self.reap(proc)
@@ -1539,13 +1538,13 @@ _EARLY = []
 def _no_more_signals():
     """From here to the end of the process no INT/TERM/HUP can change the exit status. CPython's
     finalization resets Python-level handlers to SIG_DFL once sys.exit has begun, so a flag in a
-    handler is not enough: the signals are BLOCKED (one that is pending stays pending) and IGNORED
-    (one that is ever unblocked is discarded, not delivered with the default action). Every path that
+    handler is not enough: the signals are BLOCKED (one that is pending stays pending and is discarded
+    when the process exits). They are deliberately NOT set to SIG_IGN: when a second signal is already
+    queued in CPython's machinery, switching its handler to SIG_IGN prints "Exception ignored while
+    calling signal handler ... OSError: Signal N ignored due to race condition" on stderr. Every path that
     ends the process after a signal, or after the verdict, goes through here: the early handler, the
     Train handler and its deferred exit in spawn(), and the exit of __main__."""
     signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))
-    for sig in SIGS:
-        signal.signal(sig, signal.SIG_IGN)
 
 
 class _FinalizeWindow:
