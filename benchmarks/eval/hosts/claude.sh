@@ -56,7 +56,16 @@ sb_exec=() sandboxed=0 claude_bin=claude
 # profile and the CLI's captured stdout/stderr, so the agent can neither read nor forge the result the grader row
 # is built from (the old `<home>/.eval-claude.json` sat in the agent-writable home: a rename-over forged tokens, cost and answer).
 sbxdir="$(mktemp -d "$(dirname "$home")/sbx.XXXXXX")" || { echo "claude.sh: cannot create the adapter dir (error: sandbox)" >&2; exit 79; }
-trap 'rm -rf "$sbxdir"' EXIT
+runpid=""
+# EXIT: take the watchdog (limited.py -> the CLI's process group) down first, then remove the adapter dir (descriptor walk, never a path-based rm)
+cleanup() {
+  if [[ -n "$runpid" ]]; then kill -TERM "$runpid" 2>/dev/null; wait "$runpid" 2>/dev/null; runpid=""; fi
+  python3 -I -B "$here/../lib/scrub.py" rmcell "$sbxdir" >/dev/null 2>&1
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT
+trap 'exit 129' HUP   # the CLI runs under a background `wait` below (a foreground child would defer the trap until it exits)
 if [[ "${EVAL_CLAUDE_NO_SANDBOX:-0}" == 1 || "${EVAL_NO_SANDBOX:-0}" == 1 ]]; then
   echo "claude.sh: WARNING: EVAL_NO_SANDBOX=1 / EVAL_CLAUDE_NO_SANDBOX=1 -- the agent runs UNCONFINED (row sandbox:off); results are not comparable with sandboxed rows" >&2
 else
@@ -97,6 +106,18 @@ else
 fi
 
 if ! eval_claude_auth; then echo "claude.sh: no usable credential (auth)" >&2; exit 78; fi
+# SECRET SET: the value of the exported authentication variable goes to $EVAL_SECRETS_FILE (run.sh's 0600 file in the cell root) through a
+# pipe, with the variable removed from the helper's environment (never argv, never env); xtrace is off while it is expanded. Unset: the
+# caller is not run.sh. A failure to record it is a credential failure (exit 78).
+record_secret() {
+  local xt=0 rc=0
+  case $- in *x*) xt=1 ;; esac
+  { set +x; } 2>/dev/null
+  printf %s "${!EVAL_AUTH_VAR}" | env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY python3 -I -B "$here/../lib/redact.py" add-stdin "$EVAL_SECRETS_FILE" || rc=$?
+  if [[ $xt -eq 1 ]]; then set -x; fi
+  return $rc
+}
+if [[ -n "${EVAL_SECRETS_FILE:-}" ]] && ! record_secret; then echo "claude.sh: cannot record the secret set (credential)" >&2; exit 78; fi
 
 if [[ $sandboxed -eq 1 ]]; then
   # The OS sandbox confines writes and denies secret reads, so Bash is allowed WITHOUT a pattern list
@@ -132,8 +153,9 @@ fi
 # holds it cannot keep this adapter waiting: it leaves $sbxdir/orphan (row error orphan-process).
 python3 -I -B "$here/../lib/limited.py" --capture "$raw" --orphan "$sbxdir/orphan" --stdin "$prompt" --stderr "$errf" 0 -- \
   python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gocache" --tmpdir "$celltmp" \
-  --set "CLAUDE_CONFIG_DIR=$home" --set "CLAUDE_CODE_TMPDIR=$celltmp" --pass "$EVAL_AUTH_VAR" -- ${sb_exec[@]+"${sb_exec[@]}"} "$claude_bin" "${args[@]}"
-rc=$?
+  --set "CLAUDE_CONFIG_DIR=$home" --set "CLAUDE_CODE_TMPDIR=$celltmp" --pass "$EVAL_AUTH_VAR" -- ${sb_exec[@]+"${sb_exec[@]}"} "$claude_bin" "${args[@]}" &
+runpid=$!
+wait "$runpid"; rc=$?; runpid=""
 if [[ -s "$errf" ]]; then tail -n 5 "$errf" | cut -c1-200 >&2; fi
 python3 -I -B "$here/../lib/parse_claude.py" "$raw" "$out" "$usage"
 prc=$?

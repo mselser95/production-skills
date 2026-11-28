@@ -52,20 +52,31 @@ case "$mode" in read-only|workspace-write) ;; *) echo "codex.sh: unknown agent_m
 
 real="${EVAL_CODEX_REAL_HOME:-$HOME/.codex}"
 copy="$home/auth.json" auth_pass=() runpid="" sbxdir="" staged=0 scrub_failed=0
-scrubpy="$here/../lib/scrub.py"
+scrubpy="$here/../lib/scrub.py" redactpy="$here/../lib/redact.py"
+# SECRET SET (README "Credentials"): what run.sh must find nowhere in the row, the captures or the kept files. Written to
+# $EVAL_SECRETS_FILE (run.sh's 0600 file in the cell root) at staging: the staged copy's bytes and every JSON string value >= 16 chars in
+# it, or the value of CODEX_API_KEY (through a pipe, with the variable removed from the helper's environment: never argv, never env).
+# No file, no setting: the caller is not run.sh (selftests of the adapter). Failure to record it is a credential failure (exit 78).
 # SCRUB SEQUENCE (the credential copy never outlives the CLI; nothing is ever copied back out): (1) close the control FIFO:
 # the holder started at staging wipes the STAGED INODE through the descriptor it kept open (zeros, ftruncate, fsync), which
 # destroys the bytes for every hard link under any name or directory permission; (2) wait (bounded) for it; (3) reset
 # permissions/immutable flags of the agent-writable home from outside (the agent may have chmod 000 / chflags uchg);
-# (4) unlink; (5) verify the name is gone, else scrub_failed (exit 80, loud stderr). run.sh then removes the whole cell.
+# (4) unlink BY NAME through a directory-descriptor walk (lib/scrub.py rmname: every component opened O_NOFOLLOW|O_DIRECTORY,
+# permissions and flags reset on the way, so a home the agent replaced by a symlink is unlinked as a name and its target is
+# never touched; the name is recorded in <cell>/cell-tampered for run.sh); (5) verify the name is gone, else scrub_failed (exit 80).
+# run.sh then removes the whole cell.
 scrub_auth() {
   { set +x; } 2>/dev/null
   [[ $staged -eq 1 ]] || return 0
   exec 9>&-
   [[ -s "$sbxdir/holder.pid" ]] && python3 -I -B "$scrubpy" waitgone "$sbxdir/holder.pid" 5
-  python3 -I -B "$scrubpy" reset "$home"   # always first: with the home at mode 000 even `test -e` on the copy lies
-  rm -f "$copy"
-  if [[ -e "$copy" || -L "$copy" ]]; then
+  local o rc
+  o="$(python3 -I -B "$scrubpy" rmname "$(dirname "$home")" "$(basename "$home")/auth.json" 2>&1)"; rc=$?
+  if [[ "$o" == *"tampered "* ]]; then
+    printf '%s\n' "$(printf '%s\n' "$o" | sed -n 's/^tampered //p' | head -n 1)" >>"$(dirname "$home")/cell-tampered"
+    echo "codex.sh: CELL TAMPERED (error: cell-tampered): the agent replaced a name the credential copy lives under; the name was unlinked, its target untouched" >&2
+  fi
+  if [[ $rc -ne 0 ]]; then
     scrub_failed=1
     echo "codex.sh: SCRUB FAILED: the credential copy is still on disk at $copy (its content was wiped through the held descriptor, the name was not removable); remove $(dirname "$home") by hand" >&2
   fi
@@ -73,10 +84,13 @@ scrub_auth() {
 }
 cleanup() {
   if [[ -n "$runpid" ]]; then kill -TERM "$runpid" 2>/dev/null; wait "$runpid" 2>/dev/null; runpid=""; fi
-  scrub_auth; [[ -n "$sbxdir" ]] && rm -rf "$sbxdir"; return 0
+  scrub_auth
+  [[ -n "$sbxdir" ]] && python3 -I -B "$scrubpy" rmcell "$sbxdir" >/dev/null 2>&1
+  return 0
 }
 trap cleanup EXIT
-trap 'exit 143' TERM INT HUP   # `wait` below (not a foreground child) lets the trap fire at once; the EXIT trap scrubs
+trap 'exit 143' TERM INT
+trap 'exit 129' HUP   # `wait` below (not a foreground child) lets the trap fire at once; the EXIT trap scrubs
 # the adapter's own dir, in the cell's temp root next to the home: the profile (sandboxed) and the CLI's captured
 # stdout/stderr live here. The profile never re-allows it, so the agent cannot read, forge or replace them.
 sbxdir="$(mktemp -d "$(dirname "$home")/sbx.XXXXXX")" || { sbxdir=""; echo "codex.sh: cannot create the adapter dir (error: sandbox)" >&2; exit 79; }
@@ -119,12 +133,19 @@ fi
 
 if [[ -n "${CODEX_API_KEY:-}" ]]; then
   auth_pass=(--pass CODEX_API_KEY)
+  if [[ -n "${EVAL_SECRETS_FILE:-}" ]]; then
+    { set +x; } 2>/dev/null
+    printf %s "$CODEX_API_KEY" | env -u CODEX_API_KEY python3 -I -B "$redactpy" add-stdin "$EVAL_SECRETS_FILE" || { echo "codex.sh: cannot record the secret set (credential)" >&2; exit 78; }
+  fi
 elif [[ -e "$real/auth.json" || -L "$real/auth.json" ]]; then
   { set +x; } 2>/dev/null
   # lib/scrub.py hold: O_NOFOLLOW + regular-file check + a NEW file (O_EXCL) at 0600; the content is never inspected or
   # printed; the staged inode's descriptor stays open in a small holder process until the scrub (see scrub_auth)
   staged=1
   python3 -I -B "$scrubpy" hold "$real/auth.json" "$copy" "$sbxdir/ctl" "$sbxdir/holder.pid" || { scrub_auth; echo "codex.sh: cannot stage auth (credential)" >&2; exit 78; }
+  if [[ -n "${EVAL_SECRETS_FILE:-}" ]]; then
+    env -u CODEX_API_KEY -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN python3 -I -B "$redactpy" add-json-file "$EVAL_SECRETS_FILE" "$copy" || { scrub_auth; echo "codex.sh: cannot record the secret set (credential)" >&2; exit 78; }
+  fi
   exec 9>"$sbxdir/ctl"   # our end of the holder's control FIFO: closing it (or dying) makes the holder wipe
 else
   echo "codex.sh: no usable credential (auth)" >&2; exit 78

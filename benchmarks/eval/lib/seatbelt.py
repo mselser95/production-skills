@@ -48,6 +48,25 @@ SOCK_RE = r'(docker\.sock|agent[^/]*\.sock|S\.gpg-agent[^/]*|S\.ssh-agent[^/]*|/
 USAGE = ("usage: seatbelt.py <workdir> <home> <gocache> <tmpdir> <read-only|workspace-write> "
          "[--deny-root P]... [--allow-read P]... [--deny-read P]... [--reallow-read P]... [--protect P]... [--readonly-file P]...")
 
+# ONE delimited block, emitted last. `(allow default)` leaves every kernel/IPC channel open that does not touch a file path,
+# and those persist or act OUTSIDE the cell (a shared-memory name holding the staged credential outlives the cell; a
+# `kill -9` of the harness's holder process disables the credential wipe). Each rule below was shown OPEN by a probe before it was
+# added (selftest section 24); channels that were already closed (unix sockets and xattr outside the cell, launchd `submit`,
+# `defaults write` into the real user domain) have a case and no rule. Operation names are those macOS 27.2 accepts: an unknown
+# name makes sandbox-exec reject the whole profile, which the adapters turn into exit 79 (they run `sandbox-exec -f P /usr/bin/true` first).
+IPC_BLOCK = [
+    ";; BEGIN ipc-and-signal denies (seatbelt.py IPC_BLOCK)",
+    "(deny ipc-posix-shm*)",                      # POSIX shm: a named segment would outlive the cell and carry data out
+    "(deny ipc-posix-sem*)",                      # POSIX named semaphores: same, a name outside the cell
+    "(deny ipc-sysv-shm)",                        # SysV shared memory: a segment outlives the cell
+    "(deny ipc-sysv-sem)",                        # SysV semaphores
+    "(deny ipc-sysv-msg)",                        # SysV message queues
+    "(deny signal)",                              # no signal to any process ...
+    "(allow signal (target same-sandbox))",       # ... except the cell's own (itself and its children): the holder and the harness are outside
+    '(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name "com.apple.pboard"))',    # the user's pasteboard (pbcopy)
+    ";; END ipc-and-signal denies",
+]
+
 
 def bad(p):
     return '"' in p or "\\" in p or "\n" in p
@@ -172,6 +191,7 @@ def main():
         out.append('(deny file-write* (literal "%s"))' % os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(p))), os.path.basename(p)))
     out.append('(deny file-read* file-write* (regex #"%s"))' % SOCK_RE)
     out.append('(deny network-outbound (remote unix-socket (path-regex #"%s")))' % SOCK_RE)
+    out += IPC_BLOCK
     print("\n".join(out))
     return 0
 

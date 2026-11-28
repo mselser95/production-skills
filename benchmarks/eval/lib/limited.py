@@ -6,7 +6,7 @@ of its OWN process group and kills the WHOLE group when the limit passes, and
 also when cmd exits normally, so a host that leaves a background child behind
 cannot leak it into the next cell.
 
-Exit: 124 timed out (group killed) | 127 cannot start | else cmd's exit code.
+Exit: 124 timed out (group killed) | 127 cannot start | 143 TERM/INT, 129 HUP (group killed and reaped) | else cmd's exit code.
 
 --capture OUT: cmd's stdout is read HERE (outside any sandbox the cmd runs under) into OUT, so the cmd never holds
 a descriptor on a harness file. When the leader is gone the group is killed and the pipe gets ONE bounded grace
@@ -110,12 +110,15 @@ def main():
         return 127
     pgid = proc.pid
 
-    def forward(_sig, _frm):
+    def forward(sig, _frm):
+        # TERM/INT -> 143, HUP (a terminal hangup) -> 129: the child's group is taken down and REAPED either way (kill_group), so a
+        # hangup that reaches only this watchdog cannot leave the CLI running under a cell that is then removed
         kill_group(pgid, leader=proc)
-        os._exit(143)
+        os._exit(129 if sig == signal.SIGHUP else 143)
 
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
+    signal.signal(signal.SIGHUP, forward)
     if cap:
         timed_out = capture_loop(proc, pgid, out_fd, limit, orphan)
         if timed_out:

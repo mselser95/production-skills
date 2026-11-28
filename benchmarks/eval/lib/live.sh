@@ -62,7 +62,16 @@ for t in "${tasks[@]}"; do
         bash "$here/run.sh" --task "$t" --arm "$arm" --host "$h" --rep "$r" --out "$res" --model "$m" --order-seed "$seed"
         rc=$?
         if [[ $rc -eq 3 ]]; then echo "eval-live: STOP -- host $h cannot run here (credential or sandbox failure, row recorded)" >&2; exit 3; fi
-        if [[ $rc -eq 4 ]]; then echo "eval-live: STOP -- a credential copy could not be removed (scrub-failed, row recorded; see the run.sh stderr line above)" >&2; exit 4; fi
+        if [[ $rc -eq 4 ]]; then
+          # exit 4 covers several row classes (scrub-failed, credential-in-output, credential-in-kept-files, credential-scan-failed): name the row's
+          # own, and ONLY the class (the lowercase-and-dash prefix of its error text, never the rest: a path or a count may follow it)
+          cls="$(tail -n 1 "$res" 2>/dev/null | python3 -I -B -c 'import json,re,sys
+try: e=json.loads(sys.stdin.read()).get("error")
+except Exception: e=None
+m=re.match(r"[a-z]+(?:-[a-z]+)*", e) if isinstance(e,str) else None
+print(m.group(0) if m else "unknown")' 2>/dev/null)"
+          echo "eval-live: STOP -- the credential handling of a cell failed (row error class: ${cls:-unknown}; row recorded; see the run.sh stderr line above)" >&2; exit 4
+        fi
         [[ $rc -eq 0 ]] || echo "eval-live: run.sh could not even start $t $h $arm $r (rc $rc)" >&2
       done
       r=$((r + 1))

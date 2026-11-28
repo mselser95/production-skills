@@ -8,8 +8,24 @@ set -uo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/eval-selftest.XXXXXX")"
+# HERMETIC FROM THE FIRST LINE: the suite root is created here (the ONE use of the caller's TMPDIR, a mktemp and nothing else) and
+# TMPDIR and HOME are re-exported under it BEFORE anything runs, so run.sh's startup sweep, every mktemp and every adapter act inside the
+# root and never in the caller's real temp dir or home. `inroot` (below) re-checks this in every helper that starts the harness.
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/eval-selftest.XXXXXX")" || { echo "selftest: cannot create the suite root" >&2; exit 2; }
+SUITE_ROOT="$tmp"; mkdir -p "$tmp/tmp" "$tmp/home"
+export TMPDIR="$tmp/tmp" HOME="$tmp/home"
 trap 'rm -rf "$tmp"' EXIT
+# inroot [path...]: fail the WHOLE suite (one line, exit 97) unless the exported TMPDIR is under $SUITE_ROOT/tmp, the exported HOME under
+# $SUITE_ROOT/home and every path given (the TMPDIR/HOME a helper overrides with) under $SUITE_ROOT. `..` is never accepted.
+_under() { case "$1" in *"/.."*|*"../"*) return 1 ;; "$2"|"$2"/*) return 0 ;; esac; return 1; }
+inroot() {
+  local p
+  _under "${TMPDIR:-}" "$SUITE_ROOT/tmp" || { echo "selftest: FATAL: TMPDIR '${TMPDIR:-}' is not under the suite root $SUITE_ROOT/tmp: refusing to start the harness outside it" >&2; exit 97; }
+  _under "${HOME:-}" "$SUITE_ROOT/home" || { echo "selftest: FATAL: HOME '${HOME:-}' is not under the suite root $SUITE_ROOT/home: refusing to start the harness outside it" >&2; exit 97; }
+  for p in "$@"; do
+    _under "$p" "$SUITE_ROOT" && [[ "$p" != "$SUITE_ROOT" ]] || { echo "selftest: FATAL: '$p' is not under the suite root $SUITE_ROOT: refusing to start the harness outside it" >&2; exit 97; }
+  done
+}
 pass=0 total=0
 note() { # name ok(0/1) detail
   total=$((total + 1))
@@ -20,7 +36,7 @@ note() { # name ok(0/1) detail
 # Darwin only; a case that needs one is guarded with `darwin_only <id>`, which on any other
 # platform prints `SKIP <id> (darwin-only)` and returns 1. The ONE declaration of which cases
 # those are is the next line; the accounting at the bottom fails on any drift, on either platform.
-DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14s3 14t 14u 14u2 14v 14v2 14v3 14v4 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x 15y 15z1 15z2 15z3 15z4 19q 19x2 21a"
+DARWIN_ONLY_DECLARED="26l 14q2 14r 14s 14s2 14s3 14t 14u 14u2 14v 14v2 14v3 14v4 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x 15y 15z1 15z2 15z3 15z4 19q 19x2 21a 22s 24a 24b 24c 24d 24e 24f 24g 24h 24i 24j 24k"
 PLATFORM="$(uname)"; DO_SEEN="" DO_SKIPPED=""
 darwin_only() {
   DO_SEEN="$DO_SEEN $1"
@@ -81,6 +97,7 @@ ln -s ../../shared "$skills/prod-review/references"
 # cell <results> <task> <arm> <mode> [extra env assignments...]
 cell() {
   local res="$1" task="$2" arm="$3" mode="$4"; shift 4
+  inroot
   env STUB_MODE="$mode" STUB_SOLVE_CMD="$task/reference/solve.sh" EVAL_SKILLS_ROOT="$skills" "$@" \
     bash "$here/run.sh" --task "$task" --arm "$arm" --host stub --rep 1 --out "$res" >/dev/null 2>&1
 }
@@ -298,6 +315,7 @@ note "13c host without credential -> row error:auth, run.sh exit 3" $ok "rc=$rc 
 # R2: TERM mid-cell kills the whole host process group and cleans the temp dirs
 sigtmp="$tmp/sigtmp"; mkdir -p "$sigtmp"; ready="$tmp/ready"; secs=$((5000 + RANDOM % 900))
 tt2="$(TASK_TIMEOUT=120 mktask "$corpus" prod-review t-sig dev good)"
+inroot "$sigtmp"
 env TMPDIR="$sigtmp" STUB_MODE=timeout STUB_CHILD_SECS="$secs" STUB_READY="$ready" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$tt2" --arm skill --host stub --rep 1 --out "$tmp/r13d.jsonl" >/dev/null 2>&1 &
 rpid=$!
@@ -343,6 +361,12 @@ note "13i make eval runs selftest, libtests and lint" $ok "recipe: $mk_eval"
 # install root (default-deny reads), and the canned output a case leaves for it (claude.out) must be readable there:
 # do NOT move it back under $tmp (15u proves a file there is unreadable to the fake, one in its install dir is readable).
 fb="$tmp/fakebin"; frec="$fb"; mkdir -p "$fb" "$tmp/outside"
+# EVAL_KEEP=1 no longer keeps the cell's `home` (agent-writable, credential-bearing): a case that reads what a fake CLI recorded THERE (claude.argv,
+# names.txt, codex.argv) gets it from a stub python3, first on PATH in $fb: for the ONE call that removes a cell with --keep (`scrub.py rmcell
+# <cell> --keep ...`) and only when TEE_HOME_TO is set, it copies <cell>/home to $TEE_HOME_TO first, then runs the real interpreter (absolute path,
+# resolved here: no recursion). It is test-side only: run.sh never sees it.
+REALPY0="$(command -v python3)"
+printf '#!/bin/sh\ncase " $* " in *scrub.py*" rmcell "*" --keep "*) if [ -n "${TEE_HOME_TO:-}" ]; then prev=""; for a in "$@"; do if [ "$prev" = rmcell ]; then mkdir -p "$TEE_HOME_TO"; cp -R "$a/home" "$TEE_HOME_TO/" 2>/dev/null; break; fi; prev="$a"; done; fi ;; esac\nexec "%s" "$@"\n' "$REALPY0" >"$fb/python3"; chmod +x "$fb/python3"
 realhome="$tmp/callerhome"; realcodex="$tmp/realcodex"; realclaude="$tmp/realclaude"; mkdir -p "$realhome" "$realcodex" "$realclaude"
 mkdir -p "$realhome/.ssh" "$realhome/.claude"; echo SSH-CANARY >"$realhome/.ssh/canary"; echo CFG-CANARY >"$realhome/.claude/canary"
 corpusfile="$(find "$here/corpus" -name task.json | sort | head -1)"
@@ -379,9 +403,9 @@ fi
 if [ -f "$frec/rotate" ]; then echo '{"canary":"ROTATED-CANARY"}' >"\$CODEX_HOME/auth.json"; fi
 if [ -f "$frec/changereal" ]; then echo '{"canary":"OTHER-PROCESS-CANARY"}' >"$realcodex/auth.json"; fi
 if [ -f "$frec/changesame" ]; then echo '{"canary":"ORIG-CANAXX"}' >"$realcodex/auth.json"; fi
-if [ -f "$frec/codex.jsonl" ]; then cat "$frec/codex.jsonl"; else
-echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'; fi
-echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+if [ -f "$frec/codex.jsonl" ]; then cat "$frec/codex.jsonl"; else   # a fixture is the WHOLE stream, its own terminal event included
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'; fi
 FAKE
 cat >"$fb/security" <<FAKE
 #!/usr/bin/env bash
@@ -403,6 +427,7 @@ adapter() {
   if [[ -n "$gitw" ]]; then ( cd "$AW" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 && git init -q . && git add -A \
     && git -c user.name=e -c user.email=e@e.invalid -c commit.gpgsign=false commit -q -m i && echo more >>README.md ) >/dev/null 2>&1; fi
   rm -f "${frec:?}/codex.argv" "${frec:?}/codex.env" "${frec:?}/codex.cwd" "${frec:?}/codex.hadauth" "${frec:?}/codex.stdin"
+  inroot
   ( cd "$tmp" && env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u CODEX_API_KEY \
       ${nosb_default[@]+"${nosb_default[@]}"} ${cxnosb[@]+"${cxnosb[@]}"} PATH="$fb:$PATH" HOME="$realhome" OLDPWD=/some/repo CLAUDECODE=1 CLAUDE_EFFORT=high CLAUDE_CODE_SESSION_ID=sess-x \
       CLAUDE_CODE_MESSAGING_TOKEN=msgtok CLAUDE_CODE_CHILD_SESSION=1 EVAL_CANARY=canary-var \
@@ -519,6 +544,7 @@ if [[ $arc -eq 0 && "$(cat "$frec/codex.hadauth")" == no && "$(grep -c '^CODEX_A
 note "14o codex: an exported CODEX_API_KEY is preferred and no auth.json is copied" $ok "rc=$arc"
 # EVAL_KEEP=1 through run.sh: the dir stays, the credential does not
 keeptmp="$tmp/keeptmp"; mkdir -p "$keeptmp"; ktask="$(mktask "$corpus" prod-review t-keep dev good)"
+inroot "$keeptmp"
 env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$keeptmp" EVAL_KEEP=1 EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$ktask" --arm skill --host codex --rep 1 --out "$tmp/r14p.jsonl" >/dev/null 2>&1; rc=$?
 if [[ $rc -eq 0 && "$(nrows "$tmp/r14p.jsonl")" == 1 && -n "$(find "$keeptmp" -mindepth 1 -maxdepth 1 -name 'eval-cell.*' | head -1)" \
@@ -545,6 +571,7 @@ if [[ $arc -eq 7 && "$(cat "$frec/codex.hadauth")" == yes && ! -e "$AH/auth.json
 note "14n5 codex: the copy is scrubbed after a failing CLI (exit 7 propagated), real file untouched" $ok "rc=$arc"
 rm -f "$frec/ready.fifo" "$frec/codex.pid"; mkfifo "$frec/ready.fifo"; exec 7<>"$frec/ready.fifo"; : >"$frec/hang"
 mkdir -p "$tmp/sigh" "$tmp/sigw" "$tmp/sigg"; echo "do the thing" >"$tmp/ap.txt"
+inroot
 ( cd "$tmp" && exec env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" EVAL_GOCACHE="$tmp/sigg" EVAL_CODEX_REAL_HOME="$realcodex" \
   bash "$here/hosts/codex.sh" "$tmp/sigw" "$tmp/sigh" "$tmp/ap.txt" "$tmp/sigout.txt" "$tmp/sigusage.json" "" 0.5 read-only "" ) >"$tmp/sig.out" 2>"$tmp/sig.err" &
 sigpid=$!
@@ -570,8 +597,10 @@ import json, sys
 t = json.load(open(sys.argv[1])); t["agent_mode"] = "workspace-write"; json.dump(t, open(sys.argv[1], "w"))
 PY
 rm -f "$tmp/grader-ran"
+inroot
 bash "$here/run.sh" --task "$wwt" --arm bare --host stub --rep 1 --out "$tmp/rww.jsonl" >/dev/null 2>"$tmp/rww.err"; rc=$?
 rort="$(mktask "$wwcorp" prod-review t-rog dev always0)"; printf '#!/usr/bin/env bash\ntouch "%s"\necho "{\\"found\\":1}"; exit 0\n' "$tmp/grader-ran-ro" >"$rort/grade.sh"; rm -f "$tmp/grader-ran-ro"
+inroot
 bash "$here/run.sh" --task "$rort" --arm bare --host stub --rep 1 --out "$tmp/rro.jsonl" >/dev/null 2>&1; rc2=$?
 if [[ $rc -eq 0 && "$(rowval "$tmp/rww.jsonl" error)" == grader-unconfined && "$(rowval "$tmp/rww.jsonl" pass)" == false && ! -e "$tmp/grader-ran" && "$(cat "$tmp/rww.err")" == *grader-unconfined* \
    && $rc2 -eq 0 && "$(rowval "$tmp/rro.jsonl" error)" != grader-unconfined && -e "$tmp/grader-ran-ro" ]]; then ok=0; else ok=1; fi
@@ -624,7 +653,8 @@ note "15o sandbox ON: unrestricted Bash, no Bash(...) patterns, no escape-flag d
 fi
 runclaude() { # runclaude <task> <outfile> [env...] -> row file; kept home in $KT
   KT="$tmp/kt$((++kn))"; mkdir -p "$KT"; local task="$1" res="$2"; shift 2
-  env -u CODEX_API_KEY ${nosb_default[@]+"${nosb_default[@]}"} PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$KT" EVAL_KEEP=1 CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_SKILLS_ROOT="$skills" "$@" \
+  inroot "$KT"
+  env -u CODEX_API_KEY TEE_HOME_TO="$KT/homecopy" ${nosb_default[@]+"${nosb_default[@]}"} PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$KT" EVAL_KEEP=1 CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_SKILLS_ROOT="$skills" "$@" \
     bash "$here/run.sh" --task "$task" --arm bare --host claude --rep 1 --out "$res" >/dev/null 2>"$tmp/runclaude.err"
 }
 kn=0
@@ -633,7 +663,7 @@ kn=0
 # user's real /Users, so the canaries are ours. The probe host records what it can and cannot do.
 FT="$tmp/ft"; DR="$tmp/aaa-decoy:$FT"; mkdir -p "$tmp/aaa-decoy"   # the decoy root sorts FIRST: a rule honouring only its first filter would miss $FT
 FHOME="$FT/u/me"; FREPO="$FT/dev/repo"; FREPO2="$FT/dev2/repo-copy"; FCELLS="$FT/cells"; SK="$tmp/sk"
-fbs="$tmp/fakebin-sb"; REAL_USER_HOME="$HOME"
+fbs="$tmp/fakebin-sb"; REAL_USER_HOME="$FT/u"   # stand-in for the caller's home inside the fake tree (HOME itself is the suite's scratch home)
 mkdir -p "$fbs" "$FHOME/.ssh" "$FHOME/.claude-sfx" "$FHOME/.config/tool" "$FREPO/benchmarks/eval/corpus/x" "$FREPO/benchmarks/eval/results" "$FT/dev2" "$FCELLS" "$SK"
 echo SSH-CANARY >"$FHOME/.ssh/id"; echo HIST-CANARY >"$FHOME/.claude-sfx/history.jsonl"; echo CRED-FILE-CANARY >"$FHOME/.config/tool/creds"
 echo GITCFG-CANARY >"$FHOME/.gitconfig"; echo ZSH-CANARY >"$FHOME/.zsh_history"
@@ -889,7 +919,8 @@ note "14q seatbelt --reallow-read: refused when it contains a denied/protected p
 kcn=0
 runcodex() { # runcodex <task> <outfile> [env...] -> row file; kept cell dir in $KC
   KC="$tmp/kc$((++kcn))"; mkdir -p "$KC"; local task="$1" res="$2"; shift 2
-  env HOME="$realhome" TMPDIR="$KC" EVAL_KEEP=1 CODEX_API_KEY=k EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" PATH="$fb:$PATH" "$@" \
+  inroot "$KC"
+  env TEE_HOME_TO="$KC/homecopy" HOME="$realhome" TMPDIR="$KC" EVAL_KEEP=1 CODEX_API_KEY=k EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" PATH="$fb:$PATH" "$@" \
     bash "$here/run.sh" --task "$task" --arm bare --host codex --rep 1 --out "$res" >/dev/null 2>"$tmp/runcodex.err"
 }
 # fake Codex install under a fake caller home: the real binary sits INSIDE the real Codex home, next to the auth stand-in,
@@ -967,9 +998,10 @@ if darwin_only 14t; then
 # through run.sh with the DEFAULT roots: both hosts are 'seatbelt'; the argv is the sandboxed one; only the install dir is re-allowed
 runcodex "$ttask" "$tmp/r14t.jsonl" PATH="$CXP" EVAL_CODEX_REAL_HOME="$CXR"; rc=$?
 cav="$(find "$KC" -name codex.argv | head -1)"; binrp="$(rprobe "$CXREL/bin")"; relrp="$(rprobe "$CXREL")"
+allow_ln="$(grep '^(allow file-read\*' "$frec/sbx.copy")"   # captured, then matched (no early-exit grep on a pipe under pipefail)
 if [[ $rc -eq 0 && -n "$cav" && "$(rowval "$tmp/r14t.jsonl" sandbox)" == seatbelt && "$(argafter "$cav" -s)" == danger-full-access && "$(argafter "$cav" -c)" == approval_policy=never ]] \
    && ! grep -q -- '--add-dir\|workspace-write\|dangerously' "$cav" && grep -qx -- --ignore-user-config "$cav" && grep -qx -- - "$cav" \
-   && grep '^(allow file-read\*' "$frec/sbx.copy" | grep -qF "(subpath \"$binrp\")" && ! grep '^(allow file-read\*' "$frec/sbx.copy" | grep -qF "(subpath \"$relrp\")" \
+   && grep -qF "(subpath \"$binrp\")" <<<"$allow_ln" && ! grep -qF "(subpath \"$relrp\")" <<<"$allow_ln" \
    && grep -qF "(deny file-read* file-write* (subpath \"$(rprobe "$CXR")\"))" "$frec/sbx.copy"; then ok=0; else ok=1; fi
 note "14t codex via run.sh: row sandbox:seatbelt, argv -s danger-full-access + approval_policy=never (no --add-dir/workspace-write), profile re-allows ONLY the install dir and denies the real Codex home" $ok "rc=$rc row: $(cut -c1-160 "$tmp/r14t.jsonl" 2>&1) argv: $(tr '\n' '|' <"$cav" 2>/dev/null)"
 fi
@@ -1073,7 +1105,8 @@ ad="$tmp/anc14"; mkdir -p "$ad/cell/work"; echo SIB >"$ad/sibling-file"; echo SI
 python3 -I -B "$here/lib/seatbelt.py" "$ad/cell/work" "$ad/cell/home" "$ad/cell/gc" "$ad/cell/tmp" read-only --deny-root "$tmp" >"$ad/p.sb"; prc=$?
 sbt() { /usr/bin/sandbox-exec -f "$ad/p.sb" "$@" >/dev/null 2>&1 && echo ok || echo denied; }
 r1="$(sbt /usr/bin/stat "$ad")"; r2="$(sbt /bin/ls "$ad")"; r3="$(sbt /bin/cat "$ad/sibling-file")"; r4="$(sbt /usr/bin/stat "$ad/sibling-file")"; r5="$(sbt /bin/cat "$ad/cell/sibling2")"
-if [[ $prc -eq 0 && "$r1" == ok && "$r2" == denied && "$r3" == denied && "$r4" == denied && "$r5" == denied ]] && grep -q '^(allow file-read-metadata (literal ' "$ad/p.sb" && ! grep '^(allow file-read-metadata' "$ad/p.sb" | grep -q subpath; then ok=0; else ok=1; fi
+meta_ln="$(grep '^(allow file-read-metadata' "$ad/p.sb")"   # captured, then matched
+if [[ $prc -eq 0 && "$r1" == ok && "$r2" == denied && "$r3" == denied && "$r4" == denied && "$r5" == denied ]] && grep -q '^(allow file-read-metadata (literal ' "$ad/p.sb" && ! grep -q subpath <<<"$meta_ln"; then ok=0; else ok=1; fi
 note "14q2 ancestors of the cell: stat works, but ls, cat of a sibling file and stat of a sibling file are all denied (metadata rule is literals only)" $ok "prc=$prc stat=$r1 ls=$r2 cat-sibling=$r3 stat-sibling=$r4 cat-sibling-of-cell=$r5"
 fi
 if darwin_only 14u2; then
@@ -1133,15 +1166,19 @@ note "16a2 codex: a same-length edit of the real auth.json is still detected (di
 echo '{"canary":"ORIG-CANARY"}' >"$realcodex/auth.json"
 # N8: the preflight says missing when there is no credential
 emptyc="$tmp/emptyc"; mkdir -p "$emptyc" "$tmp/emptyx"
+inroot
 out1="$(env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN PATH="$fb:$PATH" HOME="$realhome" EVAL_CLAUDE_AUTH_DIR="$emptyc" bash "$here/lib/authcheck.sh" claude 2>&1)"; rc1=$?
+inroot
 out2="$(env -u CODEX_API_KEY HOME="$realhome" EVAL_CODEX_REAL_HOME="$tmp/emptyx" bash "$here/lib/authcheck.sh" codex 2>&1)"; rc2=$?
+inroot
 out3="$(env -u CODEX_API_KEY HOME="$realhome" EVAL_CODEX_REAL_HOME="$realcodex" bash "$here/lib/authcheck.sh" codex 2>&1)"; rc3=$?
+inroot
 out4="$(env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN PATH="$fb:$PATH" HOME="$realhome" EVAL_CLAUDE_AUTH_DIR="$realclaude" bash "$here/lib/authcheck.sh" claude 2>&1)"; rc4=$?
 if [[ $rc1 -eq 78 && $out1 == missing && $rc2 -eq 78 && $out2 == missing && $rc3 -eq 0 && $out3 == ok && $rc4 -eq 0 && $out4 == ok ]]; then ok=0; else ok=1; fi
 note "16b authcheck: missing -> exit 78, present -> ok (claude and codex)" $ok "claude-empty=$rc1/$out1 codex-empty=$rc2/$out2 codex-ok=$rc3/$out3 claude-ok=$rc4/$out4"
 # live loop: preflight refuses; a host that loses auth stops the loop after the first cell (N4)
 lc="$tmp/livecorp"; ld="$tmp/liveres"; mktask "$lc" prod-review t-live dev good >/dev/null
-live() { env EVAL_LIVE=1 EVAL_CORPUS="$lc" EVAL_RESULTS_DIR="$ld" EVAL_SKILLS_ROOT="$skills" HOME="$realhome" "$@" bash "$here/lib/live.sh" >"$tmp/live.out" 2>"$tmp/live.err"; }
+live() { inroot; env EVAL_LIVE=1 EVAL_CORPUS="$lc" EVAL_RESULTS_DIR="$ld" EVAL_SKILLS_ROOT="$skills" HOME="$realhome" "$@" bash "$here/lib/live.sh" >"$tmp/live.out" 2>"$tmp/live.err"; }
 rm -rf "$ld"; live EVAL_HOSTS=codex EVAL_CODEX_REAL_HOME="$tmp/emptyx" N=1; rc=$?
 if [[ $rc -eq 2 && -z "$(find "$ld" -name '*.jsonl' 2>/dev/null | head -1)" && "$(cat "$tmp/live.err")" == *"no usable credential"* ]]; then ok=0; else ok=1; fi
 note "16c live preflight refuses before spending when a host has no credential" $ok "rc=$rc $(head -c 200 "$tmp/live.err")"
@@ -1317,12 +1354,12 @@ if [[ $arc -eq 0 && "$(cat "$tmp/aout.txt")" == "just prose" ]]; then ok=0; else
 note "19g claude prose, structured_output null: the prose is passed through (the row will say output_valid:false)" $ok "rc=$arc out: $(head -c 200 "$tmp/aout.txt")"
 rm -f "$frec/claude.out"
 printf '%s\n' '{"findings":[{"id":3}]}' >"$frec/codex.last"
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[{\"id\":5}]}"}}' >"$frec/codex.jsonl"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[{\"id\":5}]}"}}' '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}' >"$frec/codex.jsonl"
 ADAPTER_SCHEMA="$sch" adapter codex read-only CODEX_API_KEY=k; arc=$?
 # 19h BEFORE: the -o last-message file was the document, preferred over the JSONL item. AFTER: a -o file (decoy {"id":3}, written if -o were passed) is never read; the stream's item is the document.
 if [[ $arc -eq 0 && "$(jdoc "$tmp/aout.txt")" == '{"findings": [{"id": 5}]}' ]]; then ok=0; else ok=1; fi
 note "19h codex: the stream's last agent_message is the document; a decoy last-message file is never read" $ok "rc=$arc out: $(head -c 200 "$tmp/aout.txt")"
-rm -f "$frec/codex.last"; printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[{\"id\":4}]}"}}' >"$frec/codex.jsonl"
+rm -f "$frec/codex.last"; printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[{\"id\":4}]}"}}' '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}' >"$frec/codex.jsonl"
 ADAPTER_SCHEMA="$sch" adapter codex read-only CODEX_API_KEY=k; arc=$?
 if [[ $arc -eq 0 && "$(jdoc "$tmp/aout.txt")" == '{"findings": [{"id": 4}]}' ]]; then ok=0; else ok=1; fi
 note "19i codex: no -o file written -> the last agent_message of the JSONL is the document" $ok "rc=$arc out: $(head -c 200 "$tmp/aout.txt")"
@@ -1381,7 +1418,8 @@ if [[ "$(argafter "$(find "$KT" -name claude.argv | head -1)" --json-schema)" ==
 note "19q3 run.sh -> claude adapter (grader skipped): the 9th argument carries the schema as --json-schema, on every platform" $ok "row: $(cut -c1-300 "$tmp/r19g3.jsonl" 2>&1)"
 rm -f "$frec/claude.out"
 printf '%s\n' '{"found":0,"findings":[]}' >"$frec/codex.last"   # decoy: never read now
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"found\":1,\"findings\":[]}"}}' >"$frec/codex.jsonl"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"found\":1,\"findings\":[]}"}}' '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}' >"$frec/codex.jsonl"
+inroot
 env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$jt" --arm bare --host codex --rep 1 --out "$tmp/r19h.jsonl" >/dev/null 2>&1; rc=$?
 rm -f "$frec/codex.last" "$frec/codex.jsonl"
@@ -1412,7 +1450,7 @@ lint_case "19v lint GREEN: schema present, reference writes a JSON object, kind 
 # Everything below uses a FAKE codex (a dir of ours first on PATH), a FAKE caller home and a FAKE credential. Nothing touches a real
 # ~/.codex, ~/.claude* or ~/.ssh. The fake's behaviour is the content of $fx/bin/mode, read from its own install dir (the sandboxed
 # environment is sealed, and a sandboxed fake may read only its own install root).
-SC="$tmp/s21"; mkdir -p "$SC/stubrm" "$SC/ftdeny"; fx="$SC/fx"; mkdir -p "$fx/bin"
+SC="$tmp/s21"; mkdir -p "$SC/stubpy" "$SC/ftdeny"; fx="$SC/fx"; mkdir -p "$fx/bin"
 S21CRED='{"canary":"S21-CRED-CANARY-0451"}'
 cat >"$fx/bin/codex" <<'FAKE'
 #!/usr/bin/env bash
@@ -1443,7 +1481,10 @@ echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK'"$res"'
 echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
 FAKE
 chmod +x "$fx/bin/codex"
-printf '#!/bin/sh\nexit 1\n' >"$SC/stubrm/rm"; chmod +x "$SC/stubrm/rm"
+# the removal seam of the harness is `python3 .../lib/scrub.py rmcell` (run.sh calls the interpreter by NAME, so a stub python3 first on PATH is the seam):
+# the stub execs the real interpreter (absolute path resolved HERE, before PATH changes: no recursion) for everything but that one argv
+REALPY="$(command -v python3)"
+printf '#!/bin/sh\ncase " $* " in *scrub.py*" rmcell "*) echo "survivor: injected" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' "$REALPY" >"$SC/stubpy/python3"; chmod +x "$SC/stubpy/python3"
 setfx() { echo "$1" >"$fx/bin/mode"; rm -f "$fx/bin/invoked"; echo "${GCAN:-$SC/canary-plant}" >"$fx/bin/canary-path"; }
 echo "$S21CRED" >"$realcodex/auth.json"; chmod 600 "$realcodex/auth.json"
 s21find() { grep -rl -D skip S21-CRED-CANARY-0451 "$@" 2>/dev/null | sort | tr '\n' ' '; }   # files under the given trees that hold the credential
@@ -1467,6 +1508,7 @@ fi
 kxn=0
 runfx() { # runfx <mode> [env...] -> $KX (TMPDIR of the run), row in $KX.jsonl, rc in $KXRC
   KX="$tmp/kx$((++kxn))"; mkdir -p "$KX"; setfx "$1"; shift
+  inroot "$KX"
   env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" TMPDIR="$KX" EVAL_CODEX_REAL_HOME="$realcodex" \
     EVAL_SKILLS_ROOT="$skills" "$@" bash "$here/run.sh" --task "$good" --arm bare --host codex --rep 1 --out "$KX.jsonl" >"$KX.out" 2>"$KX.err"
   KXRC=$?
@@ -1479,17 +1521,17 @@ for m in perms500 perms000 uchg; do
   note "21b/$m run.sh: after a chmod/uchg/hard-link attack the cell is removed (nothing left under the temp root, no credential byte anywhere)" $ok "rc=$KXRC left=[$left] row-error=$(rowval "$KX.jsonl" error)"
 done
 
-# 21c removal FAILS (a failing `rm` first on PATH, test-only): the row says scrub-failed with the path, exit 4, a loud line, and the staged
+# 21c removal FAILS (a stub python3 first on PATH, test-only: `scrub.py rmcell` exits 1 `survivor: injected`, everything else runs the real interpreter): the row says scrub-failed with the path, exit 4, a loud line, and the staged
 # inode plus every hard link to it are already EMPTY (the fd wipe does not depend on removal). The agent's own copy (copy.json) is the
 # one place the bytes survive, which is why the removal verification and the exit status exist.
-runfx perms500 PATH="$SC/stubrm:$fx/bin:$fb:$PATH"; python3 -I -B "$here/lib/scrub.py" reset "$KX"
+runfx perms500 PATH="$SC/stubpy:$fx/bin:$fb:$PATH"; python3 -I -B "$here/lib/scrub.py" reset "$KX"
 cell="$(find "$KX" -maxdepth 1 -name 'eval-cell.*' | head -1)"
 left="$(s21find "$KX")"
 if [[ $KXRC -eq 4 && "$(rowval "$KX.jsonl" error)" == scrub-failed:* && "$(cat "$KX.err")" == *"SCRUB FAILED"* && -n "$cell" \
-   && -e "$cell/home/auth.json" && ! -s "$cell/home/auth.json" && -e "$cell/celltmp/stash.json" && ! -s "$cell/celltmp/stash.json" \
+   && ! -s "$cell/home/auth.json" && -e "$cell/celltmp/stash.json" && ! -s "$cell/celltmp/stash.json" \
    && -e "$cell/gocache/stash2.json" && ! -s "$cell/gocache/stash2.json" && "$left" == "$cell/celltmp/copy.json " ]]; then ok=0; else ok=1; fi
 note "21c removal failure: row error scrub-failed:<path>, exit 4, SCRUB FAILED on stderr, hard-linked credential content already wiped" $ok "rc=$KXRC row-error=$(rowval "$KX.jsonl" error) cell=[$cell] left=[$left]"
-runfx perms500 PATH="$SC/stubrm:$fx/bin:$fb:$PATH" EVAL_KEEP=1; python3 -I -B "$here/lib/scrub.py" reset "$KX"
+runfx perms500 PATH="$SC/stubpy:$fx/bin:$fb:$PATH" EVAL_KEEP=1; python3 -I -B "$here/lib/scrub.py" reset "$KX"
 # (EVAL_KEEP keeps the dirs but never the credential name)
 if [[ $KXRC -eq 0 && -z "$(find "$KX" -name auth.json | head -1)" || $KXRC -eq 4 ]]; then ok=0; else ok=1; fi
 note "21c2 EVAL_KEEP=1 never keeps the credential copy (name removed, or exit 4 when removal failed)" $ok "rc=$KXRC"
@@ -1507,7 +1549,7 @@ w "$A" "$T" "$B" "$F"; tok="$(pc)"; r4=$?; u4="$(cat "$SC/st.usage")"; o4="$(cat
 w "$A" "$T" "$F"; pc >/dev/null; r5=$?
 w "$A" "$B" "$T"; tok6="$(pc)"; r6=$?
 w "$A" "$T" ""; pc >/dev/null; r7=$?
-if [[ $r1 -eq 0 && "$o1" == ANSWER && $r2 -eq 0 && "$o2" == SECOND && $r3 -eq 0 && $r4 -eq 3 && "$tok" == stream-trailing-data && "$u4" == *'"tokens_in": 0'* && -z "$o4" \
+if [[ $r1 -eq 0 && "$o1" == ANSWER && $r2 -eq 0 && "$o2" == SECOND && $r3 -eq 0 && $r4 -eq 3 && "$tok" == stream-trailing-data && "$u4" == *'"tokens_in": null'* && -z "$o4" \
    && $r5 -eq 3 && $r6 -eq 3 && "$tok6" == stream-trailing-data && $r7 -eq 0 ]]; then ok=0; else ok=1; fi
 note "21d parse_codex: events after turn.completed (a forged answer, a second terminal/usage) and two final answers after the last tool call are rejected (exit 3, stream-trailing-data); a tool call between answers, reasoning and a trailing blank line are fine" $ok "r=$r1,$r2,$r3,$r4,$r5,$r6,$r7 tok=[$tok] usage=$u4"
 runfx trailing; ec="$(rowval "$KX.jsonl" error)"
@@ -1534,18 +1576,21 @@ printf '#!/usr/bin/env bash\ncd "$1" && git status >/dev/null 2>&1\necho "{\\"fo
 printf '#!/usr/bin/env bash\ngit config core.fsmonitor %q\n' "sh -c 'touch $GCAN' #" >"$gt/fixture.setup.sh"
 # control: the plant works (plain git status runs it), otherwise (1) proves nothing
 ctl="$SC/ctlrepo"; mkdir -p "$ctl"; ( cd "$ctl" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 && git init -q . && git config core.fsmonitor "sh -c 'touch $GCAN' #" && echo a >f && git status >/dev/null 2>&1 ); ctlran=no; [[ -e "$GCAN" ]] && ctlran=yes; rm -f "$GCAN"
+inroot
 bash "$here/run.sh" --task "$gt" --arm bare --host stub --rep 1 --out "$SC/r21f1.jsonl" >/dev/null 2>&1; rc=$?
 if [[ "$ctlran" == yes && $rc -eq 0 && ! -e "$GCAN" && "$(rowval "$SC/r21f1.jsonl" pass)" == true ]]; then ok=0; else ok=1; fi
 note "21f1 the grader's git is neutralised: a repo-local core.fsmonitor (control: it does run under plain git) never runs under run.sh's grader" $ok "control-ran=$ctlran rc=$rc canary=$([[ -e "$GCAN" ]] && echo RAN || echo absent) row: $(cut -c1-200 "$SC/r21f1.jsonl" 2>&1)"
 # (2) EVAL_NO_SANDBOX codex: the workdir is writable in every mode -> grader refused BEFORE the host starts
 rm -f "$GCAN"; : >"$SC/r21f2.jsonl"
 setfx plant-git
+inroot
 env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$gt" --arm bare --host codex --rep 1 --out "$SC/r21f2.jsonl" >/dev/null 2>"$SC/r21f2.err"; rc=$?
 if [[ $rc -eq 0 && "$(rowval "$SC/r21f2.jsonl" error)" == grader-unconfined && "$(rowval "$SC/r21f2.jsonl" pass)" == false && ! -e "$GCAN" && ! -e "$fx/bin/invoked" ]]; then ok=0; else ok=1; fi
 note "21f2 codex under EVAL_NO_SANDBOX=1, read-only task: error grader-unconfined, the host is NEVER started (no model call), grader canary absent" $ok "rc=$rc invoked=$([[ -e "$fx/bin/invoked" ]] && echo yes || echo no) row: $(cut -c1-200 "$SC/r21f2.jsonl" 2>&1)"
 # (3) the host DID run (explicit EVAL_SKIP_GRADER) and planted a git config: workdir-tampered, grader never runs
 setfx plant-git; : >"$SC/r21f3.jsonl"
+inroot
 env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$gt" --arm bare --host codex --rep 1 --out "$SC/r21f3.jsonl" >/dev/null 2>"$SC/r21f3.err"; rc=$?
 if [[ $rc -eq 0 && "$(rowval "$SC/r21f3.jsonl" error)" == workdir-tampered && ! -e "$GCAN" && -e "$fx/bin/invoked" ]]; then ok=0; else ok=1; fi
@@ -1566,14 +1611,16 @@ EOF
     attr) printf '#!/usr/bin/env bash\necho "* filter=x" >"$1/.gitattributes"\n' >"$SC/tamper.sh" ;;
   esac
   rm -f "$GCAN"
+  inroot
   env STUB_MODE=solve STUB_SOLVE_CMD="$SC/tamper.sh" bash "$here/run.sh" --task "$gt" --arm bare --host stub --rep 1 --out "$SC/r21g-$tm.jsonl" >/dev/null 2>&1; rc=$?
   if [[ $rc -eq 0 && "$(rowval "$SC/r21g-$tm.jsonl" error)" == workdir-tampered && "$(rowval "$SC/r21g-$tm.jsonl" pass)" == false && ! -e "$GCAN" ]]; then ok=0; else ok=1; fi
   note "21g/$tm workdir tamper ($tm) between prepare and grade: error workdir-tampered, pass:false, grader canary absent" $ok "rc=$rc row: $(cut -c1-200 "$SC/r21g-$tm.jsonl" 2>&1)"
 done
-printf '#!/usr/bin/env bash\ntouch "$1/done.txt"; echo edit >>"$1/README.md"; git -C "$1" status >/dev/null 2>&1; git -C "$1" add -A 2>/dev/null\n' >"$SC/benign.sh"
+printf '#!/usr/bin/env bash\ntouch "$1/done.txt"; echo edit >>"$1/README.md"; git -C "$1" status >/dev/null 2>&1\n' >"$SC/benign.sh"   # (the index is part of the digest since W4: a `git add` is no longer benign, see 26f/index)
+inroot
 env STUB_MODE=solve STUB_SOLVE_CMD="$SC/benign.sh" bash "$here/run.sh" --task "$good" --arm bare --host stub --rep 1 --out "$SC/r21g-ok.jsonl" >/dev/null 2>&1
 if [[ "$(rowval "$SC/r21g-ok.jsonl" pass)" == true && "$(rowval "$SC/r21g-ok.jsonl" error)" == "<absent>" ]]; then ok=0; else ok=1; fi
-note "21g/ok worktree edits and an index refresh are NOT tamper: graded, pass:true" $ok "row: $(cut -c1-200 "$SC/r21g-ok.jsonl" 2>&1)"
+note "21g/ok worktree edits (tracked and untracked) and a read-only git status are NOT tamper: graded, pass:true" $ok "row: $(cut -c1-200 "$SC/r21g-ok.jsonl" 2>&1)"
 
 # 21h startup sweep: a stale cell of ours (000 home, locked dirs, a credential-shaped file) is removed; a foreign dir, a fresh cell, a kept cell and a symlink are not
 SW="$tmp/sweep"; mkdir -p "$SW/target" "$SW/other-old" "$SW/eval-cell.fresh" "$SW/eval-cell.keep" "$SW/eval-cell.stale1/home/sub" "$SW/eval-cell.stale1/celltmp"
@@ -1582,6 +1629,7 @@ ln -s "$SW/target" "$SW/eval-cell.link"
 echo "$S21CRED" >"$SW/eval-cell.stale1/home/auth.json"; chmod 600 "$SW/eval-cell.stale1/home/auth.json"; echo "$S21CRED" >"$SW/eval-cell.stale1/celltmp/stash"
 chmod 000 "$SW/eval-cell.stale1/home/sub" "$SW/eval-cell.stale1/celltmp"; chmod 500 "$SW/eval-cell.stale1/home"
 touch -t 202001010000 "$SW/eval-cell.stale1" "$SW/other-old" "$SW/eval-cell.keep" "$SW/target"   # the symlink target is OLD too: only the link-vs-dir check keeps it out
+inroot "$SW"
 env TMPDIR="$SW" bash "$here/run.sh" --task "$good" --arm bare --host stub --rep 1 --out "$SC/r21h.jsonl" >"$SC/r21h.out" 2>"$SC/r21h.err"; rc=$?
 if [[ $rc -eq 0 && ! -e "$SW/eval-cell.stale1" && -f "$SW/other-old/f" && -f "$SW/eval-cell.keep/f" && -d "$SW/eval-cell.fresh" && -L "$SW/eval-cell.link" \
    && "$(cat "$SW/target/canary")" == FOREIGN-TARGET && "$(cat "$SC/r21h.err")" == *"startup sweep removed stale cell $SW/eval-cell.stale1"* \
@@ -1594,19 +1642,890 @@ python3 -I -B - "$wpt/task.json" <<'PY'
 import json, sys
 t = json.load(open(sys.argv[1])); t["agent_mode"] = "workspace-write"; json.dump(t, open(sys.argv[1], "w"))
 PY
-pf() { env "${@:2}" bash "$here/run.sh" --task "$1" --host "${PFHOST:-codex}" --arm bare --rep 1 --preflight >/dev/null 2>&1; echo $?; }
+pf() { inroot; env "${@:2}" bash "$here/run.sh" --task "$1" --host "${PFHOST:-codex}" --arm bare --rep 1 --preflight >/dev/null 2>&1; echo $?; }
 pa="$(PFHOST=stub pf "$good" X=1)"; pb="$(PFHOST=stub pf "$wpt" X=1)"; pc_="$(pf "$good" EVAL_NO_SANDBOX=1)"; pd="$(PFHOST=claude pf "$good" EVAL_CLAUDE_NO_SANDBOX=1)"; pe="$(pf "$wpt" X=1)"
 pg=5; if [[ "$PLATFORM" == Darwin ]]; then pg="$(pf "$good" X=1)"; else pg=0; fi
 if [[ "$pa" == 0 && "$pb" == 5 && "$pc_" == 5 && "$pd" == 5 && "$pe" == 5 && "$pg" == 0 ]]; then ok=0; else ok=1; fi
 note "21i run.sh --preflight: graded only for read-only + (seatbelt | stub); refused (exit 5) for workspace-write and for any unsandboxed host" $ok "stub-ro=$pa stub-ww=$pb codex-nosb=$pc_ claude-nosb=$pd codex-ww=$pe codex-seatbelt-ro=$pg"
 # live.sh: skips such a cell BEFORE run.sh, so no host is invoked and no row is written; EVAL_SKIP_GRADER is refused there
 setfx normal; mkdir -p "$SC/lcorp/prod-review"; cp -R "$wpt" "$SC/lcorp/prod-review/t-pfw"
+inroot
 env EVAL_LIVE=1 N=1 EVAL_HOSTS=codex EVAL_CORPUS="$SC/lcorp" EVAL_RESULTS_DIR="$SC/lres" CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" \
   bash "$here/lib/live.sh" >"$SC/live.out" 2>"$SC/live.err"
+inroot
 env EVAL_LIVE=1 N=1 EVAL_HOSTS=codex EVAL_CORPUS="$SC/lcorp" EVAL_RESULTS_DIR="$SC/lres2" CODEX_API_KEY=k EVAL_SKIP_GRADER=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" \
   bash "$here/lib/live.sh" >/dev/null 2>"$SC/live2.err"; lrc=$?
 if [[ ! -e "$fx/bin/invoked" && "$(cat "$SC/live.err")" == *"SKIP prod-review/t-pfw on codex"* && -z "$(cat "$SC/lres"/*.jsonl 2>/dev/null)" && $lrc -eq 2 && "$(cat "$SC/live2.err")" == *EVAL_SKIP_GRADER* ]]; then ok=0; else ok=1; fi
 note "21j live.sh pre-flight skips an ungradeable cell with a reason before run.sh (host invoked: 0 times, no row), and refuses EVAL_SKIP_GRADER=1" $ok "invoked=$([[ -e "$fx/bin/invoked" ]] && echo yes || echo no) live.err: $(head -c 300 "$SC/live.err")"
+
+# ---- 22: the harness never removes or chmods by a path the agent could have replaced; the suite never leaves its root ---------
+# Finding 1: an agent that did `rm -rf $HOME; ln -s <victim> $HOME` made the old path-based `rm -f $home/auth.json` delete a file
+# OUTSIDE the cell. Now every removal is a directory-descriptor walk (lib/scrub.py rmcell / rmname). Finding 2: the suite exports its
+# own TMPDIR/HOME at the top and every helper that starts the harness calls `inroot`. Fake CLIs only, a fake victim, a fake caller home.
+SD="$tmp/s22"; mkdir -p "$SD/fxt/bin" "$SD/cells" "$SD/ftdeny"; VIC="$SD/victim"
+echo '{"canary":"S22-CRED-CANARY"}' >"$realcodex/auth.json"; chmod 600 "$realcodex/auth.json"
+cat >"$SD/fxt/bin/codex" <<'FAKE'
+#!/usr/bin/env bash
+D="$(cd "$(dirname "$0")" && pwd)"; mode="$(cat "$D/mode")"; V="$(cat "$D/victim")"; cat >/dev/null
+H="${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}"
+case "$mode" in
+  home) rm -rf "$H"; ln -s "$V" "$H" ;;
+  gocache) rm -rf "$GOCACHE"; ln -s "$V" "$GOCACHE" ;;
+  celltmp) rm -rf "$TMPDIR"; ln -s "$V" "$TMPDIR" ;;
+  nested) ln -s "$V" "$H/sub"; mkdir "$GOCACHE/d"; ln -s "$V" "$GOCACHE/d/e"; ln -s "$V/auth.json" "$TMPDIR/l" ;;
+  authlink) rm -f "$H/auth.json" "$H/.credentials.json"; ln -s "$V/auth.json" "$H/auth.json"; ln -s "$V/.credentials.json" "$H/.credentials.json" ;;
+esac
+case "$(basename "$0")" in
+  codex) echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'; echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}' ;;
+  *) echo '{"result":"OK","is_error":false,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":2}}' ;;
+esac
+FAKE
+cp "$SD/fxt/bin/codex" "$SD/fxt/bin/claude"; chmod +x "$SD/fxt/bin/codex" "$SD/fxt/bin/claude"
+# a victim directory the agent will aim at: files whose bytes, modes and mtimes must survive the cell
+mkvictim() {
+  rm -rf "$VIC"; mkdir -p "$VIC"; echo V-AUTH-CANARY >"$VIC/auth.json"; echo V-CRED-CANARY >"$VIC/.credentials.json"; echo V-CANARY >"$VIC/canary"
+  chmod 600 "$VIC/auth.json" "$VIC/.credentials.json"; chmod 640 "$VIC/canary"; touch -t 202001010000 "$VIC/auth.json" "$VIC/.credentials.json" "$VIC/canary"
+}
+vsig() { python3 -I -B -c 'import hashlib,os,sys
+d=sys.argv[1]
+print(oct(os.stat(d).st_mode))
+for n in sorted(os.listdir(d)):
+    p=os.path.join(d,n); st=os.lstat(p); print(n,oct(st.st_mode),int(st.st_mtime),hashlib.sha256(open(p,"rb").read()).hexdigest()[:12])' "$1"; }
+t22n=0
+t22() { # t22 <host> <mode> [env...] -> $T22 (the run's TMPDIR), row in $T22.jsonl, rc in $T22RC; the fake agent tampers as <mode> says, aimed at $VIC
+  local h="$1" m="$2"; shift 2; T22="$tmp/t22-$((++t22n))"; mkdir -p "$T22"
+  echo "$m" >"$SD/fxt/bin/mode"; echo "$VIC" >"$SD/fxt/bin/victim"
+  inroot "$T22" "$realhome"
+  env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 EVAL_CLAUDE_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$SD/fxt/bin:$fb:$PATH" HOME="$realhome" TMPDIR="$T22" \
+    EVAL_CODEX_REAL_HOME="$realcodex" CLAUDE_CODE_OAUTH_TOKEN=CRED-CANARY-123 EVAL_SKILLS_ROOT="$skills" "$@" \
+    bash "$here/run.sh" --task "$good" --arm bare --host "$h" --rep 1 --out "$T22.jsonl" >"$T22.out" 2>"$T22.err"
+  T22RC=$?
+}
+chk22() { # chk22 <case> <host> <mode> <keep 0|1> <wanted row error, or "-" for: NOT a cell-tampered row>
+  local n="$1" h="$2" m="$3" k="$4" want="$5" before after err cellroot rpass; mkvictim; before="$(vsig "$VIC")"
+  if [[ $k == 1 ]]; then t22 "$h" "$m" EVAL_KEEP=1; else t22 "$h" "$m"; fi
+  after="$(vsig "$VIC")"; err="$(rowval "$T22.jsonl" error)"; rpass="$(rowval "$T22.jsonl" pass)"
+  cellroot="$(find "$T22" -mindepth 1 -maxdepth 1 -name 'eval-cell.*' | head -1)"
+  ok=1
+  if [[ "$before" == "$after" && $T22RC -eq 0 && "$(nrows "$T22.jsonl")" == 1 ]]; then
+    if [[ "$want" == - ]]; then [[ "$err" != cell-tampered* ]] && ok=0; else [[ "$err" == "$want" && "$rpass" == false ]] && ok=0; fi
+  fi
+  if [[ $ok -eq 0 ]]; then
+    if [[ $k == 1 ]]; then   # EVAL_KEEP keeps the cell: it is still there, and removing it through the routine under test leaves nothing
+      if [[ -n "$cellroot" ]] && python3 -I -B "$here/lib/scrub.py" rmcell "$cellroot" >/dev/null 2>&1 && [[ ! -e "$cellroot" ]]; then ok=0; else ok=1; fi
+    else [[ -z "$cellroot" ]] && ok=0 || ok=1; fi
+  fi
+  note "$n victim files intact (bytes, mode, mtime), row error [$want], cell root $([[ $k == 1 ]] && echo kept || echo gone)" $ok "rc=$T22RC err=[$err] pass=$rpass cell=[$cellroot] victim: $(echo "$before" | tr '\n' ' ') -> $(echo "$after" | tr '\n' ' ')"
+}
+# 22a a replaced `home` (the reviewer's reproduction), both hosts, with and without EVAL_KEEP
+for h in codex claude; do for k in 0 1; do chk22 "22a/$h/keep$k home -> symlink to a victim dir:" "$h" home "$k" "cell-tampered: home"; done; done
+# 22b the other top-level cell children; nested links are ordinary content (unlinked as names, NOT an error row)
+for h in codex claude; do
+  chk22 "22b/$h gocache -> symlink:" "$h" gocache 0 "cell-tampered: gocache"
+  chk22 "22b/$h celltmp -> symlink:" "$h" celltmp 0 "cell-tampered: celltmp"
+  chk22 "22b/$h nested links (home/sub, gocache/d/e, celltmp/l):" "$h" nested 0 -
+done
+# 22c the staged credential name replaced by a symlink to a victim file: the victim survives (codex: the staged name itself is tampered)
+chk22 "22c/codex/keep0 auth.json -> symlink to a victim file:" codex authlink 0 "cell-tampered: home/auth.json"
+chk22 "22c/codex/keep1 auth.json -> symlink to a victim file:" codex authlink 1 "cell-tampered: home/auth.json"
+chk22 "22c/claude/keep0 .credentials.json -> symlink (nested link, ordinary content):" claude authlink 0 -
+# EVAL_KEEP now removes `home` as any run does (S2): links nested in it are ordinary content, as in keep0 (nothing named, victims intact)
+chk22 "22c/claude/keep1 auth.json and .credentials.json -> symlinks to victim files (nested links, ordinary content, EVAL_KEEP removes home like any run):" claude authlink 1 -
+# 22s (REAL sandbox-exec) the same attack under the real profile: the agent really can replace `home` there; the adapter must not follow it
+if darwin_only 22s; then
+  mkvictim; before="$(vsig "$VIC")"; echo home >"$SD/fxt/bin/mode"; echo "$VIC" >"$SD/fxt/bin/victim"; rm -f "$SD/cells/cell-tampered"
+  CXSB=1 adapter codex read-only ABASE="$SD/cells" DENYROOTS="$SD/ftdeny" PATH="$SD/fxt/bin:$fb:$PATH"; arc=$?; after="$(vsig "$VIC")"
+  if [[ $arc -eq 0 && "$before" == "$after" && ! -e "$AH" && ! -L "$AH" && "$(cat "$SD/cells/cell-tampered" 2>/dev/null)" == "$(basename "$AH")" ]]; then ok=0; else ok=1; fi
+  note "22s sandboxed codex replaces its home by a symlink to a victim: victim intact, the link unlinked as a name, tampering recorded for the row" $ok "rc=$arc home=$([[ -L "$AH" ]] && echo LINK || echo ok) tampered=[$(cat "$SD/cells/cell-tampered" 2>&1)] adapter: $(head -c 300 "$tmp/adapter.err") victim: $(echo "$before" | tr '\n' ' ') -> $(echo "$after" | tr '\n' ' ')"
+fi
+# 22d the hostile cell contents the removal must survive
+cat >"$SD/mkcell.py" <<'PY'
+import os, socket, stat, sys
+root = sys.argv[1]
+def w(p, c=b"x"):
+    with open(p, "wb") as f: f.write(c)
+for d in ("home", "gocache", "celltmp", "work", "sbx.1"):
+    os.makedirs(os.path.join(root, d))
+w(root + "/prompt.txt")
+os.makedirs(root + "/home/locked/inner"); w(root + "/home/locked/inner/f"); os.chmod(root + "/home/locked", 0)               # a mode-000 directory
+os.makedirs(root + "/work/ro/sub"); w(root + "/work/ro/sub/f"); os.chmod(root + "/work/ro/sub/f", 0o400); os.chmod(root + "/work/ro/sub", 0o500); os.chmod(root + "/work/ro", 0o500)   # a read-only tree
+os.mkfifo(root + "/celltmp/ff")
+cwd = os.open(".", os.O_RDONLY); os.chdir(root + "/celltmp"); s = socket.socket(socket.AF_UNIX); s.bind("sock"); s.close(); os.fchdir(cwd); os.close(cwd)   # a socket (relative bind: short path)
+for i in range(2000): w(root + "/gocache/f%d" % i)                                                                                # 2,000 files
+cwd = os.open(".", os.O_RDONLY); os.chdir(root + "/gocache")
+for i in range(200): os.mkdir("d"); os.chdir("d")
+w("deep"); os.fchdir(cwd); os.close(cwd)                                                                                            # a 200-deep chain
+w(root + "/home/a\nb"); os.makedirs(root + "/home/dir\nname")                                                                      # names with a newline
+if hasattr(os, "chflags"):                                                                                                         # user-immutable file and directory (macOS)
+    w(root + "/home/uchg-file"); os.chflags(root + "/home/uchg-file", stat.UF_IMMUTABLE)
+    os.makedirs(root + "/work/uchg-dir"); w(root + "/work/uchg-dir/f"); os.chflags(root + "/work/uchg-dir", stat.UF_IMMUTABLE)
+PY
+CELLD="$SD/hostile"; mkdir -p "$SD/hostile-parent"; CELLD="$SD/hostile-parent/eval-cell.H"
+python3 -I -B "$SD/mkcell.py" "$CELLD" >"$SD/mkcell.out" 2>&1; mrc=$?
+python3 -I -B "$here/lib/scrub.py" rmcell "$CELLD" >"$SD/rmcell.out" 2>"$SD/rmcell.err"; rrc=$?
+if [[ $mrc -eq 0 && $rrc -eq 0 && ! -e "$CELLD" && ! -L "$CELLD" ]]; then ok=0; else ok=1; fi
+note "22d rmcell removes mode-000 dirs, a read-only tree, uchg file+dir (macOS), a FIFO, a socket, 2,000 files, a 200-deep chain, newline names" $ok "mkcell=$mrc rmcell=$rrc $(head -c 200 "$SD/mkcell.out") $(head -c 200 "$SD/rmcell.err")"
+python3 -I -B "$SD/mkcell.py" "$CELLD" >/dev/null 2>&1   # --keep: the named top-level names stay, everything else goes, the root stays
+python3 -I -B "$here/lib/scrub.py" rmcell "$CELLD" --keep prompt.txt --keep nonexistent >/dev/null 2>&1; krc=$?
+if [[ $krc -eq 0 && "$(/bin/ls -A "$CELLD" | tr '\n' ' ')" == "prompt.txt " ]]; then ok=0; else ok=1; fi
+note "22d2 rmcell --keep NAME leaves exactly the kept top-level names (and the root), removes the rest" $ok "rc=$krc left=[$(/bin/ls -A "$CELLD" 2>&1 | tr '\n' ' ')]"
+python3 -I -B "$here/lib/scrub.py" rmcell "$CELLD" >/dev/null 2>&1
+# 22e the routine refuses a ROOT that is a symlink or is not ours: nothing is touched
+mkvictim; before="$(vsig "$VIC")"; ln -s "$VIC" "$SD/rootlink"
+python3 -I -B "$here/lib/scrub.py" rmcell "$SD/rootlink" >/dev/null 2>&1; r1=$?; python3 -I -B "$here/lib/scrub.py" rmname "$SD/rootlink" auth.json >/dev/null 2>&1; r2=$?
+python3 -I -B "$here/lib/scrub.py" rmname "$VIC" ../x >/dev/null 2>&1; r3=$?
+asother() { python3 -I -B -c 'import importlib.util,os,sys
+sp=importlib.util.spec_from_file_location("scrub",sys.argv[1]); m=importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+u=os.getuid(); m.os.getuid=lambda: u+1   # as if the directory were owned by someone else
+sys.exit(m.rmcell(sys.argv[2],[]) if sys.argv[3]=="cell" else m.rmname(sys.argv[2],"auth.json"))' "$here/lib/scrub.py" "$1" "$2"; }
+asother "$VIC" cell >/dev/null 2>&1; r4=$?; asother "$VIC" name >/dev/null 2>&1; r5=$?
+after="$(vsig "$VIC")"
+if [[ $r1 -eq 2 && $r2 -eq 2 && $r3 -eq 2 && $r4 -eq 2 && $r5 -eq 2 && "$before" == "$after" && -L "$SD/rootlink" ]]; then ok=0; else ok=1; fi
+note "22e rmcell/rmname refuse a symlink ROOT, a ROOT owned by another uid and a REL with '..': exit 2, nothing touched" $ok "rc=$r1/$r2/$r3/$r4/$r5 victim: $(echo "$before" | tr '\n' ' ') -> $(echo "$after" | tr '\n' ' ')"
+# 22h the swap between the stat and the open (simulated: the stat of `home` lies and reports the VICTIM's own identity while the name is a
+# symlink to it): O_NOFOLLOW on the open is what refuses it; without it the victim's files would be removed
+cat >"$SD/race.py" <<'PY'
+import importlib.util, os, sys
+sp = importlib.util.spec_from_file_location("scrub", sys.argv[1]); m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+cell, vic = sys.argv[2], sys.argv[3]
+real = os.stat; vst = real(vic)
+def lying(path, *a, **k):
+    if path == "home" and k.get("dir_fd") is not None:
+        return vst
+    return real(path, *a, **k)
+m.os.stat = lying
+sys.exit(m.rmcell(cell, []))
+PY
+mkvictim; before="$(vsig "$VIC")"; mkdir -p "$SD/race/eval-cell.R"; ln -s "$VIC" "$SD/race/eval-cell.R/home"
+python3 -I -B "$SD/race.py" "$here/lib/scrub.py" "$SD/race/eval-cell.R" "$VIC" >/dev/null 2>&1; rrc=$?; after="$(vsig "$VIC")"
+if [[ $rrc -ne 0 && "$before" == "$after" ]]; then ok=0; else ok=1; fi
+note "22h a stat that reports the victim's identity for a symlinked name does not make rmcell follow it (O_NOFOLLOW on the open): victim intact, nonzero exit" $ok "rc=$rrc victim: $(echo "$before" | tr '\n' ' ') -> $(echo "$after" | tr '\n' ' ')"
+# 22g sweep guard: unit-style string checks (no sweep is ever run against a shared temp root), then the run.sh wiring
+sw_ok=0; mkdir -p "$SD/gt"; ln -s /tmp "$SD/gt/lnk"
+for v in "" / /tmp /tmp/ /private/tmp /var/tmp /private/var/tmp /tmp//../tmp "$SD/gt/lnk" "$SD/gt/missing"; do
+  python3 -I -B "$here/lib/scrub.py" sweepok "$v" >/dev/null 2>&1 && { sw_ok=1; echo "sweepok allowed [$v]" >"$SD/g.why"; }
+done
+python3 -I -B "$here/lib/scrub.py" sweepok "$SD/gt" >/dev/null 2>&1 || { sw_ok=1; echo "sweepok refused our own dir" >"$SD/g.why"; }
+python3 -I -B -c 'import importlib.util,os,sys
+sp=importlib.util.spec_from_file_location("scrub",sys.argv[1]); m=importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+u=os.getuid(); m.os.getuid=lambda: u+1   # as if the directory were owned by someone else
+sys.exit(m.sweepok(sys.argv[2]))' "$here/lib/scrub.py" "$SD/gt" >/dev/null 2>&1 && { sw_ok=1; echo "sweepok allowed a foreign-owned dir" >"$SD/g.why"; }
+inroot "$SD/gt"; env TMPDIR="$SD/gt/missing" bash "$here/run.sh" --task "$good" --arm bare --host stub --rep 1 --out "$SD/g.jsonl" >/dev/null 2>"$SD/g.err"
+if [[ $sw_ok -eq 0 && "$(cat "$SD/g.err")" == *"startup sweep skipped"* ]]; then ok=0; else ok=1; fi
+note "22g sweep guard: '', /, /tmp, /private/tmp, /var/tmp, a link to /tmp, a missing dir and a dir owned by another uid are refused; our own dir is allowed; run.sh prints 'startup sweep skipped'" $ok "$(cat "$SD/g.why" 2>&1) err: $(head -c 200 "$SD/g.err")"
+# 22f hermeticity: with TMPDIR pointed at a directory that merely stands in for the caller's (inside the root, NOT the exported one) every
+# helper that starts the harness must refuse (exit 97, `inroot`), and the old probe cell in that directory survives
+STAND="$SD/callertmp"; mkdir -p "$STAND/eval-cell.SELFTESTPROBE"; echo probe >"$STAND/eval-cell.SELFTESTPROBE/f"; touch -t 202001010000 "$STAND/eval-cell.SELFTESTPROBE"
+f_bad=""
+for hp in "cell $SD/f.jsonl $good skill noop" "adapter codex read-only" "runclaude $good $SD/f2.jsonl" "runcodex $good $SD/f3.jsonl" "runfx noop" "live EVAL_HOSTS=none" "pf $good"; do
+  # shellcheck disable=SC2086
+  ( export TMPDIR="$STAND"; set -- $hp; "$@" ) >/dev/null 2>"$SD/f.err"; frc=$?
+  [[ $frc -eq 97 && "$(cat "$SD/f.err")" == *"is not under the suite root"* ]] || f_bad="$f_bad [${hp%% *}:rc=$frc]"
+done
+( export TMPDIR=/tmp; inroot ) >/dev/null 2>&1; i1=$?; ( export HOME=/nonexistent/h; inroot ) >/dev/null 2>&1; i2=$?; ( export TMPDIR="$SD/../x"; inroot ) >/dev/null 2>&1; i3=$?
+( unset TMPDIR; inroot ) >/dev/null 2>&1; i4=$?; ( inroot "$SD" ) >/dev/null 2>&1; i5=$?; ( inroot /etc ) >/dev/null 2>&1; i6=$?
+if [[ -z "$f_bad" && -d "$STAND/eval-cell.SELFTESTPROBE" && -f "$STAND/eval-cell.SELFTESTPROBE/f" && $i1 -eq 97 && $i2 -eq 97 && $i3 -eq 97 && $i4 -eq 97 && $i5 -eq 0 && $i6 -eq 97 ]]; then ok=0; else ok=1; fi
+note "22f hermetic: every harness-starting helper refuses a TMPDIR outside the exported suite TMPDIR (rc 97) and the probe cell survives; inroot fails for TMPDIR/HOME outside the root" $ok "bad=[$f_bad] probe=$([[ -f "$STAND/eval-cell.SELFTESTPROBE/f" ]] && echo alive || echo GONE) inroot rc=$i1/$i2/$i3/$i4/$i5/$i6"
+
+# ---- 23: the staged credential never persists in anything the harness keeps (lib/redact.py) ------------------------------------
+# Fake CLIs (no network, no model) leak a canary credential the way a real agent could; every case greps the row file, the --out dir, the
+# kept cell and the whole run's temp root for the canary RAW, base64, url-safe base64 and hex and expects NOTHING. EVAL_NO_SANDBOX +
+# EVAL_SKIP_GRADER: the host runs, the cell is judged on what it leaves behind.
+S23="$tmp/s23"; mkdir -p "$S23/bin" "$S23/rc"
+CAN="$(python3 -I -B -c 'import base64,secrets
+while True:   # a canary whose standard and url-safe base64 differ, so a missing variant is visible
+    t = "CANARY" + secrets.token_hex(10) + "??>~"
+    if base64.b64encode(t.encode()) != base64.urlsafe_b64encode(t.encode()): print(t); break')"
+CAN15="fifteen-chars-0"
+printf '{"tokens":{"access_token":"%s","note":"%s"},"k":"v"}\n' "$CAN" "$CAN15" >"$S23/rc/auth.json"; chmod 600 "$S23/rc/auth.json"
+python3 -I -B -c 'import base64,sys
+t=sys.argv[1].encode(); u=base64.urlsafe_b64encode(t).decode()
+print(t.decode()); print(base64.b64encode(t).decode()); print(u); print(u.rstrip("=")); print(t.hex()); print(t.hex().upper())' "$CAN" >"$S23/pats"
+cat >"$S23/bin/common.sh" <<'FAKE'
+D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; mode="$(cat "$D/mode")"; SEC="$(cat "$D/secret")"
+H="${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-}}"
+b64() { printf %s "$1" | base64 | tr -d '\n'; }
+hex() { python3 -I -B -c 'import binascii,sys; sys.stdout.write(binascii.hexlify(sys.argv[1].encode()).decode())' "$1"; }   # one contiguous lowercase string on every platform (xxd is absent on Debian and wraps at 60)
+hexu() { hex "$1" | tr a-f A-F; }
+emit() { python3 -I -B -c 'import json,sys
+t = sys.stdin.read()
+if sys.argv[1] == "claude": print(json.dumps({"result": t, "is_error": False, "total_cost_usd": 0.001, "usage": {"input_tokens": 1, "output_tokens": 2}}))
+else:
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": t}})); print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 1}}))' "$FAKEHOST"; }
+cat >/dev/null
+case "$mode" in
+  errfail) printf 'e1\ntool said: token=%s\ne3\n' "$SEC" >&2; exit 1 ;;   # three lines: the row keeps the last three, cut to 200 characters
+  raw) printf 'found %s here' "$SEC" | emit ;;
+  b64) printf 'found %s here' "$(b64 "$SEC")" | emit ;;
+  hex) printf 'found %s here' "$(hex "$SEC")" | emit ;;
+  hexu) printf 'found %s here' "$(hexu "$SEC")" | emit ;;
+  json) printf '{"found":1,"note":"%s"}' "$SEC" | emit ;;
+  big) python3 -I -B -c 'import sys
+s = sys.argv[1]; sys.stdout.write("a" * ((1 << 20) - 10) + s + "b" * 4500000)' "$SEC" | emit ;;
+  clean) printf 'all good' | emit ;;
+  copies)
+    printf %s "$SEC" >"$H/copy"; b64 "$SEC" >"$TMPDIR/x.b64"; printf %s "$SEC" >"$GOCACHE/g"
+    printf 'my notes %s\n' "$SEC" >"$PWD/notes.txt"; { head -c 64 /dev/urandom; printf %s "$(hex "$SEC")"; head -c 64 /dev/urandom; } >"$PWD/blob.bin"
+    echo harmless >"$PWD/keep.txt"; printf 'all good' | emit ;;
+esac
+FAKE
+for h in codex claude; do printf '#!/usr/bin/env bash\nFAKEHOST=%s\nsource "$(dirname "$0")/common.sh"\n' "$h" >"$S23/bin/$h"; chmod +x "$S23/bin/$h"; done
+mkdir -p "$S23/wcorp"; wt23="$(mktask "$S23/wcorp" prod-review t-ww23 dev good)"
+python3 -I -B - "$wt23/task.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); t["agent_mode"] = "workspace-write"; json.dump(t, open(sys.argv[1], "w"))
+PY
+t23n=0
+t23() { # t23 <host> <mode> <task> [env...] -> $T23 (the run's TMPDIR), row file $T23.out/rows.jsonl, rc $T23RC, stderr $T23.err
+  local h="$1" m="$2" tk="$3" auth=(); shift 3; T23="$S23/run$((++t23n))"; mkdir -p "$T23" "$T23.out"
+  echo "$m" >"$S23/bin/mode"; printf %s "${LEAK:-$CAN}" >"$S23/bin/secret"
+  if [[ $h == claude ]]; then auth=(CLAUDE_CODE_OAUTH_TOKEN="$CAN"); elif [[ -z "${CODEX_KEY_ROUTE:-}" ]]; then auth=(-u CODEX_API_KEY); else auth=(CODEX_API_KEY="$CAN"); fi
+  inroot "$T23" "$realhome"
+  env ${auth[@]+"${auth[@]}"} EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="${T23PATH:-$S23/bin:$fb:$PATH}" HOME="$realhome" TMPDIR="$T23" EVAL_CODEX_REAL_HOME="$S23/rc" \
+    EVAL_SKILLS_ROOT="$skills" "$@" bash "$here/run.sh" --task "$tk" --arm bare --host "$h" --rep 1 --out "$T23.out/rows.jsonl" >"$T23.stdout" 2>"$T23.err"
+  T23RC=$?; R23="$T23.out/rows.jsonl"
+}
+canfind() { grep -rlaF -D skip -f "$S23/pats" "$@" 2>/dev/null | sort | tr '\n' ' '; }   # files holding the canary in any of the covered encodings
+v23() { rowval "$R23" "$1"; }
+# 23-1 a CLI that exits 1 printing the token to stderr (both hosts): the row carries credential-in-output and not the token
+for h in codex claude; do
+  t23 "$h" errfail "$good"; left="$(canfind "$R23" "$T23.out" "$T23")"
+  if [[ $T23RC -eq 4 && "$(v23 error)" == credential-in-output && "$(v23 pass)" == false && "$(v23 error_before)" == "host exit 1:"* && -z "$left" && "$(nrows "$R23")" == 1 \
+     && "$(grep -c '^CREDENTIAL IN OUTPUT -- redacted in [0-9]* place(s)$' "$T23.err")" == 1 ]]; then ok=0; else ok=1; fi
+  note "23-1/$h CLI exits 1 printing the token: row error credential-in-output (exit 4, one loud line), no canary in row/out/cell/temp root" $ok "rc=$T23RC err=$(v23 error) before=$(v23 error_before) left=[$left]"
+done
+# 23-2 exit 0 printing the token to stdout: raw, base64, hex (both hosts)
+for h in codex claude; do for m in raw b64 hex hexu; do
+  t23 "$h" "$m" "$good" EVAL_KEEP=1; left="$(canfind "$R23" "$T23.out" "$T23")"
+  if [[ $T23RC -eq 4 && "$(v23 error)" == credential-in-output && "$(v23 pass)" == false && -z "$left" ]] && grep -q 'found \[REDACTED\] here' "$T23"/eval-cell.*/agent-output.txt; then ok=0; else ok=1; fi
+  note "23-2/$h/$m token on stdout ($m): the kept answer is redacted in place, row credential-in-output, no canary anywhere" $ok "rc=$T23RC err=$(v23 error) left=[$left]"
+done; done
+# 23-3 the token inside the JSON answer document: row redacted, error, not graded (no grader metrics)
+for h in codex claude; do
+  t23 "$h" json "$good" EVAL_KEEP=1; left="$(canfind "$R23" "$T23.out" "$T23")"
+  if [[ $T23RC -eq 4 && "$(v23 error)" == credential-in-output && "$(v23 pass)" == false && "$(v23 metrics)" == "{}" && -z "$left" ]] \
+     && python3 -I -B -c 'import glob,json,sys; d=json.load(open(glob.glob(sys.argv[1]+"/eval-cell.*/agent-output.txt")[0])); sys.exit(0 if d["note"]=="[REDACTED]" and d["found"]==1 else 1)' "$T23"; then ok=0; else ok=1; fi
+  note "23-3/$h the token inside the JSON answer: the stored document stays valid JSON with the value redacted, row credential-in-output, not graded" $ok "rc=$T23RC err=$(v23 error) metrics=$(v23 metrics) left=[$left]"
+done
+# 23-4 a nested JSON string value of a staged credential FILE (codex auth.json route): that value alone is detected
+LEAK="$CAN" t23 codex raw "$good"; left="$(canfind "$R23" "$T23.out" "$T23")"
+if [[ $T23RC -eq 4 && "$(v23 error)" == credential-in-output && -z "$left" ]]; then ok=0; else ok=1; fi
+note "23-4 codex auth.json route: the nested access_token (>= 16 chars, NOT the whole file) is found on its own" $ok "rc=$T23RC err=$(v23 error) left=[$left]"
+# 23-5 a 15-char value is not a secret; a clean run stays free of [REDACTED] and of the new row fields
+LEAK="$CAN15" t23 codex raw "$good" EVAL_KEEP=1
+if [[ $T23RC -eq 0 && "$(v23 error)" == grader-skipped ]] && ! grep -q 'REDACTED' "$R23" "$T23"/eval-cell.*/agent-output.txt \
+   && grep -q "found $CAN15 here" "$T23"/eval-cell.*/agent-output.txt; then ok=0; else ok=1; fi
+note "23-5a a 15-char JSON value is NOT treated as a secret: its text stays, no redaction, no error beyond grader-skipped, exit 0" $ok "rc=$T23RC err=$(v23 error)"
+for h in codex claude; do
+  t23 "$h" clean "$good" EVAL_KEEP=1
+  if [[ $T23RC -eq 0 && "$(v23 error)" == grader-skipped ]] && ! grep -q 'REDACTED\|error_before\|credential_paths' "$R23" && python3 -I -B -c 'import json,sys
+need = set("task skill split kind language output_valid arm host model rep pass metrics tokens_in tokens_out cost_usd duration_s exit timed_out sandbox order_seed skill_sha harness_sha ts error".split())
+sys.exit(0 if set(json.loads(open(sys.argv[1]).readline())) == need else 1)' "$R23"; then ok=0; else ok=1; fi
+  note "23-5b/$h a clean run: the row has exactly the pre-change keys (no error_before, no credential_paths), no [REDACTED]" $ok "rc=$T23RC row=$(cut -c1-200 "$R23")"
+done
+# 23-6 a secret spanning the scanner's chunk boundary in a 5 MB capture (the answer file)
+for h in codex claude; do
+  t23 "$h" big "$good" EVAL_KEEP=1; left="$(canfind "$R23" "$T23.out" "$T23")"
+  if [[ $T23RC -eq 4 && "$(v23 error)" == credential-in-output && -z "$left" && "$(wc -c <"$(ls "$T23"/eval-cell.*/agent-output.txt)")" -gt 5000000 ]]; then ok=0; else ok=1; fi
+  note "23-6/$h the canary straddles the 1 MiB chunk boundary of a 5 MB capture: found and redacted" $ok "rc=$T23RC err=$(v23 error) left=[$left]"
+done
+# 23-7 EVAL_KEEP=1: home gocache celltmp sbx.* are removed as in any run; work is scanned and a file holding the secret is DELETED
+for h in codex claude; do
+  t23 "$h" copies "$wt23" EVAL_KEEP=1; left="$(canfind "$R23" "$T23.out" "$T23")"; cellk="$(find "$T23" -mindepth 1 -maxdepth 1 -name 'eval-cell.*' | head -1)"
+  gone=""; for n in home gocache celltmp; do [[ -e "$cellk/$n" ]] && gone="$gone $n"; done; [[ -n "$(find "$cellk" -maxdepth 1 -name 'sbx.*')" ]] && gone="$gone sbx"
+  if [[ $T23RC -eq 4 && -n "$cellk" && -z "$gone" && ! -e "$cellk/work/notes.txt" && ! -e "$cellk/work/blob.bin" && -f "$cellk/work/keep.txt" && -f "$cellk/work/README.md" && -z "$left" \
+     && "$(v23 error)" == "credential-in-kept-files: 2 file(s)" && "$(v23 pass)" == false && "$(v23 credential_paths)" == "['blob.bin', 'notes.txt']" && ! -e "$cellk/.secrets" ]]; then ok=0; else ok=1; fi
+  note "23-7/$h EVAL_KEEP=1: home/gocache/celltmp/sbx gone, work/notes.txt (raw) and work/blob.bin (hex in binary) deleted, other work files kept, row credential-in-kept-files with the two paths" $ok "rc=$T23RC err=$(v23 error) paths=$(v23 credential_paths) still=[$gone] left=[$left] cell=$(ls "$cellk" 2>&1 | tr '\n' ' ')"
+done
+# 23-8 the secrets never appear in the argv or the environment of the helper: a python3 wrapper records both for every redact.py call
+mkdir -p "$S23/rec"; REALPY23="$(command -v python3)"
+printf '#!/bin/sh\ncase " $* " in *redact.py*) { echo "ARGV: $*"; env; } >>"%s/calls.txt" ;; esac\nexec "%s" "$@"\n' "$S23/rec" "$REALPY23" >"$S23/rec/python3"; chmod +x "$S23/rec/python3"
+: >"$S23/rec/calls.txt"
+T23PATH="$S23/rec:$S23/bin:$fb:$PATH" t23 claude errfail "$good"
+T23PATH="$S23/rec:$S23/bin:$fb:$PATH" CODEX_KEY_ROUTE=1 t23 codex errfail "$good"
+if [[ "$(grep -c '^ARGV: .*add-stdin' "$S23/rec/calls.txt")" -ge 2 && "$(grep -c '^ARGV: .*scan-file' "$S23/rec/calls.txt")" -ge 2 && -z "$(canfind "$S23/rec/calls.txt")" ]]; then ok=0; else ok=1; fi
+note "23-8 no secret in the argv or environment of any redact.py call (claude token route and codex CODEX_API_KEY route; $(grep -c '^ARGV:' "$S23/rec/calls.txt") calls recorded)" $ok "calls=$(grep -c '^ARGV:' "$S23/rec/calls.txt") leaked-in=[$(canfind "$S23/rec/calls.txt")]"
+# 23-9 redact.py on its own: links are not followed, a FIFO does not hang it
+RD="$S23/rd"; mkdir -p "$RD/tree/sub" "$RD/outside"; printf 'outside holds %s\n' "$CAN" >"$RD/outside/file"; ln -s "$RD/outside/file" "$RD/tree/link"; ln -s "$RD/outside" "$RD/tree/dlink"
+mkfifo "$RD/tree/fifo"; printf 'inside %s\n' "$CAN" >"$RD/tree/sub/hit.txt"; echo clean >"$RD/tree/sub/ok.txt"
+printf %s "$CAN" | python3 -I -B "$here/lib/redact.py" add-stdin "$RD/sec"
+# (limited.py closes inherited descriptors, so the secrets descriptor is opened INSIDE the bounded command)
+python3 -I -B "$here/lib/limited.py" 10 -- bash -c 'exec python3 -I -B "$1" scan-tree 3 "$2" 3<"$3"' _ "$here/lib/redact.py" "$RD/tree" "$RD/sec" >"$RD/o" 2>&1; rrc=$?
+if [[ $rrc -eq 3 && ! -e "$RD/tree/sub/hit.txt" && -f "$RD/tree/sub/ok.txt" && -L "$RD/tree/link" && -L "$RD/tree/dlink" && -p "$RD/tree/fifo" \
+   && "$(cat "$RD/outside/file")" == "outside holds $CAN" && "$(cat "$RD/o")" == *"deleted sub/hit.txt"* ]]; then ok=0; else ok=1; fi
+note "23-9 redact.py scan-tree: a symlink to a file/dir holding the canary is neither read nor deleted, a FIFO does not hang it (rc $rrc), the file inside is deleted" $ok "rc=$rrc out=$(head -c 200 "$RD/o")"
+
+# ---- 24: the cell cannot leave the staged credential anywhere outside itself, nor kill the guard (lib/seatbelt.py IPC_BLOCK) --------------
+# `(allow default)` leaves IPC channels open that persist or act outside the cell: POSIX shm/semaphores and SysV IPC (a named
+# segment outlives the cell), signals (kill -9 of the holder disables the credential wipe) and the pasteboard. Each case runs a probe
+# INSIDE a real seatbelt cell (seatbelt.py's own entry point, default roots) and checks from OUTSIDE; a control run of the same probe
+# outside the sandbox proves the probe is real. Every IPC object a case creates is removed by s24_clean even when the case fails.
+# provenance: candidate (TTL 2027-06-01), pinning: false -- the probe tools and operation names are those of macOS 27.x.
+s24="$tmp/s24"; mkdir -p "$s24/w" "$s24/home" "$s24/gc" "$s24/tmp" "$s24/real" "$s24/hold"; inroot "$s24"
+s24_id="$$"; s24_shm="/evs24s$s24_id"; s24_sem="/evs24m$s24_id"; s24_key="$(printf '0x%08x' $((0x45000000 + s24_id)))"
+s24_label="com.example.evaltest.s24.$s24_id"; s24_dom="com.example.evaltest.s24$s24_id"; s24_gkey="evaltest_s24_$s24_id"
+s24_realhome="$(python3 -I -B -c 'import os,pwd;print(pwd.getpwuid(os.getuid()).pw_dir)')"; s24_cp=""; s24_pbsaved=0
+s24_pyroot="$(python3 -I -B -c 'import sys;print(sys.base_prefix)')"
+S24_SHM='import os, sys, mmap
+import _posixshmem as P
+mode, name = sys.argv[1], sys.argv[2]
+try:
+    if mode == "create":
+        fd = P.shm_open(name, os.O_CREAT | os.O_RDWR, 0o600); os.ftruncate(fd, 64); m = mmap.mmap(fd, 64); m[:6] = b"CANARY"; print("created")
+    elif mode == "read":
+        fd = P.shm_open(name, os.O_RDWR, 0o600); m = mmap.mmap(fd, 64); print("READ", bytes(m[:6]).decode())
+    else:
+        P.shm_unlink(name); print("unlinked")
+except OSError as e:
+    print("DENIED" if mode == "create" else "ABSENT", e.errno)'
+S24_SEM='import sys
+import _multiprocessing as M
+mode, name = sys.argv[1], sys.argv[2]
+try:
+    if mode == "create":
+        M.SemLock(0, 1, 1, name, False); print("created")
+    elif mode == "exists":
+        try: M.SemLock(0, 1, 1, name, False); print("ABSENT")
+        except FileExistsError: print("EXISTS")
+    else:
+        M.sem_unlink(name); print("unlinked")
+except OSError as e:
+    print("DENIED" if mode == "create" else "ERR", e.errno)'
+S24_SYSV='import ctypes, ctypes.util, sys
+L = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+c = ctypes.c_int; key = int(sys.argv[1], 0); mk = 0o1000 | 0o600; bad = ctypes.c_void_p(-1).value
+L.shmat.restype = ctypes.c_void_p; L.shmat.argtypes = [c, ctypes.c_void_p, c]
+p = L.shmat(L.shmget(c(key), ctypes.c_size_t(4096), c(mk)), None, 0)
+buf = ctypes.create_string_buffer(b"\x01\0\0\0\0\0\0\0CANARY", 16)
+class U(ctypes.Union): _fields_ = [("val", c)]
+u = U(); u.val = 1234
+print("shmat=%s msgsnd=%d setval=%d" % ("FAIL" if p in (None, bad) else "OK", L.msgsnd(c(L.msgget(c(key), c(mk))), buf, ctypes.c_size_t(6), c(0)), L.semctl(c(L.semget(c(key), c(1), c(mk))), c(0), c(8), u)))'
+s24_prof="$s24/p.sb"
+python3 -I -B "$here/lib/seatbelt.py" "$s24/w" "$s24/home" "$s24/gc" "$s24/tmp" read-only --allow-read "$s24_pyroot" >"$s24_prof" 2>"$s24/p.err"; s24_prc=$?
+s24in() { (cd "$s24/w" && env -i PATH="$PATH" HOME="$s24/home" TMPDIR="$s24/tmp" /usr/bin/sandbox-exec -f "${S24_PROF:-$s24_prof}" "$@" 2>&1 9>&-); }   # run INSIDE the cell
+s24_sysv_ids() { ipcs -m -s -q 2>/dev/null | awk -v k="$s24_key" '$3 == k {print $1, $2}'; }   # "<m|s|q> <id>" of OUR key only
+s24_clean() {   # idempotent; removes only objects carrying this run's unique names/key/label/domain
+  [[ "$PLATFORM" == Darwin ]] || return 0
+  python3 -I -B -c "$S24_SHM" unlink "$s24_shm" >/dev/null 2>&1; python3 -I -B -c "$S24_SEM" unlink "$s24_sem" >/dev/null 2>&1
+  local t i; while read -r t i; do [[ -n "$t" ]] && ipcrm "-$t" "$i" 2>/dev/null; done < <(s24_sysv_ids)
+  if [[ -n "$s24_cp" ]]; then kill -KILL "$s24_cp" 2>/dev/null; wait "$s24_cp" 2>/dev/null; fi; s24_cp=""
+  launchctl remove "$s24_label" >/dev/null 2>&1
+  HOME="$s24_realhome" defaults delete "$s24_dom" >/dev/null 2>&1; HOME="$s24_realhome" defaults delete NSGlobalDomain "$s24_gkey" >/dev/null 2>&1
+  rm -f "$s24_realhome/Library/Preferences/$s24_dom.plist"   # `defaults delete` leaves an empty plist; this run's throwaway name only
+  if [[ $s24_pbsaved -eq 1 ]]; then pbcopy <"$s24/pb.saved"; s24_pbsaved=0; fi
+}
+trap 's24_clean; rm -rf "$tmp"' EXIT
+
+if darwin_only 24a; then   # POSIX shm
+  c1="$(python3 -I -B -c "$S24_SHM" create "$s24_shm" 2>&1)"; c2="$(python3 -I -B -c "$S24_SHM" read "$s24_shm" 2>&1)"; python3 -I -B -c "$S24_SHM" unlink "$s24_shm" >/dev/null 2>&1
+  i1="$(s24in python3 -I -B -c "$S24_SHM" create "$s24_shm")"; o1="$(python3 -I -B -c "$S24_SHM" read "$s24_shm" 2>&1)"; python3 -I -B -c "$S24_SHM" unlink "$s24_shm" >/dev/null 2>&1
+  if [[ "$c1" == created && "$c2" == "READ CANARY" && "$i1" == DENIED* && "$o1" == ABSENT* ]]; then ok=0; else ok=1; fi
+  note "24a POSIX shm: in-cell shm_open(O_CREAT) is denied and the name does not exist outside (control outside: created and read back)" $ok "control=[$c1|$c2] cell=[$i1] outside=[$o1]"
+fi
+if darwin_only 24b; then   # POSIX named semaphore
+  c1="$(python3 -I -B -c "$S24_SEM" create "$s24_sem" 2>&1)"; c2="$(python3 -I -B -c "$S24_SEM" exists "$s24_sem" 2>&1)"; python3 -I -B -c "$S24_SEM" unlink "$s24_sem" >/dev/null 2>&1
+  i1="$(s24in python3 -I -B -c "$S24_SEM" create "$s24_sem")"; o1="$(python3 -I -B -c "$S24_SEM" exists "$s24_sem" 2>&1)"; python3 -I -B -c "$S24_SEM" unlink "$s24_sem" >/dev/null 2>&1
+  if [[ "$c1" == created && "$c2" == EXISTS && "$i1" == DENIED* && "$o1" == ABSENT ]]; then ok=0; else ok=1; fi
+  note "24b POSIX named semaphore: in-cell sem_open(O_CREAT) is denied and the name does not exist outside (control outside: created, then seen)" $ok "control=[$c1|$c2] cell=[$i1] outside=[$o1]"
+fi
+if darwin_only 24c; then   # SysV shm / sem / msg: the data-carrying operations (attach, send, set value) are denied; CREATION of an empty object still succeeds on this macOS
+  s24_clean; c1="$(python3 -I -B -c "$S24_SYSV" "$s24_key" 2>&1)"; n1="$(s24_sysv_ids | wc -l | tr -d ' ')"; s24_clean
+  i1="$(s24in python3 -I -B -c "$S24_SYSV" "$s24_key")"; s24_clean; n2="$(s24_sysv_ids | wc -l | tr -d ' ')"
+  if [[ "$c1" == "shmat=OK msgsnd=0 setval=0" && "$n1" == 3 && "$i1" == "shmat=FAIL msgsnd=-1 setval=-1" && "$n2" == 0 ]]; then ok=0; else ok=1; fi
+  note "24c SysV IPC: an in-cell shmat, msgsnd and semctl(SETVAL) on objects it created are all denied (control outside: all succeed; our objects are removed afterwards)" $ok "control=[$c1]/$n1 cell=[$i1]/$n2"
+fi
+if darwin_only 24d; then   # signals: the holder and an unrelated process outside survive; the cell can still signal its own children
+  printf 'CRED-CANARY-24\n' >"$s24/real/auth.json"; rm -f "$s24/hold/copy" "$s24/hold/ctl" "$s24/hold/holder.pid"
+  python3 -I -B "$here/lib/scrub.py" hold "$s24/real/auth.json" "$s24/hold/copy" "$s24/hold/ctl" "$s24/hold/holder.pid" >/dev/null 2>&1; hrc=$?
+  exec 9>"$s24/hold/ctl"; hp="$(cat "$s24/hold/holder.pid" 2>/dev/null)"; sleep 300 9>&- & s24_cp=$!
+  cell_sh='for p in "$@"; do for s in 0 TERM KILL; do /bin/kill -$s "$p" 2>/dev/null; echo "k$s:$p:$?"; done; done
+sleep 3 & c=$!; kill -0 "$c" && echo child-kill0-ok; kill -TERM "$c" && echo child-term-ok; wait "$c"; echo "child-status:$?"
+sleep 3 & kill -KILL $! && echo child-kill9-ok'
+  cres="$(s24in /bin/bash -c "$cell_sh" _ "$hp" "$s24_cp")"
+  kill -0 "$hp" 2>/dev/null && h_alive=1 || h_alive=0; kill -0 "$s24_cp" 2>/dev/null && c_alive=1 || c_alive=0
+  denied=1; for p in "$hp" "$s24_cp"; do for s in 0 TERM KILL; do [[ "$cres" == *"k$s:$p:1"* ]] || denied=0; done; done
+  if grep -q CRED-CANARY-24 "$s24/hold/copy" 2>/dev/null; then wiped=held; else wiped=gone; fi
+  exec 9>&-; python3 -I -B "$here/lib/scrub.py" waitgone "$s24/hold/holder.pid" 5; if grep -q CRED-CANARY-24 "$s24/hold/copy" 2>/dev/null; then wiped2=held; else wiped2=gone; fi
+  if [[ $hrc -eq 0 && -n "$hp" && $h_alive -eq 1 && $c_alive -eq 1 && $denied -eq 1 && "$cres" == *child-kill0-ok* && "$cres" == *child-term-ok* && "$cres" == *child-status:143* \
+     && "$cres" == *child-kill9-ok* && "$wiped" == held && "$wiped2" == gone ]]; then ok=0; else ok=1; fi
+  note "24d signals: in-cell kill -0/-TERM/-KILL of the credential holder and of an unrelated outside process all fail and both stay alive; the cell can still signal its own children; the holder then wipes on close" $ok "hold=$hrc holder-alive=$h_alive canary-alive=$c_alive denied=$denied wiped-before=$wiped after=$wiped2 cell=[$(printf %s "$cres" | tr '\n' ' ' | cut -c1-260)]"
+  s24_clean
+fi
+if darwin_only 24e; then   # pasteboard
+  pbt="$(osascript -e 'clipboard info' 2>/dev/null | sed 's/«class[^»]*»//g; s/Unicode text//g; s/public\.utf8-plain-text//g; s/string//g; s/text//g' | tr -d '{}, 0-9')"
+  if [[ -n "$pbt" ]] || ! pbpaste >"$s24/pb.saved" 2>/dev/null; then printf '  SKIP  24e (the pasteboard holds non-text data that cannot be restored: [%s]; not counted)\n' "$pbt"
+  else
+    s24_pbsaved=1; base="evs24-base-$s24_id"; printf %s "$base" | pbcopy; c0="$(pbpaste)"
+    printf %s "evs24-canary-$s24_id" | s24in pbcopy >"$s24/pb.err" 2>&1; irc=$?
+    after="$(pbpaste)"; seen="$(s24in pbpaste)"; s24_clean
+    if cmp -s <(pbpaste) "$s24/pb.saved"; then restored=yes; else restored=no; fi
+    if [[ "$c0" == "$base" && $irc -ne 0 && "$after" == "$base" && "$seen" != *"$base"* && "$restored" == yes ]]; then ok=0; else ok=1; fi
+    note "24e pasteboard: in-cell pbcopy fails and the real pasteboard still holds what it held, an in-cell pbpaste does not see it, and the test restores the user's text" $ok "irc=$irc after=[$after] cell-paste=[$(printf %s "$seen" | head -c 60)] restored=$restored"
+  fi
+fi
+if darwin_only 24f; then   # defaults write to the REAL user domain (HOME = the real home: a hostile agent unsets the cell's)
+  HOME="$s24_realhome" defaults write "$s24_dom" k v >/dev/null 2>&1; ctl_ok=$?; ctl_v="$(HOME="$s24_realhome" defaults read "$s24_dom" k 2>/dev/null)"; HOME="$s24_realhome" defaults delete "$s24_dom" >/dev/null 2>&1
+  if [[ $ctl_ok -ne 0 || "$ctl_v" != v ]]; then printf '  SKIP  24f (defaults write does not work outside the sandbox here; not counted)\n'
+  else
+    s24in env HOME="$s24_realhome" defaults write "$s24_dom" k v >/dev/null; s24in env HOME="$s24_realhome" defaults write NSGlobalDomain "$s24_gkey" canary >/dev/null
+    d1="$(HOME="$s24_realhome" defaults read "$s24_dom" k 2>/dev/null)"; d2="$(HOME="$s24_realhome" defaults read NSGlobalDomain "$s24_gkey" 2>/dev/null)"
+    s24_clean
+    if [[ -z "$d1" && -z "$d2" ]]; then ok=0; else ok=1; fi
+    note "24f defaults write from the cell (a throwaway app domain and NSGlobalDomain, HOME = the real home): nothing lands in the real preferences (control outside: written, read, deleted)" $ok "domain=[$d1] global=[$d2]"
+  fi
+fi
+if darwin_only 24g; then   # launchd submit
+  launchctl submit -l "$s24_label" -- /usr/bin/true >/dev/null 2>&1; ctl_ok=$?; ctl_l="$(launchctl list 2>/dev/null | grep -c "$s24_label")"; launchctl remove "$s24_label" >/dev/null 2>&1
+  if [[ $ctl_ok -ne 0 || "$ctl_l" -lt 1 ]]; then printf '  SKIP  24g (launchctl submit does not work outside the sandbox here; not counted)\n'
+  else
+    s24in launchctl submit -l "$s24_label" -- /usr/bin/true >/dev/null; irc=$?; left="$(launchctl list 2>/dev/null | grep -c "$s24_label")"; s24_clean
+    if [[ $irc -ne 0 && "$left" == 0 ]]; then ok=0; else ok=1; fi
+    note "24g launchd: in-cell launchctl submit is refused (rc $irc) and no such label is listed outside (control outside: submitted, listed, removed)" $ok "rc=$irc labels-left=$left"
+  fi
+fi
+if darwin_only 24h; then   # unix socket outside the cell (already closed: case only)
+  s24h="$(python3 -I -B -c '
+import os, socket, subprocess, sys
+os.chdir(sys.argv[1]); p = "evs24.sock"
+if os.path.exists(p): os.unlink(p)
+srv = socket.socket(socket.AF_UNIX); srv.bind(p); srv.listen(5); srv.setblocking(False)
+cell = subprocess.run(sys.argv[2:], capture_output=True, text=True)
+try: srv.accept(); leaked = "yes"
+except BlockingIOError: leaked = "no"
+c = socket.socket(socket.AF_UNIX); c.connect(p); ctl = "ok"
+os.unlink(p); print("cell-rc=%d leaked=%s control=%s" % (cell.returncode, leaked, ctl))' "$s24/w" /usr/bin/sandbox-exec -f "$s24_prof" "$(command -v python3)" -I -B -c 'import socket; s = socket.socket(socket.AF_UNIX); s.connect("evs24.sock")' 2>&1)"
+  if [[ "$s24h" == "cell-rc=1 leaked=no control=ok" ]]; then ok=0; else ok=1; fi
+  note "24h unix socket outside the cell: an in-cell connect fails and nothing reaches the listener (control outside: connects)" $ok "$s24h"
+fi
+if darwin_only 24i; then   # xattr outside the cell (already closed: case only)
+  echo x >"$s24/real/xfile"; xattr -w user.evs24 ctl "$s24/real/xfile" >/dev/null 2>&1; ctl_ok=$?; xattr -d user.evs24 "$s24/real/xfile" >/dev/null 2>&1
+  s24in xattr -w user.evs24 cell "$s24/real/xfile" >/dev/null; irc=$?; left="$(xattr "$s24/real/xfile" 2>/dev/null | grep -c evs24)"
+  if [[ $ctl_ok -eq 0 && $irc -ne 0 && "$left" == 0 ]]; then ok=0; else ok=1; fi
+  note "24i xattr outside the cell: an in-cell xattr -w on a file outside is refused and no attribute lands (control outside: written)" $ok "control=$ctl_ok cell-rc=$irc left=$left"
+fi
+if darwin_only 24j; then   # the profile loads, an ordinary cell works, and an unknown operation name is REJECTED (fail closed)
+  work="$(s24in /bin/bash -c 'echo wrote-ok >"$HOME/f" && cat "$HOME/f"; sleep 0.1 & wait; python3 -I -B -c "print(40+2)"; /bin/ls "$PWD" >/dev/null && echo ls-ok')"
+  { cat "$s24_prof"; echo '(deny ipc-posix-shmm*)'; } >"$s24/typo.sb"; S24_PROF="$s24/typo.sb" s24in /usr/bin/true >/dev/null; typo_rc=$?
+  s24_pre=1; for h in claude codex; do grep -Eq '"\$sbx" -f "\$profile" /usr/bin/true >/dev/null 2>&1 \|\| \{ echo .*exit 79' "$here/hosts/$h.sh" || s24_pre=0; done
+  if [[ $s24_prc -eq 0 && "$work" == *wrote-ok* && "$work" == *42* && "$work" == *ls-ok* && $typo_rc -ne 0 && $s24_pre -eq 1 ]]; then ok=0; else ok=1; fi
+  note "24j the profile loads and a normal cell works; a profile with an unknown operation name is rejected by sandbox-exec (rc $typo_rc), and both adapters preflight the profile and exit 79 instead of running the CLI" $ok "gen=$s24_prc work=[$(printf %s "$work" | tr '\n' ' ' | cut -c1-120)] typo-rc=$typo_rc preflight-wired=$s24_pre $(head -c 120 "$s24/p.err")"
+fi
+if darwin_only 24k; then   # the block is ONE delimited block of exactly the audited rules
+  nb="$(grep -c '^;; BEGIN ipc-and-signal denies' "$s24_prof")"; ne="$(grep -c '^;; END ipc-and-signal denies' "$s24_prof")"
+  blk="$(awk '/^;; BEGIN ipc-and-signal/{on=1;next} /^;; END ipc-and-signal/{on=0} on' "$s24_prof" | tr '\n' '|')"
+  want='(deny ipc-posix-shm*)|(deny ipc-posix-sem*)|(deny ipc-sysv-shm)|(deny ipc-sysv-sem)|(deny ipc-sysv-msg)|(deny signal)|(allow signal (target same-sandbox))|(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name "com.apple.pboard"))|'
+  if [[ "$nb" == 1 && "$ne" == 1 && "$blk" == "$want" ]]; then ok=0; else ok=1; fi
+  note "24k the IPC/signal denies are ONE delimited block of exactly the audited rules" $ok "begin=$nb end=$ne block=[$blk]"
+fi
+trap 'rm -rf "$tmp"' EXIT; s24_clean
+
+# ---- 25: a result row never reports usage or a pass the stream did not establish (lib/parse_codex.py, lib/parse_claude.py, run.sh) --------
+# provenance: candidate (TTL 2027-06-01), pinning: false -- the contract is the parsers' docstrings; the streams below are written here, not
+# captured from a real CLI. Parser cases drive the parsers on fixture files; the run.sh cases use a FAKE codex (our dir first on PATH).
+S25="$tmp/s25"; mkdir -p "$S25/bin" "$S25/home" "$S25/realcodex"
+CX_A='{"type":"item.completed","item":{"type":"agent_message","text":"ANSWER"}}'
+CX_T='{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+cx_w() { printf '%s\n' "$@" >"$S25/in.jsonl"; }
+cx_run() { POUT="$(python3 -I -B "$here/lib/parse_codex.py" "$S25/in.jsonl" "$S25/o.txt" "$S25/u.json" 2>/dev/null)"; PRC=$?; }
+cl_run() { POUT="$(python3 -I -B "$here/lib/parse_claude.py" "$S25/in.json" "$S25/o.txt" "$S25/u.json" 2>/dev/null)"; PRC=$?; }
+uj() { python3 -I -B -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])).get(sys.argv[2],"<absent>")))' "$S25/u.json" "$1"; }
+ans() { cat "$S25/o.txt"; }
+nullu() { [[ "$(uj tokens_in)" == null && "$(uj tokens_out)" == null && "$(uj cost_usd)" == null ]]; }
+# 25a a complete valid stream: the answer and the usage
+cx_w "$CX_A" "$CX_T"; cx_run
+if [[ $PRC -eq 0 && "$(ans)" == ANSWER && "$(uj tokens_in)" == 5 && "$(uj tokens_out)" == 1 && "$(uj cost_usd)" == null && "$(uj usage_error)" == '"<absent>"' ]]; then ok=0; else ok=1; fi
+note "25a codex complete valid stream: answer + usage, exit 0, no error key" $ok "rc=$PRC out=$(ans) usage=$(cat "$S25/u.json")"
+# 25b no terminal event (what a CLI that exits 0 mid-turn leaves): stream-incomplete, usage NULL (F1: it was 0), no answer; also an empty stream
+cx_w "$CX_A"; cx_run; r1=$PRC; p1="$POUT"; n1=0; nullu || n1=1; a1="$(ans)"
+: >"$S25/in.jsonl"; cx_run; r2=$PRC; p2="$POUT"
+if [[ $r1 -eq 4 && "$p1" == stream-incomplete && $n1 -eq 0 && -z "$a1" && $r2 -eq 4 && "$p2" == stream-incomplete ]] && nullu; then ok=0; else ok=1; fi
+note "25b codex no terminal event / empty stream: stream-incomplete (exit 4), tokens null not 0, no answer" $ok "r=$r1,$r2 p=$p1,$p2 usage=$(cat "$S25/u.json")"
+# 25c turn.failed and an error event: host-error (exit 6), the message kept, usage null, no answer
+cx_w "$CX_A" '{"type":"turn.failed","error":{"message":"quota   exceeded"}}'; cx_run; r1=$PRC; p1="$POUT"; e1="$(uj error)"; n1=0; nullu || n1=1
+cx_w '{"type":"error","message":"stream broke"}' "$CX_A" "$CX_T"; cx_run; r2=$PRC; e2="$(uj error)"; a2="$(ans)"
+if [[ $r1 -eq 6 && "$p1" == host-error && "$e1" == *"turn.failed: quota exceeded"* && $n1 -eq 0 && $r2 -eq 6 && "$e2" == *"stream broke"* && -z "$a2" ]]; then ok=0; else ok=1; fi
+note "25c codex turn.failed / mid-stream error event: host-error (exit 6) with the message, usage null, no answer even when a turn.completed follows" $ok "r=$r1,$r2 e1=$e1 e2=$e2"
+# 25d BOM: at the start of the stream it is stripped; before the terminal line only, that line is invalid JSON
+printf '\xef\xbb\xbf%s\n%s\n' "$CX_A" "$CX_T" >"$S25/in.jsonl"; cx_run; r1=$PRC; a1="$(ans)"; t1="$(uj tokens_in)"
+printf '%s\n\xef\xbb\xbf%s\n' "$CX_A" "$CX_T" >"$S25/in.jsonl"; cx_run; r2=$PRC; p2="$POUT"; n2=0; nullu || n2=1
+if [[ $r1 -eq 0 && "$a1" == ANSWER && "$t1" == 5 && $r2 -eq 5 && "$p2" == stream-invalid && $n2 -eq 0 ]]; then ok=0; else ok=1; fi
+note "25d codex BOM at the start of the stream is stripped and parsed; a BOM before the terminal line only is stream-invalid (exit 5), usage null" $ok "r=$r1,$r2 ans=$a1 tok=$t1 p2=$p2"
+# 25e invalid JSON line, a non-object line, invalid UTF-8: stream-invalid (they used to be skipped silently)
+cx_w "$CX_A" '{not json' "$CX_T"; cx_run; r1=$PRC; p1="$POUT"
+cx_w "$CX_A" '5' "$CX_T"; cx_run; r2=$PRC
+printf '%s\n{"type":"x","v":"\xff\xfe"}\n%s\n' "$CX_A" "$CX_T" >"$S25/in.jsonl"; cx_run; r3=$PRC
+if [[ $r1 -eq 5 && "$p1" == stream-invalid && $r2 -eq 5 && $r3 -eq 5 ]] && nullu; then ok=0; else ok=1; fi
+note "25e codex invalid JSON line / non-object line / invalid UTF-8 -> stream-invalid (exit 5), usage null" $ok "r=$r1,$r2,$r3"
+# 25f usage missing: valid stream, answer STILL delivered, usage null, usage_error set, exit 0 (graded, excluded from cost)
+cx_w "$CX_A" '{"type":"turn.completed"}'; cx_run; r1=$PRC; a1="$(ans)"; ue1="$(uj usage_error)"; n1=0; nullu || n1=1
+cx_w "$CX_A" '{"type":"turn.completed","usage":{"input_tokens":5}}'; cx_run; r2=$PRC; a2="$(ans)"; ue2="$(uj usage_error)"
+if [[ $r1 -eq 0 && "$a1" == ANSWER && "$ue1" == *missing* && $n1 -eq 0 && $r2 -eq 0 && "$a2" == ANSWER && "$ue2" == *output_tokens* ]] && nullu; then ok=0; else ok=1; fi
+note "25f codex usage (or a required usage field) missing: usage-invalid, answer delivered, tokens null, usage_error set, exit 0" $ok "r=$r1,$r2 ue=$ue1,$ue2"
+# 25g every required usage field x every invalid value: usage-invalid, answer delivered, all null; the valid boundary 2**53 is accepted
+bad=""; cnt=0
+for f in input_tokens output_tokens; do
+  for v in -1 5.0 '"5"' true false null 1e400 Infinity NaN 1152921504606846976 9007199254740993; do
+    if [[ $f == input_tokens ]]; then u="{\"input_tokens\":$v,\"output_tokens\":1}"; else u="{\"input_tokens\":5,\"output_tokens\":$v}"; fi
+    cx_w "$CX_A" "{\"type\":\"turn.completed\",\"usage\":$u}"; cx_run; cnt=$((cnt + 1))
+    if [[ $PRC -ne 0 || "$(ans)" != ANSWER || "$(uj usage_error)" != *"$f"* ]] || ! nullu; then bad="$bad $f=$v(rc$PRC)"; fi
+  done
+done
+cx_w "$CX_A" '{"type":"turn.completed","usage":{"input_tokens":9007199254740992,"output_tokens":0}}'; cx_run
+if [[ -z "$bad" && $PRC -eq 0 && "$(uj tokens_in)" == 9007199254740992 && "$(uj tokens_out)" == 0 ]]; then ok=0; else ok=1; fi
+note "25g codex usage values: negative, 5.0, \"5\", true/false, null, 1e400, Infinity, NaN, 2**60, 2**53+1 -> usage-invalid for each required field ($cnt runs); 2**53 and 0 accepted" $ok "bad=[$bad]"
+# 25h optional usage fields: absent is fine; present and invalid is usage-invalid
+cx_w "$CX_A" '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1,"cached_input_tokens":-1}}'; cx_run; r1=$PRC; ue1="$(uj usage_error)"
+cx_w "$CX_A" '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1,"cached_input_tokens":4,"reasoning_output_tokens":0}}'; cx_run
+if [[ $r1 -eq 0 && "$ue1" == *cached_input_tokens* && $PRC -eq 0 && "$(uj tokens_in)" == 5 ]]; then ok=0; else ok=1; fi
+note "25h codex optional usage fields: invalid when present (usage-invalid), not required when absent" $ok "ue=$ue1"
+# 25i duplicate keys (the usage object, the terminal event): stream-invalid, nothing taken
+cx_w "$CX_A" '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1,"input_tokens":1}}'; cx_run; r1=$PRC; p1="$POUT"
+cx_w "$CX_A" '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1},"usage":{"input_tokens":1,"output_tokens":1}}'; cx_run; r2=$PRC
+if [[ $r1 -eq 5 && "$p1" == stream-invalid && $r2 -eq 5 && -z "$(ans)" ]] && nullu; then ok=0; else ok=1; fi
+note "25i codex duplicate key in the usage object or the terminal event -> stream-invalid (exit 5)" $ok "r=$r1,$r2"
+# 25j existing classes keep their exit code: a second terminal event, data after the terminal event -> 3, usage null (not 0)
+cx_w "$CX_A" "$CX_T" "$CX_T"; cx_run; r1=$PRC; p1="$POUT"; n1=0; nullu || n1=1
+cx_w "$CX_A" "$CX_T" '{"type":"item.completed","item":{"type":"agent_message","text":"FORGED"}}'; cx_run; r2=$PRC
+if [[ $r1 -eq 3 && "$p1" == stream-trailing-data && $n1 -eq 0 && $r2 -eq 3 && -z "$(ans)" ]]; then ok=0; else ok=1; fi
+note "25j codex two terminal events / data after the terminal event: stream-trailing-data (exit 3), usage null" $ok "r=$r1,$r2"
+# 25k a 20 MB line: bounded time and memory (the driver kills it at 20 s and reports peak RSS of the child)
+python3 -I -B -c 'import json,sys
+big={"type":"item.completed","item":{"type":"command_execution","command":"A"*(20*1024*1024)}}
+with open(sys.argv[1],"w") as f:
+    f.write(json.dumps(big)+"\n"+sys.argv[2]+"\n"+sys.argv[3]+"\n")' "$S25/in.jsonl" "$CX_A" "$CX_T"
+big="$(python3 -I -B -c 'import resource,subprocess,sys,time
+t=time.time()
+try:
+    r=subprocess.run([sys.executable,"-I","-B",sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]],timeout=20,capture_output=True)
+    rc=r.returncode
+except subprocess.TimeoutExpired:
+    rc="timeout"
+rss=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+rss=rss/(1024*1024) if sys.platform=="darwin" else rss/1024
+print(rc, "%.1f" % (time.time()-t), int(rss))' "$here/lib/parse_codex.py" "$S25/in.jsonl" "$S25/o.txt" "$S25/u.json")"
+read -r brc bsec bmb <<<"$big"
+if [[ "$brc" == 0 && "$(ans)" == ANSWER && "${bmb:-9999}" -lt 400 ]]; then ok=0; else ok=1; fi
+note "25k codex a 20 MB event line is parsed in bounded time and memory (rc $brc, ${bsec:-?}s, peak ${bmb:-?} MB < 400)" $ok "big=[$big]"
+rm -f "$S25/in.jsonl"
+
+# Claude: ONE JSON object
+CL_OK='{"result":"OK","is_error":false,"total_cost_usd":0.5,"usage":{"input_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":7}}'
+cl_w() { printf '%s' "$1" >"$S25/in.json"; }
+cl_w "$CL_OK"; cl_run
+if [[ $PRC -eq 0 && "$(ans)" == OK && "$(uj tokens_in)" == 1103 && "$(uj tokens_out)" == 7 && "$(uj cost_usd)" == 0.5 ]]; then ok=0; else ok=1; fi
+note "25l claude one valid document: answer, tokens, cost" $ok "rc=$PRC usage=$(cat "$S25/u.json")"
+# 25m an array (even of one result), two concatenated documents, trailing garbage, empty: error classes, usage null, no answer
+cl_w "[$CL_OK,$CL_OK]"; cl_run; r1=$PRC; p1="$POUT"; n1=0; nullu || n1=1
+cl_w "[{\"type\":\"result\"},$CL_OK]"; cl_run; r1b=$PRC
+cl_w "$CL_OK$CL_OK"; cl_run; r2=$PRC
+cl_w "$CL_OK
+$CL_OK"; cl_run; r2b=$PRC
+cl_w "$CL_OK garbage"; cl_run; r3=$PRC; a3="$(ans)"
+cl_w '   '; cl_run; r4=$PRC; p4="$POUT"
+if [[ $r1 -eq 5 && "$p1" == stream-invalid && $n1 -eq 0 && $r1b -eq 5 && $r2 -eq 5 && $r2b -eq 5 && $r3 -eq 5 && -z "$a3" && $r4 -eq 4 && "$p4" == stream-incomplete ]] && nullu; then ok=0; else ok=1; fi
+note "25m claude an array / two documents / trailing garbage -> stream-invalid (exit 5); empty output -> stream-incomplete (exit 4); usage null" $ok "r=$r1,$r1b,$r2,$r2b,$r3,$r4"
+# 25n cost_usd: negative, string, bool, NaN, Infinity, 1e400 -> usage-invalid: answer delivered, ALL usage null, usage_error set, exit 0; absent/null -> cost null, tokens kept
+bad=""
+for v in -0.1 '"0.1"' true NaN Infinity -Infinity 1e400; do
+  cl_w "{\"result\":\"OK\",\"is_error\":false,\"total_cost_usd\":$v,\"usage\":{\"input_tokens\":3,\"output_tokens\":7}}"; cl_run
+  if [[ $PRC -ne 0 || "$(ans)" != OK || "$(uj usage_error)" != *total_cost_usd* ]] || ! nullu; then bad="$bad $v(rc$PRC)"; fi
+done
+cl_w '{"result":"OK","is_error":false,"usage":{"input_tokens":3,"output_tokens":7}}'; cl_run; c1="$(uj cost_usd) $(uj tokens_in)"
+cl_w '{"result":"OK","is_error":false,"total_cost_usd":null,"usage":{"input_tokens":3,"output_tokens":7}}'; cl_run; c2="$(uj cost_usd) $(uj tokens_in)"
+if [[ -z "$bad" && "$c1" == "null 3" && "$c2" == "null 3" ]]; then ok=0; else ok=1; fi
+note "25n claude total_cost_usd negative / string / true / NaN / Infinity / 1e400 -> usage-invalid (answer delivered, all usage null); absent or null -> cost null with tokens kept" $ok "bad=[$bad] c=[$c1],[$c2]"
+# 25o claude usage fields: missing usage, missing/invalid token fields -> usage-invalid; a bool/float/negative/string/null token
+bad=""
+for u in '{}' '{"input_tokens":3}' '{"input_tokens":true,"output_tokens":1}' '{"input_tokens":3,"output_tokens":1.0}' '{"input_tokens":-3,"output_tokens":1}' '{"input_tokens":"3","output_tokens":1}' '{"input_tokens":3,"output_tokens":null}' '{"input_tokens":3,"output_tokens":1,"cache_read_input_tokens":-1}' '{"input_tokens":9007199254740993,"output_tokens":1}' 'null'; do
+  cl_w "{\"result\":\"OK\",\"is_error\":false,\"usage\":$u}"; cl_run
+  if [[ $PRC -ne 0 || "$(ans)" != OK || -z "$(uj usage_error | tr -d '"')" ]] || ! nullu; then bad="$bad $u(rc$PRC)"; fi
+done
+if [[ -z "$bad" ]]; then ok=0; else ok=1; fi
+note "25o claude usage missing / required token field missing or not an integer in [0,2**53] -> usage-invalid, answer delivered, tokens null" $ok "bad=[$bad]"
+# 25p is_error / error subtype -> host-error (exit 6) with the message, no answer; a non-boolean is_error -> stream-invalid
+cl_w '{"result":"credit  balance too low","is_error":true,"usage":{"input_tokens":3,"output_tokens":7}}'; cl_run; r1=$PRC; p1="$POUT"; e1="$(uj error)"; a1="$(ans)"; n1=0; nullu || n1=1
+cl_w '{"result":"x","is_error":false,"subtype":"error_max_turns","usage":{"input_tokens":3,"output_tokens":7}}'; cl_run; r2=$PRC
+cl_w '{"result":"x","is_error":"false","usage":{"input_tokens":3,"output_tokens":7}}'; cl_run; r3=$PRC
+if [[ $r1 -eq 6 && "$p1" == host-error && "$e1" == *"credit balance too low"* && -z "$a1" && $n1 -eq 0 && $r2 -eq 6 && $r3 -eq 5 ]]; then ok=0; else ok=1; fi
+note "25p claude is_error / error subtype -> host-error (exit 6) with the message, no answer, usage null; is_error \"false\" (a string) -> stream-invalid" $ok "r=$r1,$r2,$r3 e1=$e1"
+# 25q duplicate keys (top level, usage object) -> stream-invalid
+cl_w '{"result":"OK","result":"FORGED","is_error":false,"usage":{"input_tokens":3,"output_tokens":7}}'; cl_run; r1=$PRC
+cl_w '{"result":"OK","is_error":false,"usage":{"input_tokens":3,"output_tokens":7,"output_tokens":1}}'; cl_run; r2=$PRC
+if [[ $r1 -eq 5 && $r2 -eq 5 && -z "$(ans)" ]] && nullu; then ok=0; else ok=1; fi
+note "25q claude duplicate key at the top level or in usage -> stream-invalid (exit 5)" $ok "r=$r1,$r2"
+rm -f "$S25/in.json"
+
+# run.sh level: a FAKE codex (stream from $S25/stream, exit code from $S25/rc, stderr line from $S25/errline); no sandbox, grader skipped
+# (what the cell leaves is judged: a stream-class error is the row error; a usage-invalid row gets as far as grading, so it says grader-skipped)
+cat >"$S25/bin/codex" <<'FAKE'
+#!/bin/sh
+D="$(cd "$(dirname "$0")/.." && pwd)"
+cat >/dev/null
+[ -s "$D/errline" ] && cat "$D/errline" >&2
+cat "$D/stream"
+exit "$(cat "$D/rc")"
+FAKE
+chmod +x "$S25/bin/codex"
+printf '#!/bin/sh\necho "s25 fake claude: not expected to run" >&2; exit 97\n' >"$S25/bin/claude"; chmod +x "$S25/bin/claude"
+s25n=0
+s25run() { # s25run <rc> [errline] ; the stream is $S25/stream -> row in $S25R.jsonl, run.sh exit in $S25RC
+  S25R="$tmp/s25r$((++s25n))"; mkdir -p "$S25R"; printf '%s\n' "$1" >"$S25/rc"; printf '%s' "${2:-}" >"$S25/errline"
+  inroot "$S25R"
+  PATH="$S25/bin:$PATH" command -v codex claude >"$S25R.which"
+  env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$S25/bin:$PATH" HOME="$S25/home" TMPDIR="$S25R" \
+    EVAL_CODEX_REAL_HOME="$S25/realcodex" EVAL_SKILLS_ROOT="$skills" \
+    bash "$here/run.sh" --task "$good" --arm bare --host codex --rep 1 --out "$S25R.jsonl" >"$S25R.out" 2>"$S25R.err"
+  S25RC=$?
+}
+f25() { rowval "$S25R.jsonl" "$1"; }
+fake_ok=0; grep -q "^$S25/bin/codex$" <<<"$(PATH="$S25/bin:$PATH" command -v codex)" || fake_ok=1
+# 25r F1: the CLI exits 0 WITHOUT a terminal event -> an ERROR row (stream-incomplete), pass false, tokens null (it was 0)
+printf '%s\n' "$CX_A" >"$S25/stream"; s25run 0
+if [[ $fake_ok -eq 0 && $S25RC -eq 0 && "$(f25 error)" == stream-incomplete && "$(f25 pass)" == false && "$(f25 tokens_in)" == None && "$(f25 tokens_out)" == None && "$(f25 cost_usd)" == None ]]; then ok=0; else ok=1; fi
+note "25r run.sh: a CLI that exits 0 with no terminal event -> row error stream-incomplete, pass false, tokens/cost null (not 0)" $ok "rc=$S25RC fake=$fake_ok row: $(cut -c1-300 "$S25R.jsonl" 2>&1)"
+# 25s a stream failure is not graded: error is the class, no grader metrics in the row
+printf '%s\n' "$CX_A" '{"type":"turn.failed","error":{"message":"quota exceeded"}}' >"$S25/stream"; s25run 0; e1="$(f25 error)"; p1="$(f25 pass)"; t1="$(f25 tokens_in)"
+printf '%s\n' "$CX_A" '{bad' "$CX_T" >"$S25/stream"; s25run 0; e2="$(f25 error)"; p2="$(f25 pass)"
+printf '%s\n' "$CX_A" "$CX_T" "$CX_T" >"$S25/stream"; s25run 0; e3="$(f25 error)"; t3="$(f25 tokens_in)"
+if [[ "$e1" == "host-error: turn.failed: quota exceeded" && "$p1" == false && "$t1" == None && "$e2" == stream-invalid && "$p2" == false && "$e3" == stream-trailing-data && "$t3" == None && "$(f25 metrics)" == "{}" ]]; then ok=0; else ok=1; fi
+note "25s run.sh: turn.failed -> host-error with the message, invalid line -> stream-invalid, second terminal -> stream-trailing-data; pass false, tokens null, not graded (no metrics)" $ok "e=[$e1] [$e2] [$e3] t=[$t1] [$t3]"
+# 25t usage-invalid: the row is NOT a stream error (it reaches the grading stage: grader-skipped here), carries usage_error, tokens null
+printf '%s\n' "$CX_A" '{"type":"turn.completed","usage":{"input_tokens":-5,"output_tokens":1}}' >"$S25/stream"; s25run 0
+if [[ $S25RC -eq 0 && "$(f25 error)" == grader-skipped && "$(f25 usage_error)" == *input_tokens* && "$(f25 tokens_in)" == None && "$(f25 tokens_out)" == None && "$(f25 exit)" == 0 ]]; then ok=0; else ok=1; fi
+note "25t run.sh: a valid answer with an invalid usage field -> not a stream error (reaches grading), row has usage_error, tokens null, host exit 0" $ok "row: $(cut -c1-300 "$S25R.jsonl" 2>&1)"
+# 25u a crashed CLI (exit 1, partial stream, a stderr line): tokens null, pass false, the host exit is the error
+printf '%s\n' "$CX_A" >"$S25/stream"; s25run 1 "fatal: crashed"
+if [[ "$(f25 tokens_in)" == None && "$(f25 tokens_out)" == None && "$(f25 pass)" == false && "$(f25 error)" == "host exit"* ]]; then ok=0; else ok=1; fi
+note "25u run.sh: a crashed CLI (exit 1, partial stream) -> tokens null, pass false, error is the host exit" $ok "row: $(cut -c1-300 "$S25R.jsonl" 2>&1)"
+# 25v control: a complete valid stream keeps its usage (and is not a stream error)
+printf '%s\n' "$CX_A" "$CX_T" >"$S25/stream"; s25run 0
+if [[ "$(f25 tokens_in)" == 5 && "$(f25 tokens_out)" == 1 && "$(f25 error)" == grader-skipped && "$(f25 usage_error)" == "<absent>" ]]; then ok=0; else ok=1; fi
+note "25v run.sh control: a complete valid stream -> tokens 5/1, no usage_error" $ok "row: $(cut -c1-300 "$S25R.jsonl" 2>&1)"
+# 25w every run above resolved codex AND claude into our scratch (never the real CLIs)
+real25=""; for w in "$tmp"/s25r*.which; do [[ "$(sed -n 1p "$w")" == "$S25/bin/codex" && "$(sed -n 2p "$w")" == "$S25/bin/claude" ]] || real25="$real25 $w"; done
+if [[ -z "$real25" ]] && ls "$tmp"/s25r*.which >/dev/null 2>&1; then ok=0; else ok=1; fi
+note "25w the fake codex and claude resolved first on PATH for every run.sh case above" $ok "not-fake: $real25"
+
+# 25x report.py: a row with null usage is excluded from the token mean and counted (n_usage_missing); the warning when an arm's share is over the threshold
+python3 -I -B - "$S25/rep.jsonl" "$S25/rep2.jsonl" <<'PY'
+import json, sys
+def rows(arm, toks):
+    for i, t in enumerate(toks):
+        yield {"task": "t%d" % i, "skill": "prod-ops", "split": "dev", "kind": "seeded", "language": "go", "arm": arm, "host": "codex", "model": "m",
+               "rep": 1, "pass": True, "metrics": {}, "duration_s": 1.0, "tokens_in": t, "tokens_out": None if t is None else 50}
+with open(sys.argv[1], "w") as o:
+    for r in list(rows("skill", [100, 200, None])) + list(rows("bare", [100, 100, 100])):
+        o.write(json.dumps(r) + "\n")
+with open(sys.argv[2], "w") as o:
+    for r in list(rows("skill", [100, 200, 300, 400, 500])) + list(rows("bare", [100, 100, 100, 100, None])):   # 1 of 5 = 20%: not over the threshold
+        o.write(json.dumps(r) + "\n")
+PY
+rp="$(python3 -I -B "$here/report.py" "$S25/rep.jsonl" 2>&1)"; rp2="$(python3 -I -B "$here/report.py" "$S25/rep2.jsonl" 2>&1)"
+sl="$(grep -E '^prod-ops +codex +m +n/a +dev +go +seeded +skill ' <<<"$rp")"
+nm="$(python3 -I -B -c 'import sys;sys.path.insert(0,sys.argv[1]);import report,json
+rows=[json.loads(l) for l in open(sys.argv[2])];print(report.cell([r for r in rows if r["arm"]=="skill"])["n_usage_missing"])' "$here" "$S25/rep.jsonl")"
+if [[ "$sl" == *"200 (1 no usage)"* && "$nm" == 1 && "$rp" == *"WARNING"*"1 of 3 skill rows have no usage"* && "$rp2" != *"rows have no usage"* ]]; then ok=0; else ok=1; fi
+note "25x report: rows with null usage are excluded from the token figure ((150+250) over the 2 rows with usage / 2 passing = 200) and counted (n_usage_missing 1); an arm over 20% missing prints a WARNING, an arm at 20% does not" $ok "line=[$sl] n=$nm warn=$(grep -c 'rows have no usage' <<<"$rp")/$(grep -c 'rows have no usage' <<<"$rp2")"
+
+# ---- 26: the third review's warnings: HUP, the git-metadata digest, the host list, cell lifetime vs the sweep, a graded Codex pass ----
+# Own fakes (hang-capable, pid-recording) first on PATH; path26 aborts the whole suite (exit 97) when codex/claude do not resolve into them.
+S26="$tmp/s26"; mkdir -p "$S26/bin" "$S26/realcodex" "$S26/realclaude" "$S26/home"; S26_PATHCHK=0
+S26CANARY="S26-CRED-CANARY-5521"
+printf '{"canary":"%s"}\n' "$S26CANARY" >"$S26/realcodex/auth.json"; chmod 600 "$S26/realcodex/auth.json"
+echo "do the thing" >"$S26/prompt.txt"
+cat >"$S26/bin/codex" <<FAKE
+#!/usr/bin/env bash
+cat >/dev/null; : >"$S26/invoked" 2>/dev/null
+if [ -f "$S26/hang" ]; then echo \$\$ >"$S26/cli.pid"; echo ready >"$S26/ready.fifo"; exec sleep 30; fi
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+FAKE
+cat >"$S26/bin/claude" <<FAKE
+#!/usr/bin/env bash
+cat >/dev/null; : >"$S26/invoked" 2>/dev/null
+if [ -f "$S26/hang" ]; then echo \$\$ >"$S26/cli.pid"; echo ready >"$S26/ready.fifo"; exec sleep 30; fi
+echo '{"result":"OK","is_error":false,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":2}}'
+FAKE
+chmod +x "$S26/bin/codex" "$S26/bin/claude"
+path26() {
+  local c; c="$(PATH="$S26/bin:$PATH" command -v codex claude | tr '\n' ' ')"
+  [[ "$c" == "$S26/bin/codex $S26/bin/claude " ]] || { echo "selftest: FATAL: codex/claude do not resolve into $S26/bin (got: $c)" >&2; exit 97; }
+  S26_PATHCHK=$((S26_PATHCHK + 1))
+}
+# runhang26 <signal> <pid|group> <cmd...>: run cmd in the background (group: as the leader of its OWN session, so `kill -<sig> -<pgid>` from
+# here is a terminal hangup that does not reach this test), wait for the fake CLI to say it is running, send the signal, collect:
+# R26RC (exit code of cmd), R26READY, R26ALIVE (the fake CLI is still alive afterwards: it is killed here either way)
+runhang26() {
+  local sig="$1" tgt="$2" cxpid; shift 2
+  rm -f "$S26/cli.pid" "$S26/ready.fifo"; mkfifo "$S26/ready.fifo"; exec 7<>"$S26/ready.fifo"; : >"$S26/hang"
+  path26; inroot
+  if [[ "$tgt" == group ]]; then python3 -I -B -c 'import os,sys;os.setsid();os.execvp(sys.argv[1],sys.argv[1:])' "$@" >"$S26/h.out" 2>"$S26/h.err" &
+  else "$@" >"$S26/h.out" 2>"$S26/h.err" & fi
+  local pid=$!
+  if read -r -t 20 -u 7 _r; then R26READY=yes; else R26READY=never-started; fi
+  if [[ "$tgt" == group ]]; then kill -s "$sig" -- "-$pid" 2>/dev/null; else kill -s "$sig" "$pid" 2>/dev/null; fi
+  wait "$pid"; R26RC=$?; exec 7<&-; rm -f "$S26/hang"
+  cxpid="$(cat "$S26/cli.pid" 2>/dev/null)"; R26ALIVE=no
+  if [[ -n "$cxpid" ]] && kill -0 "$cxpid" 2>/dev/null; then R26ALIVE=yes; kill -TERM "$cxpid" 2>/dev/null; fi
+}
+s26dirs() { rm -rf "${S26:?}/${1:?}"; mkdir -p "$S26/$1/w" "$S26/$1/h" "$S26/$1/g"; }
+# W1 a: HUP to the codex adapter mid-run (14n6 is the TERM twin): the CLI dies, the staged copy is gone, rc 129
+s26dirs a1
+runhang26 HUP pid env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 PATH="$S26/bin:$PATH" HOME="$S26/home" EVAL_GOCACHE="$S26/a1/g" EVAL_CODEX_REAL_HOME="$S26/realcodex" \
+  bash "$here/hosts/codex.sh" "$S26/a1/w" "$S26/a1/h" "$S26/prompt.txt" "$S26/a1/out" "$S26/a1/usage" "" 0.5 read-only ""
+if [[ "$R26READY" == yes && $R26RC -eq 129 && "$R26ALIVE" == no && -z "$(grep -rl "$S26CANARY" "$S26/a1" 2>/dev/null)" && -z "$(find "$S26/a1" -maxdepth 1 -name 'sbx.*' | head -1)" ]]; then ok=0; else ok=1; fi
+note "26a codex adapter: SIGHUP mid-run kills the CLI, scrubs the staged copy and the adapter dir, exit 129" $ok "ready=$R26READY rc=$R26RC cli-alive=$R26ALIVE left: $(find "$S26/a1" -mindepth 1 -maxdepth 2 | head -5 | tr '\n' ' ')"
+# W1 b: the claude adapter ran limited.py in the FOREGROUND with no trap: TERM or HUP killed bash and left the watchdog + CLI running
+for sg in TERM:143 HUP:129; do
+  s26dirs b1
+  runhang26 "${sg%%:*}" pid env -u ANTHROPIC_API_KEY EVAL_CLAUDE_NO_SANDBOX=1 CLAUDE_CODE_OAUTH_TOKEN="$S26CANARY-T" PATH="$S26/bin:$PATH" HOME="$S26/home" EVAL_GOCACHE="$S26/b1/g" \
+    bash "$here/hosts/claude.sh" "$S26/b1/w" "$S26/b1/h" "$S26/prompt.txt" "$S26/b1/out" "$S26/b1/usage" "" 0.5 read-only ""
+  if [[ "$R26READY" == yes && $R26RC -eq "${sg##*:}" && "$R26ALIVE" == no && -z "$(find "$S26/b1" -maxdepth 1 -name 'sbx.*' | head -1)" ]]; then ok=0; else ok=1; fi
+  note "26b/${sg%%:*} claude adapter: ${sg%%:*} mid-run kills the CLI (its watchdog included) and removes the adapter dir, exit ${sg##*:}" $ok "ready=$R26READY rc=$R26RC cli-alive=$R26ALIVE left: $(find "$S26/b1" -mindepth 1 -maxdepth 1 | head -5 | tr '\n' ' ')"
+done
+# W1 c: HUP (and, as the control, TERM) to the watchdog itself: the child's group is killed and reaped, 129 / 143
+for sg in HUP:129 TERM:143; do
+  runhang26 "${sg%%:*}" pid python3 -I -B "$here/lib/limited.py" 60 -- "$S26/bin/codex"
+  if [[ "$R26READY" == yes && $R26RC -eq "${sg##*:}" && "$R26ALIVE" == no ]]; then ok=0; else ok=1; fi
+  note "26c/${sg%%:*} lib/limited.py: ${sg%%:*} to the watchdog kills the child's process group and exits ${sg##*:}" $ok "ready=$R26READY rc=$R26RC child-alive=$R26ALIVE"
+done
+# W1 d/e: run.sh. d = HUP to run.sh alone; e = HUP to the whole process group of run.sh (a terminal hangup: run.sh AND its watchdog get it, the
+# adapter and the CLI are in their own sessions and do not). Either way: CLI dead, the cell gone, the credential nowhere, exit 129.
+gt26="$(mktask "$S26/corp" prod-review t-hup dev always0)"
+for hm in pid:d group:e; do
+  rm -rf "$S26/t${hm##*:}"; mkdir -p "$S26/t${hm##*:}"
+  runhang26 HUP "${hm%%:*}" env CODEX_API_KEY="$S26CANARY-KEY-VALUE" EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 EVAL_CODEX_REAL_HOME="$S26/realcodex" PATH="$S26/bin:$PATH" HOME="$S26/home" \
+    TMPDIR="$S26/t${hm##*:}" EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$gt26" --arm bare --host codex --rep 1 --out "$S26/hup${hm##*:}.jsonl"
+  if [[ "$R26READY" == yes && $R26RC -eq 129 && "$R26ALIVE" == no && -z "$(find "$S26/t${hm##*:}" -mindepth 1 | head -1)" && -z "$(grep -rl "$S26CANARY" "$S26/t${hm##*:}" 2>/dev/null)" ]]; then ok=0; else ok=1; fi
+  note "26${hm##*:} run.sh: SIGHUP to ${hm%%:*}$([[ ${hm%%:*} == group ]] && echo ' (the whole foreground group, as a hangup)') mid-run: CLI dead, cell removed, credential nowhere, exit 129" $ok "ready=$R26READY rc=$R26RC cli-alive=$R26ALIVE left: $(find "$S26/t${hm##*:}" -mindepth 1 -maxdepth 2 | head -4 | tr '\n' ' ') err: $(tail -n 2 "$S26/h.err" | cut -c1-160 | tr '\n' ' ')"
+done
+
+# ---- W4: the digest that decides workdir-tampered covers the git metadata of the WHOLE tree (stub host, sandbox n/a, graded: a mutation of
+# the workdir while the host "ran" must give workdir-tampered, never a grade). Each script gets the workdir as $1.
+gd26="$(mktask "$S26/gcorp" prod-review t-dig dev always0)"; mkdir -p "$S26/t4"
+s26mut() { # s26mut <name> <script body>: write the mutation script
+  { echo '#!/usr/bin/env bash'; echo 'export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1'; echo 'cd "$1" || exit 1'; printf '%s\n' "$2"; } >"$S26/m-$1.sh"
+}
+s26mut nested-config 'mkdir -p sub/.git; printf "[core]\n\tfsmonitor = false\n" >sub/.git/config'
+s26mut nested-deep 'mkdir -p a/b/c/.git; echo x >a/b/c/.git/config'
+s26mut gitfile 'mkdir -p sub; echo "gitdir: ../elsewhere" >sub/.git'
+s26mut gitfile-link 'mkdir -p sub; ln -s /nonexistent-target sub/.git'
+s26mut index 'echo new >new.txt; git add new.txt'
+s26mut hook 'printf "#!/bin/sh\n" >.git/hooks/post-checkout; chmod +x .git/hooks/post-checkout'
+s26mut info-attributes 'mkdir -p .git/info; echo "* filter=x" >.git/info/attributes'
+s26mut alternates 'mkdir -p .git/objects/info; echo /nowhere >.git/objects/info/alternates'
+s26mut subdir-gitattributes 'mkdir -p sub; echo "* filter=x" >sub/.gitattributes'
+s26mut gitmodules 'printf "[submodule \"a\"]\n\tpath = a\n" >.gitmodules'
+s26mut head 'echo "ref: refs/heads/other" >.git/HEAD'
+s26mut ref 'git update-ref refs/heads/zz HEAD'
+s26mut gitdir-config-worktree 'echo "[core]" >.git/config.worktree'
+s26mut modules 'mkdir -p .git/modules/m/hooks; echo x >.git/modules/m/hooks/pre-commit'
+# controls: content is not git metadata
+s26mut ctl-untracked 'echo hi >untracked.txt; mkdir -p deep/dir; echo hi >deep/dir/f.txt; echo more >>README.md'
+s26mut ctl-objects 'mkdir -p .git/objects/zz; echo junk >.git/objects/zz/obj'
+for dm in nested-config nested-deep gitfile gitfile-link index hook info-attributes alternates subdir-gitattributes gitmodules head ref gitdir-config-worktree modules; do
+  inroot; rm -f "$S26/dg-$dm.jsonl"
+  env STUB_MODE=solve STUB_SOLVE_CMD="$S26/m-$dm.sh" TMPDIR="$S26/t4" EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$gd26" --arm bare --host stub --rep 1 --out "$S26/dg-$dm.jsonl" >/dev/null 2>&1; rc=$?
+  if [[ $rc -eq 0 && "$(rowval "$S26/dg-$dm.jsonl" error)" == workdir-tampered && "$(rowval "$S26/dg-$dm.jsonl" pass)" == false ]]; then ok=0; else ok=1; fi
+  note "26f/$dm digest: '$dm' added while the CLI ran -> workdir-tampered, not graded" $ok "rc=$rc row: $(cut -c1-220 "$S26/dg-$dm.jsonl" 2>&1)"
+done
+for dm in ctl-untracked ctl-objects; do
+  inroot; rm -f "$S26/dg-$dm.jsonl"
+  env STUB_MODE=solve STUB_SOLVE_CMD="$S26/m-$dm.sh" TMPDIR="$S26/t4" EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$gd26" --arm bare --host stub --rep 1 --out "$S26/dg-$dm.jsonl" >/dev/null 2>&1; rc=$?
+  if [[ $rc -eq 0 && "$(rowval "$S26/dg-$dm.jsonl" error)" == "<absent>" && "$(rowval "$S26/dg-$dm.jsonl" pass)" == true ]]; then ok=0; else ok=1; fi
+  note "26f/$dm digest control: $([[ $dm == ctl-objects ]] && echo 'a new loose object (objects/ is data, not covered)' || echo 'untracked and edited content files (not git metadata)') does NOT change it: graded, pass:true" $ok "rc=$rc row: $(cut -c1-220 "$S26/dg-$dm.jsonl" 2>&1)"
+done
+# the digest is read-only and deterministic: twice over the same tree gives the same value; a tree it cannot open gives no digest (the caller fails closed)
+dw="$S26/dw"; rm -rf "$dw"; mkdir -p "$dw/sub"; ( cd "$dw" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 && git init -q . && echo a >f && git add -A && git -c user.name=e -c user.email=e@e.invalid commit -q -m i ) >/dev/null 2>&1
+d1="$(python3 -I -B "$here/lib/scrub.py" gitdigest "$dw")"; d2="$(python3 -I -B "$here/lib/scrub.py" gitdigest "$dw")"; python3 -I -B "$here/lib/scrub.py" gitdigest "$S26/no-such-dir" >/dev/null 2>&1; drc=$?
+ln -s "$dw" "$S26/dw-link"; python3 -I -B "$here/lib/scrub.py" gitdigest "$S26/dw-link" >/dev/null 2>&1; lrc=$?
+if [[ ${#d1} -eq 64 && "$d1" == "$d2" && $drc -eq 1 && $lrc -eq 1 ]]; then ok=0; else ok=1; fi
+note "26f/det digest: deterministic, 64 hex; a missing dir and a symlinked root give exit 1 and no digest" $ok "d1=$d1 d2=$d2 missing-rc=$drc symlink-rc=$lrc"
+
+# ---- W5: the host is an explicit list; nothing is created for anything else
+for hv in nope ../lib/live '' CODEX 'codex ' 'a/b' '..' 'stub.sh'; do
+  rm -rf "$S26/t5"; mkdir -p "$S26/t5"; inroot "$S26/t5"; rm -f "$S26/r5.jsonl"
+  env TMPDIR="$S26/t5" EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$gd26" --arm bare --host "$hv" --rep 1 --out "$S26/r5.jsonl" >"$S26/r5.out" 2>"$S26/r5.err"; rc=$?
+  if [[ $rc -eq 2 && -z "$(find "$S26/t5" -mindepth 1 | head -1)" && ! -e "$S26/r5.jsonl" ]] && grep -q 'host must be one of' "$S26/r5.err"; then ok=0; else ok=1; fi
+  note "26g/host '$hv' is refused: exit 2, nothing created (no cell, no row)" $ok "rc=$rc left: $(find "$S26/t5" -mindepth 1 | head -2 | tr '\n' ' ') err: $(head -c 120 "$S26/r5.err")"
+done
+inroot; rm -f "$S26/r5.jsonl"
+env TMPDIR="$S26/t5" EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$gd26" --arm bare --host stub --rep 1 --preflight >/dev/null 2>&1; rc=$?
+if [[ $rc -eq 0 ]]; then ok=0; else ok=1; fi
+note "26g/control the listed host 'stub' still passes the check (preflight exit 0)" $ok "rc=$rc"
+
+# ---- W7 (a): the longest possible cell must stay under the sweep floor minus the margin: timeout_s < 1170, so 1169 is the largest
+for tv in 1169:0 1169.9:0 1170:2 3600:2 0:2 -5:2 1e9:2 \"abc\":2; do
+  tk="$(TASK_TIMEOUT="${tv%%:*}" mktask "$S26/tcorp$RANDOM" prod-review t-to dev always0)"; inroot; rm -rf "$S26/t7a"; mkdir -p "$S26/t7a"
+  env TMPDIR="$S26/t7a" EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$tk" --arm bare --host stub --rep 1 --preflight >/dev/null 2>"$S26/r7.err"; rc=$?
+  if [[ $rc -eq ${tv##*:} ]] && { [[ $rc -eq 0 ]] || [[ "$(grep -c . "$S26/r7.err")" == 1 ]]; } && [[ -z "$(find "$S26/t7a" -mindepth 1 | head -1)" ]]; then ok=0; else ok=1; fi
+  note "26h/timeout_s=${tv%%:*} -> exit ${tv##*:} ($([[ ${tv##*:} == 0 ]] && echo accepted || echo 'refused, one line'))" $ok "rc=$rc err: $(head -c 200 "$S26/r7.err")"
+done
+# W7 (b): the sweep spares a cell whose marker names a live pid with its own start time; everything else follows the age rule
+s26old() { mkdir -p "$1/home"; echo x >"$1/home/f"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" >"$1/.eval-live"; python3 -I -B -c 'import os,sys,time;t=time.time()-5*3600;os.utime(sys.argv[1],(t,t))' "$1"; }
+s26lstart() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//'; }
+rm -rf "$S26/t7"; mkdir -p "$S26/t7"
+sleep 300 & hl=$!; sleep 300 & hd=$!; hlst="$(s26lstart "$hl")"; hdst="$(s26lstart "$hd")"; kill -TERM "$hd" 2>/dev/null; wait "$hd" 2>/dev/null
+s26old "$S26/t7/eval-cell.live" "$(printf '%s\n%s' "$hl" "$hlst")"
+s26old "$S26/t7/eval-cell.dead" "$(printf '%s\n%s' "$hd" "$hdst")"
+s26old "$S26/t7/eval-cell.reuse" "$(printf '%s\n%s' "$hl" "Mon Jan  1 00:00:00 2001")"
+s26old "$S26/t7/eval-cell.nomarker" ""
+s26old "$S26/t7/eval-cell.garbage" "not a marker"
+s26old "$S26/t7/eval-cell.pidonly" "$hl"
+s26old "$S26/t7/eval-cell.fresh" "$(printf '%s\n%s' "$hd" "$hdst")"; python3 -I -B -c 'import os,sys,time;os.utime(sys.argv[1],(time.time(),time.time()))' "$S26/t7/eval-cell.fresh"
+inroot; env STUB_MODE=noop TMPDIR="$S26/t7" EVAL_SWEEP_MINUTES=30 EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$gd26" --arm bare --host stub --rep 1 --out "$S26/r7.jsonl" >/dev/null 2>"$S26/r7s.err"
+kill -TERM "$hl" 2>/dev/null; wait "$hl" 2>/dev/null
+gone() { [[ ! -e "$S26/t7/eval-cell.$1" ]] && echo gone || echo kept; }
+if [[ "$(gone live)" == kept && "$(gone dead)" == gone && "$(gone reuse)" == gone && "$(gone nomarker)" == gone && "$(gone garbage)" == gone && "$(gone pidonly)" == gone && "$(gone fresh)" == kept ]]; then ok=0; else ok=1; fi
+note "26i sweep: an old cell whose marker names a LIVE pid with its own start time is kept; dead pid, reused pid (other start time), no/garbage/pid-only marker are swept; a fresh cell is kept" $ok "live=$(gone live) dead=$(gone dead) reuse=$(gone reuse) nomarker=$(gone nomarker) garbage=$(gone garbage) pidonly=$(gone pidonly) fresh=$(gone fresh)"
+# the marker run.sh itself writes: its own pid (read from inside the run, while run.sh is alive) and that pid's start time
+cat >"$S26/m-marker.sh" <<'EOF'
+#!/usr/bin/env bash
+cell="$(dirname "$1")"; cp "$cell/.eval-live" "$S26M/marker.copy"; pid="$(head -n 1 "$cell/.eval-live")"
+LC_ALL=C ps -o lstart= -p "$pid" | sed 's/^ *//' >"$S26M/marker.start"; echo "$pid" >"$S26M/marker.pid"
+EOF
+inroot; rm -f "$S26/marker."*; env S26M="$S26" STUB_MODE=solve STUB_SOLVE_CMD="$S26/m-marker.sh" TMPDIR="$S26/t7" EVAL_SKILLS_ROOT="$skills" bash "$here/run.sh" --task "$gd26" --arm bare --host stub --rep 1 --out "$S26/r7m.jsonl" >/dev/null 2>&1 &
+mp=$!; wait "$mp"
+if [[ "$(sed -n 1p "$S26/marker.copy" 2>/dev/null)" == "$mp" && "$(sed -n 1p "$S26/marker.pid" 2>/dev/null)" == "$mp" && -n "$(sed -n 2p "$S26/marker.copy")" && "$(sed -n 2p "$S26/marker.copy")" == "$(cat "$S26/marker.start")" ]] \
+   && [[ -z "$(find "$S26/t7" -maxdepth 1 -name 'eval-cell.*' -newer "$S26/marker.pid" | head -1)" ]]; then ok=0; else ok=1; fi
+note "26j run.sh writes its cell's .eval-live: its own pid and that pid's start time (as ps reports it while alive), and the cell is removed at the end" $ok "marker: $(tr '\n' '|' <"$S26/marker.copy" 2>&1) pid=$mp"
+
+# ---- live.sh names the row's error class for exit 4 (never its content)
+rm -rf "$S26/lv"; mkdir -p "$S26/lv"; cp -R "$here/lib" "$S26/lv/lib"
+cat >"$S26/lv/run.sh" <<'EOF'
+#!/usr/bin/env bash
+out=""; pf=0; while [[ $# -gt 0 ]]; do case "$1" in --out) out="$2"; shift 2 ;; --preflight) pf=1; shift ;; *) shift ;; esac; done
+[[ $pf -eq 1 ]] && exit 0
+printf '{"error":"%s"}\n' "$FAKE_ERR" >>"$out"; exit 4
+EOF
+for le in 'scrub-failed: /secret/path/x' 'credential-in-output' 'credential-in-kept-files: 3 file(s)' 'credential-scan-failed'; do
+  inroot; rm -rf "$S26/lres"
+  env EVAL_LIVE=1 EVAL_HOSTS=stub N=1 EVAL_CORPUS="$S26/gcorp" EVAL_RESULTS_DIR="$S26/lres" FAKE_ERR="$le" HOME="$S26/home" bash "$S26/lv/lib/live.sh" >"$S26/lv.out" 2>"$S26/lv.err"; lrc=$?
+  cls="${le%%:*}"
+  if [[ $lrc -eq 4 ]] && grep -q "row error class: $cls;" "$S26/lv.err" && ! grep -q 'secret/path\|3 file' "$S26/lv.err" && ! grep -q 'credential copy could not be removed' "$S26/lv.err"; then ok=0; else ok=1; fi
+  note "26k live.sh exit 4 names the row's error class '$cls' and nothing of the row beyond it" $ok "rc=$lrc err: $(grep 'STOP' "$S26/lv.err" | head -c 240)"
+done
+
+# ---- W6: a GRADED Codex pass: the fake codex under the REAL seatbelt adapter, read-only task -> graded, pass:true (macOS)
+if darwin_only 26l; then
+  inroot; rm -rf "$S26/t6"; mkdir -p "$S26/t6"; rm -f "$S26/r6.jsonl"; path26
+  env CODEX_API_KEY=k EVAL_CODEX_REAL_HOME="$S26/realcodex" PATH="$S26/bin:$PATH" HOME="$S26/home" TMPDIR="$S26/t6" EVAL_SKILLS_ROOT="$skills" \
+    bash "$here/run.sh" --task "$gd26" --arm bare --host codex --rep 1 --out "$S26/r6.jsonl" >/dev/null 2>"$S26/r6.err"; rc=$?
+  if [[ $rc -eq 0 && "$(rowval "$S26/r6.jsonl" pass)" == true && "$(rowval "$S26/r6.jsonl" sandbox)" == seatbelt && "$(rowval "$S26/r6.jsonl" error)" == "<absent>" && "$(rowval "$S26/r6.jsonl" host)" == codex ]]; then ok=0; else ok=1; fi
+  note "26l codex under the real seatbelt adapter, read-only task: GRADED, pass:true, sandbox seatbelt (the cell is gradable on macOS)" $ok "rc=$rc row: $(cut -c1-260 "$S26/r6.jsonl" 2>&1) err: $(tail -n 2 "$S26/r6.err" | cut -c1-160 | tr '\n' ' ')"
+fi
+# Linux sibling: no seatbelt, so the codex adapter refuses before the CLI starts (error sandbox, exit 3, never graded); the unconfined-grader refusal
+# for Codex's own sandbox is portable and already asserted by 21f2 (EVAL_NO_SANDBOX=1: grader-unconfined, host never started)
+if [[ "$PLATFORM" != Darwin ]]; then
+  inroot; rm -rf "$S26/t6"; mkdir -p "$S26/t6"; rm -f "$S26/r6.jsonl" "$S26/invoked"; path26
+  env CODEX_API_KEY=k EVAL_CODEX_REAL_HOME="$S26/realcodex" PATH="$S26/bin:$PATH" HOME="$S26/home" TMPDIR="$S26/t6" EVAL_SKILLS_ROOT="$skills" \
+    bash "$here/run.sh" --task "$gd26" --arm bare --host codex --rep 1 --out "$S26/r6.jsonl" >/dev/null 2>"$S26/r6.err"; rc=$?
+  if [[ $rc -eq 3 && "$(rowval "$S26/r6.jsonl" error)" == sandbox && "$(rowval "$S26/r6.jsonl" pass)" == false && ! -e "$S26/invoked" ]]; then ok=0; else ok=1; fi
+  note "26m codex without a seatbelt, no opt-out: the adapter refuses (error sandbox, exit 3), the CLI is never started, nothing graded" $ok "rc=$rc row: $(cut -c1-260 "$S26/r6.jsonl" 2>&1)"
+fi
+# every run above resolved codex and claude into the section's own fakes
+if (( S26_PATHCHK >= 8 )); then ok=0; else ok=1; fi
+note "26z every run in this section resolved codex AND claude into $S26/bin first (checks: $S26_PATHCHK)" $ok "checks=$S26_PATHCHK"
 
 # ---- 20: no bytecode litter outside the corpus -----------------------------------------------------
 pyc="$(find "$here" -name __pycache__ -not -path "$here/corpus/*" 2>/dev/null | head -3 | tr '\n' ' ')"

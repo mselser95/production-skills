@@ -14,7 +14,7 @@ OPTIMISTIC: reps of one task are not independent), pass^k (share of tasks whose
 k reps ALL passed; k is printed; only tasks with exactly k reps count), total
 tokens and seconds SPENT (all rows, failed attempts included) per RESOLVED task
 (passing rows); rows with no usage data are excluded from the token figure and
-counted ("N no usage"), never treated as 0, and the MEAN PER ROW of metrics.false_positives
+counted ("N no usage"; an arm with more than 20% such rows prints a WARNING line), never treated as 0, and the MEAN PER ROW of metrics.false_positives
 and metrics.found (descriptive; rows that do not carry the metric are left out, n/a if none).
 
 Per (skill, host, model, sandbox, split, language, kind) the VERDICT comes from a task-clustered paired
@@ -103,6 +103,9 @@ def mean_metric(rows, name):
     return sum(vs) / len(vs) if vs else None
 
 
+MISSING_USAGE_WARN = 0.2   # an arm with more than this share of rows without usage gets a warning line
+
+
 def cell(rows):
     n = len(rows)
     k = sum(1 for r in rows if r.get("pass") is True)
@@ -113,13 +116,13 @@ def cell(rows):
     kk = max(counts, key=lambda c: (counts[c], c))   # modal reps per task (ties: larger)
     full = [v for v in by_task.values() if len(v) == kk]
     passk = sum(1 for v in full if all(v)) / len(full)
-    has = [r for r in rows if r.get("tokens_in") is not None or r.get("tokens_out") is not None]
+    has = [r for r in rows if r.get("tokens_in") is not None and r.get("tokens_out") is not None]   # a half-null row is missing usage, never 0
     toks = sum((r.get("tokens_in") or 0) + (r.get("tokens_out") or 0) for r in has)
     k_has = sum(1 for r in has if r.get("pass") is True)
     secs = sum(r["duration_s"] for r in rows if isinstance(r.get("duration_s"), (int, float)))
     fp, found = mean_metric(rows, "false_positives"), mean_metric(rows, "found")
     return {"n": n, "k": k, "reps": kk, "uneven": len(counts) > 1, "passk": passk, "ntask": len(full),
-            "tok": toks / k_has if k_has else None, "nousage": len(rows) - len(has), "sec": secs / k if k else None, "fp": fp, "found": found,
+            "tok": toks / k_has if k_has else None, "nousage": len(rows) - len(has), "n_usage_missing": len(rows) - len(has), "sec": secs / k if k else None, "fp": fp, "found": found,
             "reps_by_task": by_task,
             "per_task": {t: sum(v) / len(v) for t, v in by_task.items()}}
 
@@ -166,6 +169,10 @@ def diff_for(cells, key7, warns, notes, label):
         return ["n/a", "n/a", "0"], "insufficient tasks (n=0): one arm missing"
     if a["reps"] != b["reps"]:
         warns.append("WARNING: %s: arms are not comparable on pass^k (k=%d skill vs k=%d bare)" % (label, a["reps"], b["reps"]))
+    for arm, c in (("skill", a), ("bare", b)):
+        if c["n_usage_missing"] > MISSING_USAGE_WARN * c["n"]:
+            warns.append("WARNING: %s: %d of %d %s rows have no usage (> %d%%): the token comparison between the arms is not reliable"
+                         % (label, c["n_usage_missing"], c["n"], arm, round(100 * MISSING_USAGE_WARN)))
     e, lo, hi, m, oa, ob = paired(a, b)
     if oa or ob:
         notes.append("unpaired tasks in %s: skill-only=%s bare-only=%s" % (label, ",".join(oa) or "-", ",".join(ob) or "-"))
