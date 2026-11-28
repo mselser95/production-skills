@@ -51,13 +51,13 @@ here would be a threshold nobody derived.
 | `evidence-record-selftest.sh` | 85 |
 | `install-hosts-mutations-selftest.sh` | 38 |
 | `install-hosts-selftest.sh` | 52 |
-| `integration-train-selftest.sh` | 408 |
+| `integration-train-selftest.sh` | 500 |
 | `lint-parallel-selftest.sh` | 43 |
 | `mutation-baseline-selftest.sh` | 31 |
 | `plan-dag-selftest.sh` | 347 |
 | `run-once-selftest.sh` | 172 |
-| `service-python-gates-selftest.sh` | 40 |
+| `service-python-gates-selftest.sh` | 90 |
 | `template-vendored-list-selftest.sh` | 5 |
 | `template-workflow-pins-selftest.sh` | 573 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **3450** |
+| **total** | **3592** |
