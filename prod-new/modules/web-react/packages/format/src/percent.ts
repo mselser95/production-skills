@@ -3,7 +3,7 @@ import type { Decimal } from './grammar.ts';
 import { isSupportedLocale, learnTemplates, numberSymbols } from './locale.ts';
 import { applyTemplate, renderBody, resolveFraction } from './number.ts';
 import type { FractionOptions } from './number.ts';
-import { failWith, okText } from './types.ts';
+import { failWith, okText, readOptions } from './types.ts';
 import type { FormatResult } from './types.ts';
 
 /** Move the decimal point two places right by string arithmetic: 0.1234 -> 12.34, 1 -> 100, 0.005 -> 0.5. */
@@ -19,7 +19,9 @@ export function shiftTwo(d: Decimal): Decimal {
  * maxFractionDigits 2. The percent sign and its spacing are the locale's own (en-US "12.34%", de-DE "12,34 %"
  * with U+00A0, tr-TR "%12,34").
  */
-export function formatPercent(ratio: string, options: FractionOptions): FormatResult {
+export function formatPercent(ratio: string, opts: FractionOptions): FormatResult {
+  const options = readOptions<FractionOptions>(opts, ['locale', 'minFractionDigits', 'maxFractionDigits', 'rounding', 'signDisplay']);
+  if (options === undefined) return failWith('bad-options');
   const r = resolveFraction(options, 0, 2);
   if (r === undefined) return failWith('bad-options');
   if (!isSupportedLocale(options.locale)) return failWith('bad-locale');

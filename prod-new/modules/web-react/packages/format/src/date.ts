@@ -1,5 +1,5 @@
 import { isSupportedLocale } from './locale.ts';
-import { MAX_INPUT_LENGTH, failWith, okText } from './types.ts';
+import { MAX_INPUT_LENGTH, failWith, okText, readOptions } from './types.ts';
 import type { FormatResult } from './types.ts';
 
 export type DateStyle = 'short' | 'medium' | 'long' | 'full';
@@ -64,8 +64,9 @@ function formatter(key: string, locale: string, o: Intl.DateTimeFormatOptions): 
  * and locale. The result never depends on the machine's zone or locale. Fractions beyond milliseconds are dropped.
  * Invalid text is `bad-instant`; an unknown zone is `bad-time-zone`.
  */
-export function formatDate(isoInstant: string, options: DateOptions): FormatResult {
-  if (typeof options !== 'object' || options === null) return failWith('bad-options');
+export function formatDate(isoInstant: string, opts: DateOptions): FormatResult {
+  const options = readOptions<DateOptions>(opts, ['locale', 'timeZone', 'dateStyle', 'timeStyle']);
+  if (options === undefined) return failWith('bad-options');
   const dateStyle = options.dateStyle ?? 'medium';
   const timeStyle = options.timeStyle ?? 'medium';
   const dOk = dateStyle === 'none' || STYLES.includes(dateStyle);
@@ -104,8 +105,9 @@ export function formatDate(isoInstant: string, options: DateOptions): FormatResu
  * built at UTC midnight and formatted in the zone "UTC", so no local-time Date is ever constructed and the day cannot
  * shift with the machine's zone.
  */
-export function formatCalendarDate(ymd: string, options: CalendarDateOptions): FormatResult {
-  if (typeof options !== 'object' || options === null) return failWith('bad-options');
+export function formatCalendarDate(ymd: string, opts: CalendarDateOptions): FormatResult {
+  const options = readOptions<CalendarDateOptions>(opts, ['locale', 'dateStyle']);
+  if (options === undefined) return failWith('bad-options');
   const dateStyle = options.dateStyle ?? 'medium';
   if (!STYLES.includes(dateStyle)) return failWith('bad-options');
   if (!isSupportedLocale(options.locale)) return failWith('bad-locale');

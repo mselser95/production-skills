@@ -58,3 +58,19 @@ describe('formatPercent', () => {
     expect(text(formatPercent('1', undefined as never))).toBe('ERR:bad-options');
   });
 });
+
+describe('percent separators are the percent style own', () => {
+  it('equals Intl in 33 locales on exactly representable ratios (a failure prints both strings)', () => {
+    const locales = 'en-US en-GB en-IN en-CH de-DE de-AT de-CH de-LI fr-FR fr-CH fr-BE fr-CA es-ES es-AR es-MX pt-BR pt-PT it-IT it-CH nl-NL nl-BE sv-SE nb-NO da-DK fi-FI pl-PL cs-CZ hu-HU ru-RU tr-TR ja-JP ko-KR zh-CN'.split(' ');
+    const bad: string[] = [];
+    for (const locale of locales) {
+      const nf = new Intl.NumberFormat(locale, { style: 'percent', numberingSystem: 'latn', maximumFractionDigits: 2, roundingMode: 'halfExpand' });
+      for (const v of ['0', '0.5', '-0.5', '0.1234', '12345.6789', '-12345.6789', '123456.5', '0.0001']) {
+        const got = pct(v, { locale });
+        const want = nf.format(v as never);
+        if (got !== want) bad.push(`${locale} ${v}: package ${JSON.stringify(got)} intl ${JSON.stringify(want)}`);
+      }
+    }
+    expect(bad.slice(0, 10), `${bad.length} mismatches`).toEqual([]);
+  });
+});

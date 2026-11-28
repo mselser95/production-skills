@@ -86,10 +86,12 @@ for k in ("strict", "noUncheckedIndexedAccess", "exactOptionalPropertyTypes", "n
     assert b.get(k) is True, k
 PY
 
-# ---- no float-based formatting in src/: the same grep the package's own guard test runs
+# ---- no float-based formatting in src/: a COARSE hermetic first line (grep, no node). The real guard is the lexer-based
+# test/guard.test.ts (comments, strings and template code handled by state; unary plus, arithmetic and an exact
+# allow-list as data), which runs in the live section and in `pnpm test`. This grep has no escape marker at all.
 forbidden_rx='\.toFixed\(|\.toPrecision\(|\.toExponential\(|\.toLocaleString\(|\bparseFloat\(|\bparseInt\(|\bNumber\(|\bMath\.round\('
-forbidden_hits() { # <dir>: offending non-comment, non-allow-listed lines
-  grep -nE -- "$forbidden_rx" "$1"/*.ts 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*)' | grep -v 'format-guard-allow:'
+forbidden_hits() { # <dir>: offending lines that do not start with a comment opener (no per-line exemption exists)
+  grep -nE -- "$forbidden_rx" "$1"/*.ts 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*(//|/\*)'
 }
 if hits="$(forbidden_hits "$pkg/src")"; then fail "src/ holds a forbidden float-based call" "$(head -c 240 <<<"$hits")"; else pass "src/ holds no toFixed / toPrecision / toExponential / toLocaleString / parseFloat / parseInt / Number( / Math.round("; fi
 n_src="$(find "$pkg/src" -name '*.ts' | wc -l | tr -d ' ')"
@@ -100,7 +102,8 @@ printf 'export const leak = (x: string): string => (0.1).toFixed(2) + x;\n' >> "
 forbidden_hits "$tmp/src-ctl" >/dev/null && fail "grep control: the unmutated copy was flagged" || pass "grep control: the unmutated copy is clean"
 forbidden_hits "$tmp/src-mut" >/dev/null && pass "grep mutant: a toFixed line appended to src is caught" || fail "grep mutant: a toFixed line went unnoticed"
 printf 'export const ok2 = (x: string): string => x.concat("a").toFixed(2); // format-guard-allow: test\n' > "$tmp/src-mut/types.ts"
-forbidden_hits "$tmp/src-mut" >/dev/null && fail "grep: an allow-marked line was flagged" || pass "grep: the allow marker is honoured"
+forbidden_hits "$tmp/src-mut" >/dev/null && pass "grep: a line carrying the old allow marker is STILL flagged (no escape marker exists)" || fail "grep: an allow-marked line was exempt"
+grep -rq 'format-guard-allow' "$pkg/src" && fail "an escape marker is present in src/" || pass "src/ carries no format-guard-allow marker"
 
 # ---- every exported function has a test file and a re-export; every test file has a provenance header
 fns="$(grep -hoE '^export function [A-Za-z0-9_]+' "$pkg"/src/*.ts | awk '{print $3}' | sort -u)"
@@ -148,9 +151,9 @@ else
       out="$(cd "$pk" && TZ="$z" timeout 90 pnpm exec vitest run test/date.test.ts 2>&1)" && pass "live: date tests green under TZ=$z" || fail "live: date tests under TZ=$z" "$(head -c 200 <<<"$out")"
     done
 
-    # mutate <name> <file under src> <test files> <failing-test regex> <old> <new>
+    # mutate <name> <file under the package> <test files> <failing-test regex> <old> <new>
     mutate() {
-      local name="$1" file="$pk/src/$2" tests="$3" must="$4" old="$5" new="$6" c m
+      local name="$1" file="$pk/$2" tests="$3" must="$4" old="$5" new="$6" c m
       cp "$file" "$tmp/orig.bak"
       c="$(pm vitest run $tests)"; crc=$?
       if [[ $crc -ne 0 ]]; then fail "mutant $name: control (unmutated) is not green" "$(grep -E 'FAIL' <<<"$c" | head -n 2 | head -c 200)"; return; fi
@@ -168,30 +171,62 @@ open(p, "w", encoding="utf-8").write(s.replace(old, new))' "$file" "$old" "$new"
       elif ! grep -Eq -- "(FAIL|×).*($must)" <<<"$m"; then fail "mutant $name: RED, but not in the expected test /$must/" "$(grep -E 'FAIL|×' <<<"$m" | head -n 2 | head -c 240)"
       else pass "mutant $name: control GREEN, mutant RED in /$must/ ($(grep -cE '^ *(FAIL|×)' <<<"$m") failing lines)"; fi
     }
-    mutate "rounding through Number().toFixed" round.ts "test/properties.test.ts" "2\\. digits round-trip" \
+    mutate "rounding through Number().toFixed" src/round.ts "test/properties.test.ts" "2\\. digits round-trip" \
       "  if (frac.length <= maxFrac) return { int, frac };" \
       "  { const s = Number(int + '.' + frac).toFixed(maxFrac); const dot = s.indexOf('.'); return dot < 0 ? { int: s, frac: '' } : { int: s.slice(0, dot), frac: s.slice(dot + 1) }; }"
-    mutate "exponent accepted by the grammar" grammar.ts "test/decimal.test.ts" "1e5" \
+    mutate "exponent accepted by the grammar" src/grammar.ts "test/decimal.test.ts" "1e5" \
       "const DECIMAL = /^(-?)(0|[1-9][0-9]*)(?:\\.([0-9]+))?\$/;" \
       "const DECIMAL = /^(-?)(0|[1-9][0-9]*)(?:\\.([0-9]+))?(?:[eE][+-]?[0-9]+)?\$/;"
-    mutate "half-even and half-up swapped" round.ts "test/decimal.test.ts test/properties.test.ts" "half-even|half-up|4\\. the result equals" \
+    mutate "half-even and half-up swapped" src/round.ts "test/decimal.test.ts test/properties.test.ts" "half-even|half-up|4\\. the result equals" \
       "  return mode === 'half-up' ? true : lastKept % 2 === 1;" \
       "  return mode === 'half-up' ? lastKept % 2 === 1 : true;"
-    mutate "grouping size hard-coded to 3" locale.ts "test/decimal.test.ts" "en-IN" \
+    mutate "grouping size hard-coded to 3" src/locale.ts "test/decimal.test.ts" "en-IN" \
       "const secondary = pieces.length >= 3 ? (pieces[pieces.length - 2] ?? primary) : primary;" \
       "const secondary = 3;"
-    mutate "timeZone defaults to the ambient zone" date.ts "test/date.test.ts" "outputs do not depend on it" \
+    mutate "timeZone defaults to the ambient zone" src/date.ts "test/date.test.ts" "outputs do not depend on it" \
       "const o: Intl.DateTimeFormatOptions = { timeZone: options.timeZone };" \
       "const o: Intl.DateTimeFormatOptions = {};"
-    mutate "currency fraction digits hard-coded to 2" money.ts "test/money.test.ts" "USD 2, JPY 0, KWD 3" \
+    mutate "currency fraction digits hard-coded to 2" src/money.ts "test/money.test.ts" "USD 2, JPY 0, KWD 3" \
       "const digits = resolved.maximumFractionDigits;" \
       "const digits = 2;"
-    mutate "negative zero keeps its minus" number.ts "test/decimal.test.ts" "negative zero" \
+    mutate "negative zero keeps its minus" src/number.ts "test/decimal.test.ts" "negative zero" \
       "  if (body.zero) return 'none';" \
       "  if (false) return 'none';"
-    mutate "carry through all nines dropped" round.ts "test/decimal.test.ts" "carry" \
+    mutate "carry through all nines dropped" src/round.ts "test/decimal.test.ts" "carry" \
       "  if (i === 0) return '1' + '0'.repeat(d.length);" \
       "  if (i === 0) return '0'.repeat(d.length);"
+    mutate "money borrows the plain-number separators" src/money.ts "test/money.test.ts" "fr-CH CHF" \
+      "numberSymbols(options.locale, style), true)" \
+      "numberSymbols(options.locale), true)"
+    mutate "decimal sign loses its bidi mark" src/locale.ts "test/rtl.test.ts" "ar-EG" \
+      "prefix: join(parts.slice(0, Math.max(first, 0))), suffix" \
+      "prefix: join(parts.slice(0, Math.max(first, 0))).replace(/[\u200e\u200f\u061c]/g, ''), suffix"
+    mutate "orPlaceholder throws on null again" src/types.ts "test/robust.test.ts" "orPlaceholder" \
+      "  try {
+    if (typeof result === 'object' && result !== null && result.ok === true && typeof result.text === 'string') return result.text;
+  } catch {
+    // a hostile object (a getter that throws) is not a result: fall through to the placeholder
+  }
+  return typeof placeholder === 'string' ? placeholder : PLACEHOLDER;" \
+      "  return result.ok ? result.text : placeholder;"
+    mutate "an option getter that throws propagates" src/types.ts "test/robust.test.ts" "formatDecimal|formatMoney|cannot be read" \
+      "  } catch {
+    return undefined;" \
+      "  } catch (e) {
+    throw e;"
+    mutate "guard: an added (+digits).toString() path" src/types.ts "test/guard.test.ts" "every finding in src" \
+      "export const PLACEHOLDER = '\u2014';" \
+      "export const PLACEHOLDER = '\u2014';
+export const leak = (s: string): string => (+s).toString();"
+    mutate "guard: a toFixed on a new line" src/types.ts "test/guard.test.ts" "every finding in src" \
+      "export const PLACEHOLDER = '\u2014';" \
+      "export const PLACEHOLDER = '\u2014';
+export const leak = (s: string): string => s
+  .toFixed(2);"
+    mutate "guard: an extra allow entry without bumping the count" test/guard.test.ts "test/guard.test.ts" "exactly the expected number" \
+      "  { file: 'round.ts', kind: 'arith', text: 'lastKept % 2', why: 'parity of one ASCII digit (half-even)' }," \
+      "  { file: 'round.ts', kind: 'arith', text: 'lastKept % 2', why: 'parity of one ASCII digit (half-even)' },
+  { file: 'round.ts', kind: 'math', text: 'Math.round', why: 'mutant' },"
     # typecheck bites: a type error in src is RED, the clean tree was GREEN above
     printf "export const bad: number = 'a';\n" > "$pk/src/zz-type-error.ts"
     out="$(pm tsc -p tsconfig.json)" && fail "mutant type error: typecheck stayed GREEN" || pass "mutant type error in src: typecheck control GREEN, mutant RED"

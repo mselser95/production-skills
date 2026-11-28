@@ -6,8 +6,6 @@
 export interface NumberSymbols {
   readonly group: string;
   readonly decimal: string;
-  readonly minus: string;
-  readonly plus: string;
   /** Size of the group next to the decimal point; 0 = the locale does not group. */
   readonly primary: number;
   /** Size of every further group (2 in en-IN, where 1234567 is 12,34,567). */
@@ -27,7 +25,7 @@ export interface Templates {
   readonly plus: Template;
 }
 
-const CACHE_LIMIT = 64;
+const CACHE_LIMIT = 256;
 function remember<T>(cache: Map<string, T>, key: string, make: () => T): T {
   const hit = cache.get(key);
   if (hit !== undefined) return hit;
@@ -50,10 +48,17 @@ export function isSupportedLocale(locale: unknown): locale is string {
 
 const symbolCache = new Map<string, NumberSymbols>();
 
-export function numberSymbols(locale: string): NumberSymbols {
-  return remember(symbolCache, locale, () => {
-    const always = new Intl.NumberFormat(locale, { numberingSystem: 'latn', useGrouping: true, maximumFractionDigits: 1 });
-    const auto = new Intl.NumberFormat(locale, { numberingSystem: 'latn' });
+/**
+ * The separators and grouping of a locale, learned from Intl on safe samples. `style` selects WHICH Intl style is
+ * asked: none = plain numbers; `{style: 'currency', currency, currencyDisplay}` or `{style: 'percent'}` = that style's
+ * OWN separators, because CLDR defines currency and percent symbols apart from the plain-number ones in some locales
+ * (fr-CH money uses "." for decimals, de-AT money groups with ".", en-CH money groups with ",").
+ */
+export function numberSymbols(locale: string, style: Intl.NumberFormatOptions = {}): NumberSymbols {
+  return remember(symbolCache, locale + '|' + JSON.stringify(style), () => {
+    const base: Intl.NumberFormatOptions = { ...style, numberingSystem: 'latn' };
+    const always = new Intl.NumberFormat(locale, { ...base, useGrouping: true, minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    const auto = new Intl.NumberFormat(locale, base);
     const big = always.formatToParts(1234567890123);
     const pieces = big.filter((p) => p.type === 'integer').map((p) => p.value.length);
     const primary = pieces.length >= 2 ? (pieces[pieces.length - 1] ?? 0) : 0;
@@ -62,8 +67,6 @@ export function numberSymbols(locale: string): NumberSymbols {
     return {
       group: part(big, 'group', ','),
       decimal: part(always.formatToParts(1.5), 'decimal', '.'),
-      minus: part(always.formatToParts(-1), 'minusSign', '-'),
-      plus: part(new Intl.NumberFormat(locale, { numberingSystem: 'latn', signDisplay: 'always' }).formatToParts(1), 'plusSign', '+'),
       primary,
       secondary,
       minGrouping: auto.formatToParts(1000).some((p) => p.type === 'group') ? 1 : 2,
@@ -100,7 +103,8 @@ function templateOf(parts: Intl.NumberFormatPart[]): Template {
 
 const templateCache = new Map<string, Templates>();
 
-/** The sign / unit placement for a currency or percent style, from the formatted samples 1, -1 and +1. */
+/** The sign / unit placement for a plain, currency or percent style, from the formatted samples 1, -1 and +1: ALL
+ * literal text around the number run, so a locale's bidi control characters before the minus sign are kept. */
 export function learnTemplates(locale: string, options: Intl.NumberFormatOptions): Templates {
   return remember(templateCache, locale + '|' + JSON.stringify(options), () => {
     const base: Intl.NumberFormatOptions = { ...options, numberingSystem: 'latn' };

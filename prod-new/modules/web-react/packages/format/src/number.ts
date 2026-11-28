@@ -1,9 +1,9 @@
 import { parseDecimal, parseInteger } from './grammar.ts';
 import type { Decimal, Parsed } from './grammar.ts';
-import { groupDigits, isSupportedLocale, numberSymbols } from './locale.ts';
+import { groupDigits, isSupportedLocale, learnTemplates, numberSymbols } from './locale.ts';
 import type { NumberSymbols, Template, Templates } from './locale.ts';
 import { fitFraction, isZero, roundMagnitude } from './round.ts';
-import { MAX_FRACTION_DIGITS, failWith, okText } from './types.ts';
+import { MAX_FRACTION_DIGITS, failWith, okText, readOptions } from './types.ts';
 import type { FormatResult, RoundingMode, SignDisplay } from './types.ts';
 
 export interface FractionOptions {
@@ -75,17 +75,17 @@ export function applyTemplate(t: Templates, d: Decimal, body: Body, sign: SignDi
   return tpl.prefix + body.text + tpl.suffix;
 }
 
-function withParsed(p: Parsed, locale: unknown, r: Resolved | undefined, run: (d: Decimal, r: Resolved, sym: NumberSymbols) => string): FormatResult {
+function withParsed(p: Parsed, locale: unknown, r: Resolved | undefined, run: (d: Decimal, r: Resolved, locale: string) => string): FormatResult {
   if (r === undefined) return failWith('bad-options');
   if (!isSupportedLocale(locale)) return failWith('bad-locale');
   if (!p.ok) return failWith(p.reason);
-  return okText(run(p.value, r, numberSymbols(locale)));
+  return okText(run(p.value, r, locale));
 }
 
-function plain(d: Decimal, r: Resolved, sym: NumberSymbols, grouping: boolean): string {
-  const body = renderBody(d, r, sym, grouping);
-  const which = signOf(d, body, r.sign);
-  return (which === 'minus' ? sym.minus : which === 'plus' ? sym.plus : '') + body.text;
+/** A plain number: the digits wrapped in the locale's own sign prefix / suffix (bidi marks included). */
+function plain(d: Decimal, r: Resolved, locale: string, grouping: boolean): string {
+  const body = renderBody(d, r, numberSymbols(locale), grouping);
+  return applyTemplate(learnTemplates(locale, {}), d, body, r.sign);
 }
 
 /**
@@ -95,8 +95,9 @@ function plain(d: Decimal, r: Resolved, sym: NumberSymbols, grouping: boolean): 
  * Checks run in this order: options, locale, value.
  */
 export function formatDecimal(value: string, options: DecimalOptions): FormatResult {
-  const r = resolveFraction(options, 0, 3);
-  return withParsed(parseDecimal(value), options?.locale, r, (d, rr, sym) => plain(d, rr, sym, options.grouping ?? true));
+  const o = readOptions<DecimalOptions>(options, ['locale', 'minFractionDigits', 'maxFractionDigits', 'rounding', 'signDisplay', 'grouping']);
+  if (o === undefined) return failWith('bad-options');
+  return withParsed(parseDecimal(value), o.locale, resolveFraction(o, 0, 3), (d, rr, loc) => plain(d, rr, loc, o.grouping ?? true));
 }
 
 export interface NumOptions {
@@ -114,6 +115,8 @@ export function formatNum(value: string | bigint | number, options: NumOptions):
   if (typeof value === 'bigint') text = value.toString();
   else if (typeof value === 'number') text = Number.isSafeInteger(value) ? String(value) : undefined;
   const p = parseInteger(text);
-  const r = resolveFraction({ locale: options?.locale ?? '', minFractionDigits: 0, maxFractionDigits: 0, ...(options?.signDisplay === undefined ? {} : { signDisplay: options.signDisplay }) }, 0, 0);
-  return withParsed(p, options?.locale, r, (d, rr, sym) => plain(d, rr, sym, options.grouping ?? true));
+  const o = readOptions<NumOptions>(options ?? {}, ['locale', 'signDisplay', 'grouping']); // missing options: bad-locale below (pinned)
+  if (o === undefined) return failWith('bad-options');
+  const r = resolveFraction({ locale: '', minFractionDigits: 0, maxFractionDigits: 0, ...(o.signDisplay === undefined ? {} : { signDisplay: o.signDisplay }) }, 0, 0);
+  return withParsed(p, o.locale, r, (d, rr, loc) => plain(d, rr, loc, o.grouping ?? true));
 }

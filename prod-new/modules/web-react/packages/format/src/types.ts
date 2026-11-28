@@ -33,7 +33,31 @@ export const failWith = (reason: FormatError): FormatResult => ({ ok: false, rea
 
 /** The string to put on the screen: the text when ok, else the placeholder. */
 export function orPlaceholder(result: FormatResult, placeholder: string = PLACEHOLDER): string {
-  return result.ok ? result.text : placeholder;
+  try {
+    if (typeof result === 'object' && result !== null && result.ok === true && typeof result.text === 'string') return result.text;
+  } catch {
+    // a hostile object (a getter that throws) is not a result: fall through to the placeholder
+  }
+  return typeof placeholder === 'string' ? placeholder : PLACEHOLDER;
+}
+
+/**
+ * A snapshot of the options a formatter reads: each key is read ONCE, inside a try, so a getter that throws (or a
+ * revoked Proxy) makes the call `bad-options` instead of throwing at render time. `undefined` = not a plain options
+ * object (null, a primitive, an array) or unreadable.
+ */
+export function readOptions<T>(options: unknown, keys: readonly string[]): T | undefined {
+  try {
+    if (typeof options !== 'object' || options === null || Array.isArray(options)) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const k of keys) {
+      const v = (options as Record<string, unknown>)[k];
+      if (v !== undefined) out[k] = v;
+    }
+    return out as T;
+  } catch {
+    return undefined;
+  }
 }
 
 /** How a discarded digit string rounds. `half-up` = half away from zero (the Intl default, `halfExpand`);

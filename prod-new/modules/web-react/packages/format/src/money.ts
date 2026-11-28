@@ -2,7 +2,7 @@ import { parseDecimal } from './grammar.ts';
 import { isSupportedLocale, learnTemplates, numberSymbols } from './locale.ts';
 import { applyTemplate, renderBody, resolveFraction } from './number.ts';
 import type { Resolved } from './number.ts';
-import { failWith, okText } from './types.ts';
+import { failWith, okText, readOptions } from './types.ts';
 import type { FormatResult, RoundingMode, SignDisplay } from './types.ts';
 
 export interface MoneyOptions {
@@ -26,8 +26,9 @@ const DISPLAYS: readonly string[] = ['symbol', 'narrowSymbol', 'code'];
  * own, learned from Intl samples (en-US "-$1.00", de-DE "-1,00 \u20ac"); there is ONE negative style, the locale's minus
  * pattern: never accounting parentheses. Zero after rounding carries no sign ("-0.004" USD -> "$0.00").
  */
-export function formatMoney(amount: string, currency: string, options: MoneyOptions): FormatResult {
-  if (typeof options !== 'object' || options === null) return failWith('bad-options');
+export function formatMoney(amount: string, currency: string, opts: MoneyOptions): FormatResult {
+  const options = readOptions<MoneyOptions>(opts, ['locale', 'rounding', 'signDisplay', 'currencyDisplay']);
+  if (options === undefined) return failWith('bad-options');
   const display = options.currencyDisplay ?? 'symbol';
   const base = resolveFraction({ locale: '', rounding: options.rounding ?? 'half-up', signDisplay: options.signDisplay ?? 'auto' }, 0, 0);
   if (base === undefined || !DISPLAYS.includes(display)) return failWith('bad-options');
@@ -40,6 +41,6 @@ export function formatMoney(amount: string, currency: string, options: MoneyOpti
   const digits = resolved.maximumFractionDigits;
   if (digits === undefined) return failWith('bad-currency');
   const r: Resolved = { ...base, min: digits, max: digits };
-  const body = renderBody(p.value, r, numberSymbols(options.locale), true);
+  const body = renderBody(p.value, r, numberSymbols(options.locale, style), true);
   return okText(applyTemplate(learnTemplates(options.locale, style), p.value, body, r.sign));
 }
