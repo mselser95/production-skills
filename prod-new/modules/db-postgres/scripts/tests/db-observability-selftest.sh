@@ -37,6 +37,12 @@ trap 'rm -rf "$tmp"' EXIT
 ok=0; bad=0; skipped=0
 export TMPDIR="$tmp"   # the scrape test's scratch dir lands here, never in the real /tmp
 mkdir -p "$tmp/mut" "$tmp/runs" "$tmp/bin" "$tmp/empty"
+# the suite must leave the module's real tree exactly as it found it: its status (tracked changes,
+# untracked and ignored files) is read now and compared at the end (skipped outside a git checkout)
+modroot="$(cd "$here/../.." && pwd)"
+tree_status() { git -C "$modroot" status --porcelain --ignored -- . 2>/dev/null; }
+tree0=""; tree_git=0
+if git -C "$modroot" rev-parse --is-inside-work-tree >/dev/null 2>&1; then tree_git=1; tree0="$(tree_status)"; fi
 
 if ! python3 -B -c 'import yaml' 2>/dev/null; then
   echo "FAIL prerequisite: python3 with PyYAML is required (pip install PyYAML)"
@@ -48,9 +54,17 @@ TN=(); TT=(); SECT_NAME=""; SECT_T0=$SECONDS
 sect() { local now=$SECONDS; [[ -z $SECT_NAME ]] || { TN+=("$SECT_NAME"); TT+=("$((now - SECT_T0))"); }; SECT_NAME="${1:-}"; SECT_T0=$now; }
 pass() { echo "ok   $1"; ok=$((ok + 1)); }
 flunk() { echo "FAIL $1${2:+ ($2)}"; bad=$((bad + 1)); }
+# sdebug WHAT: with SELFTEST_DEBUG=1, the last scenario's exit status and output tail (why a case failed)
+sdebug() {
+  [[ -z ${SELFTEST_DEBUG:-} ]] || { echo "  debug ($1): rc=${rc:-?}"; printf '%s\n' "${out:-}" | tail -n 12 | sed 's/^/  | /'; }
+}
 expect_ok() { # name fn args...: the case must pass
   local name="$1"; shift
-  if "$@"; then pass "$name"; else flunk "$name"; fi
+  if "$@"; then pass "$name"
+  else
+    flunk "$name"
+    sdebug "$name"
+  fi
 }
 # tmo SECS cmd...: a hard wall-clock limit (no GNU timeout on a stock macOS)
 tmo() {
@@ -113,10 +127,13 @@ import yaml
 casefile, obsdir, overlayfile, scratch = sys.argv[1:5]
 dbroot = os.path.dirname(obsdir)
 tree = {}
-for root, _, names in os.walk(obsdir):
+for root, _, names in os.walk(dbroot):   # the whole db/ tree: the walk and the docs scan read all of it
     for n in names:
-        with open(os.path.join(root, n), encoding="utf-8") as f:
-            tree["db/" + os.path.relpath(os.path.join(root, n), dbroot)] = f.read()
+        try:
+            with open(os.path.join(root, n), encoding="utf-8") as f:
+                tree["db/" + os.path.relpath(os.path.join(root, n), dbroot)] = f.read()
+        except UnicodeDecodeError:
+            pass
 with open(overlayfile, encoding="utf-8") as f:
     tree["db/compose.observability.yml"] = f.read()
 for _n in ("compose.yml", "compose.timescale.yml"):
@@ -171,7 +188,7 @@ def run(script, want, f, old, new, pt):
             files[k] = files[k].replace(old, new)
     code, lsrc = code_of(script)
     cur[0] = lsrc
-    real_which, real_runner, real_listdir = shutil.which, subprocess.run, os.listdir
+    real_which, real_runner, real_listdir, real_walk = shutil.which, subprocess.run, os.listdir, os.walk
     tdir = None
     b = dict(vars(builtins))
     if pt == "real":
@@ -202,6 +219,21 @@ def run(script, want, f, old, new, pt):
             return sorted(names)
 
         os.listdir = vlistdir
+
+        def vwalk(top, topdown=True, onerror=None, followlinks=False):
+            d = os.path.normpath(str(top))
+            kids = {}
+            for k in vf:
+                if k.startswith(d + os.sep):
+                    parts = os.path.relpath(k, d).split(os.sep)
+                    kids.setdefault(parts[0], len(parts) == 1)
+            files_ = sorted(n for n, isf in kids.items() if isf)
+            dirs_ = sorted(n for n, isf in kids.items() if not isf)
+            yield d, dirs_, files_
+            for n in dirs_:
+                yield from vwalk(os.path.join(d, n))
+
+        os.walk = vwalk
         shutil.which = (lambda n, *a, **k: "/fake/promtool") if pt == "fake" else (lambda n, *a, **k: None)
         if pt == "fake":
             subprocess.run = fake_run
@@ -219,7 +251,7 @@ def run(script, want, f, old, new, pt):
                 rc = 70
                 buf.write("harness: " + repr(e))
     finally:
-        shutil.which, subprocess.run, os.listdir = real_which, real_runner, real_listdir
+        shutil.which, subprocess.run, os.listdir, os.walk = real_which, real_runner, real_listdir, real_walk
         if tdir:
             shutil.rmtree(tdir, ignore_errors=True)
     out = buf.getvalue()
@@ -549,10 +581,10 @@ pc "README documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: RE
 pc "RUNBOOK (a command wrapped over two lines) documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: observability/RUNBOOK.md documents `docker compose -f compose.other.yml`' "$RB" 'compose.observability.yml up -d' 'compose.observability.yml -f compose.other.yml up -d'
 pc "a compose file's own comment documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: compose.timescale.yml documents `docker compose -f compose.other.yml`' "compose.timescale.yml" '#   docker compose -f compose.yml -f compose.timescale.yml up -d' '#   docker compose -f compose.yml -f compose.other.yml up -d'
 pc "the scrape test runs a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: scripts/db-scrape-test.sh runs `docker compose -f compose.other.yml`' "../scripts/db-scrape-test.sh" '-f "$dbdir/compose.observability.yml")' '-f "$dbdir/compose.observability.yml" -f "$dbdir/compose.other.yml")'
-# sixth review: the documented-command reader is an ALLOW-LIST of shapes. Every case below carries a
-# non-compose-named extra.yml with the exporter fragment, so a missed spelling would be a real hole.
-EXTRA=$'services:\n  exporter:\n    environment: {PGSSLMODE: disable}\n'
-dcx() { pc "$1" "$2" "../README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' "$3"$'\x01'"$EXTRA"; }   # NAME WANT NEWTEXT
+# sixth review: the documented-command reader is an ALLOW-LIST of shapes (a lint since the seventh review).
+# documented-command lint cases (seventh review: the lint is not the guarantee any more, the FILE rule below is;
+# these run on the shipped tree, with no extra file, so they test the lint alone).
+dcx() { pc "$1" "$2" "../README.md" "$README_CMD" "$3"; }   # NAME WANT NEWTEXT
 dcx "compose mention: --file extra.yml -> COMPOSE-DOC-FILE" $'COMPOSE-DOC-FILE: README.md:\n`--file`: a flag' 'docker compose --file extra.yml up -d'
 dcx "compose mention: --file=extra.yml -> COMPOSE-DOC-FILE" '`--file=extra.yml`: a flag' 'docker compose --file=extra.yml up -d'
 dcx "compose mention: glued -fextra.yml -> COMPOSE-DOC-FILE" '`-fextra.yml`: a flag' 'docker compose -fextra.yml up -d'
@@ -605,7 +637,7 @@ pmx "parity: compose enumeration reduced to compose.yml only (timescale fragment
     if not re.fullmatch' -- 'BASE-EXPORTER: compose.timescale.yml defines the service `exporter`' "compose.timescale.yml" "$TSANCH" "$TSANCH"$'  exporter: {}\n'
 pmx "parity: the closed list of compose files removed" '    if name_ not in COMPOSE_CLOSED and name_ not in AUTO_MERGED:' '    if False:' -- 'COMPOSE-UNKNOWN-FILE: `compose.extra.yml`' "+compose.extra.yml" "" $'services: {}\n'
 pmx "parity: the documented-commands check removed" '        for m_ in COMPOSE_MENTION.finditer(text_):' '        for m_ in []:' -- 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "../README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
-dcxm() { pmx "$1" "$2" "$3" -- "$4" "../README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' "$5"$'\x01'"$EXTRA"; }   # NAME ANCHOR REPL WANT NEWTEXT
+dcxm() { pmx "$1" "$2" "$3" -- "$4" "../README.md" "$README_CMD" "$5"; }   # NAME ANCHOR REPL WANT NEWTEXT
 dcxm "parity: continuation joining removed (the wrapped command is two lines)" '        if line_.rstrip().endswith("\\"):' '        if False:' 'documents `docker compose -f extra.yml`' $'docker compose -f compose.yml -f compose.observability.yml \\\n  -f extra.yml up -d'
 dcxm "parity: the anchored shape loosened to flags right after docker compose (--profile x -f passes)" '        if u_.startswith(BAD_FLAG_PREFIX):' '        if False:' '`--profile`: a flag' 'docker compose --profile x -f compose.yml -f extra.yml up -d'
 dcxm "parity: --project-directory not refused" '"--project-directory", ' '' '`--project-directory`: a flag' 'docker compose --project-directory . up -d'
@@ -621,6 +653,35 @@ pmx "parity: the URI floor back to the three old checks (host)" 'if not m_uri:' 
 pmx "parity: the URI floor back to the three old checks (&user=)" 'if not m_uri:' 'if False:' 'elif sorted(m_uri.group(2).split("&")) !=' 'elif False and sorted(m_uri.group(2).split("&")) !=' -- "OVERLAY-URI" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=$URI_OK&user=postgres${X1}DATA_SOURCE_URI=$URI_OK&user=postgres"
 pmx "parity: aggregation operators case-sensitive again (Sum( refused)" '(text in FUNCS or low in AGG) and (nxt == ("open", "(") or (low in AGG and' '(text in FUNCS) and (nxt == ("open", "(") or (low in AGG and' -- OK "$R" "expr: pg_up == 0" "expr: 'Sum(pg_up) == 0'"
 pmx "parity: function names case-insensitive (Rate( accepted)" '(text in FUNCS or low in AGG) and' '(low in FUNCS or low in AGG) and' -- 'unknown function `Rate(`' "$R" "expr: pg_up == 0" "expr: 'Rate(pg_up[5m]) == 0'"
+
+# seventh review: THE GUARANTEE comes from FILES. Every YAML file under db/ (any depth, any name, any case) is
+# loaded; a compose-shaped one may not define the overlay's service and must be on the closed list. These cases
+# are real parity runs on the tree with one extra file; the command spelling does not matter any more.
+EXF=$'services:\n  exporter:\n    environment: {PGSSLMODE: disable}\n'
+pc "file rule: db/extra.yml with the exporter fragment -> BASE-EXPORTER + COMPOSE-UNKNOWN-FILE" $'BASE-EXPORTER: extra.yml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `extra.yml`' "+extra.yml" "" "$EXF"
+pc "file rule: the same file named notes.yaml -> RED" $'BASE-EXPORTER: notes.yaml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `notes.yaml`' "+notes.yaml" "" "$EXF"
+pc "file rule: the same file in db/bootstrap/x.yml -> RED" $'BASE-EXPORTER: bootstrap/x.yml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `bootstrap/x.yml`' "+bootstrap/x.yml" "" "$EXF"
+pc "file rule: the same file at db/observability/deep/dir/y.YAML -> RED" $'BASE-EXPORTER: observability/deep/dir/y.YAML defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `observability/deep/dir/y.YAML`' "+observability/deep/dir/y.YAML" "" "$EXF"
+pc "file rule: a compose-shaped file WITHOUT the exporter -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `other.yml`' "+other.yml" "" $'services: {other: {image: x}}\n'
+pc "file rule: a file with only a top-level include -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `inc.yml`' "+inc.yml" "" $'include: [../elsewhere.yml]\n'
+pc "file rule: a non-compose YAML (groups: [...]) is GREEN" OK "+more-rules.yml" "" $'groups: [{name: x, rules: []}]\n'
+pc "file rule: an unparsable db/junk.yml -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `junk.yml`' "+junk.yml" "" $'a: [unclosed\n'
+pc "file rule: a two-document file -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `two.yml`' "+two.yml" "" $'a: 1\n---\nservices: {exporter: {}}\n'
+pc "round-7 exploit: a global-flag command in the README merging extra.yml -> RED by the file rule AND the lint" $'BASE-EXPORTER: extra.yml defines the service `exporter`\nCOMPOSE-DOC-FILE: README.md:' "../README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' 'docker --context x compose -f compose.yml -f compose.observability.yml -f extra.yml up -d'$'\x01'"$EXF"
+pc "round-7 exploit: a command in db/bootstrap/NOTES.md naming a fourth file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: bootstrap/NOTES.md documents `docker compose -f extra.yml`' "+bootstrap/NOTES.md" "" $'docker compose -f compose.yml -f extra.yml up -d\n'
+dcx "compose mention: docker --context x compose -> refused outright (global flag)" 'no global flags' 'docker --context x compose -f compose.yml -f compose.observability.yml up -d'
+dcx "compose mention: docker --debug compose ps -> refused (global flag)" '`--debug`: write `docker compose` with no global flags' 'docker --debug compose ps'
+dcx "compose mention: docker -H tcp://h compose ps -> refused (global flag)" '`-H`: write `docker compose` with no global flags' 'docker -H tcp://h compose ps'
+dcx "compose mention: docker --host=h compose ps -> refused (global flag)" '`--host=h`: write `docker compose` with no global flags' 'docker --host=h compose ps'
+pmx "parity: the recursive walk reduced to the top level" 'for root_, dirs_, files_ in os.walk(overlay_dir, onerror=walk_error):' 'for root_, dirs_, files_ in [next(os.walk(overlay_dir, onerror=walk_error))]:' -- 'COMPOSE-UNKNOWN-FILE: `observability/deep/dir/y.YAML`' "+observability/deep/dir/y.YAML" "" "$EXF"
+pmx "parity: the walk restricted to compose-named files" $'        if not is_yaml_name(n_):\n            continue\n' $'        if not re.fullmatch(r"(docker-)?compose.*\\.ya?ml", n_, re.I):\n            continue\n' -- 'BASE-EXPORTER: extra.yml defines the service `exporter`' "+extra.yml" "" "$EXF"
+pmx "parity: the compose-shaped -> unknown file rule removed" '            if rel_ not in COMPOSE_CLOSED:' '            if False:' -- 'COMPOSE-UNKNOWN-FILE: `other.yml`' "+other.yml" "" $'services: {other: {image: x}}\n'
+pmx "parity: the non-overlay service check removed from the walk" '            judge_compose(rel_, doc_)' '            pass' -- 'BASE-EXPORTER: extra.yml defines the service `exporter`' "+extra.yml" "" "$EXF"
+pmx "parity: the unreadable-file rule removed" '        if not ok_:' '        if False:' -- 'COMPOSE-UNREADABLE-FILE: `junk.yml`' "+junk.yml" "" $'a: [unclosed\n'
+pmx "parity: the markdown scan restricted to the README and RUNBOOK (db/**/*.md not scanned)" 'DOC_SOURCES += [(r_, p_) for r_, p_ in md_seen if os.path.abspath(p_) != _rb]' 'pass' -- 'COMPOSE-DOC-FILE: bootstrap/NOTES.md documents `docker compose -f extra.yml`' "+bootstrap/NOTES.md" "" $'docker compose -f compose.yml -f extra.yml up -d\n'
+pmx "parity: a global docker flag is not a mention" '|docker(?:\s+-{1,2}[\w-]+(?:=\S+)?(?:\s+(?!compose\b|-)\S+)?)+\s+compose\b' '' -- '`--debug`: write `docker compose` with no global flags' "../README.md" "$README_CMD" 'docker --debug compose ps'
+pmx "parity: the global-flag refusal removed" '    if toks[0].lower() == "docker" and len(toks) > 1 and toks[1].startswith("-"):' '    if False:' -- '`--debug`: write `docker compose` with no global flags' "../README.md" "$README_CMD" 'docker --debug compose ps'
+pmx "parity: the scripts' -f \"\$dbdir/...\" scan removed" $'        for f_ in re.findall(r\'-f\\s+"\\$dbdir/([^"]+)"\', read(p_)):' '        for f_ in []:' -- 'COMPOSE-DOC-FILE: scripts/db-scrape-test.sh runs `docker compose -f compose.other.yml`' "../scripts/db-scrape-test.sh" '-f "$dbdir/compose.observability.yml")' '-f "$dbdir/compose.observability.yml" -f "$dbdir/compose.other.yml")'
 
 sect "parity harness run (one python process)"
 prun
@@ -1030,13 +1091,13 @@ vverdict() {
   key="$fn|$*"
   for i in "${!CK[@]}"; do [[ ${CK[i]} == "$key" ]] && res="${CR[i]}"; done
   if ((res < 0)); then
-    if "$fn" "$ctl" "$@" >/dev/null 2>&1; then res=0; else res=1; fi
+    if "$fn" "$ctl" "$@" >/dev/null 2>&1; then res=0; else res=1; sdebug "control of $fn"; fi
     CK+=("$key"); CR+=("$res")
   fi
   ((res == 0)) || { VV=NOCONTROL; return 0; }
   out=""; rc=0   # what the scenario leaves behind is the MUTANT's run (scenarios that run no script leave these empty)
   if "$fn" "$copy" "$@" >/dev/null 2>&1; then VV=GREEN
-  elif crashed "$rc" "$out"; then VV=CRASH
+  elif crashed "$rc" "$out"; then VV=CRASH; sdebug "crashed mutant of $fn"
   else VV=RED; fi
 }
 # crashed RC OUTPUT: the mutant died of a shell error rather than failing the guarded assertion.
@@ -1068,6 +1129,10 @@ if [[ $VV == NOANCHOR ]]; then pass "meta: an anchor that is not found is a fail
 PORT_RE=':[1-9][0-9]*[[:space:]]*$'   # the scrape test's published-port regex, literally
 vmut "scrape test: required-metric check removed" "$scrape" 'if [[ $l == "PASS "* ]]; then emit PASS "required-metric ${l#PASS }"; else emit FAIL "required-metric ${l#FAIL }" "absent from the scrape"; fi' 'emit PASS "required-metric ${l#* }"' sc_missing
 vmut "scrape test: pg_up check removed" "$scrape" 'if [[ $up == 1 ]]; then' 'if true; then' sc_pgup
+# the watchdog is killed with KILL: a TERM right after its fork runs the parent's traps in it (cleanup deletes the scratch dir)
+sc_wd_kill() { grep -qF 'kill -KILL "$wd"' "$1"; }
+expect_ok "scrape test: the watchdog is killed with KILL, never a trap-able signal" sc_wd_kill "$scrape"
+vmut "scrape test: watchdog killed with TERM (its fork-time trap race deletes the scratch dir)" "$scrape" 'kill -KILL "$wd"' 'kill "$wd"' sc_wd_kill
 vmut "scrape test: cleanup/project with a fixed name instead of the unique one" "$scrape" 'proj="dbscrape-$$"' 'proj="dbscrape-fixed"' sc_teardown
 vmut "scrape test: teardown trap removed" "$scrape" 'trap cleanup EXIT' ':' sc_teardown
 vmut "scrape test: published-port check removed" "$scrape" "grep -Eq '$PORT_RE' \"\$last\"; then" 'false; then' sc_published
@@ -1216,8 +1281,31 @@ if [[ -r $workflow ]]; then
   vmut "db-ci-wired: the GITHUB_ENV rule removed" "$ciwired" 'if any("GITHUB_ENV" in l or "GITHUB_PATH" in l for l in lines_of(s)):' 'if False:' ciw_names "$S9" 'GITHUB_ENV'
   vmut "db-ci-wired: the preceding-step key allow-list removed" "$ciwired" '        if key not in PRE_KEYS:' '        if False:' ciw_names "$S14" '`shell`'
   vmut "db-ci-wired: the preceding-step env name rule removed" "$ciwired" '        if BAD_ENV.match(str(k)):' '        if False:' ciw_names "$S17" 'MAKEFLAGS'
+  # seventh review: the step that decides whether the gate runs is PINNED by equality (id, env, whole run);
+  # three one-line edits used to leave rc 0 with db-test never running. And that step must run BEFORE the gate.
+  WCA="$tmp/wf-changed-false.yaml"; WCB="$tmp/wf-changed-path.yaml"; WCC="$tmp/wf-changed-id.yaml"; WCD="$tmp/wf-changed-late.yaml"
+  cp "$workflow" "$WCA"; replace_in "$WCA" 'echo "run=true" >> "$GITHUB_OUTPUT"' 'echo "run=false" >> "$GITHUB_OUTPUT"' || flunk "CI scenario: always-false copy"
+  cp "$workflow" "$WCB"; replace_in "$WCB" 'prod-new/modules/db-postgres/|Makefile' 'prod-new/module/db-postgres/|Makefile' || flunk "CI scenario: path-typo copy"
+  cp "$workflow" "$WCC"; replace_in "$WCC" '        id: changed' '        id: chg' || flunk "CI scenario: renamed-id copy"
+  CHB="$(cat "$workflow"; printf x)"; CHB="${CHB%x}"
+  CHST=$'      - name: did the database module change?\n'; CHEN=$'      # `make db-test` starts'
+  CHPRE="${CHB%%"$CHST"*}"; CHREST="${CHB#*"$CHST"}"; CHUNK="$CHST${CHREST%%"$CHEN"*}"; CHAFTER="$CHEN${CHREST#*"$CHEN"}"
+  CHGATE=$'        run: make db-test\n'; CHMOV="$CHPRE$CHAFTER"; CHMOV="${CHMOV/"$CHGATE"/"$CHGATE"$'\n'"$CHUNK"}"
+  printf '%s' "$CHMOV" > "$WCD"
+  [[ $CHMOV != "$CHB" && $CHMOV == *"$CHGATE"*"$CHST"* ]] || flunk "CI scenario: late change-detection copy was not built"
+  expect_ok "CI: a change-detection step that always writes run=false is refused, naming the step" ciw_names "$ciwired" "$WCA" "differs from the pinned text"
+  expect_ok "CI: a change-detection path filter with a typo is refused, naming the step" ciw_names "$ciwired" "$WCB" "did the database module change?"
+  expect_ok "CI: a renamed change-detection id is refused" ciw_names "$ciwired" "$WCC" 'exactly one step with id `changed`'
+  expect_ok "CI: the change-detection step placed after the gate is refused" ciw_refuses "$ciwired" "$WCD"
+  vmut "db-ci-wired: the change-detection equality pin removed (always-false passes)" "$ciwired" 'if {k: v for k, v in _ch.items() if k != "name"} != CHANGED_PIN:' 'if False:' ciw_refuses "$WCA"
+  vmut "db-ci-wired: the change-detection equality pin removed (path typo passes)" "$ciwired" 'if {k: v for k, v in _ch.items() if k != "name"} != CHANGED_PIN:' 'if False:' ciw_refuses "$WCB"
+  vmut "db-ci-wired: the gate-if-reads-that-step rule removed (a late change-detection step passes)" "$ciwired" '    if (_ref and _ref != [CHANGED_ID]) or cands[0] > first:' '    if False:' ciw_refuses "$WCD"
 else flunk "CI wiring pin" "cannot read $workflow"; fi
 
+if ((tree_git)); then
+  if [[ "$(tree_status)" == "$tree0" ]]; then pass "the suite left the module's real tree unchanged (git status --porcelain --ignored)"
+  else flunk "the suite changed the module's real tree" "$(diff <(printf '%s\n' "$tree0") <(tree_status) | head -n 5 | tr '\n' ' ')"; fi
+else echo "NOTE the module is not in a git checkout: the unchanged-tree assertion is skipped"; fi
 sect ""
 echo "section timings (s, whole seconds):"
 for i in "${!TN[@]}"; do printf '  %4s  %s\n' "${TT[i]}" "${TN[i]}"; done

@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# db-ci-wired.sh - prove the CI workflow really runs `make db-test`.
+# db-ci-wired.sh - check that the CI workflow's job `db` has a `make db-test` step that, when the
+# change-detection step says so, runs with nothing on it that could make it pass without running.
 #
 #   db-ci-wired.sh [WORKFLOW.yaml]       (default .github/workflows/pr.yaml)
 #
+# What is claimed, exactly: job `db` has (1) the PINNED change-detection step (id `changed`, compared by
+# equality: its `env` and its whole `run`, only `name` is free; the gate's `if` reads its output), (2) the
+# PyYAML and image pre-pull steps, and (3) one `make db-test` step whose `if` reads that step's output and
+# which carries only the key allow-lists below. NOT claimed: shell in EARLIER steps is not judged (a step
+# that rewrites the Makefile or a dotfile), and third-party `uses:` actions before the gate are not pinned;
+# review covers those. If the change-detection step is edited on purpose, update CHANGED_PIN below.
 # A grep for `run: make db-test` is satisfied by a commented line or by a step
 # that can never run, or can never fail the job. This PARSES the workflow (python3 +
 # PyYAML) and requires, in a job named `db`:
@@ -38,6 +45,31 @@ import re, sys, yaml
 
 FALSE = {"false", "${{ false }}", "${{false}}", "0"}
 STEP_IF = "steps.changed.outputs.run == 'true'"   # the one `if` the shipped workflow gates its steps with
+
+# THE PIN: the step that decides whether the gate runs. The gate's `if` reads `steps.changed.outputs.run`;
+# a gate is only as live as that output, so the step that writes it is compared by EQUALITY (id, `if`,
+# `env` and the full `run`; only `name` is free) against this copy. One edit to it (it always writes
+# run=false, its path filter has a typo, its id is renamed) turns the gate into a step that never runs
+# with the job still green. If the workflow's step is changed on purpose, update this copy in the same PR.
+CHANGED_ID = "changed"
+CHANGED_PIN = {
+    "id": "changed",
+    "env": {'EVENT': '${{ github.event_name }}', 'BASE': '${{ github.event.pull_request.base.sha }}'},
+    "run": r"""if [ "$EVENT" != "pull_request" ]; then
+  echo "run=true" >> "$GITHUB_OUTPUT"
+  echo "db: running (event $EVENT)"
+  exit 0
+fi
+files=$(git diff --name-only "$BASE" HEAD) || { echo "db: cannot diff against $BASE" >&2; exit 1; }
+if grep -qE '^(prod-new/modules/db-postgres/|Makefile$|\.github/workflows/pr\.yaml$)' <<<"$files"; then
+  echo "run=true" >> "$GITHUB_OUTPUT"
+  echo "db: running (database module, Makefile or workflow changed)"
+else
+  echo "run=false" >> "$GITHUB_OUTPUT"
+  echo "db: skipped: no database change"
+fi
+""",
+}
 
 STEP_KEYS = {"name", "run", "if", "id", "timeout-minutes"}
 PRE_KEYS = {"name", "uses", "with", "run", "if", "id", "env", "continue-on-error"}
@@ -91,6 +123,17 @@ if "if" in hits[0] and hits[0]["if"] != STEP_IF:
     refuse(f"the `make db-test` step's `if` is not exactly `{STEP_IF}`")
 live = hits
 first = steps.index(live[0])
+# the change-detection step: exactly one, pinned by equality, and BEFORE the gate that reads its output
+cands = [i for i, s in enumerate(steps) if s.get("id") == CHANGED_ID]
+if len(cands) != 1:
+    refuse(f"job `db` must have exactly one step with id `{CHANGED_ID}` (found {len(cands)}): the step that decides whether db-test runs; if the change is intended, update the pin in scripts/db-ci-wired.sh")
+_ch = steps[cands[0]]
+if {k: v for k, v in _ch.items() if k != "name"} != CHANGED_PIN:
+    refuse(f"the step that decides whether db-test runs (step {_ch.get('name', '(unnamed)')!r}, id `{CHANGED_ID}`) differs from the pinned text; if the change is intended, update the pin in scripts/db-ci-wired.sh")
+if "if" in hits[0]:
+    _ref = re.findall(r"steps\.([A-Za-z0-9_-]+)\.", str(hits[0]["if"]))
+    if (_ref and _ref != [CHANGED_ID]) or cands[0] > first:   # (an `if` with no step reference is the STEP_IF rule's business)
+        refuse(f"the `make db-test` step's `if` must read the output of the step `{CHANGED_ID}`, and that step must run BEFORE it (else the output is empty and db-test never runs)")
 for s in steps[:first]:
     for key in s:
         if key not in PRE_KEYS:

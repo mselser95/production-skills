@@ -106,7 +106,10 @@ bounded() {
   ( read -t "$secs" -u 3 _; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
   wd=$!
   wait "$pid"; rc=$?
-  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  # KILL, not TERM: a watchdog killed right after its fork has not yet reset the parent's traps, so a
+  # TERM would run `trap 'exit 130'` and then `cleanup` (EXIT) IN THE WATCHDOG, deleting $scratch
+  # under the live run (seen on Linux when the bounded command finishes within milliseconds)
+  kill -KILL "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   ((rc == 137)) && rc=124
   return "$rc"
 }

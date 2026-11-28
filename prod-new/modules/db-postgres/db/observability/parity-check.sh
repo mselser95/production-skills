@@ -47,6 +47,18 @@
 #                    sit in db/ (compose or a bare `docker compose up` would merge/pick them up).
 #                    With the base silent on the exporter, the overlay IS the merged service,
 #                    so every overlay check above judges what compose will run.
+#   COMPOSE-UNKNOWN-FILE / COMPOSE-UNREADABLE-FILE  (THE GUARANTEE, about FILES)
+#                    db/ is walked recursively; every .yml/.yaml (any case, any depth) is loaded
+#                    strictly. One that is compose-shaped (a `services` mapping or an `include`) may
+#                    not define a service the overlay defines, whatever it is called (BASE-EXPORTER),
+#                    and must be one of the three listed files at its exact path (else
+#                    COMPOSE-UNKNOWN-FILE). A YAML file that cannot be read is COMPOSE-UNREADABLE-FILE.
+#                    So no `docker compose` command naming only files under db/ can merge anything
+#                    into the exporter. A file from OUTSIDE db/ (`-f ../x.yml`) or stdin is not read.
+#   COMPOSE-DOC-FILE a LINT over documented commands (every *.md under db/, the top-level README,
+#                    the compose files' comments, the two container scripts): refuses the spellings
+#                    it knows. It cannot read variables, command substitution or commands wrapped
+#                    over a plain newline; the guarantee does not rest on it.
 #   RECORDING-RULE   a `record:` rule: recording rules are not checked yet
 #   PROMTOOL-CHECK   `promtool check rules` failed (run only when promtool is on PATH)
 # Exit: 0 green · 1 findings · 2 nothing was checked (python3 or PyYAML missing, a file
@@ -689,6 +701,21 @@ COMPOSE_CLOSED = ("compose.yml", "compose.timescale.yml", "compose.observability
 AUTO_MERGED = ("compose.override.yml", "compose.override.yaml", "docker-compose.override.yml",
                "docker-compose.override.yaml", "docker-compose.yml", "docker-compose.yaml", "compose.yaml")
 ov_name = os.path.basename(overlay_path)
+
+
+def judge_compose(name_, cf):
+    """One rule for every compose-shaped file other than the overlay: it may say nothing about a service the
+    overlay defines, extend one, or include another file."""
+    if "include" in cf:
+        fail("BASE-EXPORTER", f"{name_} has a top-level `include:` (another file this check does not read)")
+    csvc = cf.get("services") if isinstance(cf.get("services"), dict) else {}
+    for k, v in csvc.items():
+        if str(k) in ov_services:
+            fail("BASE-EXPORTER", f"{name_} defines the service `{k}`, which the overlay defines: compose would merge the two and this check reads only the overlay (define it in one place)")
+        ext = v.get("extends") if isinstance(v, dict) else None
+        if ext is not None and (str(ext.get("service", "") if isinstance(ext, dict) else ext) in ov_services or "observability" in str(ext)):
+            fail("BASE-EXPORTER", f"{name_} service `{k}` extends the overlay or one of its services")
+
 try:
     listing = sorted(os.listdir(overlay_dir))
 except OSError:
@@ -705,16 +732,63 @@ for name_ in listing:
         fail("COMPOSE-UNKNOWN-FILE", f"`{name_}` is not a regular file (a directory or a dangling link named like a compose file): compose would try to read it; delete it")
         continue
     cf = load(os.path.join(overlay_dir, name_))
-    cf = cf if isinstance(cf, dict) else {}
-    if "include" in cf:
-        fail("BASE-EXPORTER", f"{name_} has a top-level `include:` (another file this check does not read)")
-    csvc = cf.get("services") if isinstance(cf.get("services"), dict) else {}
-    for k, v in csvc.items():
-        if str(k) in ov_services:
-            fail("BASE-EXPORTER", f"{name_} defines the service `{k}`, which the overlay defines: compose would merge the two and this check reads only the overlay (define it in one place)")
-        ext = v.get("extends") if isinstance(v, dict) else None
-        if ext is not None and (str(ext.get("service", "") if isinstance(ext, dict) else ext) in ov_services or "observability" in str(ext)):
-            fail("BASE-EXPORTER", f"{name_} service `{k}` extends the overlay or one of its services")
+    judge_compose(name_, cf if isinstance(cf, dict) else {})
+# THE GUARANTEE is about FILES, not command lines. Walk db/ recursively: every regular file whose name ends in
+# .yml or .yaml (any case, any depth, no name skipped) is loaded with the strict loader. A document that is a
+# mapping with a `services` mapping (or a top-level `include`) is compose-shaped: it may not define a service
+# the overlay defines (whatever it is CALLED), and it must be one of the closed list at its exact path. Other
+# YAML (Prometheus config, alert rules) is untouched. So no `docker compose` command that names only files
+# under db/ can merge anything into the exporter, however the command line is spelled.
+YAML_EXEMPT = ()   # exact relative paths a legitimate multi-document or tagged file may be exempted at (none ship)
+
+
+def is_yaml_name(n):
+    return n.lower().endswith((".yml", ".yaml"))
+
+
+def load_soft(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return True, yaml.load(fh.read(), Loader=UniqueKeyLoader)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        return False, " ".join(str(e).split())[:120]
+
+
+def walk_error(e):
+    fail("COMPOSE-UNREADABLE-FILE", f"{e.filename}: cannot list this directory ({e.strerror}); a file that cannot be read cannot be shown harmless")
+
+
+ov_abs = os.path.abspath(overlay_path)
+yaml_seen, md_seen = [], []
+for root_, dirs_, files_ in os.walk(overlay_dir, onerror=walk_error):
+    dirs_.sort()
+    rel_root = os.path.relpath(root_, overlay_dir).replace(os.sep, "/")
+    for d_ in dirs_:
+        if is_yaml_name(d_):
+            fail("COMPOSE-UNREADABLE-FILE", f"`{(rel_root + '/' if rel_root != '.' else '') + d_}` is a directory (or a link to one) named like a YAML file; delete it")
+    for n_ in sorted(files_):
+        rel_ = (rel_root + "/" if rel_root != "." else "") + n_
+        p_ = os.path.join(root_, n_)
+        if n_.lower().endswith(".md"):
+            md_seen.append((rel_, p_))
+        if not is_yaml_name(n_):
+            continue
+        yaml_seen.append(rel_)
+        if os.path.abspath(p_) == ov_abs or rel_ in YAML_EXEMPT:
+            continue
+        if "/" not in rel_ and re.fullmatch(r"(docker-)?compose.*\.ya?ml", n_, re.I):
+            continue   # judged by the compose-file loop above
+        if nonregular(p_):
+            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}` is not a regular file (a dangling link?): it cannot be shown harmless; delete it")
+            continue
+        ok_, doc_ = load_soft(p_)
+        if not ok_:
+            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}` cannot be read as strict YAML ({doc_}): a file that cannot be read cannot be shown harmless")
+            continue
+        if isinstance(doc_, dict) and (isinstance(doc_.get("services"), dict) or "include" in doc_):
+            judge_compose(rel_, doc_)
+            if rel_ not in COMPOSE_CLOSED:
+                fail("COMPOSE-UNKNOWN-FILE", f"`{rel_}` is a compose-shaped YAML file (a `services` mapping or an `include`) that this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}, at those exact paths); a command that merges it could add to the exporter: delete it or move it outside db/")
 # COMPOSE MENTIONS, by an ALLOW-LIST of command shapes. A deny-list of the spellings of "use this
 # file" (`--file`, `--file=x`, `-fx`, a `\` continuation, `--profile x -f`, `COMPOSE_FILE=`,
 # `docker-compose`, `podman compose`...) always misses one. So: join `\` continuations; a "mention" is
@@ -728,9 +802,14 @@ for name_ in listing:
 DOC_SOURCES = [("README.md", os.path.join(overlay_dir, "..", "README.md")),
                ("observability/RUNBOOK.md", None)]
 DOC_SOURCES += [(n_, os.path.join(overlay_dir, n_)) for n_ in listing if re.fullmatch(r"(docker-)?compose.*\.ya?ml", n_, re.I) and not nonregular(os.path.join(overlay_dir, n_))]
+# every *.md under db/ (the RUNBOOK is read through the --dir path above) and the module's top-level README
+_rb = os.path.abspath(os.path.join(obs, "RUNBOOK.md"))
+DOC_SOURCES += [(r_, p_) for r_, p_ in md_seen if os.path.abspath(p_) != _rb]
+scanned = []
 SCRIPT_SOURCES = [("scripts/db-scrape-test.sh", "../scripts/db-scrape-test.sh"), ("scripts/db-bootstrap-test.sh", "../scripts/db-bootstrap-test.sh")]
 DOC_SOURCES += [(l_, os.path.join(overlay_dir, r_)) for l_, r_ in SCRIPT_SOURCES]
-COMPOSE_MENTION = re.compile(r"(?<![\w-])(?:(?:docker|podman|nerdctl)\s+compose\b|docker-compose(?=\s|$))", re.I)
+# a global docker flag between `docker` and `compose` (`--context x`, `--debug`, `-H host`, `--host=h`) is a mention too
+COMPOSE_MENTION = re.compile(r"(?<![\w-])(?:(?:docker|podman|nerdctl)\s+compose\b|docker(?:\s+-{1,2}[\w-]+(?:=\S+)?(?:\s+(?!compose\b|-)\S+)?)+\s+compose\b|docker-compose(?=\s|$))", re.I)
 COMPOSE_ENVNAME = re.compile(r"COMPOSE_(?:FILE|ENV_FILES|PROFILES|PROJECT_NAME)")
 SCRIPT_PINS = (  # the shell constructions the two scripts build their command with, literally
     re.compile(r'dc\(\) \{ docker compose -p "\$proj" --env-file "\$envf" "\$\{files\[@\]\}" "\$@"; \}\Z'),
@@ -760,6 +839,8 @@ def logical_lines(raw):
 def judge_mention(tail):
     """None when the command is an accepted shape, else (what is wrong, the offending token)."""
     toks = tail.replace("[", " ").replace("]", " ").split()
+    if toks[0].lower() == "docker" and len(toks) > 1 and toks[1].startswith("-"):
+        return ("write `docker compose` with no global flags (a flag between `docker` and `compose` can select another context or host)", toks[1])
     if toks[0].lower() != "docker" or len(toks) < 2 or toks[1].lower() != "compose":
         return ("only `docker compose` is a documented command (not docker-compose, podman, nerdctl)", toks[0])
     i, seen = 2, []
@@ -791,6 +872,7 @@ for label_, p_ in DOC_SOURCES:
         raw_ = read(p_)
     else:
         continue
+    scanned.append(label_)
     is_script_ = label_.startswith("scripts/")
     for ln_, text_ in logical_lines(raw_):
         env_ = COMPOSE_ENVNAME.search(text_)
@@ -832,5 +914,6 @@ if findings:
     print(f"parity-check: RED ({len(findings)} findings)")
     sys.exit(1)
 dash = sum(1 for v in required.values() if v)
+print("parity-check: YAML under db/: " + ", ".join(yaml_seen) + "; markdown scanned for compose commands: " + ", ".join(l_ for l_ in scanned if l_.lower().endswith(".md")))
 print(f"parity-check: OK ({len(alerts)} alerts, {len(required)} required metrics, {dash} dashboard-only, exporter {want.split('@')[0]})")
 PY

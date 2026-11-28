@@ -29,15 +29,21 @@ database never became healthy (the run ends right after the 30 s health wait) / 
 
 - Locally: `make db-test` runs the plain image, then the Timescale variant, and stops at the first failure
   (about a minute, needs Docker). It is in no aggregate target (`check-fast`, `gates`, `selftests`).
-- In CI: job `db` in `.github/workflows/pr.yaml` runs `make db-test` on `ubuntu-latest` (timeout 5 minutes).
+- In CI: job `db` in `.github/workflows/pr.yaml` runs `make db-test` on `ubuntu-latest` (timeout 10 minutes).
   It always starts and reports; a first step diffs the pull request against its base and, when nothing under
   `prod-new/modules/db-postgres/`, the Makefile or the workflow changed, prints `db: skipped: no database change`
   and ends green (so a required check never hangs on a skipped job). Pushes to master always run it.
   `make gates` also runs `bash scripts/db-ci-wired.sh`, which PARSES `pr.yaml` (python3 + PyYAML; a missing
-  parser is exit 2) and requires a job `db` with a step whose `run` is exactly `make db-test`, with no constant
-  false `if` and no `continue-on-error` on that step or the job. It also requires, in that job, a live step that
-  pip-installs PyYAML and a live step that pre-pulls the images named by `image.lock`, both BEFORE the `make db-test`
-  step, and `timeout-minutes` >= 10. (A grep for the line is satisfied by a comment.)
+  parser is exit 2) and claims exactly this: job `db` has the change-detection step (id `changed`) EQUAL to the text
+  pinned in the script (its `env` and whole `run`; only `name` is free), the PyYAML and image pre-pull steps before
+  the gate, and one `make db-test` step whose `run` is exactly `make db-test`, whose `if` is exactly
+  `steps.changed.outputs.run == 'true'` (and that step runs before it), and which carries only
+  `name`/`run`/`if`/`id`/`timeout-minutes`; earlier steps carry only `name`/`uses`/`with`/`run`/`if`/`id`/`env`/
+  `continue-on-error` with no `MAKE*`/`SHELL`/`PATH` env and no `GITHUB_ENV`/`GITHUB_PATH` write; the job carries only
+  `name`/`runs-on`/`timeout-minutes`/`steps`, with `timeout-minutes` >= 10. Not judged: shell in EARLIER steps (a
+  step that rewrites the Makefile or a dotfile) and third-party `uses:` actions before the gate; review covers
+  those. If the change-detection step is edited on purpose, the pin is a one-line update in `scripts/db-ci-wired.sh`
+  (`CHANGED_PIN`). (A grep for the line is satisfied by a comment.)
 - GitHub runners are linux/amd64 and the lock's runtime facts were observed on arm64 only. The `db` job has
   run green once on `ubuntu-latest` (linux/amd64) for this module's pull request, at an earlier commit than
   the secrets, hardening and leak-check changes; it has NOT been observed on the current head, so nothing
@@ -58,15 +64,30 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   your own OUTSIDE `db/`, passed as one more `-f` (any other compose-named file inside `db/` is refused; a file you pass from OUTSIDE `db/` is never read by `parity-check.sh`, so what it adds is your responsibility), that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
   `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`. Keep no `.env`
   in `db/`: compose loads it on its own and would substitute `${VAR}` from it, so `parity-check.sh` refuses one.
-  The overlay is the ONLY compose file in `db/` that may say anything about its own services. The CLOSED list of
-  compose files `db/` may hold is `compose.yml`, `compose.timescale.yml` and `compose.observability.yml`; any other
-  compose-named file there (`compose*.y[a]ml`, `docker-compose*.y[a]ml`) is `COMPOSE-UNKNOWN-FILE`, a new one is a
-  change to the list in `parity-check.sh`, and every compose command line this module documents or runs must be
-  `docker compose` followed by up to three `-f <bare file name from the list>` pairs and then only the subcommand and
-  its arguments (no `--file`, `-fFILE`, `--profile`, `--project-directory`, `-p`, `./` path, compose environment
-  variable, `docker-compose` or `podman`; a `\` continuation is joined first), else `COMPOSE-DOC-FILE`. A compose file in `db/` must be plain YAML (no `<<` merge keys, no
-  `!override`/`!reset` tags, one document), so that what the check reads is what compose merges: valid compose that
-  uses them exits 2 (fails closed, on purpose).
+  THE GUARANTEE (it is about files): no YAML file under `db/` other than the overlay defines the exporter service,
+  and no compose-shaped file exists there beyond the three listed; so any `docker compose` command that only names
+  files under `db/` gets the pinned exporter. A file from OUTSIDE `db/` passed with `-f`, or a compose file fed on
+  stdin, is outside what this check reads and is the caller's responsibility. `parity-check.sh` enforces it by
+  walking `db/` recursively and loading every `.yml`/`.yaml` (any case, any depth) with a strict loader: a document
+  with a `services` mapping (or a top-level `include`) is compose-shaped, may not define a service the overlay
+  defines (`BASE-EXPORTER`, whatever the file is called), and must be one of `compose.yml`, `compose.timescale.yml`,
+  `compose.observability.yml` at those exact paths (else `COMPOSE-UNKNOWN-FILE`). YAML that is not compose-shaped
+  (the Prometheus alert rules and their tests) is left alone; a YAML file that cannot be read is
+  `COMPOSE-UNREADABLE-FILE` (a compose file must be plain YAML: no `<<` merge keys, no `!override`/`!reset` tags, one
+  document; for the three listed files this exits 2, fail closed). Compose-named files outside the list, the
+  auto-merged names (`compose.override.y[a]ml`, `docker-compose*.y[a]ml`, `compose.yaml`) and a compose-named link
+  that is not a regular file are refused by name as well.
+  The documented commands are a LINT, not the guarantee: `COMPOSE-DOC-FILE` refuses the spellings it knows in every
+  `*.md` under `db/`, this README, the compose files' comments and the two container scripts: more than three `-f`
+  pairs or a `-f` file off the list, `--file`, `-fFILE`, `--profile`, `--project-directory`, `--env-file`, `-p`, a
+  path or `./` before a file name, the compose environment variables, `docker-compose`/`podman`/`nerdctl`, and any
+  global docker flag between `docker` and `compose` (write `docker compose` with no global flags). It cannot read
+  variables, command substitution, `"$@"`, or a command wrapped over a plain newline (only a `\` continuation is
+  joined). Two costs for a doc author: write `logs --follow`, not `logs -f`; and a `-f`/`-p`/`--file` that belongs to
+  an inner command (`exec db psql -f x.sql`, `run -p 9187:9187`) is refused too, so put such commands in a script,
+  not in a documented compose line. `db-scrape-test.sh` and `db-bootstrap-test.sh` are check scripts whose edits are
+  out of the trust model: the check keeps their two command constructions and their `-f "$dbdir/..."` files as a
+  lint, but their own file lists are not a guarantee surface.
 - `db/observability/required-metrics.txt` - the contract: names a scrape must contain, each with its reason.
   A name no alert uses must say `dashboard-only`.
 - `db/observability/alerts/postgres.rules.yml` + `postgres.rules.test.yml` - 13 alerts (availability, exporter absent, collector
