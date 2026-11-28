@@ -125,17 +125,46 @@ new stalled connections faster than 128 per 2 s can still occupy the head phase.
 reverse proxy / TLS terminator in front and have it enforce: TLS, client read and write
 timeouts, a request-size limit, and connection and rate limits per client.
 
-## Checks that run today
+## Gates
 
-```
-make check-fast   # uv sync --locked; ruff check; ruff format --check; mypy; pytest -q
-make verify       # check-fast, then HYPOTHESIS_PROFILE=ci pytest -q (derandomised properties)
-```
+Every target runs against the lock (the Makefile exports `UV_LOCKED=1`: a stale lock is an
+error, never a re-resolve), needs only `uv`, stops at the first failure and prints one final
+line `<target>: ok`. `check-fast` and `verify` are in `Makefile` (a scaffold test reads them
+there); the rest is `unit.mk`. Times are measured on a laptop with a warm `uv` cache.
 
-Each target is the plain `uv` commands above, in order; pytest runs with a strict config
-(warnings are errors, strict markers). `production.yaml` names exactly these two gates.
-NOT implemented yet, and not claimed anywhere: import-linter, pip-audit, coverage
-thresholds, mutation testing, an advisory (candidate) test lane, CI wiring.
+| target | what it runs | time | blocks merge |
+|---|---|---|---|
+| `check-fast` | `uv sync --locked`; `ruff check`; `ruff format --check`; `mypy --strict`; `pytest -q` (all lanes) | about 10 s | yes (CI job `check-fast`) |
+| `verify` | `check-fast`; `lock-check`; `audit`; `pytest -q` again under `HYPOTHESIS_PROFILE=ci` | about 30 s | yes (CI job `verify`) |
+| `lint` / `typecheck` | `ruff check` + `ruff format --check` / `mypy` | under 1 s | via `check-fast` |
+| `test` | `pytest -q` over `tests/` | about 7 s | via `check-fast` |
+| `test-unit`, `test-contract`, `test-architecture` | one lane = one directory of `tests/` (`make test-architecture` for just the zone rules) | 7 s, 1 s, 1 s | via `check-fast` |
+| `lock-check` | `uv lock --check`: `uv.lock` equals what `pyproject.toml` asks for | under 1 s | via `verify` |
+| `audit` | `uv audit` over the locked set (needs the network) through `gates/audit.py`; fails closed when the advisory service is unreachable; a finding passes only with a dated line in `gates/audit-waivers.txt`, and an expired line fails | about 1 s | via `verify`; also nightly in CI |
+| `fmt` | `ruff format` and `ruff check --fix` (writes files) | n/a | no |
+
+Run one lane: `make test-contract`, or any pytest selection: `uv run pytest tests/unit/test_money.py -q`.
+
+CI: `ci/python-unit.yml` (jobs `check-fast`, `verify`, and a scheduled `nightly` that runs
+`make audit`). The assembler places `ci/**` under the unit; GitHub runs workflows only from
+`.github/workflows`, so in a single-repo layout copy it there, and in a monorepo the root
+workflow calls it as a reusable workflow (`working-directory: services/<SERVICE>`). Its path
+filters are relative to the unit root. Actions are pinned by commit SHA, `uv` by version,
+every job has `timeout-minutes`, the token is read-only, no secrets are used.
+
+Decisions against the design row ("pyright strict, import-linter"):
+
+- Type checker: `mypy --strict` stays, and it is the only one. Two checkers would disagree
+  and double the maintenance; the code is written and tested against mypy.
+- Zone direction: `tests/architecture/test_boundaries.py` already refuses a cross-zone import
+  (an AST check, so it also sees aliased and function-local imports) and the domain's stdlib
+  allowlist, and `make test-architecture` runs it alone. import-linter would be a second,
+  weaker statement of the same contract (and a new dependency), so it is not added.
+
+NOT gated yet, and not claimed anywhere: coverage threshold (coverage.py is not in the locked
+set; add it with `uv lock` on a networked machine, one `fail_under` in `pyproject.toml`),
+mutation testing, an advisory (candidate) test lane, a race / free-threading lane, SBOM and
+provenance.
 
 Test headers: every test carries `# provenance: derived` and `# verifies: <clause>` directly
 above it, where `<clause>` is declared in `production.yaml` (`tests/unit/test_provenance.py`

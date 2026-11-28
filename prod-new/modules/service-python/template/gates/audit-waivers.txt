@@ -1,0 +1,5 @@
+# Dependency-audit waivers. One per line, four fields separated by whitespace:
+#   <advisory id>  <expiry YYYY-MM-DD>  <owner>  <reason, free text>
+# An entry is honoured until its expiry date (inclusive) and is a FAILURE after it, so a
+# waiver can never become permanent by neglect. A malformed line is a failure too.
+# Empty on purpose: this scaffold has no known advisory to waive.
