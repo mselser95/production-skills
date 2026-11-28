@@ -1,0 +1,77 @@
+# compose.observability.yml - ADDITIVE overlay: a postgres_exporter for the database.
+#
+#   docker compose -f compose.yml -f compose.observability.yml up -d
+#   docker compose -f compose.yml -f compose.timescale.yml -f compose.observability.yml up -d
+#
+# Born monitored: the contract is observability/required-metrics.txt (what a scrape
+# MUST contain), observability/alerts/ (what pages), scripts/db-scrape-test.sh
+# (the proof, in containers) and observability/parity-check.sh (the offline gate).
+#
+# The image is pinned by tag AND index digest and must equal observability/image.lock.
+# Hardening mirrors the database service: read-only root, no capabilities, no
+# privilege escalation, non-root user, resource limits, a secret as a FILE.
+# No host port is published. The exporter is reachable only on the compose network
+# (service name `exporter`, port 9187). To scrape it from the host, opt in with an
+# override file of your own (never edit this one):
+#   services:
+#     exporter:
+#       ports:
+#         - "127.0.0.1:9187:9187"
+# `scripts/db-scrape-test.sh` fails when the port is published without that opt-in
+# being the only thing that changed.
+services:
+  exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.21.1@sha256:a88794758ad461c75f3825b51cde4bde730bdff04b3b24d00efe14217e41f615
+    # Collectors are listed, not left to defaults. ON by default and kept: database,
+    # locks, replication, settings, stat_activity, stat_database, stat_user_tables,
+    # statio_user_tables, wal, stat_bgwriter. Turned ON here because an alert or a
+    # required metric needs them: stat_statements, stat_checkpointer (PG 17+ moved
+    # checkpoint counters out of bgwriter), database_wraparound,
+    # long_running_transactions. Turned OFF on purpose: process_idle, xlog_location,
+    # stat_wal_receiver (no consumer, extra series). stat_statements runs with
+    # --collector.stat_statements.limit and WITHOUT query text (include_query stays
+    # at its default, off), so no SQL leaves the database through a metric label.
+    command:
+      - --web.listen-address=:9187
+      - --collector.stat_statements
+      - --collector.stat_statements.limit=100
+      - --collector.stat_checkpointer
+      - --collector.database_wraparound
+      - --collector.long_running_transactions
+      - --no-collector.process_idle
+      - --no-collector.xlog_location
+      - --no-collector.stat_wal_receiver
+    env_file:
+      - ./observability/exporter/exporter.env
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 128m
+    pids_limit: 64
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "9187"
+    secrets:
+      - db_monitor_password
+    volumes:
+      # The server certificate (public part, mode 0644) is the trust anchor for
+      # verify-full. The private key in the same volume is 0600 owned by uid 70,
+      # which this user cannot read.
+      - dbtls:/tls:ro
+    healthcheck:
+      # Healthy means the exporter can log in AND answers pg_up 1, not merely that
+      # port 9187 accepts connections (it answers 200 with pg_up 0 when the
+      # database is unreachable). busybox wget and grep are in the image (UNVERIFIED
+      # here; db-scrape-test.sh fails if the container never turns healthy).
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:9187/metrics | grep -q '^pg_up 1$'
+      interval: 3s
+      timeout: 4s
+      retries: 10
+      start_period: 5s

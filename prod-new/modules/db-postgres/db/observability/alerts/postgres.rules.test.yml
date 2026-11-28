@@ -1,0 +1,231 @@
+# promtool test rules postgres.rules.test.yml
+# Every alert has at least one firing case (exp_alerts non-empty) and one
+# non-firing case (exp_alerts: []); parity-check.sh reads this file and fails on an
+# alert missing either, so a threshold nobody ever crossed cannot hide here.
+rule_files:
+  - postgres.rules.yml
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{instance="db"}'
+        values: '1 1 1 0 0 0 0'
+    alert_rule_test:
+      - {eval_time: 3m, alertname: PostgresDown, exp_alerts: []}
+      - eval_time: 6m
+        alertname: PostgresDown
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: db}
+            exp_annotations:
+              summary: "PostgreSQL is not reachable by its exporter"
+              description: "pg_up has been 0 for 1m on db: the exporter cannot log in or the server is down."
+              runbook: "db/observability/RUNBOOK.md#postgresdown"
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_scrape_collector_success{instance="db",collector="wal"}'
+        values: '1x3 0x10'
+      - series: 'pg_scrape_collector_success{instance="db",collector="locks"}'
+        values: '1x13'
+    alert_rule_test:
+      - {eval_time: 3m, alertname: PostgresExporterCollectorFailing, exp_alerts: []}
+      - eval_time: 12m
+        alertname: PostgresExporterCollectorFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: db, collector: wal}
+            exp_annotations:
+              summary: "A postgres_exporter collector is failing"
+              description: "Collector wal has failed every scrape for 5m on db; its metrics are dropped, so alerts that depend on them are blind."
+              runbook: "db/observability/RUNBOOK.md#postgresexportercollectorfailing"
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_stat_database_numbackends{instance="db",datname="app"}'
+        values: '90x10'
+      - series: 'pg_stat_database_numbackends{instance="db",datname="postgres"}'
+        values: '5x10'
+      - series: 'pg_settings_max_connections{instance="db"}'
+        values: '100x10'
+      - series: 'pg_stat_database_numbackends{instance="calm",datname="app"}'
+        values: '10x10'
+      - series: 'pg_settings_max_connections{instance="calm"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PostgresTooManyConnections
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: db}
+            exp_annotations:
+              summary: "More than 80% of max_connections in use"
+              description: "95% of max_connections are in use on db for 5m."
+              runbook: "db/observability/RUNBOOK.md#postgrestoomanyconnections"
+      - {eval_time: 3m, alertname: PostgresTooManyConnections, exp_alerts: []}
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_replication_lag_seconds{instance="replica"}'
+        values: '60x10'
+      - series: 'pg_replication_lag_seconds{instance="primary"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PostgresReplicationLagHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: replica}
+            exp_annotations:
+              summary: "A replica is more than 30s behind"
+              description: "Replication lag is 60s on replica for 5m."
+              runbook: "db/observability/RUNBOOK.md#postgresreplicationlaghigh"
+      - {eval_time: 3m, alertname: PostgresReplicationLagHigh, exp_alerts: []}
+
+  # 5e8 crosses the warning threshold only; 1.5e9 crosses both.
+  - interval: 1m
+    input_series:
+      - series: 'pg_database_wraparound_age_datfrozenxid_seconds{instance="db",datname="app"}'
+        values: '5e8x20'
+      - series: 'pg_database_wraparound_age_datfrozenxid_seconds{instance="db",datname="postgres"}'
+        values: '1e8x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresXidWraparoundApproaching
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: db, datname: app}
+            exp_annotations:
+              summary: "Transaction id age is past twice autovacuum_freeze_max_age"
+              description: "Database app on db has an oldest unfrozen xid of age 500M."
+              runbook: "db/observability/RUNBOOK.md#postgresxidwraparoundapproaching"
+      - {eval_time: 15m, alertname: PostgresXidWraparoundCritical, exp_alerts: []}
+      - {eval_time: 5m, alertname: PostgresXidWraparoundApproaching, exp_alerts: []}
+  - interval: 1m
+    input_series:
+      - series: 'pg_database_wraparound_age_datfrozenxid_seconds{instance="db",datname="app"}'
+        values: '1.5e9x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PostgresXidWraparoundCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: db, datname: app}
+            exp_annotations:
+              summary: "Transaction id wraparound is close"
+              description: "Database app on db has an oldest unfrozen xid of age 1.5G; PostgreSQL stops accepting writes near 2.1e9."
+              runbook: "db/observability/RUNBOOK.md#postgresxidwraparoundcritical"
+
+  - interval: 1m
+    input_series:
+      # bloated: 30000 dead of 100000 total = 30%
+      - series: 'pg_stat_user_tables_n_dead_tup{instance="db",datname="app",schemaname="public",relname="bloated"}'
+        values: '30000x40'
+      - series: 'pg_stat_user_tables_n_live_tup{instance="db",datname="app",schemaname="public",relname="bloated"}'
+        values: '70000x40'
+      # tiny: 50% dead but under the 10000 floor
+      - series: 'pg_stat_user_tables_n_dead_tup{instance="db",datname="app",schemaname="public",relname="tiny"}'
+        values: '5x40'
+      - series: 'pg_stat_user_tables_n_live_tup{instance="db",datname="app",schemaname="public",relname="tiny"}'
+        values: '5x40'
+      # healthy: big, 1% dead
+      - series: 'pg_stat_user_tables_n_dead_tup{instance="db",datname="app",schemaname="public",relname="healthy"}'
+        values: '20000x40'
+      - series: 'pg_stat_user_tables_n_live_tup{instance="db",datname="app",schemaname="public",relname="healthy"}'
+        values: '2000000x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: PostgresDeadTuplesHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: db, datname: app, schemaname: public, relname: bloated}
+            exp_annotations:
+              summary: "More than 20% of a table is dead tuples"
+              description: "public.bloated on db is 30% dead tuples for 30m: autovacuum is not keeping up."
+              runbook: "db/observability/RUNBOOK.md#postgresdeadtupleshigh"
+      - {eval_time: 10m, alertname: PostgresDeadTuplesHigh, exp_alerts: []}
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_long_running_transactions_oldest_timestamp_seconds{instance="db"}'
+        values: '0 0 0 400x10'
+      - series: 'pg_long_running_transactions_oldest_timestamp_seconds{instance="calm"}'
+        values: '30x13'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: PostgresLongRunningTransaction
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: db}
+            exp_annotations:
+              summary: "A transaction has been open for more than 5 minutes"
+              description: "The oldest open transaction on db is 400s old; it holds back vacuum and may hold locks."
+              runbook: "db/observability/RUNBOOK.md#postgreslongrunningtransaction"
+      - {eval_time: 4m, alertname: PostgresLongRunningTransaction, exp_alerts: []}
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_stat_database_deadlocks{instance="db",datname="app"}'
+        values: '0 0 0 1 1 1 1 1'
+      - series: 'pg_stat_database_deadlocks{instance="db",datname="postgres"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PostgresDeadlocks
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: db, datname: app}
+            exp_annotations:
+              summary: "Deadlocks detected"
+              description: "1 deadlock(s) in database app on db in the last 15m."
+              runbook: "db/observability/RUNBOOK.md#postgresdeadlocks"
+      - {eval_time: 2m, alertname: PostgresDeadlocks, exp_alerts: []}
+
+  - interval: 1m
+    input_series:
+      # forced checkpoints grow 3x faster than scheduled ones: 75% requested
+      - series: 'pg_stat_checkpointer_num_requested_total{instance="busy"}'
+        values: '0+3x40'
+      - series: 'pg_stat_checkpointer_num_timed_total{instance="busy"}'
+        values: '0+1x40'
+      # scheduled checkpoints dominate: 10% requested
+      - series: 'pg_stat_checkpointer_num_requested_total{instance="calm"}'
+        values: '0+1x40'
+      - series: 'pg_stat_checkpointer_num_timed_total{instance="calm"}'
+        values: '0+9x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: PostgresCheckpointsRequested
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: busy}
+            exp_annotations:
+              summary: "Most checkpoints are forced by WAL volume"
+              description: "75% of checkpoints on busy were requested, not scheduled."
+              runbook: "db/observability/RUNBOOK.md#postgrescheckpointsrequested"
+      - {eval_time: 5m, alertname: PostgresCheckpointsRequested, exp_alerts: []}
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_stat_database_temp_bytes{instance="db",datname="app"}'
+        values: '0+1000x40'
+      - series: 'pg_stat_database_temp_bytes{instance="db",datname="postgres"}'
+        values: '5000x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PostgresTempFilesSustained
+        exp_alerts:
+          - exp_labels: {severity: info, instance: db, datname: app}
+            exp_annotations:
+              summary: "Queries are spilling to temporary files"
+              description: "Database app on db wrote temp files for 15m (16.67B/s)."
+              runbook: "db/observability/RUNBOOK.md#postgrestempfilessustained"
+      - {eval_time: 5m, alertname: PostgresTempFilesSustained, exp_alerts: []}
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_wal_size_bytes{instance="db"}'
+        values: '5e9x30'
+      - series: 'pg_wal_size_bytes{instance="calm"}'
+        values: '1e8x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PostgresWalDirectoryLarge
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: db}
+            exp_annotations:
+              summary: "The WAL directory is larger than 4 GB"
+              description: "pg_wal on db is 4.657GiB: a stuck replication slot, a failing archive command or a very long checkpoint interval."
+              runbook: "db/observability/RUNBOOK.md#postgreswaldirectorylarge"
+      - {eval_time: 5m, alertname: PostgresWalDirectoryLarge, exp_alerts: []}

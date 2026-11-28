@@ -43,6 +43,43 @@ database never became healthy (the run ends right after the 30 s health wait) / 
 - The stack needs its secret files first (`db/bootstrap/README.md`, "Secrets"); the test generates throwaway
   ones in a scratch directory.
 
+## Monitoring (born monitored)
+
+Every database this module creates ships with a metrics exporter, a list of metrics that MUST exist, alert
+rules with tests, and a scrape test. All of it lives under `db/observability/` plus one additive overlay.
+
+- `db/compose.observability.yml` - adds `exporter` (postgres_exporter, pinned by tag and index digest in
+  `db/observability/image.lock`). Read-only root, `cap_drop: [ALL]`, `no-new-privileges`, uid 65534, limits, a
+  healthcheck that needs `pg_up 1`, waits for a healthy `db`. It logs in as `app_monitor` (member of `pg_monitor`,
+  not superuser) with `sslmode=verify-full`, the password only as a FILE (`db_monitor_password` secret). The
+  port is NOT published: reach it on the compose network as `exporter:9187`, or opt in with an override file of
+  your own that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
+  `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`.
+- `db/observability/required-metrics.txt` - the contract: names a scrape must contain, each with its reason.
+  A name no alert uses must say `dashboard-only`.
+- `db/observability/alerts/postgres.rules.yml` + `postgres.rules.test.yml` - 12 alerts (availability, collector
+  failure, connections, replication lag, xid wraparound x2, dead tuples, long transactions, deadlocks,
+  checkpoints, temp files, WAL size), each with severity, summary, description and a `runbook` annotation that
+  points at a heading of `db/observability/RUNBOOK.md`; each has a firing and a non-firing `promtool` case.
+- `bash db/observability/parity-check.sh` - offline, hermetic, python3 + PyYAML (exit 2 without it). Red when
+  an alert uses a metric outside the contract, a required metric is orphaned, an alert lacks a firing or a
+  non-firing test, severity/summary/description/runbook, or a runbook anchor; and when the overlay is not
+  digest-pinned (or differs from the lock), not read-only / `cap_drop: [ALL]` / `no-new-privileges` / non-root,
+  publishes a port, carries a password in the environment or URI, or lacks a healthcheck or a needed collector.
+- `bash scripts/db-scrape-test.sh [--mutate revoke-monitor] [--promtool]` - NEEDS DOCKER, not run by the
+  selftest. Starts `db` + `exporter` as project `dbscrape-<pid>` with a 60 s budget (`DB_SCRAPE_BUDGET_S`),
+  scrapes from the db container, and asserts `pg_up 1`, no failing collector, every required metric present,
+  the port not on the host, and that `app_monitor` is not superuser and cannot create or insert.
+  `--mutate revoke-monitor` revokes `pg_monitor` first and exits 1 (RED, as intended); exit 4 means the mutation
+  survived. `--promtool` also runs `promtool test rules` in the pinned Prometheus image (no network, read-only).
+  Torn down with `down -v` of its own project on every exit path.
+- `bash scripts/tests/db-observability-selftest.sh` - hermetic selftest and mutation proof of all of the above
+  (fake `docker`); runs `promtool test rules` locally when a `promtool` is on PATH, else prints a SKIP.
+
+Not proven offline: that the exporter image really emits the names in `required-metrics.txt` (several are marked
+UNVERIFIED there), that its busybox has `wget` for the healthcheck, and that the `DATA_SOURCE_*` variables work
+as written in v0.21.1. The scrape test is that proof; run it after every exporter bump.
+
 ## Bumping the pair
 
 1. Edit `db/image.lock` (tags, index and per-platform digests, versions).

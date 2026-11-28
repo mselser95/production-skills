@@ -120,6 +120,8 @@ gates:
 db-test:
 	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain
 	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant timescale
+	@bash prod-new/modules/db-postgres/scripts/db-scrape-test.sh --promtool
+	@bash prod-new/modules/db-postgres/scripts/db-scrape-test.sh --mutate revoke-monitor; rc=$$?; [ $$rc -eq 1 ] || { echo "db-scrape-test: revoking pg_monitor must turn the scrape RED (exit 1), got $$rc" >&2; exit 1; }
 
 # ---- the full gate --------------------------------------------------------
 verify: check-fast selftests invariants tcb mutation
