@@ -21,12 +21,13 @@ fail() { bad=$((bad + 1)); echo "FAIL $1${2:+ -- $2}"; }
 A() { python3 -I -B "$asm" --modules-dir "$mods" "$@"; }
 
 # Refusal cases that only check exit code + message are QUEUED (rq) and run in ONE python process that calls the
-# assembler's main() in-process, each in a fresh temp dir (the cheap path: ~90 interpreters cost 20+ s of CPU).
+# assembler's main() in-process, each in a fresh temp dir (the cheap path: one interpreter per case costs 20+ s of CPU).
 # Cases that need a real process (signals, the wrapper, golden digests, content checks) keep `run`.
-res="$tmp/res"; qf="$tmp/queue"; mkdir -p "$res"; : >"$qf"; qn=()
+res="$tmp/res"; qf="$tmp/queue"; qids="$tmp/queue.ids"; mkdir -p "$res"; : >"$qf"; : >"$qids"; qn=()
 cat >"$tmp/batch.py" <<'PY'
 import io, os, re, shutil, sys, tempfile
 asm, mods, res, qf, base = sys.argv[1:6]
+out = sys.stdout   # the protocol channel: assembler output is captured separately and never reaches it
 recs, cur = [], []
 for f in open(qf, "rb").read().split(b"\0")[:-1]:
     f = f.decode("utf-8", "surrogateescape")
@@ -36,23 +37,37 @@ for f in open(qf, "rb").read().split(b"\0")[:-1]:
     else:
         cur.append(f)
 code = compile(open(asm, encoding="utf-8").read(), asm, "exec")
+
+
+def emit(*fields):
+    out.write("\t".join(re.sub(r"\s+", " ", x) for x in fields) + "\n")
+    out.flush()
+
+
+n = 0
 for desc, name, want, pat, *args in recs:
+    n += 1
     work = tempfile.mkdtemp(prefix="c-", dir=base)
-    ns = {"__name__": "assemble_inproc", "__file__": asm}
-    exec(code, ns)
+    why, err = "", ""
     old = sys.argv, sys.stderr, sys.stdout
-    sys.argv = ["assemble.py", "--modules-dir", mods, "--dest", os.path.join(work, "d")] + args
-    sys.stderr = sys.stdout = io.StringIO()
     try:
-        ns["main"]()
-        rc = 0
-    except SystemExit as e:
-        rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
-    finally:
+        ns = {"__name__": "assemble_inproc", "__file__": asm}
+        exec(code, ns)
+        sys.argv = ["assemble.py", "--modules-dir", mods, "--dest", os.path.join(work, "d")] + args
+        sys.stderr = sys.stdout = io.StringIO()
+        try:
+            ns["main"]()
+            rc = 0
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
         err = sys.stderr.getvalue()
+    except BaseException as e:   # KeyboardInterrupt and GeneratorExit included: never a refusal
+        rc, why = None, "unexpected %s: %s" % (type(e).__name__, str(e)[:120])
+    finally:
         sys.argv, sys.stderr, sys.stdout = old
-    why = ""
-    if rc != int(want):
+    if why:
+        pass
+    elif rc != int(want):
         why = "exit %d, want %s: %s" % (rc, want, err[:200])
     elif pat != "-" and not re.search(pat, err):
         why = "stderr lacks /%s/: %s" % (pat, err[:200])
@@ -60,25 +75,47 @@ for desc, name, want, pat, *args in recs:
         why = "something was left behind: %s" % os.listdir(work)
     shutil.rmtree(work, ignore_errors=True)
     open(os.path.join(res, name), "w").write("bad" if why else "ok")
-    if why:
-        print("FAIL %s -- %s" % (name, why))
-    elif desc != "-":
-        print("ok   " + desc)
+    # protocol: exactly one R line per record (R, name, ok|FAIL, text), then one END line with the count
+    emit("R", name, "FAIL" if why else "ok", "%s -- %s" % (name, why) if why else desc)
+emit("END", str(n))
 PY
-flushq() {   # run every queued case in one process; count and echo their results
+# patch.py <src> <dst> <old> <new>: dst = src with the first <old> replaced by <new>; exit 1 if <old> is absent
+cat >"$tmp/patch.py" <<'PY'
+import sys
+src, dst, old, new = sys.argv[1:5]
+s = open(src, encoding="utf-8").read()
+if old not in s:
+    sys.exit(1)
+open(dst, "w", encoding="utf-8").write(s.replace(old, new, 1))
+PY
+flushq() {   # run every queued case in one process; the protocol is strict, anything missing is a loud FAIL
   [[ -s "$qf" ]] || return 0
-  local line
-  while IFS= read -r line; do
-    case "$line" in "ok   "*) ok=$((ok + 1)) ;; FAIL*) bad=$((bad + 1)) ;; esac
-    echo "$line"
-  done < <(python3 -I -B "$tmp/batch.py" "$asm" "$mods" "$res" "$qf" "$tmp" 2>&1)
-  : >"$qf"
+  local -a ids=(); local line tag name st text want idx=0 end=-1 rc
+  while IFS= read -r line; do ids+=("$line"); done <"$qids"
+  want=${#ids[@]}
+  python3 -I -B "$tmp/batch.py" "$asm" "$mods" "$res" "$qf" "$tmp" >"$tmp/batch.out" 2>"$tmp/batch.err"; rc=$?
+  while IFS=$'\t' read -r tag name st text; do
+    if [[ "$tag" == END ]]; then end="$name"
+    elif [[ "$tag" == R && $idx -lt $want && "$name" == "${ids[$idx]}" ]]; then
+      idx=$((idx + 1))
+      if [[ "$st" == ok ]]; then
+        [[ "$text" == - ]] || { ok=$((ok + 1)); echo "ok   $text"; }
+      else bad=$((bad + 1)); echo "FAIL $text"; fi
+    else bad=$((bad + 1)); echo "FAIL batch protocol: unexpected line '$tag $name'"; fi
+  done <"$tmp/batch.out"
+  local miss=$((want - idx))
+  while [[ $idx -lt $want ]]; do bad=$((bad + 1)); echo "FAIL ${ids[$idx]} -- no result (batch runner died or skipped it)"; idx=$((idx + 1)); done
+  if [[ $rc -ne 0 || "$end" != "$want" || $miss -gt 0 ]]; then
+    bad=$((bad + 1)); echo "FAIL batch runner died -- exit $rc, sentinel '$end' (want $want): $(tr '\n\t' '  ' <"$tmp/batch.err" | head -c 200)"
+  fi
+  : >"$qf"; : >"$qids"
 }
 # rq <description|-> <name> <rc> <stderr-grep|-> <args...>: queue one case ("-" = silent, judged later by qok)
 rq() {
   local desc="$1" name="$2"; shift 2
   [[ "$desc" == - ]] && qn+=("$name")
   printf '%s\0' "$desc" "$name" "$@" $'\x01END' >>"$qf"
+  echo "$name" >>"$qids"
 }
 qok() {   # every silent case queued since the last qok passed
   flushq
@@ -139,6 +176,40 @@ mkr rrchild 'a:\n  b: 1\n  b: 2\nunits: []\n'
 mkr rrblock 'a: |\n  text\nunits: []\n'
 mkr rrls 'a: 1\n# x\xe2\x80\xa8units: {z: 1}\nunits: []\n'
 mkr rrok 'version: v2\nrepo:\n  name: <REPO>\n  layout: monorepo\n\n# note: here\nq: "a: b # c"\nunits: []\n'
+
+# 0. the batch runner itself fails CLOSED. A scratch copy of the assembler gets a planted fault on a refusal path and a
+# 3-record batch goes through the same flushq; its lines are captured (its counters die with the subshell), so only the
+# verdict below reaches the totals. An exception is never a refusal, and a dead runner is never a pass.
+R1='die(2, "unknown layout'; R2='die(2, "unit id %r (module %s) and'
+meta() {   # meta <name> <anchor> <fault> -> $mo = the helper's output, $mrc = its verdict (0 green, 1 a FAIL line)
+  local cp="$tmp/meta-$1.py"
+  flushq
+  python3 -I -B "$tmp/patch.py" "$asm" "$cp" "$2" "$3; $2" || { fail "meta $1" "the fault was not planted"; mo=""; mrc=2; return; }
+  rq meta-r1 "m$1-1" 2 'unknown layout' --layout nope
+  rq meta-r2 "m$1-2" 2 'same id' --layout monorepo --unit svc:a --unit svc:a --slot OWNER=o
+  rq meta-r3 "m$1-3" 2 'same id' --layout monorepo --unit svc:foo --unit svc:FOO --slot OWNER=o
+  mo=$(asm="$cp" flushq 2>&1); mrc=0
+  grep -q '^FAIL' <<<"$mo" && mrc=1
+  return 0
+}
+meta ctl "$R1" 'pass'
+[[ $mrc -eq 0 && "$(grep -c '^ok   meta-r' <<<"$mo")" == 3 ]] && pass "0: control (a harmless statement planted): 3 records ok, no FAIL" || fail "0: meta control" "$mo"
+meta ge "$R1" 'raise GeneratorExit'
+grep -q '^FAIL mge-1 -- unexpected GeneratorExit' <<<"$mo" && ! grep -q 'runner died' <<<"$mo" && grep -q '^ok   meta-r2' <<<"$mo" \
+  && pass "0: a GeneratorExit on a refusal path is a FAIL naming the exception; the other records still report" || fail "0: GeneratorExit" "$mo"
+meta ke "$R1" 'raise KeyError("planted")'
+grep -q '^FAIL mke-1 -- exit 1, want 2' <<<"$mo" && ! grep -q '^ok   meta-r1' <<<"$mo" \
+  && pass "0: a KeyError on a refusal path is a FAIL (the assembler reports it as exit 1), never an exit 2" || fail "0: KeyError" "$mo"
+meta ox "$R1" '__import__("os")._exit(2)'
+grep -q '^FAIL mox-1 -- no result' <<<"$mo" && grep -q '^FAIL mox-2 -- no result' <<<"$mo" && grep -q '^FAIL mox-3 -- no result' <<<"$mo" && grep -q '^FAIL batch runner died' <<<"$mo" \
+  && pass "0: os._exit(2) kills the runner: every record missing, 'batch runner died'" || fail "0: os._exit" "$mo"
+meta late "$R1" '__import__("atexit").register(__import__("os")._exit, 3)'
+grep -q '^ok   meta-r3' <<<"$mo" && grep -q '^FAIL batch runner died -- exit 3' <<<"$mo" \
+  && pass "0: every result and the sentinel present but the runner exits 3: still 'batch runner died'" || fail "0: late exit status" "$mo"
+meta fake "$R2" '(__import__("os").write(1, b"END\t3\n"), __import__("os")._exit(0))'
+grep -q '^ok   meta-r1' <<<"$mo" && grep -q '^FAIL mfake-2 -- no result' <<<"$mo" && grep -q '^FAIL mfake-3 -- no result' <<<"$mo" && grep -q '^FAIL batch runner died' <<<"$mo" \
+  && pass "0: exit 0 and a forged sentinel with two results missing: the missing records are reported" || fail "0: forged sentinel" "$mo"
+if [[ -n "${META_ONLY:-}" ]]; then echo "$ok ok, $bad failed"; [[ $bad -eq 0 ]]; exit; fi
 
 # run <name> <rc> <stderr-grep|-> <args...>: exit class, message, and (rc != 0) nothing written, no .assemble-* left
 D=""
@@ -534,6 +605,29 @@ rq "17: single: two modules declaring the same directory db: exit 2" c17d 2 'sha
 rq "17: monorepo: a service at the root-nested dir is unchanged, two modules declaring db: exit 2" c17e 2 'share the unit directory' --layout monorepo --module ddb --module ddb2
 rq "17: monorepo: a declared database unit at db and an instance of a database module at db: exit 2 (the single exemption does not leak)" c17g 2 'share the unit directory' --layout monorepo --module ddb --unit dbm:main --slot OWNER=o
 rq "17: single: a link db/l -> ../x inside a declared directory: allowed" c17f 0 - --layout single --module svc --module dlk --slot SERVICE=a --slot OWNER=o
+
+# 18. the single-layout exemption covers the directory comparison ONLY: one database unit per repository, unique ids
+mk ddb4 '"placement":{"db/**":"root"},"units":[{"id":"store2","kind":"database","language":"sql","path":"db2"}]' 'db2/t.sql=y\n'
+mk dida '"placement":{"db/**":"root"},"units":[{"id":"a","kind":"database","language":"sql","path":"db"}]' 'db/s.sql=x\n'
+rq "18: single: a database instance plus a module declaring a database unit: exit 2, both named" c18a 2 'both database units' --layout single --unit dbm:main --module ddb --slot OWNER=o
+rq "18: monorepo: the same pair: exit 2" c18b 2 'share the unit directory' --layout monorepo --unit dbm:main --module ddb --slot OWNER=o
+rq "18: single: a service plus a declared database unit: exit 0 (unchanged)" c18c 0 - --layout single --unit svc:a --module ddb --slot OWNER=o
+rq "18: monorepo: the same pair: exit 0" c18d 0 - --layout monorepo --unit svc:a --module ddb --slot OWNER=o
+rq "18: single: a second database declared at db2 (outside the unit-directory rule): exit 2" c18e 2 'must be' --layout single --unit svc:a --module ddb --module ddb4 --slot OWNER=o
+rq "18: monorepo: the same: exit 2" c18f 2 'must be' --layout monorepo --unit svc:a --module ddb --module ddb4 --slot OWNER=o
+rq "18: single: an instance and a declared unit with the same id: exit 2" c18g 2 'same id' --layout single --unit svc:a --module dida --slot OWNER=o
+rq "18: monorepo: the same: exit 2" c18h 2 'same id' --layout monorepo --unit svc:a --module dida --slot OWNER=o
+
+# 19. link targets compare by path COMPONENTS (services/a is not a prefix of services/ab); a root link to a container dir
+mk rtl3 '"placement":{"LICENSE":"root","l":"root"}' 'LICENSE=MIT\n'
+ln -s services/a-extra/x "$mods/rtl3/l"
+mk rtl4 '"placement":{"LICENSE":"root","l":"root"}' 'LICENSE=MIT\n'
+ln -s services "$mods/rtl4/l"
+run c19a 0 - --layout monorepo --unit lnkin:a --unit lnkin:ab --slot OWNER=o && [[ -L "$D/services/ab/ln.txt" && -L "$D/services/a/ln.txt" ]] \
+  && pass "19: a link inside unit services/ab (README.md in its own unit) is allowed beside unit services/a" || fail "19: a/ab"
+rq "19: a root link to services/a-extra/x (not a unit) beside unit services/a: allowed" c19b 0 - --layout monorepo --unit svc:a --module rtl3 --slot OWNER=o
+rq "19: monorepo: a root link to the directory that contains the units (l -> services): exit 1, link named" c19c 1 'l -> services.*root link' --layout monorepo --unit svc:a --module rtl4 --slot OWNER=o
+rq "19: layout single: the same root link is unchanged (allowed)" c19d 0 - --layout single --unit svc:a --module rtl4 --slot OWNER=o
 
 flushq
 
