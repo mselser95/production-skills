@@ -486,7 +486,7 @@ expect "the shipped root package.json and the two design-system manifests (verba
 
 # ---- review 2, B2: "has target T" is make's own verdict, not "make printed something"
 RULE='check-fast verify:\n\t@echo "x $@" >> "$(LOG)"\n'
-mk2() { local d="$tmp/b2-$1"; mkfake "$d"; mkdir -p "$d/services/x"; printf "$2" > "$d/services/x/Makefile"; repo_yaml "$d" svc-x:services/x; echo "$d"; }
+mk2() { local d="$tmp/b2-$1"; mkfake "$d"; mkdir -p "$d/services/x"; printf -- "$2" > "$d/services/x/Makefile"; repo_yaml "$d" svc-x:services/x; echo "$d"; }
 b2red() { # <label> <tree> <egrep over the output>: root make verify exits non-zero, matches, and no recipe ran
   local out rc; : > "$LOG"; out="$(make -s -C "$2" verify 2>&1)"; rc=$?
   if [[ $rc -ne 0 && ! -s "$LOG" && "$out" != *"verify svc-x: ok"* ]] && grep -Eq -- "$3" <<<"$out"; then pass "$1"; else fail "$1" "rc=$rc log=$(cat "$LOG") $(head -c 300 <<<"$out")"; fi
@@ -514,11 +514,11 @@ U="$TM/services/x"
 T3="$(mk2 real "$RULE"'$(info building orders)\n.PHONY: check-fast verify\n')"
 b2ok "the same Makefile with a real verify rule (banner, .PHONY): present, runs (control)" "$T3"
 # BUILD STATE (real make, so it runs on whichever GNU make the host has): the root's verdict about a unit's target does not depend on
-# whether what the unit builds is fresh. The ROOT `make verify` is run twice in a row on a unit whose verify builds a file: green both
-# times (the second run finds the output up to date, where `make -q` alone answers 0).
-bs_root() { # <label> <unit Makefile text>: a root with one unit that builds services/x/build from src.c; verify twice
+# whether what the unit builds is fresh. The ROOT `make verify` is run three times in a row on a unit whose verify builds a file: green both
+# times (the later runs find the output up to date, where `make -q` alone answers 0).
+bs_root() { # <label> <unit Makefile text>: a root with one unit that builds services/x/build from src.c; verify three times
   local d out rc n; d="$(mk2 "bs-$1" "$2")"; echo src > "$d/services/x/src.c"
-  for n in first second; do
+  for n in first second third; do
     out="$(make -s -C "$d" verify 2>&1)"; rc=$?
     if [[ $rc -eq 0 && "$out" == *"verify svc-x: ok"* ]]; then pass "build state, $1: the root make verify is green on the $n run (output $([[ $n == first ]] && echo missing || echo up to date))"
     else fail "build state, $1: root make verify, $n run" "rc=$rc $(head -c 300 <<<"$out")"; fi
@@ -526,6 +526,35 @@ bs_root() { # <label> <unit Makefile text>: a root with one unit that builds ser
 }
 bs_root "verify runs \$(MAKE) build of a real file" '.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify:\n\t$(MAKE) build\nbuild: src.c\n\tcp src.c build\n'
 bs_root "verify: build with build a file target" '.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify: build\nbuild: src.c\n\tcp src.c build\n'
+# an included makefile that has a rule is remade by GNU make 3.81 under `-q -B` (4.3 does not): the -B look pins every makefile make has
+# read, so the verdict is about the target's own rule graph. The two include shapes have NO rule that runs anything for verify: RED three
+# times in a row; shapes A (`$(MAKE) build`) and B (`verify: build`) in a unit that ALSO has a remade include stay green three times.
+bs_red() { # <label> <unit Makefile text>: a root whose unit has no verify rule that runs anything: RED three times in a row, no recipe ran
+  local d out rc n; d="$(mk2 "bsr-$1" "$2")"; echo src > "$d/services/x/src.c"
+  for n in first second third; do
+    : > "$LOG"; out="$(make -s -C "$d" verify 2>&1)"; rc=$?
+    if [[ $rc -ne 0 && ! -s "$LOG" && "$out" == *"svc-x: Makefile has no verify target"* ]]; then pass "build state, $1: the root make verify is RED on the $n run, no recipe ran"
+    else fail "build state, $1: root make verify, $n run" "rc=$rc log=$(cat "$LOG") $(head -c 300 <<<"$out")"; fi
+  done
+}
+CFR='check-fast:\n\t@echo "x $@" >> "$(LOG)"\n'
+bs_red "include of a generated makefile, PHONY verify without a recipe" "$CFR"'-include gen.mk\n.PHONY: check-fast verify\ngen.mk:\n\techo "# gen" > gen.mk\n'
+bs_red "include deps.mk built from src.c, PHONY verify without a recipe" "$CFR"'include deps.mk\n.PHONY: check-fast verify\ndeps.mk: src.c\n\ttouch deps.mk\n'
+bs_red "verify depends on gen.mk, an included makefile with a rule" "$CFR"'-include gen.mk\nverify: gen.mk\ngen.mk:\n\techo "# gen" > gen.mk\n'
+GENINC='-include gen.mk\ngen.mk:\n\techo "# gen" > gen.mk\n'
+bs_root "shape A, MAKE build, plus a remade include" "$GENINC"'.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify:\n\t$(MAKE) build\nbuild: src.c\n\tcp src.c build\n'
+bs_root "shape B, verify depends on build, plus a remade include" "$GENINC"'.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify: build\nbuild: src.c\n\tcp src.c build\n'
+# the environment scrub on the REAL make: MAKEFILES names an extra makefile that gives verify a recipe (the root's own makefile overrides its
+# own verify, the unit's .PHONY-only verify would become present); the scrub keeps the verdict RED and no recipe runs. Control: a make
+# that is not scrubbed sees verify as present with the same variable.
+EVM="$tmp/evil.mk"; printf 'verify:\n\t@echo evil >> "$(LOG)"\n' > "$EVM"
+TEV="$(mk2 evilmk "$CFR"'.PHONY: check-fast verify\n')"
+[[ "$(MAKEFILES="$EVM" make -C "$TEV/services/x" -q -- verify >/dev/null 2>&1; echo $?)" == 1 ]] \
+  && pass "env scrub (control): with MAKEFILES=evil.mk a plain make sees verify as present (exit 1)" || fail "env scrub control (MAKEFILES)"
+: > "$LOG"; out="$(MAKEFILES="$EVM" make -s -C "$TEV" verify 2>&1)"; rc=$?
+[[ $rc -ne 0 && ! -s "$LOG" && "$out" == *"svc-x: Makefile has no verify target"* ]] \
+  && pass "env scrub on real make: MAKEFILES=evil.mk in the root's environment does not make a .PHONY-only verify present (RED, nothing ran)" \
+  || fail "env scrub MAKEFILES" "rc=$rc log=$(cat "$LOG") $(head -c 300 <<<"$out")"
 # round 4 forgery: a `define` whose value imitates make's rule data base for a verify rule, plus .PHONY, and no rule.
 # Make printed that text verbatim in round 4's data base; the verdict is now its exit status, which the text cannot move.
 TF="$(mk2 forge 'define FAKE\n# Files\n\nverify:\n#  commands to execute (from `Makefile'"'"', line 1):\n\t@evil\nendef\n.PHONY: check-fast verify\ncheck-fast:\n\t@echo "x $@" >> "$(LOG)"\n')"
@@ -546,6 +575,35 @@ b2red "a catch-all %: rule is RED (targets cannot be verified), no recipe ran" "
 T6="$(mk2 default '.DEFAULT:\n\t@echo "fwd $@" >> "$(LOG)"\n')"
 : > "$LOG"; out="$(bash "$T5/scripts/monorepo-run.sh" verify 2>&1)"; rc=$?
 [[ $rc -eq 2 && "$out" == *"answers for any target name"* && ! -s "$LOG" ]] && pass "the runner alone refuses a catch-all unit, no recipe ran" || fail "runner catch-all" "rc=$rc $(head -c 200 <<<"$out")"
+# the probe runs FIRST and a catch-all unit is asked nothing else (test hook MONOREPO_QUESTION_LOG: one line per question actually asked)
+QL="$tmp/questions.log"; : > "$QL"; MONOREPO_QUESTION_LOG="$QL" bash "$T5/scripts/monorepo-run.sh" verify >/dev/null 2>&1
+[[ -s "$QL" ]] && ! grep -qv "__monorepo_probe_" "$QL" && pass "a catch-all unit is asked only about the random probe name (every logged question names it), never about verify" \
+  || fail "probe first" "$(head -c 300 "$QL")"
+# a question that times out leaves nothing running: every question is its own process group, killed on timeout and afterwards.
+# MONOREPO_QUESTION_TIMEOUT=2 is the test hook (default 20 s). Markers: `sleep 3737.<pid>` / `sleep 3738.<pid>` / `MARK=storm<pid>`.
+leftover() { pgrep -f -- "$1" > /dev/null 2>&1; }
+LKM="3737.$$"; BGM="3738.$$"
+TLK="$(mk2 leak "$CFR"'verify: build\nbuild:\n\t+$(MAKE) -f sub.mk t\n')"; printf 't:\n\t+sleep %s\n' "$LKM" > "$TLK/services/x/sub.mk"; : > "$TLK/services/x/build"
+SECONDS=0; : > "$LOG"; out="$(MONOREPO_QUESTION_TIMEOUT=2 make -s -C "$TLK" verify 2>&1)"; rc=$?; el=$SECONDS
+if [[ $rc -ne 0 && "$out" == *"svc-x: Makefile has no verify target: make could not answer for verify (timed out"* ]] && ! leftover "sleep $LKM" && ((el < 15)); then
+  pass "a question that times out (a sub-make of a + line sleeping) is judged missing and no process of that tree is left (${el}s)"
+else fail "timeout leaves processes" "rc=$rc el=$el left=$(pgrep -f -- "sleep $LKM" | tr '\n' ' ') $(head -c 300 <<<"$out")"; fi
+leftover "sleep $LKM" && pkill -f -- "sleep $LKM"
+TBG="$(mk2 bgjob "$CFR"'verify:\n\t+sleep '"$BGM"' &\n')"
+out="$(check "$TBG" 2>&1 < /dev/null)"; rc=$?  # the check alone: the root's make would RUN this verify for real and leave its own sleeper
+if ! leftover "sleep $BGM"; then pass "a + line that backgrounds a process and returns leaves nothing behind after the check"
+else fail "background job survives" "rc=$rc left=$(pgrep -f -- "sleep $BGM" | tr '\n' ' ')"; fi
+leftover "sleep $BGM" && pkill -f -- "sleep $BGM"
+if [[ -n "${MONOREPO_STORM:-}" ]]; then # a forwarding catch-all forks without bound: run it only where the process count is capped (docker --pids-limit)
+  TST="$(mk2 storm "$CFR"'%%:\n\t+$(MAKE) $@ MARK=storm'"$$"'\n')"
+  SECONDS=0; : > "$LOG"; out="$(make -s -C "$TST" verify 2>&1)"; rc=$?; el=$SECONDS
+  # the verdict is RED either way and that is what is asserted: where forks are allowed the probe times out (5 s) and the unit is
+  # a catch-all; under a pids limit the storm hits the cap, make's forks fail and answer 2 / 2, so the unit is "no verify target"
+  if [[ $rc -ne 0 && ( "$out" == *"answers for any target name"* || "$out" == *"svc-x: Makefile has no verify target"* ) ]] && ! leftover "MARK=storm$$" && ((el < 20)); then
+    pass "a forwarding catch-all (%: +\$(MAKE) \$@) is refused (RED: $([[ "$out" == *"answers for any target name"* ]] && echo catch-all || echo "no verify target, forks capped")) and nothing is left (${el}s)"
+  else fail "forwarding catch-all" "rc=$rc el=$el left=$(pgrep -f -- "MARK=storm$$" | wc -l) $(head -c 300 <<<"$out")"; fi
+  leftover "MARK=storm$$" && pkill -f -- "MARK=storm$$"
+else skip "forwarding catch-all storm" "MONOREPO_STORM is not set (run it where the process count is capped, e.g. docker --pids-limit 512)"; fi
 # A FAKE make on PATH answers the question by exit status only, so a Linux host with another GNU make is covered by
 # the same verdicts: it is called `make -C <dir> -q|-n -- <target>`. FAKE_MAKE_MODE: rc0 | rc1 | rc2 | rc3 | sleep | sig | q2n0 | q2n3 | q2sleep | q2env | catchq2n0 (q2n0 | q2n3 | q2sleep: -q 2, then
 # -n 0|3|silence; q2env: -q 2, then -n 0 only when the make flags are scrubbed from its environment, else 3; catchq2n0: the PROBE name answers -q 2, -n 0) |
@@ -557,8 +615,8 @@ T6="$(mk2 default '.DEFAULT:\n\t@echo "fwd $@" >> "$(LOG)"\n')"
 FB="$tmp/fakebin"; mkdir -p "$FB"
 cat > "$FB/make" <<'E'
 #!/usr/bin/env bash
-# the -B look is `make -C <dir> -q -B -- <target>`: note it in the log as `-qB <target>`, then answer as if it were `-q -- <target>`
-B=""; if [[ "${4:-}" == -B ]]; then B=1; set -- "$1" "$2" "$3" "${@:5}"; fi
+# the -B look is `make -C <dir> -q -B [-f <makefile> -f <pin>] -- <target>`: note it in the log as `-qB <target>`, then answer as if it were `-q -- <target>`
+B=""; if [[ "${4:-}" == -B ]]; then B=1; set -- "$1" "$2" "$3" "${@: -2}"; fi  # the -B look also carries `-f <makefile> -f <pin>` before the `--`
 [[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "$3${B:+B} $5" >> "$FAKE_MAKE_LOG"
 echo "make: Entering directory '$2'"; echo "# Make data base, printed on Thu Jan  1 00:00:00 2026"; echo "# Files"; echo "verify:"
 echo "#  commands to execute (from \`Makefile', line 1):"; printf '\t@evil\n'; echo "make: 'verify' is up to date."
@@ -879,7 +937,7 @@ def marker_b(label, text, claim_ran, claim_notran, ctl, extra=None):
         "make -q -B: " + label, "-q ran %s, -q -B ran %s" % (sorted(ran["q"]), sorted(ran["B"])))
 marker_b("an up-to-date prerequisite's `+` line runs (it does not under -q alone)", ".PHONY: verify\nverify: p1\n\t@echo v\np1: f\n\t+touch PLUSP1\n", ["PLUSP1"], [], ["PLUSP1"], extra={"f": "", "p1": ""})
 marker_b("a sub-make is given -B: the `+` line of its up-to-date target runs (it does not under -q alone)", "verify:\n\t$(MAKE) -f sub.mk t\n", ["SUBPLUS"], [], ["SUBPLUS"], extra={"sub.mk": "t: f\n\t+touch SUBPLUS\n", "f": "", "t": ""})
-marker_b("an up-to-date included file that has a rule is remade, its recipe IN FULL (not under -q alone)", "-include gen.mk\ngen.mk: src\n\ttouch GEN1\n\t@echo x\n\ttouch GEN2\nverify:\n\t@echo v\n", ["GEN1", "GEN2"], [], ["GEN1"], extra={"src": "", "gen.mk": ""})
+marker_b("an up-to-date included file that has a rule is NOT remade (pinned: neither under -q nor under -q -B)", "-include gen.mk\ngen.mk: src\n\ttouch GEN1\n\t@echo x\n\ttouch GEN2\nverify:\n\t@echo v\n", [], ["GEN1", "GEN2"], ["GEN1"], extra={"src": "", "gen.mk": ""})
 marker_b("a plain recipe line still does not run", ".PHONY: verify\nverify:\n\ttouch PLAIN\n", [], ["PLAIN"], [])
 marker_b("a `+` line after a plain line of the target's recipe still does not run", ".PHONY: verify\nverify:\n\ttouch PLAIN\n\t+touch AFTER\n", [], ["PLAIN", "AFTER"], [])
 marker_b("a parse-time $(shell) runs", "X := $(shell touch PARSE)\nverify:\n\t@echo v\n", ["PARSE"], [], [])
@@ -927,6 +985,40 @@ for label, raw in (("a trailing comma", '{"name":"a","version":"1.0.0","scripts"
     open(pj, "w", encoding="utf-8").write(raw); out = run(W); open(pj, "w", encoding="utf-8").write(old)
     mine = [l for l in out if l.startswith("packages/a/package.json:")]
     say(len(mine) == 1 and "pkg-parse" in mine[0] and len(out) == 1, "package.json with %s: exactly ONE finding (pkg-parse), no stray / no-test-script follow-ups" % label, "\n".join(out))
+# review: -B look is pinned (GNU make 3.81 remakes an included makefile under -B). Judged at five points: fresh, after a real run, again,
+# after touching a source, after another real run; the verdict must be the same at every point.
+GEN = "-include gen.mk\ngen.mk:\n\techo '# gen' > gen.mk\n"
+def five(label, text, want, extra=None):
+    nm = "five-%d" % len(os.listdir(UD)); d = os.path.join(UD, nm); os.makedirs(d); open(os.path.join(d, "Makefile"), "w").write(text)
+    for f, body in (extra or {}).items(): open(os.path.join(d, f), "w").write(body)
+    def judge(): m._rc_cache.clear(); return m.make_target_state(d, "verify")
+    def real(): subprocess.run(["make", "-C", d, "verify"], capture_output=True)
+    pts = [judge()]; real(); pts.append(judge()); pts.append(judge())
+    if os.path.exists(os.path.join(d, "src.c")): os.utime(os.path.join(d, "src.c"), None)
+    pts.append(judge()); real(); pts.append(judge())
+    say(pts == [want] * 5, "-B look pinned, %s: judged %s at all five points" % (label, want), "points %s" % pts)
+SRC = {"src.c": "x"}
+five("`-include gen.mk` with a rule + .PHONY verify (no rule runs anything)", GEN + ".PHONY: verify\n", "idle")
+five("`include deps.mk` (deps.mk: src.c) + .PHONY verify", "include deps.mk\n.PHONY: verify\ndeps.mk: src.c\n\ttouch deps.mk\n", "idle", SRC)
+five("`verify: gen.mk` where gen.mk is included and has a rule", GEN + "verify: gen.mk\n", "idle")
+five("shape A (verify runs $(MAKE) build) + a remade include", GEN + ".PHONY: verify\nverify:\n\t$(MAKE) build\nbuild: src.c\n\tcp src.c build\n", "present", SRC)
+five("shape B (verify: build) + a remade include", GEN + ".PHONY: verify\nverify: build\nbuild: src.c\n\tcp src.c build\n", "present", SRC)
+five("shape B without include (control)", ".PHONY: verify\nverify: build\nbuild: src.c\n\tcp src.c build\n", "present", SRC)
+five(".PHONY only, no include (control)", ".PHONY: verify\n", "idle")
+five("stamp design (verify: .stamp, .stamp: src.c)", ".PHONY: verify\nverify: .stamp\n.stamp: src.c\n\ttouch .stamp\n", "present", SRC)
+# the -B question carries the unit's makefile and the pin makefile; a unit without a makefile gets neither (and is never asked -B)
+CB3 = os.path.join(TMP, "countbin3"); os.makedirs(CB3); CLOG3 = os.path.join(TMP, "make-args3.log")
+open(os.path.join(CB3, "make"), "w").write('#!/usr/bin/env bash\necho "$*" >> "%s"\nexec "%s" "$@"\n' % (CLOG3, real_make)); os.chmod(os.path.join(CB3, "make"), 0o755)
+d3 = os.path.join(UD, "five-pinargs"); os.makedirs(d3); open(os.path.join(d3, "Makefile"), "w").write(".PHONY: verify\n")
+os.environ["PATH"] = CB3 + os.pathsep + path1; m._rc_cache.clear(); m.make_target_state(d3, "verify"); os.environ["PATH"] = path1
+bl = [a for a in open(CLOG3).read().split("\n") if " -B " in a]
+say(len(bl) == 1 and re.search(r"-q -B -f Makefile -f \S*pin\.mk -- verify$", bl[0]) is not None, "the -B look names the unit's makefile and the pin makefile after it", "calls %s" % bl)
+# MAKEFLAGS=r (no built-in rules) in the caller's environment: `verify: tool` with tool.sh (the built-in `.sh` rule) stays present
+d4 = os.path.join(UD, "flags-r"); os.makedirs(d4); open(os.path.join(d4, "Makefile"), "w").write("verify: tool\n"); open(os.path.join(d4, "tool.sh"), "w").write("echo x\n")
+ctl = subprocess.run(["make", "-C", d4, "-q", "--", "verify"], capture_output=True, env=dict(os.environ, MAKEFLAGS="r")).returncode
+os.environ["MAKEFLAGS"] = "r"; m._rc_cache.clear(); st_r = m.make_target_state(d4, "verify"); os.environ.pop("MAKEFLAGS")
+m._rc_cache.clear(); st_r0 = m.make_target_state(d4, "verify")
+say(ctl != 1 and st_r == "present" and st_r0 == "present", "env scrub on real make: MAKEFLAGS=r in the environment does not remove the built-in `.sh` rule from the inspection (control: an unscrubbed make with it answers %s)" % ctl, "scrubbed %s, plain %s, unscrubbed -q %s" % (st_r, st_r0, ctl))
 # warnings
 out = run(M7)
 say(has(out, r"^repo.yaml:\d+: unit-path unit svc-b: path services/b: services/b is a symlink"), "an in-repo unit symlink (services/b -> a) is refused by the check", "\n".join(out))
