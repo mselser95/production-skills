@@ -55,9 +55,16 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   healthcheck that needs `pg_up 1`, waits for a healthy `db`. It logs in as `app_monitor` (member of `pg_monitor`,
   not superuser) with `sslmode=verify-full`, the password only as a FILE (`db_monitor_password` secret). The
   port is NOT published: reach it on the compose network as `exporter:9187`, or opt in with a file of
-  your own, passed as one more `-f` (never named `compose.override.yml`: that is refused), that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
+  your own OUTSIDE `db/`, passed as one more `-f` (any other compose-named file inside `db/` is refused), that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
   `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`. Keep no `.env`
   in `db/`: compose loads it on its own and would substitute `${VAR}` from it, so `parity-check.sh` refuses one.
+  The overlay is the ONLY compose file in `db/` that may say anything about its own services. The CLOSED list of
+  compose files `db/` may hold is `compose.yml`, `compose.timescale.yml` and `compose.observability.yml`; any other
+  compose-named file there (`compose*.y[a]ml`, `docker-compose*.y[a]ml`) is `COMPOSE-UNKNOWN-FILE`, a new one is a
+  change to the list in `parity-check.sh`, and every `docker compose -f` this module documents or runs must name a
+  file on the list (`COMPOSE-DOC-FILE`). A compose file in `db/` must be plain YAML (no `<<` merge keys, no
+  `!override`/`!reset` tags, one document), so that what the check reads is what compose merges: valid compose that
+  uses them exits 2 (fails closed, on purpose).
 - `db/observability/required-metrics.txt` - the contract: names a scrape must contain, each with its reason.
   A name no alert uses must say `dashboard-only`.
 - `db/observability/alerts/postgres.rules.yml` + `postgres.rules.test.yml` - 13 alerts (availability, exporter absent, collector
@@ -78,8 +85,8 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   `compose.yml` is pinned too. What compose could take from anywhere but the overlay is refused, and only this:
   in the overlay, a `$` (also `$$`) in the exporter's command, environment, `env_file` (path and contents), volumes, secrets,
   entrypoint, image or user (`OVERLAY-INTERPOLATION`), `extends`, a top-level `include`, any top-level key but `services`, a second service, and `extra_hosts` / `dns` /
-  `links` / `network_mode` / `networks` on the exporter (`OVERLAY-NETWORK`), which could re-point the name `db`; in `compose.yml`, ANY `exporter` service (even `{}`), an `extends`
-  aimed at the overlay and an `include` (`BASE-EXPORTER`: compose merges a service key by key across files, so the
+  `links` / `network_mode` / `networks` on the exporter (`OVERLAY-NETWORK`), which could re-point the name `db`; in EVERY other compose file of `db/` (`compose.yml`, `compose.timescale.yml`, any compose-named file), ANY `exporter` service (even `{}`), an `extends`
+  aimed at the overlay and an `include` (`BASE-EXPORTER`, naming the file: compose merges a service key by key across files, so the
   exporter is defined in the overlay alone); in `db/`, a `.env` (`OVERLAY-DOTENV`) and the files compose merges or
   picks up by itself (`compose.override.y[a]ml`, `docker-compose[.override].y[a]ml`, `compose.yaml`:
   `OVERLAY-OVERRIDE-FILE`). The connection URI is floored apart from the allow-list: host `db`, port 5432, a plain
@@ -101,6 +108,9 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   explains (wal/database collector, `pg_wal_size_bytes`); any other failure is exit 3; exit 4 means the mutation
   survived. `--promtool` also runs `promtool test rules` in the pinned Prometheus image (no network, read-only).
   Torn down with `down -v` of its own project on every exit path.
+  The real scrape runs `compose.yml` + `compose.observability.yml` only. The documented Timescale combination
+  (`compose.yml` + `compose.timescale.yml` + the overlay) is held by `parity-check.sh` alone (the closed list, and
+  no other file may touch the exporter); no second real-container variant runs, because it would double the CI time.
 - `bash scripts/tests/db-observability-selftest.sh` - hermetic selftest and mutation proof of all of the above
   (fake `docker`); runs `promtool test rules` locally when a `promtool` is on PATH, else prints a SKIP. Every
   mutant is paired with an unmutated control that must be green first, else `its control is not green`; a mutant

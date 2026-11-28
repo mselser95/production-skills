@@ -43,6 +43,9 @@ if ! python3 -B -c 'import yaml' 2>/dev/null; then
   echo "0 ok, 1 failed"; exit 1
 fi
 
+# per-section wall time (whole seconds), printed as a table before the final line
+TN=(); TT=(); SECT_NAME=""; SECT_T0=$SECONDS
+sect() { local now=$SECONDS; [[ -z $SECT_NAME ]] || { TN+=("$SECT_NAME"); TT+=("$((now - SECT_T0))"); }; SECT_NAME="${1:-}"; SECT_T0=$now; }
 pass() { echo "ok   $1"; ok=$((ok + 1)); }
 flunk() { echo "FAIL $1${2:+ ($2)}"; bad=$((bad + 1)); }
 expect_ok() { # name fn args...: the case must pass
@@ -75,6 +78,7 @@ EV="observability/exporter/exporter.env"
 AL="observability/exporter-allowlist.txt"
 DIG="sha256:a88794758ad461c75f3825b51cde4bde730bdff04b3b24d00efe14217e41f615"
 
+sect "parity cases: registration, harness, mutants"
 # ---- 1+2. parity-check.sh, in one process ----------------------------------------------------
 # A case = (script, expected outcome, one edit of the scratch tree). Cases are REGISTERED here
 # and executed together by the harness below, which exec()s the python body of each script
@@ -115,8 +119,13 @@ for root, _, names in os.walk(obsdir):
             tree["db/" + os.path.relpath(os.path.join(root, n), dbroot)] = f.read()
 with open(overlayfile, encoding="utf-8") as f:
     tree["db/compose.observability.yml"] = f.read()
-with open(os.path.join(os.path.dirname(overlayfile), "compose.yml"), encoding="utf-8") as f:
-    tree["db/compose.yml"] = f.read()
+for _n in ("compose.yml", "compose.timescale.yml"):
+    with open(os.path.join(os.path.dirname(overlayfile), _n), encoding="utf-8") as f:
+        tree["db/" + _n] = f.read()
+# the docs and scripts the compose-command check reads (outside db/, one level up)
+for _rel in ("README.md", "scripts/db-scrape-test.sh", "scripts/db-bootstrap-test.sh"):
+    with open(os.path.join(os.path.dirname(overlayfile), "..", _rel), encoding="utf-8") as f:
+        tree["db/../" + _rel] = f.read()
 
 codes, cache = {}, {}
 cur = [""]
@@ -162,7 +171,7 @@ def run(script, want, f, old, new, pt):
             files[k] = files[k].replace(old, new)
     code, lsrc = code_of(script)
     cur[0] = lsrc
-    real_which, real_runner = shutil.which, subprocess.run
+    real_which, real_runner, real_listdir = shutil.which, subprocess.run, os.listdir
     tdir = None
     b = dict(vars(builtins))
     if pt == "real":
@@ -184,6 +193,15 @@ def run(script, want, f, old, new, pt):
             raise FileNotFoundError(2, "No such file or directory", str(path))
 
         b["open"] = vopen
+
+        def vlistdir(path="."):
+            d = os.path.normpath(str(path))
+            names = {os.path.relpath(k, d).split(os.sep)[0] for k in vf if k.startswith(d + os.sep)}
+            if not names:
+                raise FileNotFoundError(2, "No such file or directory", str(path))
+            return sorted(names)
+
+        os.listdir = vlistdir
         shutil.which = (lambda n, *a, **k: "/fake/promtool") if pt == "fake" else (lambda n, *a, **k: None)
         if pt == "fake":
             subprocess.run = fake_run
@@ -201,7 +219,7 @@ def run(script, want, f, old, new, pt):
                 rc = 70
                 buf.write("harness: " + repr(e))
     finally:
-        shutil.which, subprocess.run = real_which, real_runner
+        shutil.which, subprocess.run, os.listdir = real_which, real_runner, real_listdir
         if tdir:
             shutil.rmtree(tdir, ignore_errors=True)
     out = buf.getvalue()
@@ -510,8 +528,28 @@ pc 'base: a top-level include -> BASE-EXPORTER' 'BASE-EXPORTER: compose.yml has 
 for _f in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml docker-compose.yml docker-compose.yaml compose.yaml; do
   pc "a $_f beside the compose files -> OVERLAY-OVERRIDE-FILE" "OVERLAY-OVERRIDE-FILE: \`$_f\` sits beside" "+$_f" "" $'services: {}\n'
 done
-pc "an unrelated file name beside the compose files is fine" OK "+compose.timescale.example" "" $'x: 1\n'
+# fifth review: the overlay is the ONLY compose file in db/ that may say anything about its services; the
+# closed list of compose files is compose.yml, compose.timescale.yml, compose.observability.yml.
+# (The fourth round's GREEN case "an unrelated file name beside the compose files" is split: a name that is
+# NOT compose-named stays green; a compose-named unknown file is RED.)
 X1=$'\001'
+pc "a non-compose file name (notes.txt) beside the compose files is fine" OK "+notes.txt" "" $'x: 1\n'
+pc "a non-compose file name (backup.sql) beside the compose files is fine" OK "+backup.sql" "" $'select 1;\n'
+pc "a compose-named file that is not on the closed list -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `compose.extra.yml`' "+compose.extra.yml" "" $'services: {}\n'
+pc "a compose-named .yaml file not on the closed list -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `compose.extra.yaml`' "+compose.extra.yaml" "" $'services: {}\n'
+TSANCH=$'\nservices:\n'
+bt() { pc "$1" "BASE-EXPORTER: compose.timescale.yml $2" "compose.timescale.yml" "$TSANCH" "$TSANCH$3"; }
+bt 'timescale file: the fourth review'"'"'s fragment (DATA_SOURCE_NAME sslmode=disable) -> BASE-EXPORTER naming it' 'defines the service `exporter`' $'  exporter:\n    environment:\n      DATA_SOURCE_NAME: "postgresql://x@db:5432/app?sslmode=disable"\n'
+bt 'timescale file: an empty `exporter: {}` -> BASE-EXPORTER' 'defines the service `exporter`' $'  exporter: {}\n'
+bt 'timescale file: a service extending the overlay -> BASE-EXPORTER' 'service `sidecar` extends' $'  sidecar:\n    extends: {file: compose.observability.yml, service: exporter}\n'
+pc 'timescale file: a top-level include -> BASE-EXPORTER' 'BASE-EXPORTER: compose.timescale.yml has a top-level `include:`' "compose.timescale.yml" "$TSANCH" $'\ninclude: [other.yml]\nservices:\n'
+pc 'a compose.ci.yml (not shipped) with the fragment -> BASE-EXPORTER naming it' $'BASE-EXPORTER: compose.ci.yml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `compose.ci.yml`' "+compose.ci.yml" "" $'services:\n  exporter:\n    environment: {PGSSLMODE: disable}\n'
+README_CMD='docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d'
+pc "README documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "../README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
+pc "RUNBOOK (a command wrapped over two lines) documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: observability/RUNBOOK.md documents `docker compose -f compose.other.yml`' "$RB" 'compose.observability.yml up -d' 'compose.observability.yml -f compose.other.yml up -d'
+pc "a compose file's own comment documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: compose.timescale.yml documents `docker compose -f compose.other.yml`' "compose.timescale.yml" '#   docker compose -f compose.yml -f compose.timescale.yml up -d' '#   docker compose -f compose.yml -f compose.other.yml up -d'
+pc "the scrape test runs a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: scripts/db-scrape-test.sh runs `docker compose -f compose.other.yml`' "../scripts/db-scrape-test.sh" '-f "$dbdir/compose.observability.yml")' '-f "$dbdir/compose.observability.yml" -f "$dbdir/compose.other.yml")'
+pc "the password file is the superuser's in BOTH files -> OVERLAY-SECRET (exactly /run/secrets/db_monitor_password)" 'OVERLAY-SECRET: DATA_SOURCE_PASS_FILE must be exactly' "$AL$X1$EV" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password"
 URI_OK='db:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt'
 pu() { # NAME WANT URI: the allow-list AND exporter.env edited consistently, so only the floor can notice
   pc "$1" "$2" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=$3${X1}DATA_SOURCE_URI=$3"
@@ -533,15 +571,23 @@ pe "a function name is case-sensitive: ABSENT( is unknown" 'unknown function `AB
 pe "lower-case rate( is fine" OK 'rate(pg_up[5m]) == 0'
 pmx "parity: the base exporter fragment check removed" '    if str(k) in ov_services:' '    if False:' -- 'BASE-EXPORTER: compose.yml defines the service `exporter`' "compose.yml" "$BASEANCH" "$BASEANCH"$'  exporter: {}\n'
 pmx "parity: the base exporter fragment check removed (reviewer's env_file)" '    if str(k) in ov_services:' '    if False:' -- 'BASE-EXPORTER: compose.yml defines the service `exporter`' "compose.yml" "$BASEANCH" "$BASEANCH"$'  exporter:\n    env_file: ["${EXPORTER_EXTRA_ENV:-./x.env}"]\n'
-pmx "parity: the override-file check removed" '    if exists(os.path.join(overlay_dir, name_)):' '    if False:' -- 'OVERLAY-OVERRIDE-FILE: `compose.override.yml` sits beside' "+compose.override.yml" "" $'services: {}\n'
+pmx "parity: the override-file check removed" 'if name_ in listing or exists(os.path.join(overlay_dir, name_)):' 'if False:' -- 'OVERLAY-OVERRIDE-FILE: `compose.override.yml` sits beside' "+compose.override.yml" "" $'services: {}\n'
 pmx "parity: the override-file list shortened (docker-compose.yaml)" '"docker-compose.yaml", ' '' -- 'OVERLAY-OVERRIDE-FILE: `docker-compose.yaml` sits beside' "+docker-compose.yaml" "" $'services: {}\n'
+pmx "parity: compose enumeration reduced to compose.yml only (timescale fragment unseen)" 'for name_ in listing:
+    if not re.fullmatch' 'for name_ in ["compose.yml"]:
+    if not re.fullmatch' -- 'BASE-EXPORTER: compose.timescale.yml defines the service `exporter`' "compose.timescale.yml" "$TSANCH" "$TSANCH"$'  exporter: {}\n'
+pmx "parity: the closed list of compose files removed" '    if name_ not in COMPOSE_CLOSED and name_ not in AUTO_MERGED:' '    if False:' -- 'COMPOSE-UNKNOWN-FILE: `compose.extra.yml`' "+compose.extra.yml" "" $'services: {}\n'
+pmx "parity: the documented-commands check removed" '    for m_ in DOC_CMD.finditer(flat_):' '    for m_ in []:' -- 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "../README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
+pmx "parity: the password-file floor back to a /run/secrets prefix" 'if env_vars.get("DATA_SOURCE_PASS_FILE", "") != "/run/secrets/db_monitor_password":' 'if not env_vars.get("DATA_SOURCE_PASS_FILE", "").startswith("/run/secrets/"):' -- 'OVERLAY-SECRET: DATA_SOURCE_PASS_FILE must be exactly' "$AL$X1$EV" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password"
 pmx "parity: the URI floor back to the three old checks (host)" 'if not m_uri:' 'if False:' 'elif sorted(m_uri.group(2).split("&")) !=' 'elif False and sorted(m_uri.group(2).split("&")) !=' -- "OVERLAY-URI" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=other:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt${X1}DATA_SOURCE_URI=other:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt"
 pmx "parity: the URI floor back to the three old checks (&user=)" 'if not m_uri:' 'if False:' 'elif sorted(m_uri.group(2).split("&")) !=' 'elif False and sorted(m_uri.group(2).split("&")) !=' -- "OVERLAY-URI" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=$URI_OK&user=postgres${X1}DATA_SOURCE_URI=$URI_OK&user=postgres"
 pmx "parity: aggregation operators case-sensitive again (Sum( refused)" '(text in FUNCS or low in AGG) and (nxt == ("open", "(") or (low in AGG and' '(text in FUNCS) and (nxt == ("open", "(") or (low in AGG and' -- OK "$R" "expr: pg_up == 0" "expr: 'Sum(pg_up) == 0'"
 pmx "parity: function names case-insensitive (Rate( accepted)" '(text in FUNCS or low in AGG) and' '(low in FUNCS or low in AGG) and' -- 'unknown function `Rate(`' "$R" "expr: pg_up == 0" "expr: 'Rate(pg_up[5m]) == 0'"
 
+sect "parity harness run (one python process)"
 prun
 pjudge
+sect "parity wrapper runs"
 
 # ---- the real shell wrapper: three runs (argument parsing, default paths, exit codes) --------------
 out="$(bash "$parity" 2>&1)"; rc=$?
@@ -554,6 +600,7 @@ mkdir -p "$tmp/noyaml"; printf '#!/bin/sh\nexit 1\n' > "$tmp/noyaml/python3"; ch
 out="$(PATH="$tmp/noyaml:$PATH" bash "$parity" 2>&1)"; rc=$?
 if [[ $rc == 2 && $out == *"PyYAML is not importable"* ]]; then pass "no PyYAML -> exit 2, never green"; else flunk "no PyYAML -> exit 2" "rc=$rc"; fi
 
+sect "promtool"
 # ---- 3. promtool ----------------------------------------------------------------------------------
 # red_pair NAME FN CTL MUT: FN must pass on CTL (the unmutated copy) and fail on MUT
 red_pair() {
@@ -578,6 +625,7 @@ else
   skipped=$((skipped + 1))
 fi
 
+sect "scrape test (fake docker)"
 # ---- 4. db-scrape-test.sh against a fake docker --------------------------------------------------------
 # The fake answers from prepared files (no helper process per call): FAKE_METRICS for the scrape,
 # FAKE_INSPECT for `docker inspect`.
@@ -896,6 +944,7 @@ if grep -q -E '^compose -p dbscrape-[0-9]+ --env-file [^ ]+ -f [^ ]+/compose.yml
 if grep -q ' exec -T db wget -q -O - http://exporter:9187/metrics$' "$LOGF"; then pass "the scrape goes from the db container to the exporter by service name"; else flunk "scrape call shape"; fi
 if grep -q -E '^inspect -f .*\.Config\.Cmd.*\.Config\.Entrypoint.*\.Config\.Env.*\.Mounts.* fakeexporter0001$' "$LOGF"; then pass "ONE docker inspect reads command, entrypoint, environment and mounts"; else flunk "inspect call shape"; fi
 
+sect "db-test recipe + scrape mutants (Makefile pin)"
 # ---- 5. the db-test recipe runs the checks in the pinned order -------------------------------------
 # mk_pin MAKEFILE: in the `db-test` recipe, in this order: the parity check, the bootstrap test(s),
 # the scrape test, then the --mutate line with its exit-1 requirement. A text pin of ONE recipe.
@@ -920,6 +969,7 @@ mk_pin() {
 if [[ -r $makefile ]]; then expect_ok "Makefile db-test: parity, bootstrap, scrape, then --mutate with its exit-1 requirement, in that order" mk_pin "$makefile"
 else flunk "Makefile db-test pin" "cannot read $makefile"; fi
 
+sect "scrape-test mutants"
 # ---- 6. mutations of the scrape test and the Makefile: PAIRED --------------------------------------
 # vverdict NAME SRC ANCHOR REPL FN ARGS...: sets VV to
 #   NOANCHOR   the patch did not apply or changed nothing
@@ -1007,6 +1057,7 @@ vmut "Makefile: the parity line removed from db-test" "$makefile" $'\t@bash prod
 vmut "Makefile: the scrape test removed from db-test" "$makefile" $'\t@bash prod-new/modules/db-postgres/scripts/db-scrape-test.sh --promtool\n' '' mk_pin
 vmut "Makefile: the --mutate exit-1 requirement removed" "$makefile" '[ $$rc -eq 1 ]' 'true' mk_pin
 vmut "Makefile: parity moved after the bootstrap tests" "$makefile" $'\t@bash prod-new/modules/db-postgres/db/observability/parity-check.sh\n\t@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain\n' $'\t@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain\n\t@bash prod-new/modules/db-postgres/db/observability/parity-check.sh\n' mk_pin
+sect "CI wiring (db-ci-wired.sh)"
 # ---- 5b. the CI job `db` really installs PyYAML and pre-pulls before `make db-test`, with time to finish -----
 # db-ci-wired.sh on the repo's workflow, then on scratch copies of it with one step broken (PAIRED: the
 # untouched copy must be green), and mutants of db-ci-wired.sh itself against workflows it must refuse.
@@ -1016,14 +1067,15 @@ if [[ -r $workflow ]]; then
   expect_ok "CI: job db is wired (make db-test, PyYAML install and image pre-pull before it, timeout >= 10)" ciw "$workflow"
   WFA="$tmp/wf-nopyyaml.yaml"; WFB="$tmp/wf-pyyaml-late.yaml"; WFC="$tmp/wf-noprepull.yaml"; WFD="$tmp/wf-short.yaml"
   cp "$workflow" "$WFA"; replace_in "$WFA" "python3 -m pip install --quiet 'PyYAML==6.0.2'" "true" || flunk "CI scenario: no-PyYAML copy"
-  cp "$workflow" "$WFB"; replace_in "$WFB" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        if: steps.changed.outputs.run == \'true\'\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' || flunk "CI scenario: late-PyYAML copy"
+  LATEPIP=$'        run: make db-test\n\n      - name: late PyYAML\n        if: steps.changed.outputs.run == \'true\'\n        run: python3 -m pip install --quiet \'PyYAML==6.0.2\'\n'
+  cp "$workflow" "$WFB"; replace_in "$WFB" "python3 -m pip install --quiet 'PyYAML==6.0.2'" "true" && replace_in "$WFB" $'        run: make db-test\n' "$LATEPIP" || flunk "CI scenario: late-PyYAML copy"
   cp "$workflow" "$WFC"; replace_in "$WFC" 'docker pull --quiet "$image@$digest"' 'true' || flunk "CI scenario: no-prepull copy"
   cp "$workflow" "$WFD"; replace_in "$WFD" $'    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' $'    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' || flunk "CI scenario: short-timeout copy"
   vmut "CI: the PyYAML install step removed from job db" "$workflow" "python3 -m pip install --quiet 'PyYAML==6.0.2'" "true" ciw
-  vmut "CI: the PyYAML install moved after the make db-test step" "$workflow" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        if: steps.changed.outputs.run == \'true\'\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' ciw
   vmut "CI: the image pre-pull removed from job db" "$workflow" 'docker pull --quiet "$image@$digest"' 'true' ciw
   vmut "CI: job db timeout lowered below 10 minutes" "$workflow" $'    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' $'    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' ciw
   ciw_refuses() { ! bash "$1" "$2" >/dev/null 2>&1; }   # SCRIPT WORKFLOW: the script must refuse
+  expect_ok "CI: the PyYAML install moved after the make db-test step is refused" ciw_refuses "$ciwired" "$WFB"
   vmut "db-ci-wired: the PyYAML requirement removed" "$ciwired" 'if not before(lambda l: PIP.match(l)):' 'if False:' ciw_refuses "$WFA"
   vmut "db-ci-wired: the PyYAML-before-db-test order removed" "$ciwired" 'steps[:first]' 'steps' ciw_refuses "$WFB"
   vmut "db-ci-wired: the pre-pull requirement removed" "$ciwired" 'if not before(lambda l: re.match(r"docker\s+pull\b", l)):' 'if False:' ciw_refuses "$WFC"
@@ -1047,7 +1099,38 @@ if [[ -r $workflow ]]; then
   vmut "db-ci-wired: the same-if requirement removed (if: 1 == 2 passes)" "$ciwired" ' and s.get("if") == test_if' '' ciw_refuses "$WFF"
   vmut "db-ci-wired: continue-on-error of the pre-steps ignored" "$ciwired" 'not soft(s.get("continue-on-error")) and s.get("if") == test_if' 's.get("if") == test_if' ciw_refuses "$WFG"
   vmut "db-ci-wired: docker pull matched as a substring (echo docker pull passes)" "$ciwired" 'if not before(lambda l: re.match(r"docker\s+pull\b", l)):' 'if not before(lambda l: "docker pull" in l):' ciw_refuses "$WFH"
+  # fifth review: a `make db-test` that cannot fail the job must not pass the pin (each copy is judged refused)
+  DBRUN=$'        run: make db-test\n'; STEPIF=$'        if: steps.changed.outputs.run == \'true\'\n'
+  cw() { # NAME OLD NEW: a copy of the workflow with one edit; sets CWF
+    CWF="$tmp/wf-$1.yaml"; cp "$workflow" "$CWF"; replace_in "$CWF" "$2" "$3" || flunk "CI scenario: $1 copy"
+  }
+  cw setplus "$DBRUN" $'        run: |\n          set +e\n          make db-test\n          exit 0\n'; W1="$CWF"
+  cw shell "$DBRUN" $'        shell: true {0}\n        run: make db-test\n'; W2="$CWF"
+  cw workdir "$DBRUN" $'        working-directory: /tmp\n        run: make db-test\n'; W3="$CWF"
+  cw second "$DBRUN" "$DBRUN"$'\n      - name: again\n        if: steps.changed.outputs.run == \'true\'\n        run: make db-test || true\n'; W4="$CWF"
+  cw jobif $'  db:\n    runs-on: ubuntu-latest\n' $'  db:\n    if: ${{ always() && false }}\n    runs-on: ubuntu-latest\n'; W5="$CWF"
+  cw stepif "$STEPIF" $'        if: always() && false\n'; W6="$CWF"
+  cw typespip "$PIPL" "python3 -m pip install --quiet types-PyYAML"; W7="$CWF"
+  cw dryrun "$PIPL" "python3 -m pip install --quiet --dry-run 'PyYAML==6.0.2'"; W8="$CWF"
+  cw piportrue "$PIPL" "pip install PyYAML || true"; W9="$CWF"
+  expect_ok "CI: 'set +e' / make db-test / 'exit 0' in one run block is refused" ciw_refuses "$ciwired" "$W1"
+  expect_ok "CI: 'shell: true {0}' on the db-test step is refused" ciw_refuses "$ciwired" "$W2"
+  expect_ok "CI: working-directory on the db-test step is refused" ciw_refuses "$ciwired" "$W3"
+  expect_ok "CI: a second step running 'make db-test || true' is refused" ciw_refuses "$ciwired" "$W4"
+  expect_ok "CI: job-level 'if: always() && false' is refused" ciw_refuses "$ciwired" "$W5"
+  expect_ok "CI: db-test step 'if: always() && false' is refused" ciw_refuses "$ciwired" "$W6"
+  expect_ok "CI: 'types-PyYAML' is not PyYAML" ciw_refuses "$ciwired" "$W7"
+  expect_ok "CI: 'pip install --dry-run' is refused" ciw_refuses "$ciwired" "$W8"
+  expect_ok "CI: 'pip install PyYAML || true' is refused" ciw_refuses "$ciwired" "$W9"
+  vmut "db-ci-wired: the exact-run rule back to 'a line of the block'" "$ciwired" 'if hits[0]["run"].rstrip() != "make db-test":' 'if "make db-test" not in [l.strip() for l in hits[0]["run"].splitlines()]:' ciw_refuses "$W1"
+  vmut "db-ci-wired: the shell / working-directory rule removed" "$ciwired" 'for key in ("shell", "working-directory"):' 'for key in ():' ciw_refuses "$W2"
+  vmut "db-ci-wired: the job-if rule removed" "$ciwired" 'if "if" in job:' 'if False:' ciw_refuses "$W5"
+  vmut "db-ci-wired: the step-if allow-list removed" "$ciwired" 'if "if" in hits[0] and hits[0]["if"] != STEP_IF:' 'if False:' ciw_refuses "$W6"
+  vmut "db-ci-wired: the pip pattern loosened to a substring (types-PyYAML passes)" "$ciwired" 'if not before(lambda l: PIP.match(l)):' 'if not before(lambda l: "pip install" in l and "PyYAML" in l):' ciw_refuses "$W7"
 else flunk "CI wiring pin" "cannot read $workflow"; fi
 
+sect ""
+echo "section timings (s, whole seconds):"
+for i in "${!TN[@]}"; do printf '  %4s  %s\n' "${TT[i]}" "${TN[i]}"; done
 if ((skipped > 0)); then echo "$ok ok, $bad failed, $skipped skipped"; else echo "$ok ok, $bad failed"; fi
 ((bad == 0))

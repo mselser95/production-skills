@@ -9,6 +9,8 @@ and substitutes `${VAR}` from it, so a stray `.env` can re-point the exporter's 
 (`parity-check.sh` refuses one). A bare `docker compose up` there reads `compose.yml` alone and never starts the
 exporter; leave no `compose.override.yml` (or `docker-compose*.yml`, `compose.yaml`) beside it either: compose
 merges those on its own, and `parity-check.sh` refuses them.
+The only compose files allowed in `db/` are `compose.yml`, `compose.timescale.yml` and `compose.observability.yml`;
+`parity-check.sh` refuses any other compose-named file there and any documented command that names one.
 
 ## PostgresDown
 

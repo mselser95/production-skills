@@ -677,23 +677,66 @@ for src_, _ in pairs:
 # The exporter lives ONLY in the overlay: compose merges a service across files key by key, so a
 # fragment of it in the base (or an auto-merged file) would add keys this check never reads.
 ov_services = {str(k) for k in ov["services"]}
-if "include" in base:
-    fail("BASE-EXPORTER", "compose.yml has a top-level `include:` (another file this check does not read)")
-bsvc = base.get("services") if isinstance(base.get("services"), dict) else {}
-for k, v in bsvc.items():
-    if str(k) in ov_services:
-        fail("BASE-EXPORTER", f"compose.yml defines the service `{k}`, which the overlay defines: compose would merge the two and this check reads only the overlay (define it in one place)")
-    ext = v.get("extends") if isinstance(v, dict) else None
-    if ext is not None and (str(ext.get("service", "") if isinstance(ext, dict) else ext) in ov_services or "observability" in str(ext)):
-        fail("BASE-EXPORTER", f"compose.yml service `{k}` extends the overlay or one of its services")
-for name_ in ("compose.override.yml", "compose.override.yaml", "docker-compose.override.yml",
-              "docker-compose.override.yaml", "docker-compose.yml", "docker-compose.yaml", "compose.yaml"):
-    if exists(os.path.join(overlay_dir, name_)):
+# EVERY compose-named file in db/ (the overlay aside) is judged by one rule: it may say nothing about a
+# service the overlay defines, extend one, or include another file. A CLOSED list of compose files may
+# exist at all: a new one is a visible change to this list, not a silent extra merge source.
+COMPOSE_CLOSED = ("compose.yml", "compose.timescale.yml", "compose.observability.yml")
+AUTO_MERGED = ("compose.override.yml", "compose.override.yaml", "docker-compose.override.yml",
+               "docker-compose.override.yaml", "docker-compose.yml", "docker-compose.yaml", "compose.yaml")
+ov_name = os.path.basename(overlay_path)
+try:
+    listing = sorted(os.listdir(overlay_dir))
+except OSError:
+    listing = []
+for name_ in AUTO_MERGED:
+    if name_ in listing or exists(os.path.join(overlay_dir, name_)):
         fail("OVERLAY-OVERRIDE-FILE", f"`{name_}` sits beside the compose files: compose merges or picks it up on its own, outside this check (delete it)")
+for name_ in listing:
+    if not re.fullmatch(r"(docker-)?compose.*\.ya?ml", name_, re.I) or name_ == ov_name:
+        continue
+    if name_ not in COMPOSE_CLOSED and name_ not in AUTO_MERGED:
+        fail("COMPOSE-UNKNOWN-FILE", f"`{name_}` is a compose file this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}); add it to the list in parity-check.sh and the README, or delete it")
+    cf = load(os.path.join(overlay_dir, name_))
+    cf = cf if isinstance(cf, dict) else {}
+    if "include" in cf:
+        fail("BASE-EXPORTER", f"{name_} has a top-level `include:` (another file this check does not read)")
+    csvc = cf.get("services") if isinstance(cf.get("services"), dict) else {}
+    for k, v in csvc.items():
+        if str(k) in ov_services:
+            fail("BASE-EXPORTER", f"{name_} defines the service `{k}`, which the overlay defines: compose would merge the two and this check reads only the overlay (define it in one place)")
+        ext = v.get("extends") if isinstance(v, dict) else None
+        if ext is not None and (str(ext.get("service", "") if isinstance(ext, dict) else ext) in ov_services or "observability" in str(ext)):
+            fail("BASE-EXPORTER", f"{name_} service `{k}` extends the overlay or one of its services")
+# Every `docker compose` command the module DOCUMENTS (README, RUNBOOK, the comments of the compose
+# files) or RUNS (the `-f "$dbdir/<file>"` of the two container scripts) may use `-f` files from the
+# closed list only: documenting a fourth merge source without listing it is a finding.
+DOC_SOURCES = [("README.md", os.path.join(overlay_dir, "..", "README.md")),
+               ("observability/RUNBOOK.md", None)]
+DOC_SOURCES += [(n_, os.path.join(overlay_dir, n_)) for n_ in listing if re.fullmatch(r"(docker-)?compose.*\.ya?ml", n_, re.I)]
+DOC_CMD = re.compile(r"docker compose((?:\s+(?:-p\s+\S+|--env-file\s+\S+|\[?-f\s+[^\s\]`]+\]?))*)")
+for label_, p_ in DOC_SOURCES:
+    if p_ is None:
+        raw_ = runbook
+    elif exists(p_):
+        raw_ = read(p_)
+    else:
+        continue
+    flat_ = re.sub(r"\s*\n\s*(?:#\s*)?", " ", raw_)
+    for m_ in DOC_CMD.finditer(flat_):
+        for f_ in re.findall(r"-f\s+([^\s\]`]+)", m_.group(1)):
+            f_ = f_.strip("\"'")
+            if f_ not in COMPOSE_CLOSED:
+                fail("COMPOSE-DOC-FILE", f"{label_} documents `docker compose -f {f_}`, which is not on the closed list ({', '.join(COMPOSE_CLOSED)})")
+for label_, rel_ in (("scripts/db-scrape-test.sh", "../scripts/db-scrape-test.sh"), ("scripts/db-bootstrap-test.sh", "../scripts/db-bootstrap-test.sh")):
+    p_ = os.path.join(overlay_dir, rel_)
+    if exists(p_):
+        for f_ in re.findall(r'-f\s+"\$dbdir/([^"]+)"', read(p_)):
+            if f_ not in COMPOSE_CLOSED:
+                fail("COMPOSE-DOC-FILE", f"{label_} runs `docker compose -f {f_}`, which is not on the closed list ({', '.join(COMPOSE_CLOSED)})")
 if not tls_ro:
     fail("OVERLAY-TLS-MOUNT", "the directory holding sslrootcert must be mounted read-only into the exporter")
-if not env_vars.get("DATA_SOURCE_PASS_FILE", "").startswith("/run/secrets/"):
-    fail("OVERLAY-SECRET", "DATA_SOURCE_PASS_FILE must name a file under /run/secrets")
+if env_vars.get("DATA_SOURCE_PASS_FILE", "") != "/run/secrets/db_monitor_password":
+    fail("OVERLAY-SECRET", "DATA_SOURCE_PASS_FILE must be exactly /run/secrets/db_monitor_password, the monitor's own password file")
 if env_vars.get("DATA_SOURCE_USER") != "app_monitor":
     fail("OVERLAY-SECRET", "DATA_SOURCE_USER must be app_monitor, the least-privilege role")
 for k in ("DATA_SOURCE_PASS", "DATA_SOURCE_NAME", "PG_EXPORTER_PASSWORD"):
