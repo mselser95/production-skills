@@ -43,8 +43,11 @@ and the reason: blank; a whole-line comment `^ *#.*$`; a top-level scalar `key: 
 without backslash or inner quote; no trailing comment); a mapping opener `key:` followed by one or
 more children `  key: value` (two spaces, ONE nesting level); exactly ONE line `units: []`. And:
 no top-level (or child) key twice, `units` included; no line starting with `---` or `...`; none of
-`| > & * ! % @ { } [ ]`, a backtick or a backslash, outside the `units: []` line and comments; no CR, tab, BOM, control or
-Unicode line-break character; the file ends with a newline. Anything that is not this flat shape
+`| > & * ! % @ { } [ ]`, a backtick or a backslash, outside the `units: []` line and comments; and THE ALPHABET: an
+inventory file is ASCII -- every character is printable ASCII (0x20-0x7E) or a newline, in comments and
+quoted values too (an allow-list: anything else, e.g. U+FFFE, an accented letter, NBSP, DEL, a tab, CR or
+BOM, is exit 2 with the line number and the code point), and the bytes must decode as strict UTF-8
+(else exit 2); the file ends with a newline. Anything that is not this flat shape
 (a second document, a block or multi-line scalar, a flow mapping, an anchor) is a refusal, so the
 one `units: []` line is always a real top-level key. That line becomes `units:` plus one flow-style
 line per unit: `  - { id: "x", kind: "service", language: "go", path: "services/x" }`, every scalar
@@ -70,7 +73,19 @@ the unit directory of ANY instance (or declared unit) is refused, exit 1, naming
 contributing module and the unit (a module's own declared units excepted). LINKS of a unit-placed
 file (layout monorepo) must resolve inside THEIR OWN unit directory: a link to another unit is
 refused (couples), and so is a link to the repository root, an ancestor of the unit (`..`) or
-anything else outside the unit (no real module places a link today). Layout single is unchanged.
+anything else outside the unit (no real module places a link today). This holds for EVERY planned
+link whose OUTPUT path lies inside any unit directory (an instance's or a declared one), however it
+was placed and whichever module placed it: a declared-unit module places its files as `root`, so its
+links inside its declared directories are checked the same way. A ROOT link (output outside every
+unit directory) whose target lies inside a unit directory couples the root to a unit and is refused,
+exit 1, naming link, target and unit; a root link to a root file is fine. Layout single is unchanged.
+ASYMMETRY: a `--unit` instance may not place a ROOT file inside its own unit directory (it must use a
+`unit` placement), while a declared-unit module's root files land in its declared directories by
+definition, because declared units have no `unit` placement.
+In layout `single` the equal/nested directory clash does not apply between an instance (whose unit
+directory is the root) and a module's declared units, which are just directories of root-placed files
+there; real file collisions are still exit 1 by the same-path rule, and two modules declaring the same
+fixed directory still clash (exit 2) in both layouts.
 
 SLOT VALUES. ONE grammar for every value, checked before anything else:
   1 to 64 characters (the length cap), each in [A-Za-z0-9._-], the first in
@@ -761,7 +776,7 @@ def parse_unit(spec):
     mid, sep, uid = parts[0].partition(":")
     if not sep or not mid or not uid:
         die(2, "bad --unit %r (want MODULE:ID[,SLOT=VALUE...])" % spec)
-    if ":" in uid:
+    if ":" in uid:  # redundant: the value grammar (check_value) refuses ':' in an id as well
         die(2, "bad --unit %r: a unit id may not contain ':'" % spec)
     over = {}
     for kv in parts[1:]:
@@ -778,12 +793,18 @@ def inventory_problem(data, generated=False):
     """The LINE ALLOW-LIST (see REPO INVENTORY in the header). `data` is bytes. Returns None when
     every line is allowed, else (line number, reason). generated=True also allows the entry lines
     this tool writes under `units:`, and wants exactly one units key (empty or filled)."""
-    if data.startswith(b"\xef\xbb\xbf"):
-        return 1, "a byte-order mark is not allowed"
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return 1, "not valid UTF-8"
+    # THE ALPHABET (an allow-list, never a list of bad characters): printable ASCII and \n, nothing
+    # else, in comments and quoted values too. A BOM, a tab, a CR, a control, a line separator, a
+    # noncharacter (U+FFFE / U+FFFF) and every other non-ASCII character fall out of it by being
+    # absent, so no code point can slip past by being missing from a deny-list.
+    for n, ln in enumerate(text.split("\n"), 1):
+        for ch in ln:
+            if not 0x20 <= ord(ch) <= 0x7e:
+                return n, "character U+%04X is not allowed (an inventory file is printable ASCII and newlines only)" % ord(ch)
     if not text.endswith("\n"):
         return text.count("\n") + 1, "the file must end with a newline"
     lines = text[:-1].split("\n")
@@ -793,13 +814,9 @@ def inventory_problem(data, generated=False):
     def unclosed():
         return None if opener is None or opener[2] else (opener[1], "mapping `%s:` has no child line" % opener[0])
     for n, ln in enumerate(lines, 1):
-        for ch in ln:
-            o = ord(ch)
-            if o < 0x20 or 0x7f <= o <= 0x9f or o in (0x2028, 0x2029, 0xfeff):
-                return n, "control, tab, carriage-return or line-break character U+%04X is not allowed" % o
         if ln.strip(" ") == "" or INV_COMMENT.fullmatch(ln):
             continue
-        if ln.startswith("---") or ln.startswith("..."):
+        if ln.startswith("---") or ln.startswith("..."):  # also caught by the line-shape rules below
             return n, "a YAML document marker (`---` / `...`) is not allowed"
         if ln == UNITS_LINE:
             if unclosed():
@@ -1057,6 +1074,8 @@ def run():
         seen[k] = x
     for n, x in enumerate(uall):
         for y in uall[n + 1:]:
+            if a.layout == "single" and x["decl"] != y["decl"]:
+                continue  # single: an instance's unit directory is the root; declared dirs sit inside it
             if (x["explicit"] or y["explicit"]) and dirs_clash(x["dir"], y["dir"]):
                 die(2, "unit %s and unit %s would share the unit directory %r (equal or nested); "
                     "nothing written" % (x["label"], y["label"], x["dir"] or ".") +
@@ -1247,9 +1266,23 @@ def run():
 
     for out in sorted(plan):
         e = plan[out]
-        if e["kind"] != "link" or not e.get("udir"):
+        if e["kind"] != "link" or a.layout != "monorepo":
             continue
-        nk, uk = fold(e["norm"]), fold(e["udir"])
+        ok_, nk = fold(out), fold(e["norm"])
+        # A link whose OUTPUT path lies inside ANY unit directory (an instance's or a declared one)
+        # belongs to that unit, however it was placed (a declared-unit module places it as root).
+        own = next((y["dir"] for y in uall if y["dir"] and ok_.startswith(fold(y["dir"]) + "/")), None)
+        if own is None:
+            # A root link: the root must not couple itself to a unit.
+            for y in uall:
+                d = fold(y["dir"])
+                if d and (nk == d or nk.startswith(d + "/")):
+                    bad_link.append("%s -> %s (module %s): a root link whose target %s lies inside the "
+                                    "unit directory %s of unit %s; a link from the root couples it to a unit"
+                                    % (out, e["data"], " + ".join(e["mods"]), e["norm"], y["dir"], y["label"]))
+                    break
+            continue
+        uk = fold(own)
         for y in uall:
             d = y["dir"]
             if d and fold(d) != uk and (nk == fold(d) or nk.startswith(fold(d) + "/")):
@@ -1261,7 +1294,7 @@ def run():
             if not (nk == uk or nk.startswith(uk + "/")):
                 bad_link.append("%s -> %s (module %s): the target %s is outside the unit directory %s; a "
                                 "link of a unit must stay inside its own unit"
-                                % (out, e["data"], " + ".join(e["mods"]), e["norm"], e["udir"]))
+                                % (out, e["data"], " + ".join(e["mods"]), e["norm"], own))
 
     if a.layout == "monorepo":
         for out, r in root_placed:
