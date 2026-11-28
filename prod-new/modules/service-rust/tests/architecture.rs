@@ -53,11 +53,11 @@
 )]
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -402,6 +402,9 @@ struct Tree {
     scrub: bool,
     /// Environment a fixture imagines the test's caller to have set.
     env: Vec<(String, String)>,
+    /// The advisory lock on the fixture's case directory, held for as long as
+    /// the tree (or a clone of it) lives; released on drop, panic included.
+    _lock: Option<Arc<File>>,
 }
 
 impl Tree {
@@ -412,6 +415,7 @@ impl Tree {
             locked: true,
             scrub: true,
             env: Vec::new(),
+            _lock: None,
         }
     }
 
@@ -506,16 +510,34 @@ fn cargo_config_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn configs_below(dir: &Path, out: &mut Vec<PathBuf>) {
+/// A directory the module-tree scans do not enter: `.git`, a directory named
+/// `target`, and the ACTUAL target directory `skip` by path (a user may point
+/// `CARGO_TARGET_DIR` at `build/` inside the module; the fixtures under it are
+/// not the module's own files and carry their own `.cargo/config.toml`).
+/// With an external target directory the fixtures are outside the module; with
+/// the default one they are under `target/`.
+fn scan_skips(entry: &fs::DirEntry, skip: &Path) -> bool {
+    let name = entry.file_name();
+    if name == "target" || name == ".git" || !entry.file_type().unwrap().is_dir() {
+        return true;
+    }
+    let p = entry.path();
+    p == skip
+        || matches!(
+            (fs::canonicalize(&p), fs::canonicalize(skip)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
+fn configs_below(dir: &Path, skip: &Path, out: &mut Vec<PathBuf>) {
     out.extend(cargo_config_files(dir));
     let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
     entries.sort_by_key(fs::DirEntry::file_name);
     for e in entries {
-        let name = e.file_name();
-        if name == "target" || name == ".git" || !e.file_type().unwrap().is_dir() {
+        if scan_skips(&e, skip) {
             continue;
         }
-        configs_below(&e.path(), out);
+        configs_below(&e.path(), skip, out);
     }
 }
 
@@ -668,16 +690,15 @@ fn toolchain_text_violations(file: &str, text: &str) -> Vec<String> {
     found
 }
 
-fn toolchain_files_below(dir: &Path, out: &mut Vec<PathBuf>) {
+fn toolchain_files_below(dir: &Path, skip: &Path, out: &mut Vec<PathBuf>) {
     out.extend(toolchain_files_in(dir));
     let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
     entries.sort_by_key(fs::DirEntry::file_name);
     for e in entries {
-        let name = e.file_name();
-        if name == "target" || name == ".git" || !e.file_type().unwrap().is_dir() {
+        if scan_skips(&e, skip) {
             continue;
         }
-        toolchain_files_below(&e.path(), out);
+        toolchain_files_below(&e.path(), skip, out);
     }
 }
 
@@ -696,8 +717,12 @@ fn toolchain_files_in(dir: &Path) -> Vec<PathBuf> {
 /// other toolchain file, in the module tree or in a directory above it up to
 /// `ceiling`, is refused by its presence.
 fn refused_toolchain_files(module: &Path, ceiling: &Path) -> Vec<String> {
+    refused_toolchain_files_skipping(module, ceiling, &target_dir())
+}
+
+fn refused_toolchain_files_skipping(module: &Path, ceiling: &Path, skip: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    toolchain_files_below(module, &mut files);
+    toolchain_files_below(module, skip, &mut files);
     for dir in dirs_above_up_to(module, ceiling) {
         files.extend(toolchain_files_in(dir));
     }
@@ -729,8 +754,12 @@ fn refused_toolchain_files(module: &Path, ceiling: &Path) -> Vec<String> {
 /// Everything layer 1 refuses for the module at `module`, looking up as far
 /// as `ceiling` (inclusive). Each finding names the file.
 fn refused_cargo_config(module: &Path, ceiling: &Path) -> Vec<String> {
+    refused_cargo_config_skipping(module, ceiling, &target_dir())
+}
+
+fn refused_cargo_config_skipping(module: &Path, ceiling: &Path, skip: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    configs_below(module, &mut files);
+    configs_below(module, skip, &mut files);
     for dir in dirs_above_up_to(module, ceiling) {
         // The user's own CARGO_HOME is their machine's, not the repository's.
         let home = std::env::var_os("CARGO_HOME")
@@ -749,7 +778,7 @@ fn refused_cargo_config(module: &Path, ceiling: &Path) -> Vec<String> {
             )
         })
         .collect();
-    found.extend(refused_toolchain_files(module, ceiling));
+    found.extend(refused_toolchain_files_skipping(module, ceiling, skip));
     found
 }
 
@@ -777,13 +806,8 @@ const PROBE_STD_NOSTD: &str = "#![no_std]\nextern crate std;\n";
 /// the unsafe lint, or lets `std` in, for a zone lowers it for the probe too,
 /// so this does not depend on knowing the mechanism. `Err` when one compiles.
 fn armed(tree: &Tree) -> Result<(), String> {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "svc-arch-probe-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = fs::remove_dir_all(&dir);
+    let scratch = Scratch::new();
+    let dir = scratch.path().join("probe");
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(
         dir.join("Cargo.toml"),
@@ -792,10 +816,11 @@ fn armed(tree: &Tree) -> Result<(), String> {
     .unwrap();
     let probe_tree = Tree {
         root: tree.root.clone(),
-        target_dir: Some(fixture_target().join("probe-build")),
+        target_dir: Some(scratch.path().join("build")),
         locked: false,
         scrub: tree.scrub,
         env: tree.env.clone(),
+        _lock: None,
     };
     let mut verdict = Ok(());
     for (what, source, target, reason) in [
@@ -842,7 +867,6 @@ fn armed(tree: &Tree) -> Result<(), String> {
             break;
         }
     }
-    let _ = fs::remove_dir_all(&dir);
     verdict
 }
 
@@ -1447,18 +1471,107 @@ missing_docs = "warn"
 
 const FIXTURE_CRATES: [(&str, &str, &str); 1] = [("svc_domain", "svc-domain", "crates/domain")];
 
-fn fixture_target() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root().join("target"), PathBuf::from)
-        .join("arch-fixtures")
+/// The target directory the test runs under: `CARGO_TARGET_DIR` (relative
+/// ones resolve against the module, cargo's working directory for a test), else
+/// `target/` in the module.
+fn target_dir() -> PathBuf {
+    root().join(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
 }
 
-/// Where fixture SOURCE trees live: a fixed directory (so nested builds are
-/// reused) under the OS temp location (`TMPDIR` honoured), never inside the module, so the real module
-/// (and its `rust-toolchain.toml`) is never an ancestor of a fixture. Only the
-/// nested cargo's build output stays under `fixture_target()`.
+fn fixture_target() -> PathBuf {
+    target_dir().join("arch-fixtures")
+}
+
+/// A short, stable hex key of a module directory (FNV-1a over the canonical
+/// path): the same checkout always gets the same key, so nested builds are
+/// reused between runs; two checkouts get two keys, even when they share one
+/// `CARGO_TARGET_DIR`.
+fn fixture_key(manifest_dir: &Path) -> String {
+    let canon = fs::canonicalize(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in canon.as_os_str().as_encoded_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:012x}", h & 0xffff_ffff_ffff)
+}
+
+fn fixture_root_for(fixtures: &Path, manifest_dir: &Path) -> PathBuf {
+    fixtures.join(fixture_key(manifest_dir))
+}
+
+/// Where fixture SOURCE trees live: `<target dir>/arch-fixtures/<key>/`, per
+/// checkout, under the target directory (so `cargo clean` removes them and
+/// nothing of the tests is left under `TMPDIR`), at a fixed path (so nested
+/// builds are reused). Left behind on purpose; each case rewrites its own
+/// directory at its start. The module-tree scans skip the target directory by
+/// path, so the real module never sees a fixture's `.cargo/config.toml`, and
+/// the parent walks stop at their ceiling, so a fixture never sees the real
+/// module's `rust-toolchain.toml`.
 fn fixture_work() -> PathBuf {
-    std::env::temp_dir().join("svc-arch-fixtures")
+    let dir = fixture_root_for(&fixture_target(), &root());
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Takes the exclusive advisory lock of one fixture case (`<kind>/<name>.lock`
+/// in the fixture root), then returns a freshly emptied case directory and the
+/// lock. A second process (or thread) on the same case blocks until the first
+/// drops the lock (the file closes on drop, panic included). Different cases
+/// do not wait for each other; cargo's own build lock serialises the builds.
+fn locked_case_dir(kind: &str, name: &str) -> (PathBuf, Arc<File>) {
+    let parent = fixture_work().join(kind);
+    fs::create_dir_all(&parent).unwrap();
+    let lock = File::options()
+        .create(true)
+        .append(true)
+        .open(parent.join(format!("{name}.lock")))
+        .unwrap();
+    lock.lock().unwrap();
+    let dir = parent.join(name);
+    let _ = fs::remove_dir_all(&dir);
+    (dir, Arc::new(lock))
+}
+
+/// The nested build directory of one case, beside the case directory and
+/// covered by the same lock. Never shared between cases: cargo's unit hash uses
+/// workspace-relative paths, so two fixture workspaces built into one target
+/// directory (two checkouts, two cases, two processes) can see each other's
+/// "fresh" fingerprint and skip compiling the attacked source. Kept between
+/// runs, so a warm run reuses it.
+fn case_build_dir(case_dir: &Path) -> PathBuf {
+    let name = case_dir.file_name().unwrap().to_string_lossy();
+    case_dir.with_file_name(format!("{name}.build"))
+}
+
+/// A throw-away directory, unique per process, call and instant, under the
+/// fixture root; removed on drop, panic included.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = fixture_work().join("scratch").join(format!(
+            "{}-{}-{nanos:x}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -1490,8 +1603,7 @@ fn append(file: &Path, text: &str) {
 /// A fixture workspace with a copy of the real domain crate; `attack` gets the
 /// crate directory. The path is fixed per case (so builds are reused).
 fn fixture(case: &str, attack: fn(&Path)) -> Tree {
-    let dir = fixture_work().join("work").join(case);
-    let _ = fs::remove_dir_all(&dir);
+    let (dir, lock) = locked_case_dir("work", case);
     let krate = dir.join("crates/domain");
     copy_dir(&root().join("crates/domain/src"), &krate.join("src"));
     fs::copy(
@@ -1502,11 +1614,12 @@ fn fixture(case: &str, attack: fn(&Path)) -> Tree {
     fs::write(dir.join("Cargo.toml"), FIXTURE_WORKSPACE).unwrap();
     attack(&krate);
     Tree {
+        target_dir: Some(case_build_dir(&dir)),
         root: dir,
-        target_dir: Some(fixture_target().join("build")),
         locked: false,
         scrub: true,
         env: Vec::new(),
+        _lock: Some(lock),
     }
 }
 
@@ -1716,8 +1829,7 @@ struct ConfigCase {
 }
 
 fn config_fixture(case: &ConfigCase) -> (Tree, PathBuf) {
-    let base = fixture_work().join("config-work").join(case.name);
-    let _ = fs::remove_dir_all(&base);
+    let (base, lock) = locked_case_dir("config-work", case.name);
     let module = if case.parent {
         base.join("mod")
     } else {
@@ -1749,7 +1861,7 @@ fn config_fixture(case: &ConfigCase) -> (Tree, PathBuf) {
     }
     let tree = Tree {
         root: module.clone(),
-        target_dir: Some(fixture_target().join("config-build")),
+        target_dir: Some(case_build_dir(&base)),
         locked: false,
         scrub: case.scrub,
         env: case
@@ -1757,6 +1869,7 @@ fn config_fixture(case: &ConfigCase) -> (Tree, PathBuf) {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), fill(v)))
             .collect(),
+        _lock: Some(lock),
     };
     (tree, base)
 }
@@ -1999,8 +2112,7 @@ fn rust_toolchain_files_may_only_carry_channel_components_targets_and_profile() 
 /// Builds `rel` files under a scratch dir and returns the findings for the
 /// module at `<scratch>/mod` with the repository root at `<scratch>`.
 fn toolchain_case(name: &str, files: &[(&str, &str)]) -> Vec<String> {
-    let base = fixture_work().join("toolchain-work").join(name);
-    let _ = fs::remove_dir_all(&base);
+    let (base, _lock) = locked_case_dir("toolchain-work", name);
     fs::create_dir_all(base.join("mod/crates/domain")).unwrap();
     for (rel, content) in files {
         let f = base.join(rel);
@@ -2019,8 +2131,8 @@ fn toolchain_case(name: &str, files: &[(&str, &str)]) -> Vec<String> {
 /// never climb into the real module.
 #[test]
 fn the_parent_walks_stop_at_the_ceiling() {
-    let scratch = std::env::temp_dir().join("svc-arch-walk-bound");
-    let _ = fs::remove_dir_all(&scratch);
+    let unique = Scratch::new();
+    let scratch = unique.path().join("walk-bound");
     let top = scratch.join("root");
     let module = top.join("a/module");
     fs::create_dir_all(top.join(".git")).unwrap();
@@ -2063,7 +2175,97 @@ fn the_parent_walks_stop_at_the_ceiling() {
     // A ceiling that is not an ancestor at all: nothing above is examined.
     assert!(dirs_above_up_to(&module, &scratch.join("elsewhere")).is_empty());
     assert!(refused_cargo_config(&module, &scratch.join("elsewhere")).is_empty());
-    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// Pure pin of the fixture key: one checkout, one root (stable between runs,
+/// so nested builds are reused); two checkouts, two roots, even under one
+/// shared target directory.
+#[test]
+fn fixture_roots_are_per_checkout_and_stable() {
+    let unique = Scratch::new();
+    let (a, b) = (unique.path().join("a/mod"), unique.path().join("b/mod"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let shared = unique.path().join("shared-target/arch-fixtures");
+    assert_eq!(
+        fixture_root_for(&shared, &a),
+        fixture_root_for(&shared, &a.join("../mod"))
+    );
+    assert_ne!(fixture_root_for(&shared, &a), fixture_root_for(&shared, &b));
+    assert!(fixture_root_for(&shared, &a).starts_with(&shared));
+    let key = fixture_key(&a);
+    assert_eq!(key.len(), 12);
+    assert!(key.bytes().all(|c| c.is_ascii_hexdigit()));
+}
+
+/// The fixture lock excludes a second holder of the same case and nobody
+/// else, and a drop (a panic unwinds through it too) releases it.
+#[test]
+fn a_fixture_case_is_held_by_one_run_at_a_time() {
+    let name = format!("lock-pin-{}", std::process::id());
+    let (dir, held) = locked_case_dir("lock-pin", &name);
+    let lock_file = dir.with_extension("lock");
+    let other = File::options().append(true).open(&lock_file).unwrap();
+    assert!(
+        matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)),
+        "a second holder of the same case got the lock"
+    );
+    let (_, elsewhere) = locked_case_dir("lock-pin", &format!("{name}-other"));
+    drop(elsewhere);
+    drop(held);
+    // A concurrent test's fork can hold a copy of the descriptor until its
+    // exec, so the release is awaited for a bounded time, not assumed.
+    let released = (0..250).any(|_| {
+        other.try_lock().is_ok() || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            false
+        }
+    });
+    assert!(released, "the lock was not released on drop");
+    let _ = fs::remove_dir_all(lock_file.parent().unwrap());
+}
+
+/// The module-tree scans skip the ACTUAL target directory by path: a
+/// `CARGO_TARGET_DIR` named `build/` inside the module holds fixtures with
+/// their own `.cargo/config.toml` and toolchain files, which are not the
+/// module's. The same files anywhere else in the module are still refused.
+#[test]
+fn the_module_scans_skip_the_actual_target_directory_by_path() {
+    let unique = Scratch::new();
+    let module = unique.path().join("module");
+    let build = module.join("build");
+    for dir in [
+        build.join("arch-fixtures/k/.cargo"),
+        module.join("src/.cargo"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), "[build]\n").unwrap();
+    }
+    fs::write(build.join("arch-fixtures/k/rust-toolchain"), "1.99.1\n").unwrap();
+    fs::write(
+        module.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )
+    .unwrap();
+
+    let found = refused_cargo_config_skipping(&module, &module, &build);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("src/.cargo"), "{found:?}");
+    assert!(
+        !found.iter().any(|f| f.contains("module/build")),
+        "{found:?}"
+    );
+    // Control: with the skip pointing elsewhere the fixtures are reported.
+    let all = refused_cargo_config_skipping(&module, &module, &module.join("elsewhere"));
+    assert!(
+        all.iter().any(|f| f.contains("build/arch-fixtures")),
+        "{all:?}"
+    );
+    assert!(
+        all.iter()
+            .any(|f| f.contains("build/arch-fixtures/k/rust-toolchain")),
+        "{all:?}"
+    );
 }
 
 #[test]

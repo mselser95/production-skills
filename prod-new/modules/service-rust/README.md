@@ -103,7 +103,7 @@ curl -H "Authorization: Bearer $SVC_AUTH_TOKEN" -d 'id=a1&units=100' localhost:8
 curl localhost:8080/balance ; curl localhost:8080/metrics
 ```
 
-The gate is green with the default target directory (`target/` in the module) and with `CARGO_TARGET_DIR` set elsewhere: the architecture fixtures live under the OS temp directory (`TMPDIR` honoured), never inside the module, and the pure test `the_parent_walks_stop_at_the_ceiling` pins that the configuration and toolchain walks never climb past the repository root (or the module itself, when that is the ceiling).
+The gate is green with the default target directory (`target/` in the module), with `CARGO_TARGET_DIR` set elsewhere, and with it set to a directory inside the module that is not named `target` (the module-tree scans skip the actual target directory by path). The architecture fixtures live under the target directory, in `arch-fixtures/<key>/`, where `<key>` is a short hash of the module's canonical path: one directory per checkout, so two checkouts (even sharing one `CARGO_TARGET_DIR` and one `TMPDIR`) never touch each other's fixtures. They are left behind on purpose, so the nested builds are reused; each case rewrites its own directory at its start, and `cargo clean` removes them. Each case holds an exclusive file lock while it runs, so two `cargo test` runs in one checkout wait for each other instead of failing. The tests leave nothing under `TMPDIR`. The pure test `the_parent_walks_stop_at_the_ceiling` pins that the configuration and toolchain walks never climb past the repository root (or the module itself, when that is the ceiling).
 
 Environment (read only in `crates/platform/src/config.rs`): `SVC_AUTH_TOKEN`
 (required), `SVC_LISTEN_ADDR` (default `127.0.0.1:8080`, literal `ip:port`),
