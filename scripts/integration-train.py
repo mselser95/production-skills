@@ -24,7 +24,8 @@ What this tool does to your repository:
  It READS objects (through a git alternates file) and, when --keep is given and a
  batch landed, WRITES ONE branch at the end: the landed commits' objects (index-pack)
  and the new ref (update-ref, create-only). Nothing else, ever: no worktree, ref,
- config, index or lock in your repository, and without --keep nothing at all. It runs
+ config or index in your repository, and no lock file left behind (a timed-out update-ref's own
+ stale lock is removed, see 8), and without --keep nothing at all. It runs
  none of your hooks, filters, merge drivers, diff drivers, textconv, signature
  programs, fsmonitor, editors, pagers, credential helpers or aliases, because git never
  runs under your configuration: every join happens in a PRIVATE bare repository the
@@ -48,10 +49,21 @@ What this tool does to your repository:
  an object alone changes nothing for a later run unless that run addresses it BY HASH,
  which is a verify keeping state by design, like one that keeps it under an absolute
  path; whatever could make an object matter (a ref, a replace ref, config, worktree
- metadata) is digested. Writes elsewhere (HOME, absolute paths) are NOT detected. A verify child that calls setsid survives a timeout (the tool cannot see it). SIGKILL
- of the tool leaves exactly one itrain-* directory under TMPDIR and nothing in your
- repository; a later start prints a one-line notice for such directories older than a
- day (it never deletes them). A caller that is a partial clone or a shallow clone is
+ metadata) is digested. Writes elsewhere (HOME, absolute paths) are NOT detected.
+ Ordinary git commands that VOID a run when a verify executes them (they rewrite the shared
+ private repository: measured): `git commit` / `commit --amend`, `git fetch`, `git gc`,
+ `git repack`, `git pack-refs`. Fine (measured, they change nothing digested): `git status`,
+ `add`, `diff`, `stash create`, `write-tree`, `rev-parse`, `log`, `reset`, `checkout`,
+ `worktree list`. A verify child that calls setsid survives a timeout (the tool cannot see it).
+ SIGKILL of the tool cannot be handled. It leaves exactly one itrain-* directory under TMPDIR;
+ a later start prints a one-line notice for such directories older than a day (it never
+ deletes them; the notice names no branch). In YOUR repository a SIGKILL can leave only what
+ delivery writes (8): unreferenced objects (a pack + idx from index-pack, removable with
+ `git gc`) and, if the kill lands in the last milliseconds of delivery, the delivered branch
+ `train-<itrain-id>-<hex>` with its reflog (update-ref runs in its own session and may finish
+ after the tool is gone; nothing reports it). It NEVER moves an existing branch (update-ref is
+ create-only) and never writes HEAD, the index, the worktree or config. Check with
+ `git for-each-ref refs/heads/train-*` (delete one with `git branch -D`). A caller that is a partial clone or a shallow clone is
  refused (exit 2): a missing object must be an error, never a fetch.
 
 Algorithm (one batch per invocation):
@@ -115,9 +127,13 @@ Algorithm (one batch per invocation):
     If a pass landed anything, every still-ejected member is retried against the grown set
     (a pass that lands nothing ends the loop). Each (member, landed set) pair is run at most
     once, so the cost is at most one run per ejected member per pass and at most #ejected
-    passes, all counted in 'runs'. GUARANTEE at the end: every ejected member was verified
-    RED together with the FINAL landed set (or red alone with nothing landed, or conflict /
-    uncheckoutable): the ejected set cannot be improved by adding ONE member. It is NOT a
+    passes, all counted in 'runs'. A member whose ejection rests on its own verify outcome
+    (red OR timed out; label 'red' / 'timeout') is retried against the landed set too, and a
+    timeout measured with that set is recorded as 'timeout' with that exact set. GUARANTEE at
+    the end: every ejected member was verified RED (red includes: timed out) together with the
+    FINAL landed set, or is red (or timed out) alone with nothing landed, or is a STRUCTURAL
+    ejection ('conflict' or 'uncheckoutable', which no verify run decides): the ejected set
+    cannot be improved by adding ONE member. It is NOT a
     maximum green subset: order still matters (the later member is the one ejected), and a
     pair of ejected members that is green together with the landed set is not searched for.
  8. Delivery (only with --keep, only after the final green verification): the landed
@@ -135,7 +151,11 @@ Algorithm (one batch per invocation):
     branch exists (the JSON names it then). If delivery fails the exit is 2,
     the JSON says "delivery_error" with the verified "commit", and the private root is
     KEPT (its path is printed) so the result is not lost; objects already stored in
-    yours stay as unreachable garbage, no ref is left.
+    yours stay as unreachable garbage, no ref is left. The same garbage (an unreferenced pack,
+    removable with `git gc`) is left by a run INTERRUPTED between index-pack and the ref. A
+    timed-out update-ref is killed; when the ref does not exist afterwards its own
+    `<ref>.lock` (the random create-only name this tool chose) is removed, so no lock is left;
+    a lock file that already existed before the tool started update-ref is never removed.
  With --state the next window is +1 after a batch landed whole on its first run,
  halved (min 1) after any red, unchanged when only conflicts/empties/unrelated/
  unrepresentable were ejected; a state file that is unreadable, not an integer in
@@ -164,10 +184,14 @@ only that candidate: 'ejected: uncheckoutable', git's first error line
 (control characters escaped) in "error". A private root that cannot be removed is named on
 stderr and in the JSON ("leftover"); the exit code is unchanged.
 Exit: 0 all admitted landed, 1 something ejected, 2 usage/git/delivery/unexpected error,
-      3 nothing was verified, 128+N after SIGHUP/SIGINT/SIGTERM (129/130/143). The last
-      stdout line is one JSON object; on an unexpected exception it carries "error".
-      Every VERDICT exit (0 or 1) prints that JSON as the LAST stdout line. Exit 1 with no
-      JSON on stdout is NOT a verdict: a caller must require the JSON. A SIGINT/SIGTERM in
+      3 nothing was verified, 128+N after SIGHUP/SIGINT/SIGTERM (129/130/143; when several
+      different signals arrive at once the first handled wins: the lowest number). Every
+      VERDICT exit (0 or 1) prints one JSON object as the LAST stdout line; exit 2 prints a
+      message on stderr and no JSON, except an unexpected exception (exit 2 with a JSON that
+      carries "error") and a failed delivery ("delivery_error"). If the reader closes stdout
+      (`| head -1`, `| true`) the JSON is LOST and no traceback is printed; the exit status
+      is still the verdict's (0/1/2/3), so a caller that needs the JSON must read stdout.
+      Exit 1 with no JSON on stdout is NOT a verdict: a caller must require the JSON. A SIGINT/SIGTERM in
       the first milliseconds after spawn can hit CPython's own start-up, before this
       script's first line (a traceback, rc 1 or -2, empty stdout); the script cannot fix
       its own interpreter start-up and no wrapper is provided.
@@ -194,8 +218,34 @@ def esc(s):
                   lambda m: "\\u007f" if m.group(0) == "\x7f" else json.dumps(m.group(0))[1:-1], str(s))
 
 
+def _stdout_lost():
+    """The reader closed stdout (`| head -1`, `| true`): the JSON can no longer be delivered. Point fd 1 at
+    /dev/null so neither this write nor the flush at interpreter exit raises (CPython would end rc 120 with a
+    BrokenPipeError traceback); the run's own verdict and exit code are unaffected."""
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+
+
+def emit(line, flush=False):
+    try:
+        print(line)
+        if flush:
+            sys.stdout.flush()
+    except BrokenPipeError:
+        _stdout_lost()
+
+
+def flush_out():
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _stdout_lost()
+
+
 def say(msg):
-    print(esc(msg))
+    emit(esc(msg))
 
 
 MIN_GIT = (2, 31)
@@ -210,6 +260,12 @@ QUIET = ("conflict", "empty", "unrelated", "unrepresentable-on-this-filesystem",
 STALE_SECONDS = 86400
 UPDATE_REF_TIMEOUT = 10
 UNREP = "unrepresentable-on-this-filesystem"
+# The `why` values an ejection record can carry, classified for recovery:
+#   red, timeout   a verify OUTCOME (a timeout is a red run): retryable against the landed set
+#   interaction    an outcome measured on a SET: retryable (phase A)
+#   conflict, uncheckoutable   STRUCTURAL: a property of the candidate and the tree, no verify run
+#   empty, unrelated, unrepresentable-on-this-filesystem   admission verdicts: never verified, never retried
+STRUCTURAL = ("conflict", "uncheckoutable")
 
 # Variables that change which repository / index / object store git uses, plus the
 # ones that inject configuration or identity. `git rev-parse --local-env-vars` is
@@ -359,6 +415,7 @@ class Train:
         self.children = set()  # child processes in flight; each leads its own process group
         self.spawning = False  # inside Popen: a signal is only recorded, then acted on once registered
         self.sig_pending = 0
+        self.exiting = 0  # the signal number once the tool has begun exiting on one; later signals are ignored
 
     # ---- plumbing -------------------------------------------------------
     def make_root(self):
@@ -382,6 +439,13 @@ class Train:
         if hold == "update-ref" and ur_mode == "kill":
             # test hook: the child sleeps first, so a signal in the pause finds it not yet written
             cmd = ["sh", "-c", 'sleep 0.8; exec "$@"', "sh"] + list(cmd)
+        if hold == "update-ref" and ur_mode == "slowexit":
+            # test hook: update-ref writes the ref, then its wrapper lingers past the hard timeout
+            cmd = ["sh", "-c", '"$@"; sleep 4', "sh"] + list(cmd)
+        if hold == "update-ref" and ur_mode == "stuck":
+            # test hook: a stuck update-ref: it holds <ref>.lock (as git does) and never finishes
+            cmd = ["sh", "-c", 'for a in "$@"; do case $a in --git-dir=*) g=${a#--git-dir=};; refs/heads/*) '
+                   'r=$a;; esac; done; : >"$g/$r.lock"; sleep 5', "sh"] + list(cmd)
         self.spawning = True
         try:
             proc = subprocess.Popen(cmd, start_new_session=True, **kw)
@@ -638,8 +702,14 @@ class Train:
         return self.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
 
     def on_signal(self, signum, frame):
+        # The FIRST signal handled decides the exit status (128+its number); when several different ones are
+        # pending at once (delivery's mask lifts) CPython runs their handlers in ascending signal number. Any
+        # later signal returns here at once: it must never raise inside the exit path of the first.
+        if self.exiting:
+            return
+        self.exiting = signum
         if self.spawning:  # inside Popen: unwinding now would lose the child; spawn() acts on it
-            self.sig_pending = self.sig_pending or signum
+            self.sig_pending = signum
             return
         sys.exit(128 + signum)
 
@@ -1097,7 +1167,7 @@ class Train:
                 self.eject(m, "interaction", tail, {"with": core, "verified_red": core + [m],
                                                     "verified_green_alone": True})
             else:
-                self.eject(m, "red", tail, {"red_with": core, "verified_red": core + [m]})
+                self.eject(m, self.cause(core + [m]), tail, {"red_with": core, "verified_red": core + [m]})
             survivors = [x for x in survivors if x != m]
         return survivors
 
@@ -1107,9 +1177,15 @@ class Train:
         return bool(rec.get("inferred")) or rec["why"] == "interaction" or "red_with" in rec
 
     def alone_red(self, rec):
-        """An ejection that rests on the member's OWN run, red, not yet retried with the landed set."""
-        return (rec["why"] == "red" and not rec.get("inferred") and "red_with" not in rec
-                and rec.get("verified_red") == [rec["id"]])
+        """An ejection that rests on the member's OWN run (red OR timed out: any verify outcome, never a
+        structural reason), not yet retried with the landed set."""
+        return (rec["why"] not in STRUCTURAL and rec["why"] != "interaction" and not rec.get("inferred")
+                and "red_with" not in rec and rec.get("verified_red") == [rec["id"]])
+
+    def cause(self, ids):
+        """The label a RUN of exactly `ids` earns when it was not green: 'timeout' or 'red'."""
+        e = self.cache.get(tuple(ids))
+        return "timeout" if e is not None and e[2] == "timeout" else "red"
 
     def recover(self, landed):
         """Iterate to a FIXED POINT. A pass retries, against the landed set as it stands, every
@@ -1118,7 +1194,7 @@ class Train:
         A member is retried again whenever the landed set has grown since its last retry; a green
         trial IS the verification of the new landed tree. The loop stops when a full pass lands
         nothing, so every retryable ejected member was last measured against the FINAL landed set.
-        Each (member, landed set) pair is run at most once (verify memoises by the exact tree), so
+        Each (member, landed set) pair is run at most once (verify memoises by the id tuple), so
         the cost is at most one run per ejected member per pass, and at most #ejected passes."""
         if self.a.no_recover:
             return landed
@@ -1155,7 +1231,7 @@ class Train:
                         rec["verified_red"] = trial
                         rec["verified_green_alone"] = True
                     else:
-                        rec["why"] = "red"
+                        rec["why"] = self.cause(trial)
                         rec["red_with"] = list(landed)
                         rec["verified_red"] = trial
                     say("proven: %s is red together with the landed set" % cid)
@@ -1174,6 +1250,7 @@ class Train:
                     self.ejected.remove(rec)
                     say("recovered: %s (red alone) joins the landed set (verified green together)" % cid)
                 elif res is False:
+                    rec["why"] = self.cause(trial)  # what THAT run measured: red, or timeout
                     rec["red_with"] = list(landed)
                     rec["verified_red"] = trial
                     rec["verified_red_alone"] = True
@@ -1235,6 +1312,10 @@ class Train:
     def deliver(self, sha):
         """The only write to the caller: objects (index-pack --stdin), then one create-only ref."""
         branch = "train-%s-%s" % (self.uid, secrets.token_hex(4))
+        if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_BRANCH"):
+            branch = os.environ["TRAIN_TEST_BRANCH"]  # test hook: a known name, so a lock can pre-exist
+        lockp = os.path.join(self.cgit, "refs", "heads", branch + ".lock")
+        prelock = os.path.lexists(lockp)  # a lock that was there BEFORE we spawned update-ref is never ours
         if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_DELIVERY_READY"):
             with open(os.environ["TRAIN_TEST_DELIVERY_READY"], "w") as fh:  # test hook: delivery starts (before pack-objects)
                 fh.write("delivering\n")
@@ -1264,6 +1345,15 @@ class Train:
                            ok=(0, 1)).stdout.strip()
             if got:
                 self.delivered = branch  # the ref exists: from here every exit names it
+            elif err is not None and getattr(err, "rc", 1) is None and not prelock:
+                # update-ref timed out and was killed AND collected (git() reaps its whole group before it
+                # raises), and the read-back says the ref does not exist: the lock beside that one
+                # random, create-only ref name can only be this tool's own stale lock; remove it.
+                try:
+                    os.unlink(lockp)
+                    err = Fatal("%s; its stale lock file was removed" % err)
+                except OSError:
+                    pass
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old)  # a pending signal acts HERE, outcome known
         if err is not None:
@@ -1369,8 +1459,7 @@ class Train:
             print("error: verified but NOT delivered: %s; commit %s is in the private repository %s"
                   " (kept)" % (esc(failure), final, esc(self.priv)), file=sys.stderr)
         self.json_done = True
-        print(json.dumps(summary, separators=(",", ":")))
-        sys.stdout.flush()
+        emit(json.dumps(summary, separators=(",", ":")), True)
         if failure:
             return 2
         if self.runs == 0:
@@ -1439,7 +1528,13 @@ def parse(argv):
     return a
 
 
+_EARLY = []
+
+
 def _early_exit(signum, frame):
+    if _EARLY:  # a second signal must not replace the first one's exit status mid-unwind
+        return
+    _EARLY.append(signum)
     sys.exit(128 + signum)
 
 
@@ -1479,23 +1574,21 @@ def main(argv):
         if t.delivered and not t.json_done:  # a signal after delivery: the branch must be named
             t.json_done = True
             say("integration branch: %s (delivered before the signal arrived)" % t.delivered)
-            print(json.dumps(dict(t.summary(t.delivered), interrupted_after_delivery=True),
-                             separators=(",", ":")))
-            sys.stdout.flush()
+            emit(json.dumps(dict(t.summary(t.delivered), interrupted_after_delivery=True),
+                            separators=(",", ":")), True)
         raise
     except Fatal as e:
-        sys.stdout.flush()
+        flush_out()
         print("error: %s" % esc(e), file=sys.stderr)
         return 2
     except Exception as e:  # noqa: BLE001 -- the contract: never a traceback, always a JSON line
-        sys.stdout.flush()
+        flush_out()
         msg = "unexpected %s: %s" % (type(e).__name__, str(e).split("\n")[0][:200])
         print("error: %s" % msg, file=sys.stderr)
         t.cleanup()
-        print(json.dumps({"error": msg, "landed": [], "ejected": t.ejected, "deferred": t.deferred,
-                          "runs": t.runs, "batch": 0, "branch": "", "commits": {},
-                          "runs_per": t.runs_per}, separators=(",", ":")))
-        sys.stdout.flush()
+        emit(json.dumps({"error": msg, "landed": [], "ejected": t.ejected, "deferred": t.deferred,
+                         "runs": t.runs, "batch": 0, "branch": "", "commits": {},
+                         "runs_per": t.runs_per}, separators=(",", ":")), True)
         return 2
 
 
