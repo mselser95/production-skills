@@ -51,9 +51,12 @@
 # TIMEOUT. A shellcheck that runs longer than LINT_FILE_TIMEOUT seconds (default 60) is
 # signalled by a per-file watchdog (TERM, then KILL after 1 s; no GNU timeout: not on stock
 # macOS) and the run exits 2 with `timeout: <path>`: a tool error, never a pass and never a
-# finding. The watchdog records its firing in a marker file BEFORE it signals, and the exit
-# is classified by that marker, so it is `timeout` every time and never `exit 137`. When
-# the file finishes first, the watchdog and its sleep are signalled and reaped.
+# finding. Which of the two happened is ONE atomic fact: the watchdog and the worker race to
+# mkdir the same name ($T/to.N); the watchdog does it BEFORE it signals, so a shellcheck that
+# dies on the signal (or exits 0 on it) is `timeout` every time and never `exit 137`, and a
+# file that finished first is classified by its own exit status. When the file finishes first,
+# the watchdog and its sleep (their own process group) are killed with KILL and reaped; when
+# the watchdog wins, the worker waits for its TERM -> KILL to complete.
 #
 # Usage: lint-parallel.sh   (from anywhere inside the work tree)
 #   LINT_JOBS          parallel shellcheck processes: default min(4, cores), and no more
@@ -190,30 +193,47 @@ if [ "$L" -eq 0 ]; then echo "lint: resolved to ZERO files -- refusing to report
 # ---- lint: ONE real file per shellcheck, with -x, in parallel --------------------------
 cat > "$T/worker.sh" <<'WORKER'
 # $1 = index, $2 = path. Output and exit code go to files; never to the shared stdout.
-# The watchdog writes the marker $T/to.$1 BEFORE it signals, TERM then KILL after $GRACE; the marker,
-# not the exit status, decides "timeout". When the file finishes first the watchdog is signalled and reaped.
-# Each shellcheck runs in its OWN process group (job control for that one command), so a wrapper in front
-# of it cannot leave children behind: the watchdog and an abort signal address the group.
+# ONE ATOMIC FACT decides "timeout or finished in time": the directory $T/to.$1. Whoever creates it first
+# wins (mkdir is atomic). The watchdog claims it BEFORE it sends any signal; the worker claims it after the
+# shellcheck is gone. Worker won: the exit status is the verdict and the watchdog is reaped. Watchdog won:
+# the file is `timeout`, whatever the exit status says, and the worker lets the watchdog finish its
+# TERM -> grace -> KILL so nothing is left in the group. No timing can produce a third outcome.
+# Each shellcheck and each watchdog runs in its OWN process group (job control for that one command): the
+# worker reaps the watchdog and its sleep with KILL, which no disposition inherited from the caller (TERM
+# ignored, a trap that did not run) can turn into a wait for the sleep.
 sc=""; wd=""
-trap '[ -z "$sc" ] || kill -KILL -- "-$sc" 2>/dev/null || kill -KILL "$sc" 2>/dev/null; [ -z "$wd" ] || kill -TERM "$wd" 2>/dev/null; exit 143' TERM HUP INT
+abort() { # a signal to the worker: both groups go, with KILL
+  [ -z "$sc" ] || kill -KILL -- "-$sc" 2>/dev/null || kill -KILL "$sc" 2>/dev/null
+  if [ -n "$wd" ]; then
+    kill -KILL -- "-$wd" 2>/dev/null || kill -KILL "$wd" 2>/dev/null
+    wait "$wd" 2>/dev/null
+    kill -KILL -- "-$wd" 2>/dev/null # a sleep forked while the first KILL was on its way
+  fi
+  exit 143
+}
+trap abort TERM HUP INT
 set -m
 shellcheck $X -S "$SEV" $DD "$2" > "$T/o.$1" 2>&1 &
 sc=$!
-set +m
 (
-  trap 'kill $(jobs -p) 2>/dev/null; wait; exit 0' TERM
-  sleep "$TMO" & wait $!
-  : > "$T/to.$1"
+  sleep "$TMO"
+  mkdir "$T/to.$1" 2>/dev/null || exit 0 # MUT:wdclaim
   kill -TERM -- "-$sc" 2>/dev/null || kill -TERM "$sc" 2>/dev/null # MUT:wdterm
-  sleep "$GRACE" & wait $!
+  sleep "$GRACE" # MUT:wdgrace
   kill -KILL -- "-$sc" 2>/dev/null || kill -KILL "$sc" 2>/dev/null # MUT:wdkill
   exit 0
 ) &
 wd=$!
+set +m
 wait "$sc"; rc=$?
-kill -TERM "$wd" 2>/dev/null # MUT:wdreap
+won=0
+mkdir "$T/to.$1" 2>/dev/null && won=1
+[ "$won" = 1 ] || rc=timeout # MUT:tomark
+if [ "$won" = 1 ]; then kill -KILL -- "-$wd" 2>/dev/null || kill -KILL "$wd" 2>/dev/null; fi # MUT:wdreap
 wait "$wd" 2>/dev/null
-[ ! -e "$T/to.$1" ] || rc=timeout # MUT:tomark
+# SECOND SWEEP: a signal sent to a group does not reach a child that is being forked at that instant. The
+# watchdog is dead now and can fork no more, so a sleep it had just started is a group member by now.
+if [ "$won" = 1 ]; then kill -KILL -- "-$wd" 2>/dev/null; fi
 printf '%s\n' "$rc" > "$T/rc.$1"
 WORKER
 export T TMO GRACE
