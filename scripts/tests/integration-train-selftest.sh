@@ -813,6 +813,17 @@ while IFS= read -r line; do
   done
   [ $hit = 1 ] && { echo "FAIL rule: $line"; exit 1; }
 done <"$ORC_RULES"
+while IFS= read -r line; do  # a HANG rule: the verify outlives --verify-timeout (a timed-out run is red)
+  [ -z "$line" ] && continue
+  hit=1
+  for tok in $line; do
+    case $tok in
+      +*) [ -f "${tok#+}" ] || hit=0 ;;
+      -*) [ -f "${tok#-}" ] && hit=0 ;;
+    esac
+  done
+  [ $hit = 1 ] && { sleep 5; echo "hung rule: $line"; exit 0; }
+done <"$ORC_HANG"
 echo ok
 ''')
 
@@ -826,7 +837,14 @@ count = os.path.join(scratch, "orc-count")
 rules_file = os.path.join(scratch, "orc-rules")
 
 
-def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None):
+hang_file = os.path.join(scratch, "orc-hang")
+
+
+def hung(present, hrules):
+    return any(pos <= present and not (neg & present) for pos, neg in hrules)
+
+
+def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None, hang=None):
     """judge: the rules the TEST's predicate uses when they differ from the verify's (the canary);
     then the problems are returned instead of recorded."""
     vrules, rules = rules, (judge if judge is not None else rules)
@@ -836,11 +854,17 @@ def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None):
             fh.write("*\n" if not pos and not neg else
                      " ".join(["+" + x + ".txt" for x in sorted(pos)] + ["-" + x + ".txt" for x in sorted(neg)]) + "\n")
     rules = rules_w
+    hang = hang or []
+    with open(hang_file, "w") as fh:
+        for pos, neg in hang:
+            fh.write(" ".join(["+" + x + ".txt" for x in sorted(pos)] + ["-" + x + ".txt" for x in sorted(neg)]) + "\n")
+    rrules, rules = rules, rules + hang  # the test's predicate: a set that hangs is RED too
     open(count, "w").close()
-    env = dict(os.environ, ORC_RULES=rules_file, ORC_COUNT=count)
+    env = dict(os.environ, ORC_RULES=rules_file, ORC_COUNT=count, ORC_HANG=hang_file)
     p = subprocess.run([sys.executable, "-I", "-B", script, "--base", "main", "--repo", repo,
                         "--verify", "sh " + vsh, "--max-batch", "8", "--keep",
-                        "--log-dir", os.path.join(scratch, "orc-logs")] + ([] if recover else ["--no-recover"]) + ids,
+                        "--log-dir", os.path.join(scratch, "orc-logs")] + ([] if recover else ["--no-recover"])
+                       + (["--verify-timeout", "2"] if hang else []) + ids,
                        capture_output=True, text=True, env=env)
     probs = []
     name = "oracle %s %s %s%s" % (name, kind, ",".join(ids), "" if recover else " --no-recover")
@@ -882,8 +906,13 @@ def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None):
         probs.append("a branch without landed members")
     for cid, e in ejected.items():  # (ii) every label literally true, by the TEST's predicate
         S = list(e.get("red_with", e.get("with", [])))
-        if e["why"] == "red" and not e.get("inferred") and "red_with" not in e and not is_red({cid}, rules):
-            probs.append("%s ejected 'red' (alone) but is green alone" % cid)
+        if e["why"] in ("red", "timeout") and not e.get("inferred") and "red_with" not in e and not is_red({cid}, rules):
+            probs.append("%s ejected '%s' (alone) but is green alone" % (cid, e["why"]))
+        if e["why"] in ("red", "timeout") and not e.get("inferred") and "verified_red" in e:
+            lab = "timeout" if not is_red(set(e["verified_red"]), rrules) and hung(set(e["verified_red"]), hang) else "red"
+            if lab != e["why"]:  # a timeout is labelled with the set that ACTUALLY timed out, red with one that failed
+                probs.append("%s labelled '%s' but its verified_red %s %s" % (
+                    cid, e["why"], e["verified_red"], "timed out" if lab == "timeout" else "failed"))
         if "red_with" in e and not is_red(set(S) | {cid}, rules):
             probs.append("%s carries red_with %s but that set is GREEN" % (cid, S))
         if e["why"] == "interaction":
@@ -908,6 +937,12 @@ def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None):
             if not is_red(present | {cid}, rules):
                 probs.append("%s is GREEN together with the FINAL landed set %s, yet ejected (%s)"
                              % (cid, landed, e["why"]))
+            if e["why"] not in ("conflict", "uncheckoutable", "empty", "unrelated", "unrepresentable-on-this-filesystem"):
+                # the stated guarantee, exactly: the tool's own record says RED with a set equal to the
+                # FINAL landed set + this member (the oracle's check above says it really is red)
+                if set(e.get("verified_red", [])) != present | {cid}:
+                    probs.append("%s: verified_red %s is not the final landed set %s plus itself"
+                                 % (cid, e.get("verified_red"), landed))
             if "red_with" in e and not set(e["red_with"]) <= present:
                 probs.append("%s red_with %s names a candidate that did not land %s" % (cid, e["red_with"], landed))
     runlog = [frozenset(l.split()) for l in open(count).read().split("\n")[:-1]]
@@ -915,7 +950,7 @@ def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None):
     for cid, e in ejected.items():  # (v) every set a label rests on was really RUN (the test's own log)
         if e.get("verified_green_alone") and frozenset([cid]) not in runlog:
             probs.append("%s verified_green_alone but [%s] was never run" % (cid, cid))
-        if e["why"] == "red" and not e.get("inferred") and "red_with" not in e and frozenset([cid]) not in runlog:
+        if e["why"] in ("red", "timeout") and not e.get("inferred") and "red_with" not in e and frozenset([cid]) not in runlog:
             probs.append("%s 'red' (alone) but [%s] was never run" % (cid, cid))
         if "verified_red" in e and frozenset(e["verified_red"]) not in runlog and e["why"] != "conflict":
             probs.append("%s verified_red %s was never run" % (cid, e["verified_red"]))
@@ -965,7 +1000,15 @@ def f_n4(js, landed, ejected):  # a reported partner must be green as a SET (nev
     return out
 
 
+def f_n4_norecover(js, landed, ejected):  # without recovery the search itself must run the member ALONE
+    out = want(["c2", "c3"], c1="red", c4="interaction")(js, landed, ejected)
+    if not ejected.get("c4", {}).get("verified_green_alone"):
+        out.append("c4 interaction without the member's own green run")
+    return out
+
+
 N4 = [({"c1"}, {"c3"}), ({"c2", "c4"}, set())]
+C6 = ["c1", "c2", "c3", "c4", "c5", "c6"]
 FIXED = [
     ("fixed-recovery", "fixed-recovery", ["c1", "c2", "c3", "c4"], [({"c1", "c3"}, set())], None),
     ("fixer-late", "fixer", ["c1", "c2", "c3", "c4"], [({"c1"}, {"c4"}), ({"c2"}, set())], want(["c1", "c3", "c4"], c2="red")),
@@ -976,11 +1019,35 @@ FIXED = [
     ("n4-partner", "named", ["c1", "c2", "c3", "c4"], N4, f_n4),
     ("triple-across-halves", "named", ["c1", "c2", "c3", "c4"], [({"c1", "c2", "c3"}, set())], want(["c1", "c2", "c4"], c3="interaction")),
     ("n5-recover", "named", ["c1", "c2", "c3", "c4", "c5"], [({"c2"}, {"c5"}), ({"c3", "c4"}, set())], None),
+    # a member green with the FINAL landed set must not stay ejected (the reviewer's two formulas)
+    ("late-landing-a", "named", C6, [({"c2", "c5"}, set()), ({"c3", "c4"}, {"c6"})],
+     want(["c1", "c2", "c3", "c4", "c6"], c5="interaction")),
+    ("late-landing-b", "named", C6, [({"c4"}, {"c3"}), ({"c2", "c5"}, set()), ({"c1"}, {"c4"})], None),
+    # N=5-6 from the families pair and fixer+pair
+    ("n5-pair", "pair", ["c1", "c2", "c3", "c4", "c5"], [({"c1", "c4"}, set())], None),
+    ("n6-pairs", "pair", C6, [({"c2", "c6"}, set()), ({"c3", "c5"}, set())], None),
+    ("n5-fixer-pair", "fixer-pair", ["c1", "c2", "c3", "c4", "c5"], [({"c2"}, {"c5"}), ({"c1", "c3"}, set())], None),
+    ("n6-fixer-pairs", "fixer-pair", C6, [({"c1"}, {"c6"}), ({"c3", "c4"}, set()), ({"c2", "c5"}, set())], None),
+    ("n6-fixer-pair", "fixer-pair", C6, [({"c4"}, {"c2"}), ({"c1", "c6"}, set())], None),
+    # red iff c2 or (c4,c5 without c1) or (c1,c6 without c5): a member ejected by the interaction search
+    ("g4-interaction-ejectees", "named", C6, [({"c2"}, set()), ({"c4", "c5"}, {"c1"}), ({"c1", "c6"}, {"c5"})], None),
 ]
 for nm, kind, fids, frules, fexp in FIXED:
     scenario(nm, kind, fids, frules, True, fexp)
     if nm in ("formula6", "triple-across-halves"):
         scenario(nm, kind, fids, frules, False)
+    if nm == "n4-partner":  # reachable only with --no-recover: kills "interaction without the alone-green run"
+        scenario(nm, kind, fids, frules, False, f_n4_norecover)
+# BLOCKER 1 (fifth review): c1 TIMES OUT iff c1 without c3, c2 is red alone. c1 is ejected 'timeout' alone while c3
+# lands; {c1,c3} is green, so recovery must retry the timed-out member against the landed set (a timeout is a verify
+# outcome, not a structural reason) and land it. One hang run ([c1] alone, 2 s).
+f_timeout = want(["c1", "c3"], c2="red")
+scenario("timeout-alone-retried", "named", ["c1", "c2", "c3"], [({"c2"}, set())], True, f_timeout,
+         hang=[({"c1"}, {"c3"})])
+# the same member timing out TOGETHER with the landed set is recorded as a timeout with that exact set
+f_timeout2 = want(["c3"], c1="timeout", c2="red")
+scenario("timeout-with-landed", "named", ["c1", "c2", "c3"], [({"c2"}, set())], True, f_timeout2,
+         hang=[({"c1"}, set())])
 # the canary: the tool runs against RED-when-c2 rules but the test judges with other rules; the
 # oracle must report problems, else it could not fail at all
 cp = scenario("canary", "canary", ["c1", "c2", "c3"], [({"c2"}, set())], True, None, judge=[({"c3"}, set())])
@@ -1974,11 +2041,28 @@ check "signal after delivery: the delivered branch exists and the caller's objec
 check "signal after delivery: no itrain-* left" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
 ident_end "signal after delivery" "$NC" objects
 
+# ONE helper for "the tool printed no traceback": every signal driver below imports it (the invariant is a clean
+# stderr, not only the right exit status; a SIG_IGN set while a second signal is queued prints "Exception ignored
+# ... Signal N ignored due to race condition" and still exits 128+n)
+cat >"$S/errmarks.py" <<'PYEOF'
+MARKS = ("Traceback", "Exception ignored", "OSError: Signal", "race condition", "BrokenPipe")
+
+
+def bad_stderr(text):
+    """The marks of a traceback found in the tool's stderr text (empty list = clean)."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    return [m for m in MARKS if m in text]
+PYEOF
+
 # (f) EARLY signals, deterministic: the tool pauses right after its handlers are installed and writes the
 # ready file first; a signal sent once it exists must end in a NORMAL exit 128+n (handler), never death by
 # the signal (the shell's $? hides that difference, so a python driver reads the real returncode)
 cat >"$S/early.py" <<'PYEOF'
 import os, signal, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from errmarks import bad_stderr
 
 script, repo, ready, sig, want, wt = sys.argv[1:7]
 env = dict(os.environ, TRAIN_SELFTEST="1", TRAIN_TEST_PAUSE_AFTER_HANDLERS="0.5", TRAIN_TEST_READY_FILE=ready)
@@ -1993,13 +2077,20 @@ else:
     p.kill()
     print("no ready file")
     sys.exit(0)
-p.send_signal(getattr(signal, "SIG" + sig))
+for one in sig.split("+"):  # "TERM+INT": two different signals back to back; want = "143,130" (either is fine)
+    p.send_signal(getattr(signal, "SIG" + one))
 try:
-    rc = p.wait(timeout=20)
+    out, _ = p.communicate(timeout=20)
+    rc = p.returncode
 except subprocess.TimeoutExpired:
     p.kill()
+    p.communicate()
     rc = "hang"
-print("ok" if rc == int(want) else "rc %s, wanted a normal exit %s" % (rc, want))
+    out = b""
+if bad_stderr(out):
+    print("traceback marks %s" % bad_stderr(out))
+else:
+    print("ok" if rc in [int(x) for x in want.split(",")] else "rc %s, wanted a normal exit %s" % (rc, want))
 PYEOF
 for sg in HUP TERM INT; do
     case $sg in HUP) want=129 ;; TERM) want=143 ;; INT) want=130 ;; esac
@@ -2011,6 +2102,65 @@ for sg in HUP TERM INT; do
     BR=
     ident_end "early $sg" "$NC"
 done
+
+# (f1) TWO DIFFERENT signals 1 ms apart on the EARLY path: the first one's handler starts the exit and CPython's
+# finalization resets Python-level handlers to SIG_DFL, so a second signal arriving there kills the process with
+# the default action unless the tool blocks INT/TERM/HUP first (BLOCK only: SIG_IGN prints a race message). The hook holds the process INSIDE
+# module teardown (TRAIN_TEST_EARLY_EXIT_WINDOW) so the second signal lands in that window every time.
+# Invariant asserted: every run EXITED (returncode > 0, never a death by signal) with 128+n, n one of the two
+# signals sent. Which n wins is reported as a note, not asserted.
+cat >"$S/early2.py" <<'PYEOF'
+import collections, os, signal, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from errmarks import bad_stderr
+
+script, ready, tmpdir, reps = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+bad, wins = [], collections.Counter()
+for order in ("HUP+INT", "INT+HUP", "INT+TERM", "TERM+INT"):
+    sent = order.split("+")
+    allowed = [128 + int(getattr(signal, "SIG" + x)) for x in sent]
+    for _ in range(reps):
+        if os.path.exists(ready):
+            os.unlink(ready)
+        env = dict(os.environ, TRAIN_SELFTEST="1", TRAIN_TEST_PAUSE_AFTER_HANDLERS="0.5", TRAIN_TEST_READY_FILE=ready,
+                   TRAIN_TEST_EARLY_EXIT_WINDOW="0.25", TMPDIR=tmpdir)
+        p = subprocess.Popen([sys.executable, "-I", "-B", script, "--repo", tmpdir], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
+        for _ in range(400):
+            if os.path.exists(ready):
+                break
+            time.sleep(0.01)
+        else:
+            p.kill()
+            p.wait()
+            bad.append("%s: no ready file" % order)
+            continue
+        p.send_signal(getattr(signal, "SIG" + sent[0]))
+        time.sleep(0.001)
+        p.send_signal(getattr(signal, "SIG" + sent[1]))
+        try:
+            _, err = p.communicate(timeout=20)
+            rc = p.returncode
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+            rc = "hang"
+            err = b""
+        if bad_stderr(err):
+            bad.append("%s: stderr marks %s" % (order, bad_stderr(err)))
+        if rc not in allowed:
+            bad.append("%s: rc %s%s" % (order, rc, " (KILLED by signal %d)" % -rc if isinstance(rc, int) and rc < 0 else ""))
+        else:
+            wins[(order, rc)] += 1
+left = [x for x in os.listdir(tmpdir) if x.startswith("itrain-")]
+sys.stderr.write("note: early double signals, first-handled winners: %s\n" % dict(sorted(wins.items())))
+print("ok" if not bad and not left else "BAD %s left=%s" % (bad[:3], left))
+PYEOF
+mkdir -p "$S/early2tmp"
+EARLY2=$(python3 -I -B "$S/early2.py" "$SCRIPT" "$S/early2ready" "$S/early2tmp" 5 2>"$S/early2.err")
+echo "$(<"$S/early2.err")"
+check "early: two different signals 1 ms apart (4 orders x 5): every run exits 128+n of one of them, never killed by the second ($EARLY2)" eq "$EARLY2" ok
 
 # (f2) a signal INSIDE Popen/just after it, deterministic: the tool pauses right after it started its first
 # WRITING git child (`git init`; the hook makes that child write into the private root 0.8 s later, as a
@@ -2032,12 +2182,15 @@ else:
     p.kill()
     print("no hold file")
     sys.exit(0)
-p.send_signal(getattr(signal, "SIG" + sig))
+for one in sig.split("+"):
+    p.send_signal(getattr(signal, "SIG" + one))
 try:
     rc = p.wait(timeout=20)
 except subprocess.TimeoutExpired:
     p.kill()
     rc = "hang"
+if "+" in sig:  # several different signals: 128+n of one of them
+    rc = "ok" if rc in [{"TERM": 143, "INT": 130, "HUP": 129}[x] for x in sig.split("+")] else "BAD%s" % rc
 time.sleep(1.3)
 print("rc=%s left=%d" % (rc, len([x for x in os.listdir(tmpdir) if x.startswith("itrain-")])))
 PYEOF
@@ -2050,6 +2203,22 @@ for sg in HUP TERM; do
     rm -rf -- "$S"/holdtmp/itrain-*
     BR=
     ident_end "signal $sg inside spawn" "$NC"
+done
+# BLOCKER 2: two DIFFERENT signals back to back while the tool is exiting on the first must not interrupt the exit
+# path: the tool exits 128+n of ONE of them (the first its handler runs: with several pending, the lowest number),
+# and still cleans up. Early pause (no private root yet) and inside spawn (root exists, a child is being registered).
+for pair in TERM+INT INT+TERM HUP+INT INT+HUP; do
+    rm -f "$S/ready"
+    quarantine
+    a=${pair%+*}; b=${pair#*+}
+    case $a in HUP) wa=129 ;; TERM) wa=143 ;; INT) wa=130 ;; esac
+    case $b in HUP) wb=129 ;; TERM) wb=143 ;; INT) wb=130 ;; esac
+    check "early $pair: a normal exit 128+n of one of them" eq "$(python3 -I -B "$S/early.py" "$SCRIPT" "$NC" "$S/ready" "$pair" "$wa,$wb" "$WT")" ok
+    check "early $pair: no itrain-* created" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
+    rm -f "$S/hold"
+    mkdir -p "$S/holdtmp"
+    check "spawn $pair: exit 128+n of one of them and no itrain-* left" eq "$(python3 -I -B "$S/hold.py" "$SCRIPT" "$NC" "$S/hold" "$pair" "$S/holdtmp" "$WT")" "rc=ok left=0"
+    rm -rf -- "$S"/holdtmp/itrain-*
 done
 
 # (g) item 0: a member red ALONE is retried once against the final landed set
@@ -2070,6 +2239,438 @@ ident_end "item 0 red" "$NC"
 REPOARG=$NC V="$V_FIX" trn --no-recover --keep n1 n2
 check "item 0: --no-recover leaves the red-alone member exactly as measured (no red_with, no retry)" eq "$(lacks "$JSON" red_with && lacks "$JSON" verified_red_alone && has "$JSON" '"runs":3,' && echo y)" y
 [ -n "$BR" ] && "$REAL_GIT" -C "$NC" branch -D "$BR" >/dev/null 2>&1
+
+# (h) delivery is all-or-nothing AS OBSERVED, for a signal at any instant: at exit either the ref does not
+# exist and nothing names it, or it exists and the branch line and the JSON name it. Deterministic cases: a
+# test hook (TRAIN_SELFTEST only) pauses right after update-ref was spawned, before it is waited for; "complete"
+# lets it finish inside the pause, "kill" delays its start so a tool that kills it would leave no ref.
+cat >"$S/deliv.py" <<'PYEOF'
+import json, os, random, shutil, signal, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from errmarks import bad_stderr
+
+G = os.environ["REAL_GIT"]
+mode = sys.argv[1]
+script, caller, ready, tmpdir, wt = sys.argv[2:7]
+names = {"TERM": 143, "INT": 130, "HUP": 129}
+
+
+def refs():
+    return subprocess.run([G, "-C", caller, "for-each-ref", "--format=%(refname:short) %(objectname)",
+                           "refs/heads/train-*"], capture_output=True, text=True).stdout.split("\n")[:-1]
+
+
+def tool(extra_env, sig, delay, anchor=None):
+    """One delivery run with a signal `delay` s after the anchor file (the start of delivery, or the
+    end of index-pack); returns the observation."""
+    for f in (ready, ready + ".indexed"):
+        if os.path.exists(f):
+            os.unlink(f)
+    mark = anchor or ready
+    t0 = time.time()
+    env = dict(os.environ, TRAIN_SELFTEST="1", TMPDIR=tmpdir)
+    for k, v in extra_env.items():  # a None value REMOVES the variable (production-mode cases)
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
+    t_sig = None
+    p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller, "--verify", "true",
+                          "--keep", "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1"], cwd=wt,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
+    if sig:
+        for _ in range(4000):
+            if os.path.exists(mark) or p.poll() is not None:
+                break
+            time.sleep(0.0005)
+        time.sleep(delay)
+        for one in sig.split("+"):  # "TERM+INT": two DIFFERENT signals back to back
+            if p.poll() is None:
+                t_sig = time.time()
+                p.send_signal(getattr(signal, "SIG" + one))
+    dead = False
+    try:
+        out, err = p.communicate(timeout=float(os.environ.get("DELIV_DEADLINE") or 60))
+    except subprocess.TimeoutExpired:  # a hang is a RED of its own, reported by this deadline
+        p.kill()
+        out, err = p.communicate()
+        dead = True
+    elapsed = time.time() - t0
+    since = (time.time() - t_sig) if t_sig else 0.0
+    rs = refs()
+    out = out.decode("utf-8", "replace")
+    left = len([x for x in os.listdir(tmpdir) if x.startswith("itrain-")])
+    lines = [x for x in out.split("\n") if x.startswith("integration branch: ")]
+    try:
+        js = json.loads(out.strip().split("\n")[-1])
+    except ValueError:
+        js = {}
+    named = js.get("branch", "")
+    for r in rs:
+        subprocess.run([G, "-C", caller, "update-ref", "-d", "refs/heads/" + r.split()[0]], check=True)
+    for x in os.listdir(tmpdir):
+        if x.startswith("itrain-"):
+            shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
+    planted = os.path.join(caller, ".git", "refs", "heads", "train-prelocked.lock")
+    kept = open(planted).read() if os.path.exists(planted) else None  # byte-identical to what was planted
+    locks = subprocess.run(["find", os.path.join(caller, ".git", "refs"), "-name", "*.lock"],
+                           capture_output=True, text=True).stdout.split()
+    for lk in locks:
+        os.unlink(lk)
+    seen = out + err.decode("utf-8", "replace")
+    return {"since": since, "errtxt": err.decode("utf-8", "replace"),
+            "rc": "DEADLINE" if dead else p.returncode if not bad_stderr(err) else "STDERR%s" % bad_stderr(err),
+            "fast": int(elapsed < 8), "left": left, "unk": int("could NOT be determined" in seen),
+            "conf": int("could NOT be confirmed" in seen), "namedb": int("train-hangbr" in seen), "ref": len(rs), "line": len(lines), "lock": len(locks),
+            "lockc": int(kept == "planted by another process\n"),
+            "dyes": int("DOES exist" in js.get("delivery_error", "")),
+            "json": int(bool(named) and named in [r.split()[0] for r in rs]),
+            "same": int(bool(rs) and rs[0].split()[1] == js.get("commits", {}).get("n1")),
+            "flag": int(js.get("interrupted_after_delivery") is True),
+            "derr": int("does not exist" in js.get("delivery_error", ""))}
+
+
+def fmt(o, keys):
+    return " ".join("%s=%s" % (k, o[k]) for k in keys)
+
+
+if mode == "hang":  # a git stand-in hangs one read made with the signals blocked; the tool must not
+    which, sg = sys.argv[7:9]
+    hb = os.path.join(os.path.dirname(ready), "hangbin")
+    cnt = os.path.join(os.path.dirname(ready), "hang.count")
+    pids = os.path.join(os.path.dirname(ready), "hang.pids")
+    for f in (cnt,):
+        if os.path.exists(f):
+            os.unlink(f)
+    os.environ["DELIV_DEADLINE"] = "10"
+    extra = {"PATH": hb + ":" + os.environ["PATH"], "HANG_COUNT": cnt, "HANG_PIDS": pids,
+             "HANG_N": {"exit": "2", "readback": "1", "ctl": "0"}[which],
+             "TRAIN_TEST_BRANCH": "train-hangbr"}
+    if which != "ctl":  # the control keeps the real bound: a loaded host can take over a second for one git call
+        extra["TRAIN_TEST_BLOCKED_GIT_TIMEOUT"] = "3"
+    if which == "exit":  # update-ref is killed at 0.3 s (the ref is absent), so the exit path must look again
+        extra.update({"TRAIN_TEST_UPDATEREF": "kill", "TRAIN_TEST_UPDATEREF_READY": ready,
+                      "TRAIN_TEST_UPDATEREF_TIMEOUT": "0.3"})
+    o = tool(extra, None if sg == "none" else sg, 0)
+    if os.path.exists(pids):  # our own stand-in's sleepers: never leave one
+        for ln in open(pids).read().split():
+            try:
+                os.kill(int(ln), signal.SIGKILL)
+            except OSError:
+                pass
+    if which == "exit":
+        print(fmt(o, ["rc", "fast", "unk", "namedb", "ref", "left"]))
+    elif which == "readback":
+        print(fmt(o, ["rc", "fast", "conf", "namedb"]))
+    else:
+        print(fmt(o, ["rc", "ref", "line", "json", "same"]))
+elif mode == "budget":  # ONE shared deadline for everything done with the signals blocked
+    which = sys.argv[7]
+    bb = os.path.join(os.path.dirname(ready), "budgetbin")
+    cnt = os.path.join(os.path.dirname(ready), "budget.count")
+    pids = os.path.join(os.path.dirname(ready), "budget.pids")
+    if os.path.exists(cnt):
+        os.unlink(cnt)
+    os.environ["DELIV_DEADLINE"] = "30"
+    sig = "INT"
+    limit = 0
+    extra = {"PATH": bb + ":" + os.environ["PATH"], "HANG_COUNT": cnt, "HANG_PIDS": pids,
+             "TRAIN_TEST_BRANCH": "train-hangbr", "TRAIN_TEST_UPDATEREF": "stuckready",
+             "TRAIN_TEST_UPDATEREF_READY": ready}
+    if which == "A":  # update-ref hangs 2 s, the read-back is slow (1.8 s), the exit look hangs
+        extra.update({"TRAIN_TEST_UPDATEREF_TIMEOUT": "2", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "2",
+                      "TRAIN_TEST_BLOCKED_BUDGET": "2.5", "RB_SLOW": "1.8", "HANG_FROM": "2"})
+        limit = 4.5
+    elif which == "B":  # the read-back answers inside the budget, the exit look gets what is left
+        extra.update({"TRAIN_TEST_UPDATEREF_TIMEOUT": "1.2", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "2",
+                      "TRAIN_TEST_BLOCKED_BUDGET": "2.5", "RB_SLOW": "0.8", "HANG_FROM": "2"})
+        limit = 3.4
+    elif which == "two":  # read-back and look both hang: the look is skipped (one call, one limit)
+        extra.update({"TRAIN_TEST_UPDATEREF_TIMEOUT": "0.5", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "1.5",
+                      "TRAIN_TEST_BLOCKED_BUDGET": "9", "HANG_FROM": "1"})
+        limit = 3.0
+    elif which == "prod":  # hooks set WITHOUT the selftest's variable: ignored, the real bounds hold
+        extra = {"PATH": bb + ":" + os.environ["PATH"], "HANG_COUNT": cnt, "HANG_PIDS": pids, "TRAIN_SELFTEST": None,
+                 "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "0.1", "TRAIN_TEST_BLOCKED_BUDGET": "0.1", "RB_SLOW": "0.5"}
+        sig = None
+    elif which == "msg_unknown":  # the read-back hangs, no signal
+        extra.update({"TRAIN_TEST_UPDATEREF": "complete", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "1", "HANG_FROM": "1"})
+        sig = None
+    elif which == "msg_exists":  # update-ref wrote the ref, then outlived its timeout
+        extra.update({"TRAIN_TEST_UPDATEREF": "slowexit", "TRAIN_TEST_UPDATEREF_TIMEOUT": "1"})
+        sig = None
+    elif which == "msg_absent":  # a stuck update-ref, killed at its timeout: no ref
+        extra.update({"TRAIN_TEST_UPDATEREF": "stuck", "TRAIN_TEST_UPDATEREF_TIMEOUT": "1"})
+        sig = None
+    o = tool(extra, sig, 0.1)
+    if os.path.exists(pids):
+        for ln in open(pids).read().split():
+            try:
+                os.kill(int(ln), signal.SIGKILL)
+            except OSError:
+                pass
+    n = int(open(cnt).read()) if os.path.exists(cnt) else 0
+    t = o["errtxt"]
+    if which in ("A", "B"):
+        print("rc=%s within=%d unk=%d" % (o["rc"], int(o["since"] < limit), o["unk"]))
+    elif which == "two":
+        print("rc=%s one=%d unk=%d calls=%d" % (o["rc"], int(o["since"] < limit), o["unk"], n))
+    elif which == "prod":
+        print(fmt(o, ["rc", "ref", "line", "json"]))
+    elif which == "msg_unknown":
+        print("rc=%s lead=%d claim=%d" % (o["rc"], int("error: verified; delivery could NOT be confirmed: " in t),
+                                          int("NOT delivered" in t)))
+    elif which == "msg_exists":
+        print("rc=%s lead=%d claim=%d" % (o["rc"], int("error: verified; update-ref did not report success but the "
+                                                       "branch DOES exist: " in t), int("NOT delivered" in t)))
+    else:
+        print("rc=%s lead=%d unk=%d" % (o["rc"], int("error: verified but NOT delivered: " in t), o["conf"]))
+elif mode == "report":  # a signal while the verdict is being REPORTED: the verdict's exit code, the JSON last
+    o = tool({"TRAIN_TEST_REPORT_READY": ready}, sys.argv[7], 0)
+    print(fmt(o, ["rc", "ref", "line", "json", "same", "flag"]))
+elif mode == "case":  # a hook pauses right after update-ref was spawned; the signal arrives in the pause
+    hook, sg, tmo = sys.argv[7:10]
+    extra = {"TRAIN_TEST_UPDATEREF": hook, "TRAIN_TEST_UPDATEREF_READY": ready}
+    if tmo != "-":
+        extra["TRAIN_TEST_UPDATEREF_TIMEOUT"] = tmo
+    if os.environ.get("DELIV_PRELOCK"):  # a lock of ANOTHER process on the very ref the tool will create
+        extra["TRAIN_TEST_BRANCH"] = "train-prelocked"
+        pl = os.path.join(caller, ".git", "refs", "heads", "train-prelocked.lock")
+        with open(pl, "w") as fh:
+            fh.write("planted by another process\n")
+    o = tool(extra, None if sg == "none" else sg, 0)
+    if "+" in sg:  # several signals: the exit status is 128+n of ONE of them (the first handled), never a traceback
+        o["rc"] = "ok" if o["rc"] in [names[x] for x in sg.split("+")] else "BAD%s" % o["rc"]
+    if hook in ("slowexit", "stuck") or os.environ.get("DELIV_PRELOCK"):
+        print(fmt(o, ["rc", "ref", "line", "json", "dyes", "derr", "lock"] + (["lockc"] if os.environ.get("DELIV_PRELOCK") else [])))
+    else:
+        print(fmt(o, ["rc", "ref", "line", "json", "same", "flag"] if sg != "none" else ["rc", "ref", "line", "json", "derr"]))
+elif mode == "kill9":  # SIGKILL in the delivery pause: only what --help promises is asserted
+    def state():
+        return subprocess.run([G, "--no-optional-locks", "-C", caller, "status", "--porcelain=v2", "--branch"], capture_output=True,
+                              text=True).stdout + subprocess.run(
+            [G, "-C", caller, "for-each-ref", "--format=%(refname) %(objectname)"], capture_output=True,
+            text=True).stdout + open(os.path.join(caller, ".git", "HEAD")).read()
+    before = state()
+    for f in (ready,):
+        if os.path.exists(f):
+            os.unlink(f)
+    env = dict(os.environ, TRAIN_SELFTEST="1", TMPDIR=tmpdir, TRAIN_TEST_UPDATEREF="kill",
+               TRAIN_TEST_UPDATEREF_READY=ready)
+    p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller, "--verify", "true",
+                          "--keep", "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1"], cwd=wt,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
+    for _ in range(4000):
+        if os.path.exists(ready) or p.poll() is not None:
+            break
+        time.sleep(0.0005)
+    p.kill()
+    p.communicate(timeout=30)
+    time.sleep(1.5)  # update-ref (its own session, delayed 0.8 s by the hook) may still finish: both outcomes allowed
+    rs = refs()
+    for r in rs:
+        subprocess.run([G, "-C", caller, "update-ref", "-d", "refs/heads/" + r.split()[0]], check=True)
+    for x in os.listdir(tmpdir):
+        if x.startswith("itrain-"):
+            shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
+    print("rc=%s unchanged=%d" % (p.returncode, int(state() == before)))
+    sys.stderr.write("note: SIGKILL during delivery left %d train-* branch(es) on this host\n" % len(rs))
+elif mode == "pipe":  # the reader closes stdout before the tool writes: no traceback, the verdict's exit status
+    env = dict(os.environ, TMPDIR=tmpdir)
+    p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller, "--verify", "true",
+                          "--keep", "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1"], cwd=wt,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
+    p.stdout.close()
+    err = p.stderr.read().decode("utf-8", "replace")
+    p.wait(timeout=60)
+    rs = refs()
+    for r in rs:
+        subprocess.run([G, "-C", caller, "update-ref", "-d", "refs/heads/" + r.split()[0]], check=True)
+    for x in os.listdir(tmpdir):
+        if x.startswith("itrain-"):
+            shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
+    print("rc=%s traceback=%d ref=%d" % (p.returncode, int(bool(bad_stderr(err))), len(rs)))
+elif mode == "early":  # a signal 0-30 ms after spawn, maybe inside CPython's own start-up
+    n, seed = int(sys.argv[7]), int(sys.argv[8])
+    rng = random.Random(seed)
+    verdicts = nojson = bad = 0
+    for i in range(n):
+        p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller, "--verify", "true",
+                              "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1"], cwd=wt,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                             env=dict(os.environ, TMPDIR=tmpdir))
+        time.sleep(0 if i == 0 else rng.uniform(0, 0.03))
+        if p.poll() is None:
+            p.send_signal(signal.SIGINT)
+        out = p.communicate(timeout=60)[0].decode("utf-8", "replace")
+        if p.returncode in (0, 1):
+            verdicts += 1
+            try:
+                json.loads(out.strip().split("\n")[-1])
+            except ValueError:
+                nojson += 1  # exit 0/1 with no JSON: NOT a verdict (CPython start-up) ...
+                bad += int(bool(out.strip()))  # ... and then stdout must be EMPTY, never a partial report
+        for x in os.listdir(tmpdir):
+            if x.startswith("itrain-"):
+                shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
+    print("runs=%d exit-0/1=%d of-which-without-json=%d without-json-but-with-output=%d" % (n, verdicts, nojson, bad))
+else:  # the sweep: signals at random instants from the start of delivery
+    n, seed, span = int(sys.argv[7]), int(sys.argv[8]), float(sys.argv[9])
+    rng = random.Random(seed)
+    both = none = viol = 0
+    rcs = {}
+    for i in range(n):
+        sg = ("TERM", "INT", "HUP")[i % 3]
+        # half of the runs land in the 6 ms after index-pack ends (where update-ref starts), half anywhere
+        # from the start of delivery, so the sweep is shown to hit BOTH outcomes
+        o = tool({"TRAIN_TEST_DELIVERY_READY": ready, "TRAIN_TEST_INDEXED_READY": ready + ".indexed"}, sg,
+                 rng.uniform(0, 0.006) if i % 2 == 0 else rng.uniform(0, span),
+                 ready + ".indexed" if i % 2 == 0 else None)
+        rcs[o["rc"]] = rcs.get(o["rc"], 0) + 1
+        if o["ref"] == 1 and o["line"] == 1 and o["json"] == 1:
+            both += 1
+        elif o["ref"] == 0 and o["line"] == 0 and o["json"] == 0:
+            none += 1
+        else:
+            viol += 1
+            sys.stderr.write("violation %d: %s\n" % (i, o))
+    print("runs=%d ref+line+json=%d no-ref+no-line+no-json=%d violations=%d" % (n, both, none, viol))
+PYEOF
+mkdir -p "$S/delivtmp"
+ident_begin "$NC"
+for sg in TERM INT HUP; do
+    case $sg in HUP) want=129 ;; INT) want=130 ;; TERM) want=143 ;; esac
+    for hk in complete kill; do
+        check "delivery: $sg while update-ref is in flight ($hk): exit $want, the branch exists, is named by the line and the JSON, equals the verified commit, says interrupted" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" "$hk" "$sg" -)" "rc=$want ref=1 line=1 json=1 same=1 flag=1"
+    done
+done
+check "delivery: an update-ref that outlives its hard timeout is exit 2, the ref is read back (absent), the JSON says so" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" kill none 0.3)" "rc=2 ref=0 line=0 json=0 derr=1"
+# BLOCKER 2: two different signals pending when delivery's mask lifts (the ref exists): exit 128+n of ONE of them, the
+# branch line and the JSON name the branch, interrupted_after_delivery is set (12/12 runs lost both before the guard)
+for pair in TERM+INT INT+TERM HUP+INT INT+HUP; do
+    check "delivery: $pair pending at mask restore: rc 128+n of one, ref exists, branch line + JSON + flag" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" complete "$pair" -)" "rc=ok ref=1 line=1 json=1 same=1 flag=1"
+done
+# M7: update-ref WROTE the ref, then outlives the hard timeout: the read-back must say the branch EXISTS and name it
+check "delivery: a timeout that fires AFTER update-ref wrote the ref says the branch exists and the JSON names it" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" slowexit none 1)" "rc=2 ref=1 line=1 json=1 dyes=1 derr=0 lock=0"
+# a stuck update-ref holding <ref>.lock, killed at the timeout: its own stale lock is removed
+check "delivery: a stuck update-ref's <ref>.lock is removed after the timeout kill (no ref, no lock left)" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" stuck none 1)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=0"
+# a lock that exists BEFORE delivery starts is another process's: delivery fails (exit 2, no ref) and the lock stays,
+# both when update-ref fails fast on it and when it is also stuck past the timeout (the guard is what keeps it)
+check "delivery: a lock that pre-exists on the ref: exit 2, no ref, the lock is NOT removed" eq "$(DELIV_PRELOCK=1 python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" none none -)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=1 lockc=1"
+check "delivery: a pre-existing lock survives, byte-identical, a stuck update-ref's timeout kill" eq "$(DELIV_PRELOCK=1 python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" stuck none 1)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=1 lockc=1"
+# BLOCKER 3: SIGKILL in the delivery pause: only what --help promises: HEAD, index, worktree and every existing ref
+# unchanged; the new train-* branch may or may not exist (update-ref runs in its own session): reported, not asserted
+mkdir -p "$S/hangbin"
+cat >"$S/hangbin/git" <<'XEOF'
+#!/bin/bash
+# the HANG_N-th `rev-parse --verify -q refs/heads/train-*` hangs (30 s, pid recorded so the driver can end it);
+# every other call is the real git
+case " $* " in *" rev-parse --verify -q refs/heads/train-"*)
+    n=$(($(cat "$HANG_COUNT" 2>/dev/null) + 1))
+    echo "$n" >"$HANG_COUNT"
+    if [ "$n" = "${HANG_N:-0}" ]; then
+        echo $$ >>"$HANG_PIDS"
+        exec sleep 30
+    fi ;;
+esac
+exec "$REAL_GIT" "$@"
+XEOF
+chmod +x "$S/hangbin/git"
+# budget stand-in: the rev-parse calls on a train branch are counted; call number RB_SLOW_N (default 1) sleeps RB_SLOW
+# seconds and then answers like the real git; every call from number HANG_FROM on (0 = none) hangs (30 s, pid recorded)
+mkdir -p "$S/budgetbin"
+cat >"$S/budgetbin/git" <<'XEOF'
+#!/bin/bash
+case " $* " in *" rev-parse --verify -q refs/heads/train-"*)
+    n=$(($(cat "$HANG_COUNT" 2>/dev/null) + 1))
+    echo "$n" >"$HANG_COUNT"
+    if [ "${HANG_FROM:-0}" != 0 ] && [ "$n" -ge "$HANG_FROM" ]; then
+        echo $$ >>"$HANG_PIDS"
+        exec sleep 30
+    fi
+    if [ "$n" = "${RB_SLOW_N:-1}" ] && [ -n "$RB_SLOW" ]; then sleep "$RB_SLOW"; fi ;;
+esac
+exec "$REAL_GIT" "$@"
+XEOF
+chmod +x "$S/budgetbin/git"
+for sg in INT TERM HUP; do
+    case $sg in HUP) want=129 ;; INT) want=130 ;; TERM) want=143 ;; esac
+    check "blocked git: $sg while the exit path's look at the ref hangs: exit $want within the bound, state UNKNOWN naming the branch, no stderr marks, nothing left" eq "$(python3 -I -B "$S/deliv.py" hang "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" exit "$sg")" "rc=$want fast=1 unk=1 namedb=1 ref=0 left=0"
+done
+check "blocked git: a delivery read-back that hangs is exit 2 within the bound, 'could NOT be confirmed', naming the branch" eq "$(python3 -I -B "$S/deliv.py" hang "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" readback none)" "rc=2 fast=1 conf=1 namedb=1"
+check "budget: update-ref hangs, a slow read-back, the exit look hangs, a signal pending: exit 130 within budget + cleanup, state unknown" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" A)" "rc=130 within=1 unk=1"
+check "budget: the read-back answers inside the budget, the exit look gets only what is left: exit 130 within budget + cleanup" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" B)" "rc=130 within=1 unk=1"
+check "budget: read-back and exit look would both hang: the look is skipped (ONE rev-parse call, one limit)" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" two)" "rc=130 one=1 unk=1 calls=1"
+check "budget: hooks set without TRAIN_SELFTEST are ignored (production mode keeps the real bounds): delivered, rc 0" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" prod)" "rc=0 ref=1 line=1 json=1"
+check "message: an unknown branch state claims nothing ('delivery could NOT be confirmed', never 'NOT delivered')" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" msg_unknown)" "rc=2 lead=1 claim=0"
+check "message: update-ref failed but the ref exists: 'update-ref did not report success but the branch DOES exist'" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" msg_exists)" "rc=2 lead=1 claim=0"
+check "message: a known absent branch keeps 'verified but NOT delivered'" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" msg_absent)" "rc=2 lead=1 unk=0"
+check "blocked git: control, the stand-in without a hang delivers normally" eq "$(python3 -I -B "$S/deliv.py" hang "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" ctl none)" "rc=0 ref=1 line=1 json=1 same=1"
+for sg in INT TERM HUP; do
+    check "signal $sg while the verdict is being reported: the verdict's exit code (0), the branch and JSON complete and last, no stderr marks" eq "$(python3 -I -B "$S/deliv.py" report "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" "$sg")" "rc=0 ref=1 line=1 json=1 same=1 flag=0"
+done
+KILL9=$(python3 -I -B "$S/deliv.py" kill9 "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" 2>"$S/kill9.err")
+check "delivery: SIGKILL during delivery leaves HEAD/index/worktree/existing refs unchanged" eq "$KILL9" "rc=-9 unchanged=1"
+echo "$(<"$S/kill9.err")"
+# the tool's stdout closed by the reader: no traceback, the verdict's exit status (0), the ref exists
+check "closed stdout (| true): no BrokenPipe traceback, rc 0 (the verdict), the branch was delivered" eq "$(python3 -I -B "$S/deliv.py" pipe "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT")" "rc=0 traceback=0 ref=1"
+SWEEP_OUT=$(python3 -I -B "$S/deliv.py" sweep "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" 60 7 0.06 2>&1)
+check "delivery sweep: 60 signals, none leaves a ref without its line and JSON, or a line without a ref ($SWEEP_OUT)" has "$SWEEP_OUT" "violations=0"
+# Which side of delivery a random signal lands on depends on the host: on a Linux container every one of the 60 fell on
+# the same side, on macOS both were hit. Both outcomes are PINNED by the deterministic cases above (complete -> the ref
+# with its line and JSON; the timeout case -> no ref), so the split is reported here, not asserted.
+echo "note: delivery sweep split on this host: $SWEEP_OUT"
+ident_end "delivery signals (objects may differ)" "$NC" objects
+# the contract that makes a verdict checkable: exit 0/1 prints the JSON as the LAST stdout line; an early-killed run
+# (CPython start-up, before the script's first line) has exit 1 or -2 and empty stdout: NOT a verdict
+EARLY_OUT=$(python3 -I -B "$S/deliv.py" early "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" 12 3 2>&1)
+check "start-up: an early SIGINT never yields exit 0/1 with output but no JSON line; exit 0/1 without JSON has EMPTY stdout ($EARLY_OUT)" has "$EARLY_OUT" "without-json-but-with-output=0"
+REPOARG=$NC trn n1
+check "verdict contract: exit 0 prints the JSON as the last stdout line" eq "$RC$(printf '%s' "$OUT" | tail -n 1 | python3 -I -B -c 'import json,sys; json.loads(sys.stdin.read()); print("J")')" 0J
+REPOARG=$NC V="exit 1" trn n1
+check "verdict contract: exit 1 prints the JSON as the last stdout line" eq "$RC$(printf '%s' "$OUT" | tail -n 1 | python3 -I -B -c 'import json,sys; json.loads(sys.stdin.read()); print("J")')" 1J
+
+# (i) the private repository's state channels a verify could use to carry a result from one run to the next.
+# Each verify below is RED the first time (it leaves a mark in the shared private git directory, which it reaches
+# by climbing two levels from its worktree) and GREEN when it finds the mark: without detection a later red run lands.
+PRIV_P='P=$(cd ../.. && pwd)/repo.git'
+V_SNAP_PACK="$PRIV_P"'; [ -f $P/objects/pack/mark ] && exit 0; : >$P/objects/pack/mark; exit 1'
+V_SNAP_WT="$PRIV_P"'; [ -f $P/worktrees/mark/x ] && exit 0; mkdir -p $P/worktrees/mark && : >$P/worktrees/mark/x; exit 1'
+V_SNAP_HEAD="$PRIV_P"'; [ "$(cat $P/HEAD)" = "ref: refs/heads/mark" ] && exit 0; echo "ref: refs/heads/mark" >$P/HEAD; exit 1'
+V_SNAP_OBJ="$PRIV_P"'; H=$(echo state | git hash-object --stdin); git --git-dir=$P cat-file -e $H 2>/dev/null && exit 0; echo state | git --git-dir=$P hash-object -w --stdin >/dev/null; exit 1'
+V_SNAP_CTL='git status >/dev/null; git diff --stat HEAD >/dev/null; echo x >new.txt; git add -A; git write-tree >/dev/null; git stash create >/dev/null 2>&1; exit 0'
+for ch in "pack:objects/pack:$V_SNAP_PACK" "worktrees:worktrees:$V_SNAP_WT" "HEAD content:top-level:$V_SNAP_HEAD"; do
+    nm=${ch%%:*}; rest=${ch#*:}; want=${rest%%:*}; vs=${rest#*:}
+    REPOARG=$NC V="$vs" trn n1 n2
+    check "snapshot channel ($nm): the run is void, exit 2 naming '$want'" eq "$RC$(has "$OUT" "verify changed the private repository: $want" && echo y)" "2y"
+done
+REPOARG=$NC V="$V_SNAP_OBJ" trn n1 n2
+check "snapshot channel (loose object): documented as NOT digested; the run is not voided" eq "$RC$(has "$OUT" "verify changed the private repository" && echo y)" "1"
+REPOARG=$NC V="$V_SNAP_CTL" trn n1 n2
+check "snapshot control: git status/add/write-tree/stash create in the worktree void nothing, both land" eq "$RC$(has "$JSON" '"landed":["n1","n2"]' && echo y)" "0y"
+# the ordinary git commands --help names: two that void a run, and the fine list as a control
+REPOARG=$NC V='git commit -q --allow-empty -m x; git pack-refs --all' trn n1
+check "voiding commands: git commit + git pack-refs inside verify void the run (exit 2 'verify changed the private repository')" eq "$RC$(has "$OUT" "verify changed the private repository" && echo y)" "2y"
+REPOARG=$NC V='git rev-parse HEAD >/dev/null; git log -1 >/dev/null; git status >/dev/null; git diff HEAD >/dev/null; git reset -q --hard; git checkout -q --detach HEAD; git worktree list >/dev/null' trn n1
+check "fine commands: rev-parse, log, status, diff, reset, checkout, worktree list inside verify void nothing" eq "$RC$(has "$JSON" '"landed":["n1"]' && echo y)" "0y"
+HELP=$(python3 -I -B "$SCRIPT" --help 2>&1)
+HELPN=$(printf '%s' "$HELP" | tr -s ' \n' '  ')
+# the --help bound is computed from the script's own constants: budget + cleanup bound <= the number in the sentence
+HELP_PIN=$(python3 -I -B -c '
+import re, sys
+src = open(sys.argv[1]).read()
+help_text = " ".join(sys.argv[2].split())
+const = lambda n: float(re.search(r"^%s = ([0-9.]+)" % n, src, re.M).group(1))
+m = re.search(r"exits within ([0-9]+) seconds", help_text)
+b = re.search(r"ONE budget of ([0-9]+) s", help_text)
+print(int(bool(m) and float(m.group(1)) >= const("BLOCKED_BUDGET") + const("CLEANUP_BOUND")),
+      int(bool(b) and float(b.group(1)) == const("BLOCKED_BUDGET")))' "$SCRIPT" "$HELP")
+check "--help bound: 'exits within N seconds' is >= BLOCKED_BUDGET + CLEANUP_BOUND, and 'ONE budget of M s' equals BLOCKED_BUDGET" eq "$HELP_PIN" "1 1"
+for phrase in 'git commit' 'git fetch' 'git gc' 'git repack' 'git pack-refs' 'worktree list' 'git for-each-ref refs/heads/train-*' \
+    'red includes: timed out' "'conflict' or 'uncheckoutable'" 'the JSON is LOST' 'exit 2 prints a' 'own stale lock is removed' 'removable with' "the exit code and the JSON are the verdict's"; do
+    check "--help states: $phrase" has "$HELPN" "$phrase"
+done
 fi # newc
 
 # A skipped block replaces several checks on hosts where it cannot run (case-folding or
