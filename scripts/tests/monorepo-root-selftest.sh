@@ -544,6 +544,27 @@ bs_red "verify depends on gen.mk, an included makefile with a rule" "$CFR"'-incl
 GENINC='-include gen.mk\ngen.mk:\n\techo "# gen" > gen.mk\n'
 bs_root "shape A, MAKE build, plus a remade include" "$GENINC"'.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify:\n\t$(MAKE) build\nbuild: src.c\n\tcp src.c build\n'
 bs_root "shape B, verify depends on build, plus a remade include" "$GENINC"'.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify: build\nbuild: src.c\n\tcp src.c build\n'
+# review: the double-colon makefile-rule shapes (see the `five` cases): RED three times with nothing that runs for verify, green three times with a real verify
+bsxn=0
+bsx() { # <red|green> <label> <unit Makefile text>: like bs_root / bs_red, with gen.in and Makefile.in beside src.c
+  local d out rc n
+  bsxn=$((bsxn + 1)); d="$(mk2 "bsx-$bsxn" "$3")"; echo src > "$d/services/x/src.c"; echo in > "$d/services/x/gen.in"; echo in > "$d/services/x/Makefile.in"
+  touch -t 200001010000 "$d/services/x/gen.in" "$d/services/x/Makefile.in"
+  for n in first second third; do
+    : > "$LOG"; out="$(make -s -C "$d" verify 2>&1)"; rc=$?
+    if [[ "$1" == green && $rc -eq 0 && "$out" == *"verify svc-x: ok"* ]]; then pass "double-colon, $2: the root make verify is green on the $n run"
+    elif [[ "$1" == red && $rc -ne 0 && ! -s "$LOG" && "$out" == *"svc-x: Makefile has no verify target"* ]]; then pass "double-colon, $2: the root make verify is RED on the $n run, no recipe ran"
+    else fail "double-colon, $2: root make verify, $n run" "rc=$rc log=$(cat "$LOG") $(head -c 300 <<<"$out")"; fi
+  done
+}
+GENDCI='-include gen.mk\ngen.mk:: gen.in\n\techo "# gen" > gen.mk\n'
+bsx red "gen.mk:: gen.in, PHONY verify without a recipe" "$CFR""$GENDCI"'.PHONY: check-fast verify\n'
+bsx red "gen.mk:: ;cmd, PHONY verify without a recipe" "$CFR"'-include gen.mk\ngen.mk:: ;echo "# gen" > gen.mk\n.PHONY: check-fast verify\n'
+bsx red "Makefile:: Makefile.in, PHONY verify without a recipe" "$CFR"'.PHONY: check-fast verify\nMakefile:: Makefile.in\n\t@true\n'
+bsx red "Makefile:: ;@true, PHONY verify without a recipe" "$CFR"'.PHONY: check-fast verify\nMakefile:: ;@true\n'
+bsx green "dcp-B, double-colon Makefile rule + verify: build" "$CFR"'.PHONY: check-fast verify\nMakefile:: Makefile.in\n\t@true\nverify: build\nbuild: src.c\n\tcp src.c build\n'
+bsx green "mkdc-B, double-colon include rule + verify: build" "$CFR""$GENDCI"'.PHONY: check-fast verify\nverify: build\nbuild: src.c\n\tcp src.c build\n'
+bsx green "auto-B, Makefile: Makefile.in + verify: build" "$CFR"'.PHONY: check-fast verify\nMakefile: Makefile.in\n\ttouch Makefile\nverify: build\nbuild: src.c\n\tcp src.c build\n'
 # the environment scrub on the REAL make: MAKEFILES names an extra makefile that gives verify a recipe (the root's own makefile overrides its
 # own verify, the unit's .PHONY-only verify would become present); the scrub keeps the verdict RED and no recipe runs. Control: a make
 # that is not scrubbed sees verify as present with the same variable.
@@ -594,6 +615,89 @@ out="$(check "$TBG" 2>&1 < /dev/null)"; rc=$?  # the check alone: the root's mak
 if ! leftover "sleep $BGM"; then pass "a + line that backgrounds a process and returns leaves nothing behind after the check"
 else fail "background job survives" "rc=$rc left=$(pgrep -f -- "sleep $BGM" | tr '\n' ' ')"; fi
 leftover "sleep $BGM" && pkill -f -- "sleep $BGM"
+# TERM / HUP / INT: a question runs in its own session, so a signal to the checker, to its wrapper or to the root make's process
+# group does not reach it by itself. The checker's handler kills every live question group, removes its private temp dir and
+# exits 128+n; the bash wrapper runs the checker as a background child and forwards TERM. Each case: a unit whose question blocks on
+# `+sleep 43.<unique>` (MONOREPO_QUESTION_TIMEOUT=300), the target started in a NEW session with its own TMPDIR, the signal sent,
+# and within 2 s no process matches the marker and the TMPDIR is empty (the private dir and the wrapper's temp file are gone).
+sign=0
+sigcase() { # <label> <check|wrapper|make> <signal name> <expected exit status or -> [q1|b]: where the question blocks (q1: the first question; b: the -B look, after the list pass made the private dir)
+  local label="$1" kind="$2" sig="$3" want="$4" stage="${5:-q1}" n=$((++sign)) u td d pid rc=- left_p left_t
+  u="43.$$$n"; td="$tmp/sigt$n"; mkdir -p "$td"
+  if [[ "$stage" == b ]]; then
+    d="$(mk2 "sig$n" "$CFR"'.PHONY: verify\nverify: build\nbuild: src.c\n\t+sleep '"$u"'\n')"; echo src > "$d/services/x/src.c"; : > "$d/services/x/build"
+  else
+    d="$(mk2 "sig$n" "$CFR"'.PHONY: verify\nverify: build\nbuild:\n\t+sleep '"$u"'\n')"
+  fi
+  case "$kind" in
+    check) set -- "$py" -B "$d/scripts/monorepo_check.py" check "$d" ;;
+    wrapper) set -- bash "$d/scripts/monorepo-run.sh" verify ;;
+    *) set -- make -s -C "$d" verify ;;
+  esac
+  MONOREPO_QUESTION_TIMEOUT=300 TMPDIR="$td" "$py" -c 'import os,signal,sys;os.setsid();signal.signal(signal.SIGINT,signal.SIG_DFL);os.execvp(sys.argv[1],sys.argv[1:])' "$@" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  for _ in $(seq 1 60); do leftover "sleep $u" && break; sleep 0.1; done
+  if ! leftover "sleep $u"; then fail "$label" "the blocking question never started"; kill -KILL "$pid" 2>/dev/null; return; fi
+  if [[ "$kind" == make ]]; then kill "-$sig" -- "-$pid" 2>/dev/null; else kill "-$sig" "$pid" 2>/dev/null; fi
+  for _ in $(seq 1 20); do leftover "sleep $u" || [[ -n "$(find "$td" -mindepth 1 -maxdepth 1 2>/dev/null)" ]] || break; sleep 0.1; done
+  { wait "$pid"; rc=$?; } 2>/dev/null
+  left_p="$(pgrep -f -- "sleep $u" | tr '\n' ' ')"; left_t="$(find "$td" -mindepth 1 -maxdepth 1 2>/dev/null | tr '\n' ' ')"
+  if [[ -z "$left_p" && -z "$left_t" ]] && { [[ "$want" == - ]] || [[ "$rc" == "$want" ]]; }; then pass "$label (exit $rc, nothing left)"
+  else fail "$label" "exit $rc (want $want) processes: $left_p temp: $left_t"; fi
+  [[ -n "$left_p" ]] && pkill -f -- "sleep $u"; [[ "$kind" == make ]] && kill -KILL -- "-$pid" 2>/dev/null
+  return 0
+}
+sigcase "TERM to the checker (blocked in the first question) kills the question's group" check TERM 143
+sigcase "TERM to the checker (blocked in the -B look, private temp dir made) kills the group and removes the private temp dir" check TERM 143 b
+sigcase "HUP to the checker (blocked in the -B look) kills the group and removes the private temp dir" check HUP 129 b
+sigcase "INT to the checker (blocked in the -B look) kills the group and removes the private temp dir" check INT 130 b
+sigcase "TERM to the wrapper script (monorepo-run.sh, blocked in the -B look) leaves no question and no temp file" wrapper TERM 143 b
+sigcase "HUP to the wrapper script (blocked in the first question) leaves no question and no temp file" wrapper HUP 129
+sigcase "INT to the wrapper script (blocked in the -B look) leaves no question and no temp file" wrapper INT 130 b
+sigcase "TERM to the process group of the root make verify (blocked in the -B look) leaves nothing" make TERM - b
+sigcase "HUP to the process group of the root make verify (blocked in the first question) leaves nothing" make HUP -
+# the spawn window: a TERM that lands between `Popen` returning its child and the checker registering the child's group must still kill that
+# group (the handler holds the signal until the group is registered). The test delivers the TERM from inside a Popen subclass, right after the
+# child exists and before the registry has it; without the hold the handler runs with an empty registry and the question's sleep survives.
+swu="43.$$77"; swd="$tmp/sigt-sw"; mkdir -p "$swd"
+SWU="$(mk2 sigsw "$CFR"'.PHONY: verify\nverify: build\nbuild:\n\t+sleep '"$swu"'\n')"
+MONOREPO_QUESTION_TIMEOUT=300 TMPDIR="$swd" "$py" -B - "$SWU/scripts/monorepo_check.py" "$SWU/services/x" > /dev/null 2>&1 <<'P'
+import importlib.util, os, signal, subprocess, sys
+spec = importlib.util.spec_from_file_location("mc", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+real = subprocess.Popen
+class Spawn(real):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        os.kill(os.getpid(), signal.SIGTERM)
+subprocess.Popen = Spawn
+m.install_signal_handlers()
+m.private_dir()
+m.make_ask(sys.argv[2], "verify", "-q")
+P
+swrc=$?
+sleep 1  # a surviving question needs a moment to reach its sleep: look only after that
+if [[ $swrc -eq 143 ]] && ! leftover "sleep $swu" && [[ -z "$(find "$swd" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then pass "a TERM that lands while a question is being spawned still kills its group and removes the private temp dir (exit 143)"
+else fail "spawn window" "exit $swrc left=$(pgrep -f -- "sleep $swu" | tr '\n' ' ') temp=$(find "$swd" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
+leftover "sleep $swu" && pkill -f -- "sleep $swu"
+# a second TERM during the cleanup (a process group TERM reaches the checker twice: from the group and forwarded by make) must not cut it short:
+# the test sends the second TERM from inside the removal of the private temp dir; the dir must still be gone and the exit status 143.
+rsd="$tmp/sigt-re"; mkdir -p "$rsd"
+RSU="$(mk2 sigre "$CFR"'.PHONY: verify\n')"
+TMPDIR="$rsd" "$py" -B - "$RSU/scripts/monorepo_check.py" > /dev/null 2>&1 <<'P'
+import importlib.util, os, shutil, signal, sys
+spec = importlib.util.spec_from_file_location("mc", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.install_signal_handlers()
+m.private_dir()
+real = shutil.rmtree
+def twice(*a, **k):
+    os.kill(os.getpid(), signal.SIGTERM)
+    return real(*a, **k)
+m.shutil.rmtree = twice
+os.kill(os.getpid(), signal.SIGTERM)
+P
+rsrc=$?
+if [[ $rsrc -eq 143 && -z "$(find "$rsd" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then pass "a second TERM while the checker is cleaning up does not abandon the cleanup (private temp dir removed, exit 143)"
+else fail "second signal during cleanup" "exit $rsrc temp=$(find "$rsd" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"; fi
 if [[ -n "${MONOREPO_STORM:-}" ]]; then # a forwarding catch-all forks without bound: run it only where the process count is capped (docker --pids-limit)
   TST="$(mk2 storm "$CFR"'%%:\n\t+$(MAKE) $@ MARK=storm'"$$"'\n')"
   SECONDS=0; : > "$LOG"; out="$(make -s -C "$TST" verify 2>&1)"; rc=$?; el=$SECONDS
@@ -615,8 +719,14 @@ else skip "forwarding catch-all storm" "MONOREPO_STORM is not set (run it where 
 FB="$tmp/fakebin"; mkdir -p "$FB"
 cat > "$FB/make" <<'E'
 #!/usr/bin/env bash
-# the -B look is `make -C <dir> -q -B [-f <makefile> -f <pin>] -- <target>`: note it in the log as `-qB <target>`, then answer as if it were `-q -- <target>`
-B=""; if [[ "${4:-}" == -B ]]; then B=1; set -- "$1" "$2" "$3" "${@: -2}"; fi  # the -B look also carries `-f <makefile> -f <pin>` before the `--`
+# the list pass is `make -C <dir> -q -f <makefile> -f <dir>/list.mk -- <name>`: note it as `-qL <name>`, write the makefile's name where the
+# module's list.mk would (list.out beside it), answer 2
+if [[ "${*: -3:1}" == */list.mk ]]; then
+  [[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "-qL ${*: -1}${FAKE_MAKE_ENVLOG:+ env=[${MAKEFLAGS-}${MFLAGS-}${MAKELEVEL-}${MAKEOVERRIDES-}${GNUMAKEFLAGS-}${MAKEFILES-}]}" >> "$FAKE_MAKE_LOG"
+  lm="${*: -3:1}"; [[ "${FAKE_MAKE_MODE:-}" == nolist ]] || printf '%s\n' "${*: -5:1}" > "${lm%list.mk}list.out"; exit 2
+fi
+# the -B look is `make -C <dir> -q -B -o <makefile>... -- <target>`: note it in the log as `-qB <target>`, then answer as if it were `-q -- <target>`
+B=""; if [[ "${4:-}" == -B ]]; then B=1; set -- "$1" "$2" "$3" "${@: -2}"; fi  # the -B look also carries `-o <makefile>` before the `--`
 [[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "$3${B:+B} $5" >> "$FAKE_MAKE_LOG"
 echo "make: Entering directory '$2'"; echo "# Make data base, printed on Thu Jan  1 00:00:00 2026"; echo "# Files"; echo "verify:"
 echo "#  commands to execute (from \`Makefile', line 1):"; printf '\t@evil\n'; echo "make: 'verify' is up to date."
@@ -626,7 +736,7 @@ echo "#  commands to execute (from \`Makefile', line 1):"; printf '\t@evil\n'; e
 case "${FAKE_MAKE_MODE:-}" in
   q2env) [[ "$3" == -n ]] && { [[ -z "${MAKEFLAGS-}${MFLAGS-}${MAKELEVEL-}${MAKEOVERRIDES-}${GNUMAKEFLAGS-}${MAKEFILES-}" ]] && exit 0; exit 3; }; exit 2 ;;
   catchq2n0) exit 2 ;;
-  q0b1) [[ -n "$B" ]] && exit 1; [[ "$3" == -q ]] && exit 0; exit 2 ;;
+  q0b1|nolist) [[ -n "$B" ]] && exit 1; [[ "$3" == -q ]] && exit 0; exit 2 ;;
   q0b0) [[ "$3" == -q ]] && exit 0; exit 2 ;;
   q0b2n0) [[ -n "$B" ]] && exit 2; [[ "$3" == -n ]] && exit 0; exit 0 ;;
   q0b2n2) [[ -n "$B" ]] && exit 2; [[ "$3" == -n ]] && exit 2; exit 0 ;;
@@ -645,7 +755,7 @@ M7="$tmp/b3g"; mkfake "$M7"; svc_make "$M7/services/a" a "check-fast verify"; ln
 G="$tmp/gt"; cp -R "$B" "$G"; mkdir -p "$G/node_modules/x"; printf '{}' > "$G/node_modules/x/package.json"; git -C "$G" init -q 2>/dev/null
 # the in-process matrix (module under test = the assembled copy of it)
 "$py" -B - "$D/scripts/monorepo_check.py" "$W" "$T2" "$T4" "$T6" "$FB" "$M7" "$G" "$tmp" <<'P' > "$tmp/matrix.out" 2>&1
-import importlib.util, json, os, re, shutil, subprocess, sys
+import importlib.util, json, os, re, shutil, subprocess, sys, time
 mod, W, T2, T4, T6, FB, M7, G, TMP = sys.argv[1:10]
 spec = importlib.util.spec_from_file_location("mc", mod); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 def say(ok, name, detail=""):
@@ -831,6 +941,22 @@ for mode, want_b, want_n in (("rc1", False, False), ("q0b1", True, False), ("q0b
 os.environ["FAKE_MAKE_MODE"] = "q0benv"; os.environ["MAKEFLAGS"] = "n"; os.environ["MFLAGS"] = "-n"; os.environ["GNUMAKEFLAGS"] = "-k"; out = run(T2)
 for v in ("MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS"): os.environ.pop(v)
 say(out == [], "the -B look is asked with MAKEFLAGS / MFLAGS / GNUMAKEFLAGS scrubbed (fake q0benv: -q -B 1 only when they are absent): present, clean", "\n".join(out))
+# the list pass: asked once per unit, only after a first answer of 0, never for a unit whose first answer is 1 or 2, scrubbed like every question; the -B look
+# carries -o for what the pass wrote; a pass that writes nothing fails closed (error, `-qB` never asked)
+for mode, want_l, want_b in (("rc1", False, False), ("rc2", False, False), ("q0b1", True, True), ("q0b0", True, True)):
+    open(FLOG, "w").close(); os.environ["FAKE_MAKE_MODE"] = mode; os.environ["FAKE_MAKE_ENVLOG"] = "1"
+    os.environ["MAKEFLAGS"] = "n"; os.environ["MFLAGS"] = "-n"; os.environ["GNUMAKEFLAGS"] = "-k"; os.environ["MAKEFILES"] = "/nonexistent.mk"
+    out = run(T2)
+    for v in ("MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEFILES", "FAKE_MAKE_ENVLOG"): os.environ.pop(v)
+    calls = open(FLOG).read().split("\n")[:-1]; lp = [c for c in calls if c.startswith("-qL ")]
+    scrubbed = all(c.endswith(" env=[]") for c in lp)
+    say(bool(lp) == want_l and (not want_l or (len(lp) == 1 and all(c.startswith("-qL " + m.PROBE_NAME) for c in lp))) and scrubbed
+        and bool([c for c in calls if c.startswith("-qB ")]) == want_b,
+        "fake make %s: the list pass is %s (once per unit, for the probe name, env scrubbed)" % (mode, "asked" if want_l else "NOT asked"), str(calls))
+open(FLOG, "w").close(); os.environ["FAKE_MAKE_MODE"] = "nolist"; out = run(T2); calls = open(FLOG).read().split("\n")[:-1]
+os.environ.pop("FAKE_MAKE_MODE")
+say(has(out, "no check-fast target: make could not answer for check-fast \\(the makefiles make read could not be listed") and not [c for c in calls if c.startswith("-qB ")],
+    "a list pass that wrote nothing fails closed: 'could not be listed', no -B look is asked", "\n".join(out) + str(calls))
 os.environ.pop("FAKE_MAKE_LOG")
 m.MAKE_TIMEOUT = tmo
 # the runner's `units` over the fake: rc1 -> has=1, rc0/rc2 -> has=0, all1 -> refused (rc 2, nothing listed)
@@ -991,6 +1117,8 @@ GEN = "-include gen.mk\ngen.mk:\n\techo '# gen' > gen.mk\n"
 def five(label, text, want, extra=None):
     nm = "five-%d" % len(os.listdir(UD)); d = os.path.join(UD, nm); os.makedirs(d); open(os.path.join(d, "Makefile"), "w").write(text)
     for f, body in (extra or {}).items(): open(os.path.join(d, f), "w").write(body)
+    for f in ("Makefile.in", "gen.in"):  # a prerequisite of a makefile rule is OLDER than the makefile: same mtime tick or not, the answer must not depend on it
+        if os.path.exists(os.path.join(d, f)): os.utime(os.path.join(d, f), (946684800, 946684800))
     def judge(): m._rc_cache.clear(); return m.make_target_state(d, "verify")
     def real(): subprocess.run(["make", "-C", d, "verify"], capture_output=True)
     pts = [judge()]; real(); pts.append(judge()); pts.append(judge())
@@ -1006,13 +1134,49 @@ five("shape B (verify: build) + a remade include", GEN + ".PHONY: verify\nverify
 five("shape B without include (control)", ".PHONY: verify\nverify: build\nbuild: src.c\n\tcp src.c build\n", "present", SRC)
 five(".PHONY only, no include (control)", ".PHONY: verify\n", "idle")
 five("stamp design (verify: .stamp, .stamp: src.c)", ".PHONY: verify\nverify: .stamp\n.stamp: src.c\n\ttouch .stamp\n", "present", SRC)
-# the -B question carries the unit's makefile and the pin makefile; a unit without a makefile gets neither (and is never asked -B)
+# review: the -B look must not add rules to the unit's rule base. An eval'd pin rule for a makefile collides with a DOUBLE-COLON rule for the same
+# makefile ("both : and :: entries": exit 2, then `-n` 0 judged a rule-less unit present). The look names the makefiles with -o instead. Same
+# five points, both makes: the double-colon shapes with nothing that runs for verify are idle; with a REAL verify they stay present.
+SRC2 = {"src.c": "x", "gen.in": "x", "Makefile.in": "x"}
+GENDC = "-include gen.mk\ngen.mk:: gen.in\n\techo '# gen' > gen.mk\n"
+five("double-colon include rule (gen.mk:: gen.in) + .PHONY verify", GENDC + ".PHONY: verify\n", "idle", SRC2)
+five("double-colon include rule with an inline recipe (gen.mk:: ;cmd) + .PHONY verify", "-include gen.mk\ngen.mk:: ;echo '# gen' > gen.mk\n.PHONY: verify\n", "idle")
+five("double-colon rule for the unit's own makefile (Makefile:: Makefile.in) + .PHONY verify", ".PHONY: verify\nMakefile:: Makefile.in\n\t@true\n", "idle", SRC2)
+five("double-colon rule for the unit's own makefile (Makefile:: ;@true) + .PHONY verify", ".PHONY: verify\nMakefile:: ;@true\n", "idle")
+five("deferred ROOT = $(dir $(lastword $(MAKEFILE_LIST))) + .SECONDEXPANSION, nothing runs", ".SECONDEXPANSION:\nROOT = $(dir $(lastword $(MAKEFILE_LIST)))\n.PHONY: verify\nverify: $$(ROOT)Makefile\n", "idle")
+five("verify: FORCE (FORCE has no rule)", "verify: FORCE\nFORCE:\n", "idle")
+five("verify: dep with a double-colon dep:: and no recipe", "verify: dep\ndep::\n", "idle")
+B_ = ".PHONY: verify\nverify: build\nbuild: src.c\n\tcp src.c build\n"
+five("dcp-B: double-colon Makefile rule + a real verify (verify: build)", ".PHONY: verify\nMakefile:: Makefile.in\n\t@true\nverify: build\nbuild: src.c\n\tcp src.c build\n", "present", SRC2)
+five("mkdc-B: double-colon include rule + a real verify", GENDC + B_, "present", SRC2)
+five("dcp-B2: double-colon Makefile rule without prerequisites (Makefile:: ;@true) + a real verify", ".PHONY: verify\nMakefile:: ;@true\nverify: build\nbuild: src.c\n\tcp src.c build\n", "present", SRC)
+five("auto-B: single-colon Makefile: Makefile.in + a real verify", ".PHONY: verify\nMakefile: Makefile.in\n\ttouch Makefile\nverify: build\nbuild: src.c\n\tcp src.c build\n", "present", SRC2)
+five("pattern rule + a real verify (verify: x.out, %.out: %.in)", ".PHONY: verify\n%.out: %.in\n\tcp $< $@\nverify: x.out\n", "present", {"x.in": "x"})
+five("deferred MAKEFILE_LIST + .SECONDEXPANSION + a real verify", ".SECONDEXPANSION:\nROOT = $(dir $(lastword $(MAKEFILE_LIST)))\n.PHONY: verify\nverify: $$(ROOT)build\nbuild: src.c\n\tcp src.c build\n", "present", SRC)
+five("build recipe starts with $(MAKE) (-q 0 when up to date, -q -B 2, -n 0): present", ".PHONY: verify\nverify: build\nbuild: src.c\n\t$(MAKE) -f Makefile copy\ncopy:\n\tcp src.c build\n", "present", SRC)
+# PINNED LIMIT: a makefile rule whose recipe leaves its prerequisite NEWER than the makefile (here `Makefile:: Makefile.in` with `@true`, Makefile.in newer)
+# never converges. GNU make 3.81 answers 2 to every question (missing); 4.3 answers the first question 0 and loops forever on `-q -B -o Makefile` (the -o file is
+# remade and re-executed each time): the question times out, 'error'. Both are RED for the unit, present or not; asserted: not present, nothing left, quick.
+d = os.path.join(UD, "never-converges"); os.makedirs(d)
+open(os.path.join(d, "Makefile"), "w").write(".PHONY: verify\nMakefile:: Makefile.in\n\t@true\nverify: build\nbuild: src.c\n\tcp src.c build\n")
+for f in ("src.c", "Makefile.in", "build"): open(os.path.join(d, f), "w").write("x")
+os.utime(os.path.join(d, "Makefile"), (946684800, 946684800)); os.utime(os.path.join(d, "src.c"), (946684800, 946684800))
+os.utime(os.path.join(d, "Makefile.in"), (946684900, 946684900)); os.utime(os.path.join(d, "build"), (946685000, 946685000))
+m.MAKE_TIMEOUT = 2.0; m._rc_cache.clear(); t0 = time.time(); st_nc = m.make_target_state(d, "verify"); el_nc = time.time() - t0; m.MAKE_TIMEOUT = 20.0
+say(st_nc in ("norule", "error") and el_nc < 15, "pinned limit: a makefile rule whose prerequisite stays newer than the makefile is judged missing/error (not present), quickly", "state %s after %.1fs" % (st_nc, el_nc))
+# the -B question carries the unit's makefile and the makefiles it read (-o); a unit without a makefile is never asked -B
 CB3 = os.path.join(TMP, "countbin3"); os.makedirs(CB3); CLOG3 = os.path.join(TMP, "make-args3.log")
 open(os.path.join(CB3, "make"), "w").write('#!/usr/bin/env bash\necho "$*" >> "%s"\nexec "%s" "$@"\n' % (CLOG3, real_make)); os.chmod(os.path.join(CB3, "make"), 0o755)
 d3 = os.path.join(UD, "five-pinargs"); os.makedirs(d3); open(os.path.join(d3, "Makefile"), "w").write(".PHONY: verify\n")
 os.environ["PATH"] = CB3 + os.pathsep + path1; m._rc_cache.clear(); m.make_target_state(d3, "verify"); os.environ["PATH"] = path1
-bl = [a for a in open(CLOG3).read().split("\n") if " -B " in a]
-say(len(bl) == 1 and re.search(r"-q -B -f Makefile -f \S*pin\.mk -- verify$", bl[0]) is not None, "the -B look names the unit's makefile and the pin makefile after it", "calls %s" % bl)
+calls3 = [a for a in open(CLOG3).read().split("\n") if a]
+bl = [a for a in calls3 if " -B " in a]
+ll = [a for a in calls3 if "list.mk" in a]
+say(len(bl) == 1 and re.search(r"-q -B -o Makefile -- verify$", bl[0]) is not None and " -f " not in bl[0], "the -B look names every makefile make read with -o and adds no -f (nothing enters the unit's rule base)", "calls %s" % bl)
+say(len(ll) == 1 and re.search(r"-q -f Makefile -f \S*list\.mk -- __monorepo_probe_[0-9a-f]+$", ll[0]) is not None and " -o " not in ll[0] and " -B" not in ll[0],
+    "the list pass is `-q -f <makefile> -f list.mk -- <random name>`: no -o, no -B", "calls %s" % ll)
+iq = [i for i, a in enumerate(calls3) if a.endswith("-q -- verify")]
+say(len(iq) == 1 and len(ll) == 1 and len(bl) == 1 and iq[0] < calls3.index(ll[0]) < calls3.index(bl[0]), "order: the first question, then the list pass, then the -B look", "calls %s" % calls3)
 # MAKEFLAGS=r (no built-in rules) in the caller's environment: `verify: tool` with tool.sh (the built-in `.sh` rule) stays present
 d4 = os.path.join(UD, "flags-r"); os.makedirs(d4); open(os.path.join(d4, "Makefile"), "w").write("verify: tool\n"); open(os.path.join(d4, "tool.sh"), "w").write("echo x\n")
 ctl = subprocess.run(["make", "-C", d4, "-q", "--", "verify"], capture_output=True, env=dict(os.environ, MAKEFLAGS="r")).returncode

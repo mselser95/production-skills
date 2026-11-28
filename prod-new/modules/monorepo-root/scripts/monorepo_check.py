@@ -9,9 +9,7 @@ Exit: 0 clean - 1 findings - 2 cannot run (PyYAML missing, repo.yaml unreadable 
 Reads text/JSON/YAML and asks `git ls-files` for a tracked node_modules/. No network, no pnpm.
 "Unit has target T" (service, database) is make's own verdict by EXIT STATUS, nothing printed is read.
 The inspection asks `make -C <unit> -q <target>`; only if that answers 0 does it ask `make -C <unit> -q -B <target>` (the same question with every file considered out of date, so the verdict does not depend on whether the
-unit's outputs are fresh, and with the unit's makefile named by -f and a module-owned makefile read after it
-that gives every makefile make has read an empty recipe, so that no makefile is remade: GNU make 3.81
-remakes an included makefile that has a rule under -B and answers 1 for it, 4.3 does not); only if the last question asked
+unit's outputs are fresh, and with every makefile make read named by -o (--assume-old: no makefile is remade and no rule is added to the unit's rule base; GNU make 3.81 remakes an included makefile that has a rule under -B and answers 1 for it, 4.3 does not; the names come from one list pass, asked first: make -C <unit> -q -f <unit makefile> -f <list makefile> <random name>, whose module-owned makefile writes $(MAKEFILE_LIST) into a file in the private temp dir by a parse-time $(shell printf ...), the exit status of the pass is not used, and a list that is empty or names something that is not a file beside the unit leaves the unit unanswerable: fail closed); only if the last question asked
 answered 2 does it ask `make -C <unit> -n <target>` (exit status only; output discarded). Verdict: -q 1 = present; -q 0 and -q -B 1 =
 present (the target was only up to date), unless a file or directory named like the target sits beside the Makefile and the rule is not
 `.PHONY` (the real run says up to date: idle, with a `.PHONY` hint); -q -B 0 = idle (nothing to run even with everything out of date); an
@@ -20,9 +18,8 @@ included file that has a rule may be remade, its recipe IN FULL, plain lines too
 containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither (an upper bound: it
 stops at the first out-of-date prerequisite whose recipe starts with a plain line; a file target that a `+` line just created may be deleted
 again). The `-B` question executes the same classes of lines, passed on to sub-makes in question mode as well, but MORE of them, since
-nothing counts as up to date: the `+` / `$(MAKE)` lines of prerequisites and sub-make targets that were up to date run too, and an included makefile is not remade (the pin). Under `-n` make walks the WHOLE recipe, so every `+` / `$(MAKE)` line of the
-target and of all its out-of-date prerequisites runs (a sub-make in dry-run mode runs its `+` lines and not its plain lines). Apart from that remake under the first question and -n, no plain recipe line runs under any question; the
-pin makefile runs nothing. On GNU make 3.81 and 4.3 the judgment is the same, and the same before and after a real run, for every shape
+nothing counts as up to date: the `+` / `$(MAKE)` lines of prerequisites and sub-make targets that were up to date run too, and no makefile is remade (-o). Under `-n` make walks the WHOLE recipe, so every `+` / `$(MAKE)` line of the
+target and of all its out-of-date prerequisites runs (a sub-make in dry-run mode runs its `+` lines and not its plain lines). Apart from that remake under the first question, the list pass and -n, no plain recipe line runs under any question; the list pass asks for a name no unit has, so it executes the unit's parse-time $(shell ...), the remake of included makefiles (as the first question does) and the module's one printf that writes the makefile names, nothing else. On GNU make 3.81 and 4.3 the judgment is the same, and the same before and after a real run, for every shape
 measured (an included makefile that has a rule, with no rule that runs anything for the target, is idle, and
 so is verify: gen.mk with gen.mk such an included makefile; the same unit with verify: build or a $(MAKE)
 build line is present), except a recipe made only of `+` / `$(MAKE)` lines that run nothing (`verify:` with `+true`, `+@echo
@@ -285,10 +282,15 @@ _timed_out = set()
 _live_groups = set()
 PROBE_NAME = "__monorepo_probe_" + secrets.token_hex(8)  # a name no unit can have as a real target
 # The -B look must be about the target's own rule graph, not about makefile remaking: GNU make 3.81 remakes every
-# makefile it reads that has a rule (an `-include gen.mk` with a `gen.mk:` rule) under -B and answers 1 for it. This
-# module-owned makefile, read AFTER the unit's, gives every makefile make has read an empty recipe, so none is remade.
-PIN_MK = "$(foreach f,$(MAKEFILE_LIST),$(eval $(f): ;))\n"
-_pin = {}
+# makefile it reads that has a rule (an `-include gen.mk` with a `gen.mk:` rule) under -B and answers 1 for it. So the
+# -B look names every makefile make read with -o (--assume-old): no makefile is remade, nothing is added to the unit's
+# rule base (a pin rule collides with a double-colon rule for the same makefile). The names come from a first pass,
+# `make -q -f <unit makefile> -f <list.mk> -- <random name>`, whose module-owned makefile writes $(MAKEFILE_LIST) into a
+# file of the private directory (a parse-time $(shell printf ...)); that file, not make's output, is what is read.
+LIST_MK = ("__monorepo_sq = $(subst ','\\'',$(1))\n"
+           "$(shell printf '%%s\\n' $(foreach f,$(MAKEFILE_LIST),'$(call __monorepo_sq,$(f))') > '%s')\n")
+_private = {}
+_defer = {"on": False, "sig": None}
 
 
 def _kill_group(pgid):
@@ -304,19 +306,82 @@ def _kill_all_groups():
     _live_groups.clear()
 
 
-atexit.register(_kill_all_groups)
+def _cleanup_private():
+    d = _private.get("dir")
+    if d:
+        shutil.rmtree(d, True)
+        _private.pop("dir", None)
 
 
-def pin_file():
-    """Path of the module-owned pin makefile (written once into a private temp dir, removed at exit)."""
-    if "path" not in _pin:
-        d = tempfile.mkdtemp(prefix="monorepo-pin-")
-        atexit.register(shutil.rmtree, d, True)
-        path = os.path.join(d, "pin.mk")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(PIN_MK)
-        _pin["path"] = path
-    return _pin["path"]
+def _cleanup():
+    _kill_all_groups()
+    _cleanup_private()
+
+
+atexit.register(_cleanup)
+
+
+_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def _die(signum):
+    """Kill every live question group, remove the private directory, exit 128+signum (os._exit: nothing else runs).
+    Later signals are ignored first: a process group TERM reaches this process twice (once from the group, once
+    forwarded by make) and the second must not cut the cleanup short."""
+    for sig in _SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    _cleanup()
+    os._exit(128 + signum)
+
+
+def _on_signal(signum, _frame):
+    if _defer["on"]:  # a question is being spawned: its pid is not registered yet; the spawner re-raises it
+        _defer["sig"] = signum
+        return
+    _die(signum)
+
+
+def install_signal_handlers():
+    """INT, TERM and HUP clean up and exit 128+n: a question runs in its OWN session, so a signal sent to this
+    process (or its group) does not reach it, and the default TERM/HUP action would skip atexit."""
+    for sig in _SIGNALS:
+        signal.signal(sig, _on_signal)
+
+
+def private_dir():
+    """The private temp directory (list.mk and its output), made on first use, removed at exit and on a signal."""
+    if "dir" not in _private:
+        _private["dir"] = tempfile.mkdtemp(prefix="monorepo-q-")
+    return _private["dir"]
+
+
+def makefile_names(unitdir):
+    """The makefiles make reads for the unit (its MAKEFILE_LIST, minus the module's own list.mk), or None when the list
+    pass wrote nothing or names something that is not a file beside the unit (a name with a space, a newline...):
+    the caller fails closed. Exit status of the pass is not used. One pass per unit."""
+    if ("names", unitdir) in _rc_cache:
+        return _rc_cache[("names", unitdir)]
+    names = None
+    mk = unit_makefile(unitdir)
+    if mk is not None:
+        d = private_dir()
+        out, lm = os.path.join(d, "list.out"), os.path.join(d, "list.mk")
+        with open(lm, "w", encoding="utf-8") as fh:
+            fh.write(LIST_MK % out.replace("'", "'\\''"))
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+        make_ask(unitdir, PROBE_NAME, "-q", "-f", mk, "-f", lm, cache=False)
+        try:
+            with open(out, encoding="utf-8", errors="replace") as fh:
+                names = [n for n in fh.read().split("\n") if n and n != lm]
+        except OSError:
+            names = None
+        if names is not None and (not names or any(not os.path.lexists(os.path.join(unitdir, n)) for n in names)):
+            names = None
+    _rc_cache[("names", unitdir)] = names
+    return names
 
 
 def unit_makefile(unitdir):
@@ -331,21 +396,17 @@ def unit_makefile(unitdir):
     return None
 
 
-def make_ask(unitdir, target, *flags):
-    """make's exit status for `make <flags> -- target` in unitdir (flags: -q, -q -B or -n), or None when make could
-    not be run, was killed by a signal or did not answer in time. One call per (unitdir, target, flags). The question
-    runs in its own session; whatever is left in that process group afterwards (a timed-out make's children, a
-    background job of a `+` line) is killed with SIGKILL, on every path out. With -B the unit's makefile is named with
-    -f and the pin makefile is read after it (see PIN_MK)."""
+def make_ask(unitdir, target, *flags, cache=True):
+    """make's exit status for `make -C unitdir <flags> -- target` (flags: -q, -q -B -o NAME..., -n, or the list pass's
+    -q -f NAME -f list.mk), or None when make could not be run, was killed by a signal or did not answer in time.
+    One call per (unitdir, target, flags) unless cache=False. The question runs in its own session; whatever is left
+    in that process group afterwards (a timed-out make's children, a background job of a `+` line) is killed with
+    SIGKILL, on every path out. A signal that arrives while the question is being spawned is held until its group is
+    registered, then acted on (the handler kills the registered groups)."""
     key = (unitdir, target, flags)
-    if key in _rc_cache:
+    if cache and key in _rc_cache:
         return _rc_cache[key]
-    cmd = ["make", "-C", unitdir, *flags]
-    if "-B" in flags:
-        mk = unit_makefile(unitdir)
-        if mk is not None:
-            cmd += ["-f", mk, "-f", pin_file()]
-    cmd += ["--", target]
+    cmd = ["make", "-C", unitdir, *flags, "--", target]
     log = os.environ.get("MONOREPO_QUESTION_LOG")
     if log:
         try:
@@ -357,9 +418,15 @@ def make_ask(unitdir, target, *flags):
     timeout = PROBE_TIMEOUT if target == PROBE_NAME else MAKE_TIMEOUT
     proc = None
     try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                env=make_env(), start_new_session=True)
-        _live_groups.add(proc.pid)
+        _defer["on"], _defer["sig"] = True, None
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    env=make_env(), start_new_session=True)
+            _live_groups.add(proc.pid)
+        finally:
+            _defer["on"] = False
+        if _defer["sig"] is not None:
+            _on_signal(_defer["sig"], None)
         try:
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -374,8 +441,10 @@ def make_ask(unitdir, target, *flags):
                 proc.wait(timeout=5)
             except (OSError, subprocess.SubprocessError):
                 pass
-    _rc_cache[key] = rc if rc is not None and rc >= 0 else None
-    return _rc_cache[key]
+    result = rc if rc is not None and rc >= 0 else None
+    if cache:
+        _rc_cache[key] = result
+    return result
 
 
 def make_rc(unitdir, target):
@@ -386,11 +455,18 @@ def make_rc(unitdir, target):
 
 
 def make_rc_always(unitdir, target):
-    """The second look, asked ONLY when the first answered 0: `make -q -B -- target` (--always-make: every file is
-    considered out of date), with the unit's makefiles pinned so they are not remade (PIN_MK). 1 (or 2, then the -n
-    question) = make has work for the target when nothing is up to date, so the rule graph is real and the target was
-    merely up to date; 0 = nothing to run even then."""
-    return make_ask(unitdir, target, "-q", "-B")
+    """The second look, asked ONLY when the first answered 0: `make -q -B -o <makefile>... -- target` (--always-make:
+    every file is considered out of date, except the makefiles named with --assume-old, which are not remade), the
+    names from makefile_names (one list pass). 1 (or 2, then the -n question) = make has work for the target when
+    nothing is up to date, so the rule graph is real and the target was merely up to date; 0 = nothing to run even
+    then. None (fail closed: 'error') when the makefile names cannot be had."""
+    names = makefile_names(unitdir)
+    if names is None:
+        return None
+    o = []
+    for n in names:
+        o += ["-o", n]
+    return make_ask(unitdir, target, "-q", "-B", *o)
 
 
 def make_rc_dry(unitdir, target):
@@ -428,9 +504,9 @@ def unit_catch_all(unitdir):
 
 def make_target_state(unitdir, target):
     """'present' | 'idle' | 'norule' | 'error' | 'catch-all'. The verdict is read from make's exit status only; the
-    -B look names the unit's makefile and pins every makefile make has read (PIN_MK), so remaking an included
-    makefile (GNU make 3.81) cannot flip it; it can still differ between make 3.81 and 4.x for a makefile that is a
-    PREREQUISITE of T (see README, limits).
+    -B look names every makefile make read with -o (--assume-old; the names come from one list pass), so remaking
+    an included makefile (GNU make 3.81) cannot flip it and no rule is added to the unit; a makefile that is a
+    PREREQUISITE of T counts as old, so such a T is idle (see README, limits). The list failing closes to 'error'.
     present = make would run something for T (-q exit 1), or -q 0 and `-q -B` 1 (T was only up to date) unless a file
     named T sits beside the Makefile, or the last question asked answered 2 and `make -n` exit 0 (a recipe that starts
     with `$(MAKE)`/`+`: see make_rc_dry).
@@ -780,6 +856,9 @@ def check(root):
             elif st == "norule":
                 what = ("make has no rule for %s, the Makefile has an error, or the recipe fails already under "
                         "`make -n` (%s)" % (t, "make -q: 0, make -q -B: 2, make -n: 2" if rc == 0 else "make -q: 2, make -n: 2"))
+            elif rc == 0 and rb is None and _rc_cache.get(("names", p), 0) is None:
+                what = ("make could not answer for %s (the makefiles make read could not be listed: a name with a space "
+                        "or newline, a file that is not beside the unit, or no list written)" % t)
             elif rc == 0:
                 what = ("make could not answer for %s (%s)" % (t, "timed out, was killed or could not be run"
                                                               if rb is None or (rb == 2 and rn is None)
@@ -860,6 +939,7 @@ def cmd_validate(path):
 
 
 def main(argv):
+    install_signal_handlers()
     if len(argv) == 3 and argv[1] == "check":
         return cmd_check(argv[2])
     if len(argv) == 4 and argv[1] == "units":
