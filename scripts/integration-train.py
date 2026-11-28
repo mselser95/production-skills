@@ -151,7 +151,7 @@ Algorithm (one batch per invocation):
     branch exists (the JSON names it then). The read-back and the exit path's look at the ref
     are bounded too (10 s each): when git hangs there the message says the branch's existence
     "could NOT be confirmed" (exit 2) or "could NOT be determined" (after a signal: 128+N),
-    never that it exists or not. After a signal the tool exits within 25 seconds even if git hangs. If delivery fails the exit is 2,
+    never that it exists or not. All of it (update-ref, read-back, the exit path's look) shares ONE budget of 20 s from the start of delivery (a call gets what is left of it, none is made when it is spent: the state is then "unknown"), so after a signal the tool exits within 25 seconds even if git hangs (budget + 3 s cleanup + slack). If delivery fails the exit is 2,
     the JSON says "delivery_error" with the verified "commit", and the private root is
     KEPT (its path is printed) so the result is not lost; objects already stored in
     yours stay as unreachable garbage, no ref is left. The same garbage (an unreferenced pack,
@@ -265,6 +265,10 @@ QUIET = ("conflict", "empty", "unrelated", "unrepresentable-on-this-filesystem",
 STALE_SECONDS = 86400
 UPDATE_REF_TIMEOUT = 10
 BLOCKED_GIT_TIMEOUT = 10  # every short local git read made while INT/TERM/HUP are blocked
+BLOCKED_BUDGET = 20  # ONE shared deadline for everything done with INT/TERM/HUP blocked (update-ref, read-back, look)
+CLEANUP_BOUND = 3  # cleanup() stays outside the budget with this bound
+EXIT_BOUND = BLOCKED_BUDGET + CLEANUP_BOUND + 2  # after a signal: budget + cleanup + scheduling slack
+_BLOCKED_DEADLINE = None  # time.monotonic() value; set once, when the signals are first blocked for the budget
 
 
 def blocked_git_timeout():
@@ -272,6 +276,26 @@ def blocked_git_timeout():
     if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_BLOCKED_GIT_TIMEOUT"):
         return float(os.environ["TRAIN_TEST_BLOCKED_GIT_TIMEOUT"])
     return BLOCKED_GIT_TIMEOUT
+
+
+def blocked_budget():
+    if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_BLOCKED_BUDGET"):
+        return float(os.environ["TRAIN_TEST_BLOCKED_BUDGET"])
+    return BLOCKED_BUDGET
+
+
+def start_blocked_budget(force=False):
+    """Start the shared deadline (once, unless force: the delivery window restarts it)."""
+    global _BLOCKED_DEADLINE
+    if force or _BLOCKED_DEADLINE is None:
+        _BLOCKED_DEADLINE = time.monotonic() + blocked_budget()
+
+
+def blocked_limit(own):
+    """min(own limit, time left in the shared budget); None = no time left: the call must NOT be made."""
+    start_blocked_budget()
+    left = _BLOCKED_DEADLINE - time.monotonic()
+    return None if left <= 0 else min(own, left)
 
 UNREP = "unrepresentable-on-this-filesystem"
 # The `why` values an ejection record can carry, classified for recovery:
@@ -457,7 +481,7 @@ class Train:
         if hold == "update-ref" and ur_mode == "slowexit":
             # test hook: update-ref writes the ref, then its wrapper lingers past the hard timeout
             cmd = ["sh", "-c", '"$@"; sleep 4', "sh"] + list(cmd)
-        if hold == "update-ref" and ur_mode == "stuck":
+        if hold == "update-ref" and ur_mode in ("stuck", "stuckready"):  # stuckready also pauses with READY (below)
             # test hook: a stuck update-ref: it holds <ref>.lock (as git does) and never finishes
             # (a lock that already exists is left byte-identical: git would fail or wait on it, not rewrite it)
             cmd = ["sh", "-c", 'for a in "$@"; do case $a in --git-dir=*) g=${a#--git-dir=};; refs/heads/*) '
@@ -465,7 +489,7 @@ class Train:
         self.spawning = True
         try:
             proc = subprocess.Popen(cmd, start_new_session=True, **kw)
-            if hold == "update-ref" and ur_mode in ("complete", "kill"):
+            if hold == "update-ref" and ur_mode in ("complete", "kill", "stuckready"):
                 # test hook: pause right after spawning update-ref, before waiting for it
                 with open(os.environ["TRAIN_TEST_UPDATEREF_READY"], "w") as fh:
                     fh.write("spawned\n")
@@ -746,7 +770,7 @@ class Train:
                 if n != "repo.git":
                     force_remove(os.path.join(self.tmp, n))
             return
-        force_remove(self.tmp, 3.0 if killed else 0.0)
+        force_remove(self.tmp, float(CLEANUP_BOUND) if killed else 0.0)
 
     # ---- admission ------------------------------------------------------
     def describe(self, c, base_sha):
@@ -1349,19 +1373,25 @@ class Train:
         # are blocked (a pending one is delivered when the mask is restored, after the outcome is known);
         # update-ref inherits the blocked mask, is not killed by cleanup, and has a hard timeout.
         old = signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))
+        start_blocked_budget(force=True)
         err = None
         unknown = False
         try:
             self.pending = (branch, sha)
             try:
+                ur_own = float(os.environ.get("TRAIN_TEST_UPDATEREF_TIMEOUT") or UPDATE_REF_TIMEOUT) \
+                    if os.environ.get("TRAIN_SELFTEST") else UPDATE_REF_TIMEOUT
                 self.git("update-ref", "refs/heads/" + branch, sha, "", caller="gitdir",  # "" = must not exist
-                         timeout=float(os.environ.get("TRAIN_TEST_UPDATEREF_TIMEOUT") or UPDATE_REF_TIMEOUT)
-                         if os.environ.get("TRAIN_SELFTEST") else UPDATE_REF_TIMEOUT)
+                         timeout=blocked_limit(ur_own) or 0.001)
             except Fatal as e:
                 err = e
             try:  # a read-back that hangs is killed after its bound: the branch's state is then UNKNOWN
+                lim = blocked_limit(blocked_git_timeout())
+                if lim is None:
+                    raise GitFail("git rev-parse was not run: the %ss budget for work done with signals blocked "
+                                  "is spent" % blocked_budget(), sub="rev-parse")
                 got = self.git("rev-parse", "--verify", "-q", "refs/heads/" + branch, caller="gitdir",
-                               ok=(0, 1), timeout=blocked_git_timeout()).stdout.strip()
+                               ok=(0, 1), timeout=lim).stdout.strip()
             except Fatal as e:
                 got = ""
                 unknown = True
@@ -1382,9 +1412,11 @@ class Train:
                 self.state_unknown = branch  # the exit path must not ask git again
             signal.pthread_sigmask(signal.SIG_SETMASK, old)  # a pending signal acts HERE, outcome known
         if err is not None:
-            raise Fatal("%s (branch refs/heads/%s %s)" % (
+            fe = Fatal("%s (branch refs/heads/%s %s)" % (
                 err, branch, "could NOT be confirmed to exist or not" if unknown
                 else "DOES exist" if self.delivered else "does not exist"))
+            fe.branch_state = "unknown" if unknown else "exists" if self.delivered else "absent"
+            raise fe
         if self.delivered != branch or got != sha:
             raise Fatal("branch %s does not point at %s" % (branch, sha[:12]))
         self.git("cat-file", "-e", sha + "^{tree}", caller="gitdir")
@@ -1433,6 +1465,7 @@ class Train:
         branch = ""
         commits = {}
         failure = ""
+        fstate = None
         final = ""
         if batch:
             say("batch: %d admitted (window %d): %s" % (len(batch), window, ",".join(batch)))
@@ -1454,6 +1487,7 @@ class Train:
                         self.delivered = branch
                     except Fatal as e:
                         failure = str(e)
+                        fstate = getattr(e, "branch_state", None)
                         self.keep_root = True
                         branch = self.delivered  # "" unless the ref was read back as existing
             reds = [e for e in self.ejected if e["why"] not in QUIET]
@@ -1486,8 +1520,12 @@ class Train:
             summary["leftover"] = leftover
         if failure:
             summary.update({"delivery_error": failure, "commit": final, "private_root": self.tmp})
-            print("error: verified but NOT delivered: %s; commit %s is in the private repository %s"
-                  " (kept)" % (esc(failure), final, esc(self.priv)), file=sys.stderr)
+            # the prefix claims only what is known about the branch (see deliver())
+            lead = {"unknown": "verified; delivery could NOT be confirmed",
+                    "exists": "verified; update-ref did not report success but the branch DOES exist"
+                    }.get(fstate, "verified but NOT delivered")
+            print("error: %s: %s; commit %s is in the private repository %s"
+                  " (kept)" % (lead, esc(failure), final, esc(self.priv)), file=sys.stderr)
         self.json_done = True
         emit(json.dumps(summary, separators=(",", ":")), True)
         if failure:
@@ -1561,7 +1599,7 @@ def parse(argv):
 _EARLY = []
 
 
-def _no_more_signals():
+def _no_more_signals():  # also starts the shared budget when no delivery window did
     """From here to the end of the process no INT/TERM/HUP can change the exit status. CPython's
     finalization resets Python-level handlers to SIG_DFL once sys.exit has begun, so a flag in a
     handler is not enough: the signals are BLOCKED (one that is pending stays pending and is discarded
@@ -1571,6 +1609,7 @@ def _no_more_signals():
     ends the process after a signal, or after the verdict, goes through here: the early handler, the
     Train handler and its deferred exit in spawn(), and the exit of __main__."""
     signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))
+    start_blocked_budget()
 
 
 class _FinalizeWindow:
@@ -1627,8 +1666,11 @@ def main(argv):
         unknown = t.state_unknown
         if not t.delivered and t.pending and not t.json_done and not unknown:
             try:  # the signal may have hit update-ref after the ref was created: look, never assume
+                lim = blocked_limit(blocked_git_timeout())  # None: the shared budget is spent, no call is made
+                if lim is None:
+                    raise GitFail("budget spent", sub="rev-parse")
                 got = t.git("rev-parse", "--verify", "-q", "refs/heads/" + t.pending[0], caller="gitdir",
-                            ok=(0, 1), timeout=blocked_git_timeout()).stdout.strip()
+                            ok=(0, 1), timeout=lim).stdout.strip()
                 if got == t.pending[1]:
                     t.delivered = t.pending[0]
             except BaseException:  # noqa: BLE001 -- includes the bounded read's timeout: state unknown

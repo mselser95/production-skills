@@ -2269,7 +2269,13 @@ def tool(extra_env, sig, delay, anchor=None):
             os.unlink(f)
     mark = anchor or ready
     t0 = time.time()
-    env = dict(os.environ, TRAIN_SELFTEST="1", TMPDIR=tmpdir, **extra_env)
+    env = dict(os.environ, TRAIN_SELFTEST="1", TMPDIR=tmpdir)
+    for k, v in extra_env.items():  # a None value REMOVES the variable (production-mode cases)
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
+    t_sig = None
     p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller, "--verify", "true",
                           "--keep", "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1"], cwd=wt,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
@@ -2281,6 +2287,7 @@ def tool(extra_env, sig, delay, anchor=None):
         time.sleep(delay)
         for one in sig.split("+"):  # "TERM+INT": two DIFFERENT signals back to back
             if p.poll() is None:
+                t_sig = time.time()
                 p.send_signal(getattr(signal, "SIG" + one))
     dead = False
     try:
@@ -2290,6 +2297,7 @@ def tool(extra_env, sig, delay, anchor=None):
         out, err = p.communicate()
         dead = True
     elapsed = time.time() - t0
+    since = (time.time() - t_sig) if t_sig else 0.0
     rs = refs()
     out = out.decode("utf-8", "replace")
     left = len([x for x in os.listdir(tmpdir) if x.startswith("itrain-")])
@@ -2311,7 +2319,8 @@ def tool(extra_env, sig, delay, anchor=None):
     for lk in locks:
         os.unlink(lk)
     seen = out + err.decode("utf-8", "replace")
-    return {"rc": "DEADLINE" if dead else p.returncode if not bad_stderr(err) else "STDERR%s" % bad_stderr(err),
+    return {"since": since, "errtxt": err.decode("utf-8", "replace"),
+            "rc": "DEADLINE" if dead else p.returncode if not bad_stderr(err) else "STDERR%s" % bad_stderr(err),
             "fast": int(elapsed < 8), "left": left, "unk": int("could NOT be determined" in seen),
             "conf": int("could NOT be confirmed" in seen), "namedb": int("train-hangbr" in seen), "ref": len(rs), "line": len(lines), "lock": len(locks),
             "lockc": int(kept == "planted by another process\n"),
@@ -2356,6 +2365,67 @@ if mode == "hang":  # a git stand-in hangs one read made with the signals blocke
         print(fmt(o, ["rc", "fast", "conf", "namedb"]))
     else:
         print(fmt(o, ["rc", "ref", "line", "json", "same"]))
+elif mode == "budget":  # ONE shared deadline for everything done with the signals blocked
+    which = sys.argv[7]
+    bb = os.path.join(os.path.dirname(ready), "budgetbin")
+    cnt = os.path.join(os.path.dirname(ready), "budget.count")
+    pids = os.path.join(os.path.dirname(ready), "budget.pids")
+    if os.path.exists(cnt):
+        os.unlink(cnt)
+    os.environ["DELIV_DEADLINE"] = "30"
+    sig = "INT"
+    limit = 0
+    extra = {"PATH": bb + ":" + os.environ["PATH"], "HANG_COUNT": cnt, "HANG_PIDS": pids,
+             "TRAIN_TEST_BRANCH": "train-hangbr", "TRAIN_TEST_UPDATEREF": "stuckready",
+             "TRAIN_TEST_UPDATEREF_READY": ready}
+    if which == "A":  # update-ref hangs 2 s, the read-back is slow (1.8 s), the exit look hangs
+        extra.update({"TRAIN_TEST_UPDATEREF_TIMEOUT": "2", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "2",
+                      "TRAIN_TEST_BLOCKED_BUDGET": "2.5", "RB_SLOW": "1.8", "HANG_FROM": "2"})
+        limit = 4.5
+    elif which == "B":  # the read-back answers inside the budget, the exit look gets what is left
+        extra.update({"TRAIN_TEST_UPDATEREF_TIMEOUT": "1.2", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "2",
+                      "TRAIN_TEST_BLOCKED_BUDGET": "2.5", "RB_SLOW": "0.8", "HANG_FROM": "2"})
+        limit = 3.4
+    elif which == "two":  # read-back and look both hang: the look is skipped (one call, one limit)
+        extra.update({"TRAIN_TEST_UPDATEREF_TIMEOUT": "0.5", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "1.5",
+                      "TRAIN_TEST_BLOCKED_BUDGET": "9", "HANG_FROM": "1"})
+        limit = 3.0
+    elif which == "prod":  # hooks set WITHOUT the selftest's variable: ignored, the real bounds hold
+        extra = {"PATH": bb + ":" + os.environ["PATH"], "HANG_COUNT": cnt, "HANG_PIDS": pids, "TRAIN_SELFTEST": None,
+                 "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "0.1", "TRAIN_TEST_BLOCKED_BUDGET": "0.1", "RB_SLOW": "0.5"}
+        sig = None
+    elif which == "msg_unknown":  # the read-back hangs, no signal
+        extra.update({"TRAIN_TEST_UPDATEREF": "complete", "TRAIN_TEST_BLOCKED_GIT_TIMEOUT": "1", "HANG_FROM": "1"})
+        sig = None
+    elif which == "msg_exists":  # update-ref wrote the ref, then outlived its timeout
+        extra.update({"TRAIN_TEST_UPDATEREF": "slowexit", "TRAIN_TEST_UPDATEREF_TIMEOUT": "1"})
+        sig = None
+    elif which == "msg_absent":  # a stuck update-ref, killed at its timeout: no ref
+        extra.update({"TRAIN_TEST_UPDATEREF": "stuck", "TRAIN_TEST_UPDATEREF_TIMEOUT": "1"})
+        sig = None
+    o = tool(extra, sig, 0.1)
+    if os.path.exists(pids):
+        for ln in open(pids).read().split():
+            try:
+                os.kill(int(ln), signal.SIGKILL)
+            except OSError:
+                pass
+    n = int(open(cnt).read()) if os.path.exists(cnt) else 0
+    t = o["errtxt"]
+    if which in ("A", "B"):
+        print("rc=%s within=%d unk=%d" % (o["rc"], int(o["since"] < limit), o["unk"]))
+    elif which == "two":
+        print("rc=%s one=%d unk=%d calls=%d" % (o["rc"], int(o["since"] < limit), o["unk"], n))
+    elif which == "prod":
+        print(fmt(o, ["rc", "ref", "line", "json"]))
+    elif which == "msg_unknown":
+        print("rc=%s lead=%d claim=%d" % (o["rc"], int("error: verified; delivery could NOT be confirmed: " in t),
+                                          int("NOT delivered" in t)))
+    elif which == "msg_exists":
+        print("rc=%s lead=%d claim=%d" % (o["rc"], int("error: verified; update-ref did not report success but the "
+                                                       "branch DOES exist: " in t), int("NOT delivered" in t)))
+    else:
+        print("rc=%s lead=%d unk=%d" % (o["rc"], int("error: verified but NOT delivered: " in t), o["conf"]))
 elif mode == "report":  # a signal while the verdict is being REPORTED: the verdict's exit code, the JSON last
     o = tool({"TRAIN_TEST_REPORT_READY": ready}, sys.argv[7], 0)
     print(fmt(o, ["rc", "ref", "line", "json", "same", "flag"]))
@@ -2507,11 +2577,35 @@ esac
 exec "$REAL_GIT" "$@"
 XEOF
 chmod +x "$S/hangbin/git"
+# budget stand-in: the rev-parse calls on a train branch are counted; call number RB_SLOW_N (default 1) sleeps RB_SLOW
+# seconds and then answers like the real git; every call from number HANG_FROM on (0 = none) hangs (30 s, pid recorded)
+mkdir -p "$S/budgetbin"
+cat >"$S/budgetbin/git" <<'XEOF'
+#!/bin/bash
+case " $* " in *" rev-parse --verify -q refs/heads/train-"*)
+    n=$(($(cat "$HANG_COUNT" 2>/dev/null) + 1))
+    echo "$n" >"$HANG_COUNT"
+    if [ "${HANG_FROM:-0}" != 0 ] && [ "$n" -ge "$HANG_FROM" ]; then
+        echo $$ >>"$HANG_PIDS"
+        exec sleep 30
+    fi
+    if [ "$n" = "${RB_SLOW_N:-1}" ] && [ -n "$RB_SLOW" ]; then sleep "$RB_SLOW"; fi ;;
+esac
+exec "$REAL_GIT" "$@"
+XEOF
+chmod +x "$S/budgetbin/git"
 for sg in INT TERM HUP; do
     case $sg in HUP) want=129 ;; INT) want=130 ;; TERM) want=143 ;; esac
     check "blocked git: $sg while the exit path's look at the ref hangs: exit $want within the bound, state UNKNOWN naming the branch, no stderr marks, nothing left" eq "$(python3 -I -B "$S/deliv.py" hang "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" exit "$sg")" "rc=$want fast=1 unk=1 namedb=1 ref=0 left=0"
 done
 check "blocked git: a delivery read-back that hangs is exit 2 within the bound, 'could NOT be confirmed', naming the branch" eq "$(python3 -I -B "$S/deliv.py" hang "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" readback none)" "rc=2 fast=1 conf=1 namedb=1"
+check "budget: update-ref hangs, a slow read-back, the exit look hangs, a signal pending: exit 130 within budget + cleanup, state unknown" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" A)" "rc=130 within=1 unk=1"
+check "budget: the read-back answers inside the budget, the exit look gets only what is left: exit 130 within budget + cleanup" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" B)" "rc=130 within=1 unk=1"
+check "budget: read-back and exit look would both hang: the look is skipped (ONE rev-parse call, one limit)" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" two)" "rc=130 one=1 unk=1 calls=1"
+check "budget: hooks set without TRAIN_SELFTEST are ignored (production mode keeps the real bounds): delivered, rc 0" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" prod)" "rc=0 ref=1 line=1 json=1"
+check "message: an unknown branch state claims nothing ('delivery could NOT be confirmed', never 'NOT delivered')" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" msg_unknown)" "rc=2 lead=1 claim=0"
+check "message: update-ref failed but the ref exists: 'update-ref did not report success but the branch DOES exist'" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" msg_exists)" "rc=2 lead=1 claim=0"
+check "message: a known absent branch keeps 'verified but NOT delivered'" eq "$(python3 -I -B "$S/deliv.py" budget "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" msg_absent)" "rc=2 lead=1 unk=0"
 check "blocked git: control, the stand-in without a hang delivers normally" eq "$(python3 -I -B "$S/deliv.py" hang "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" ctl none)" "rc=0 ref=1 line=1 json=1 same=1"
 for sg in INT TERM HUP; do
     check "signal $sg while the verdict is being reported: the verdict's exit code (0), the branch and JSON complete and last, no stderr marks" eq "$(python3 -I -B "$S/deliv.py" report "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" "$sg")" "rc=0 ref=1 line=1 json=1 same=1 flag=0"
@@ -2562,6 +2656,17 @@ REPOARG=$NC V='git rev-parse HEAD >/dev/null; git log -1 >/dev/null; git status 
 check "fine commands: rev-parse, log, status, diff, reset, checkout, worktree list inside verify void nothing" eq "$RC$(has "$JSON" '"landed":["n1"]' && echo y)" "0y"
 HELP=$(python3 -I -B "$SCRIPT" --help 2>&1)
 HELPN=$(printf '%s' "$HELP" | tr -s ' \n' '  ')
+# the --help bound is computed from the script's own constants: budget + cleanup bound <= the number in the sentence
+HELP_PIN=$(python3 -I -B -c '
+import re, sys
+src = open(sys.argv[1]).read()
+help_text = " ".join(sys.argv[2].split())
+const = lambda n: float(re.search(r"^%s = ([0-9.]+)" % n, src, re.M).group(1))
+m = re.search(r"exits within ([0-9]+) seconds", help_text)
+b = re.search(r"ONE budget of ([0-9]+) s", help_text)
+print(int(bool(m) and float(m.group(1)) >= const("BLOCKED_BUDGET") + const("CLEANUP_BOUND")),
+      int(bool(b) and float(b.group(1)) == const("BLOCKED_BUDGET")))' "$SCRIPT" "$HELP")
+check "--help bound: 'exits within N seconds' is >= BLOCKED_BUDGET + CLEANUP_BOUND, and 'ONE budget of M s' equals BLOCKED_BUDGET" eq "$HELP_PIN" "1 1"
 for phrase in 'git commit' 'git fetch' 'git gc' 'git repack' 'git pack-refs' 'worktree list' 'git for-each-ref refs/heads/train-*' \
     'red includes: timed out' "'conflict' or 'uncheckoutable'" 'the JSON is LOST' 'exit 2 prints a' 'own stale lock is removed' 'removable with' "the exit code and the JSON are the verdict's"; do
     check "--help states: $phrase" has "$HELPN" "$phrase"
