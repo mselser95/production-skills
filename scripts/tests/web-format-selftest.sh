@@ -305,12 +305,9 @@ export const bound = (nf: Intl.NumberFormat): ((v: never) => string) => { const 
     mutate "guard: symlinks followed instead of refused" test/guard.test.ts "test/guard.test.ts" "tree walk" \
       "if (e.isSymbolicLink()) refused.push" \
       "if (false) refused.push"
-    mutate "the README percent count is wrong" README.md "test/readme.test.ts" "percent list" \
-      "(65 today)" \
-      "(67 today)"
-    mutate "the README money matrix is wrong" README.md "test/readme.test.ts" "money matrix" \
-      "33 locales x 5 currencies" \
-      "34 locales x 5 currencies"
+    mutate "the owned README line money matrix is wrong" README.md "test/readme.test.ts" "owned line" \
+      "money 33 locales" \
+      "money 34 locales"
     mutate "an inherited option key is honoured again" src/types.ts "test/ownoptions.test.ts" "inherited maxFractionDigits" \
       "      if (v !== undefined && Object.prototype.hasOwnProperty.call(options, k)) out[k] = v;" \
       "      if (v !== undefined) out[k] = v;"
