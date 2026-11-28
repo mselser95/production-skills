@@ -71,7 +71,7 @@ Rules (each is pinned by a test):
 
 Tests (`pnpm test`): unit tables per function, fast-check properties (fixed seed) against an independent BigInt oracle,
 the TZ matrix, Intl cross-checks (RTL locales for decimals; money over the locales, currencies and displays listed in `test/money.test.ts`; percent over
-the locales listed in `test/percent.test.ts` x integer parts of 1 to 9 digits), a never-throws fuzz over every parameter, option
+the locales listed in `test/percent.test.ts` x integer parts of 1 to 9 digits as shown on screen), a never-throws fuzz over every parameter, option
 read-once, own-key and unknown-key tests, and `test/guard.test.ts`. The sizes of those lists are stated in ONE line, which
 `test/readme.test.ts` regenerates from the lists and compares for equality:
 
@@ -81,7 +81,9 @@ Anywhere else in this file a number next to certain stems fails that test. The r
 on either side. A WORD is a run of letters and digits; hyphens or dots between such runs keep it a single word
 (`hand-picked`; a hyphenated number is a single word too), while any other character, a slash included, separates words. A NUMBER is a digit
 sequence, or a spelled-out number (the words from "one" to "twenty", the tens, `hundred`, `dozen`, `dozens`, `score`),
-as a whole word or as a hyphen part of a word (`sixty-five`); a version such as `78.3` is not a number. The STEMS are
+as a whole word or as a hyphen part of a word (`sixty-five`). A decimal such as `65.0` is a number when the next word is a stem
+(the decimal, then the stem) unless the word before it is a capitalised name or `v` / `version` (`ICU 78.3 locale data`, `Node 26.7`,
+`version 1.2`), in which case it is a version; a decimal not directly before a stem word is not a number. The STEMS are
 `locale`, `currenc`, `display` and `language`: a word is a stem word when any hyphen part of it begins with any of
 them. Fenced code, inline code and paths are NOT exempt: a digit in a path such as `data/65.json` beside a stem is a
 finding. The test catches a number on either side of a stem in any letter case, hyphenated (`N-locale`) or after a
@@ -111,7 +113,8 @@ for another fails.
 
 What the guard does NOT flag, by design (it has no types): binary `+` / `-` in general, `++` / `--`, `|` between two
 non-literals (the type-union token), other computed or string-built member names (`Math['round']`, `x['valueOf']()`, `'for' + 'mat'`; a literal key that is
-exactly one of the five Intl names IS flagged), unicode-escaped identifiers, integer literals below ten digits, a
+exactly one of the five Intl names IS flagged), unicode-escaped identifiers, integer literals below ten digits, a statement that begins with a sign right after a block (`}` then `+x;`; after the head of an
+`if` / `while` / `for` / `with` it IS flagged), a
 type-position `Intl.X`. The backstop for FLOAT paths is behavioural: the 30-digit round-trip properties and the BigInt
 oracle fail as soon as a float is in the path (a float loses digits beyond 2^53). They cannot see a value sent to Intl
 as a string (Intl reads strings exactly): for a value routed through Intl the guard is the check, with the rounding-mode

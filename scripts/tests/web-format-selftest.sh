@@ -362,8 +362,8 @@ import { parseDecimal } from './grammar.ts';"
       "  return okText(applyTemplate(learnTemplates(options.locale, style), p.value, body, r.sign));" \
       '  return okText(`${+amount}`);'
     mutate "guard: a template head is a value again (the opener fix reverted)" test/guard.test.ts "test/guard.test.ts" "scanner finds each rule" \
-      "prev !== undefined && prev.opens !== true && " \
-      "prev !== undefined && "
+      "return x.kind !== 'tpl' || x.opens !== true;" \
+      "return true;"
     mutate "guard: a template head allows a regex again" test/guard.test.ts "test/guard.test.ts" "scanner finds each rule" \
       "if (p.kind === 'tpl') return p.opens === true;" \
       "if (p.kind === 'tpl') return false;"
@@ -388,6 +388,32 @@ import { parseDecimal } from './grammar.ts';"
     mutate "README rule: dozen removed from the number words" test/readme.test.ts "test/readme.test.ts" "claim detector sees" \
       "'hundred', 'dozen', 'dozens', 'score'" \
       "'hundred'"
+    # ---- T29b warnings: the keyword list, the postfix `!`, the control-statement head, declarations named import/require,
+    # the alias after a template head, the README pin and the decimal-version rule
+    mutate "guard: await removed from the expression-position keywords" test/guard.test.ts "test/guard.test.ts" "sign after an expression-position keyword" \
+      "'else', 'do', 'await', 'yield']" \
+      "'else', 'do', 'yield']"
+    mutate "guard: a postfix non-null ! is an opener again" test/guard.test.ts "test/guard.test.ts" "sign after an expression-position keyword" \
+      "x.text === '!' ? endsValue(k - 1) : CLOSERS" \
+      "x.text === '!' ? false : CLOSERS"
+    mutate "guard: the if/while/for/with head is not tracked" test/guard.test.ts "test/guard.test.ts" "sign after an expression-position keyword" \
+      "if (head && t[o - 2]?.text !== '.' && t[o - 2]?.text !== '?.') headClose.add(k);" \
+      "void head;"
+    mutate "guard: a declaration named import/require is flagged again" test/guard.test.ts "test/guard.test.ts" "specifiers: relative inside" \
+      "if (typed && [':', '{'].includes(t[close + 1]?.text ?? '')) return;" \
+      "void typed;"
+    mutate "guard: the alias after a template head is not flagged" test/guard.test.ts "test/guard.test.ts" "value handed to Intl is a finding" \
+      "|| prev?.opens === true) add('intl', chain, tok.line);" \
+      ") add('intl', chain, tok.line);"
+    mutate "README pin: the displayed-digits phrase is wrong" README.md "test/readme.test.ts" "owned line" \
+      "integer parts of 1 to 9 digits as shown on screen" \
+      "integer parts of 1 to 8 digits as shown on screen"
+    mutate "README rule: a decimal before a stem is a version again" test/readme.test.ts "test/readme.test.ts" "claim detector sees" \
+      "return after !== undefined && isStemWord(after) && !isName;" \
+      "return false;"
+    mutate "README rule: a name before a decimal no longer makes it a version" test/readme.test.ts "test/readme.test.ts" "claim detector sees" \
+      "return after !== undefined && isStemWord(after) && !isName;" \
+      "return after !== undefined && isStemWord(after);"
     # addfile <name> <path under the package> <content>: a NEW source file, control GREEN first, removed afterwards
     addfile() {
       local name="$1" file="$pk/$2" content="$3" must="${4:-every finding in src}" c m

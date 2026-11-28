@@ -24,7 +24,8 @@ import { describe, expect, it } from 'vitest';
 //   call      parseFloat( parseInt( Number( String( isFinite( isNaN(   (Number.isInteger / Number.isNaN / isSafeInteger are not these)
 //   numparse  Number.parseFloat / Number.parseInt
 //   math      Math.<anything>
-//   unary     a prefix + (any operand) or a prefix - on a non-literal operand
+//   unary     a prefix + (any operand) or a prefix - on a non-literal operand: after an operator, an opener, a keyword such as
+//             `return` / `await` / `yield`, a logical `!`, or the `)` of an if / while / for / with head (a postfix non-null `x!` is a value)
 //   arith     * / % ** and their compound assignments (text = the operator with its neighbours); a generator's `function*` is not
 //   bitwise   ~ ^ & << >> >>> and their compound assignments, and `|` next to a numeric literal (`x | 0`): each converts like `* 1`
 //   coerce    a binary minus whose right operand is the literal 0 (`x - 0`), which converts like `* 1`
@@ -47,7 +48,8 @@ import { describe, expect, it } from 'vitest';
 // non-literals (it is the type-union token), `valueOf` reached by a computed member name (`x['valueOf']()`), any
 // other computed member name or string-built name (`Math['round']`, `globalThis['Number']`, `'for' + 'mat'`; a string that is
 // exactly one of the five Intl names IS flagged), unicode-escaped identifiers
-// (`\u004dath`), integer literals below ten digits (fixed samples such as 1, -1, 1000), a type position `Intl.X` after
+// (`\u004dath`), a statement that begins with a sign right after a block (`}` then `+x;`; after the head of an `if` / `while` /
+// `for` / `with` it IS flagged), integer literals below ten digits (fixed samples such as 1, -1, 1000), a type position `Intl.X` after
 // `:` / `<` / `,` (told apart from a value alias only by the token before it). The backstop for those is behavioural:
 // the 30-digit round-trip properties and the BigInt oracle (test/properties.test.ts) fail as soon as a FLOAT is in the
 // path, because a float loses digits beyond 2^53. They do NOT see a value sent to Intl as a string (Intl reads strings
@@ -66,7 +68,7 @@ export interface Token {
 const PUNCT = ['>>>=', '**=', '...', '===', '!==', '<<=', '>>=', '>>>', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<', '>>', '**'];
 const ID_START = /[A-Za-z_$]/;
 const ID_PART = /[A-Za-z0-9_$]/;
-const KEYWORDS_BEFORE_REGEX = new Set(['return', 'typeof', 'case', 'in', 'of', 'delete', 'void', 'throw', 'new', 'instanceof', 'else', 'do']);
+const KEYWORDS_BEFORE_REGEX = new Set(['return', 'typeof', 'case', 'in', 'of', 'delete', 'void', 'throw', 'new', 'instanceof', 'else', 'do', 'await', 'yield']);
 
 export function lex(src: string): Token[] {
   const out: Token[] = [];
@@ -200,6 +202,27 @@ export function scan(source: string): Finding[] {
     }
     return out;
   };
+  // the `)` that closes the head of `if` / `while` / `for` / `with`: a sign after it starts the body statement, so it is unary
+  const headClose = new Set<number>();
+  const opened: number[] = [];
+  t.forEach((x, k) => {
+    if (x.kind !== 'punct') return;
+    if (x.text === '(') opened.push(k);
+    else if (x.text === ')') {
+      const o = opened.pop() ?? -1;
+      const kw = t[o - 1];
+      const head = kw?.kind === 'id' && (['if', 'while', 'with', 'for'].includes(kw.text) || (kw.text === 'await' && t[o - 2]?.text === 'for'));
+      if (head && t[o - 2]?.text !== '.' && t[o - 2]?.text !== '?.') headClose.add(k);
+    }
+  });
+  /** Does the token at `k` END a value? A postfix non-null `!` after a value is one; a `!` after an opener or operator is logical not. */
+  const endsValue = (k: number): boolean => {
+    const x = t[k];
+    if (x === undefined) return false;
+    if (x.kind === 'punct') return x.text === '!' ? endsValue(k - 1) : CLOSERS.has(x.text) && !headClose.has(k);
+    if (x.kind === 'id') return !KEYWORDS_BEFORE_REGEX.has(x.text);
+    return x.kind !== 'tpl' || x.opens !== true;
+  };
   t.forEach((tok, i) => {
     const prev = t[i - 1];
     const next = t[i + 1];
@@ -237,7 +260,7 @@ export function scan(source: string): Finding[] {
     } else if (tok.kind === 'punct') {
       // `function* gen`, `yield* x`, `export * from` and `import * as ns` are not multiplications
       const generator = prev?.kind === 'id' && ['function', 'yield', 'async', 'export', 'import'].includes(prev.text);
-      const binary = prev !== undefined && prev.opens !== true && (prev.kind !== 'punct' || CLOSERS.has(prev.text)) && !(prev.kind === 'id' && KEYWORDS_BEFORE_REGEX.has(prev.text)) && !generator;
+      const binary = prev !== undefined && endsValue(i - 1) && !generator;
       if ((tok.text === '+' || tok.text === '-') && !binary) {
         if (tok.text === '+' || next?.kind !== 'num') add('unary', tok.text + (next?.text ?? ''), tok.line);
       }
@@ -372,6 +395,18 @@ export function importFindings(file: string, source: string): { kind: string; te
     if (tok.text === 'from' && next?.kind === 'str') spec(next.raw ?? '', next.line);
     else if (tok.text === 'import' && next?.kind === 'str') spec(next.raw ?? '', next.line);
     else if ((tok.text === 'import' || tok.text === 'require') && next?.text === '(' && next.kind === 'punct') {
+      // a method or signature DECLARATION named import / require (`import(s: string) {`, `require(s: string): unknown`): the
+      // parameter list is empty or starts with a typed parameter, and a `{` or `:` follows its `)`. A string literal argument
+      // (`c ? require('../q') : y`) is never a declaration.
+      let depth = 0;
+      let close = i + 1;
+      for (; close < t.length; close++) {
+        const x = t[close];
+        if (x?.kind === 'punct' && x.text === '(') depth++;
+        if (x?.kind === 'punct' && x.text === ')' && --depth === 0) break;
+      }
+      const typed = t[i + 2]?.text === ')' || (t[i + 2]?.kind === 'id' && [':', '?'].includes(t[i + 3]?.text ?? ''));
+      if (typed && [':', '{'].includes(t[close + 1]?.text ?? '')) return;
       const arg = t[i + 2];
       const after = t[i + 3]?.text;
       const literal = (arg?.kind === 'str' || arg?.kind === 'tpl') && (after === ')' || (after === ',' && tok.text === 'import'));
@@ -565,6 +600,29 @@ describe('the source contains no float-based formatting or arithmetic on values,
     expect(kinds('const s = `${x.toFixed(2)}`;')).toEqual(['member:.toFixed']);
     expect(kinds('const a = x?.toFixed(2);')).toEqual(['member:.toFixed']);
   });
+  it('a sign after an expression-position keyword, a logical not or an if/while/for/with head is unary; after a postfix `!` it is binary (control)', () => {
+    // keywords after which a sign is unary (`await` and `yield` included)
+    expect(kinds('async function f() { return await +x; }')).toEqual(['unary:+x']);
+    expect(kinds('async function f() { const q = await -x; }')).toEqual(['unary:-x']);
+    expect(kinds('function* g() { const q = yield +x; }')).toEqual(['unary:+x']);
+    for (const kw of ['return', 'typeof', 'void', 'throw', 'case', 'in', 'of', 'new', 'else', 'do', 'delete']) expect(kinds(`${kw} +x;`), kw).toEqual(['unary:+x']);
+    expect(kinds('const b = a instanceof B; const c = a + b;')).toEqual([]);
+    // a postfix non-null `!` ends a value (binary), a logical not is an opener (unary)
+    expect(kinds('const c = arr[0]! + b;')).toEqual([]);
+    expect(kinds('const c = x! + y; const d = f()! - g;')).toEqual([]);
+    expect(kinds('const c = !+x;')).toEqual(['unary:+x']);
+    expect(kinds('const c = a && !-x;')).toEqual(['unary:-x']);
+    expect(kinds('const c = x!.y; const d = x!!; const e = !!x;')).toEqual([]);
+    expect(kinds('const c = x!! + y;')).toEqual([]);
+    expect(kinds('const c = `a${b}`! + y;')).toEqual([]);
+    // the head of if / while / for / with: a sign after its `)` starts the body
+    expect(kinds('if (c) +x;')).toEqual(['unary:+x']);
+    expect(kinds('while (c) -x;')).toEqual(['unary:-x']);
+    expect(kinds('for (;;) +x;')).toEqual(['unary:+x']);
+    expect(kinds('async function f() { for await (const a of b) +a; }')).toEqual(['unary:+a']);
+    expect(kinds('const c = (a) + b; const d = f(a) + b; if (c) { y = a + b }')).toEqual([]);
+    expect(kinds('const c = x.if(a) + b; const d = g(h(a)) + b;')).toEqual([]);
+  });
   it('bitwise coercions and the minus-zero coercion are findings; the type-union bar and plain minus are not (control)', () => {
     expect(kinds('const a = x | 0;')).toEqual(['bitwise:x | 0']);
     expect(kinds('const a = 0 | x;')).toEqual(['bitwise:0 | x']);
@@ -590,6 +648,9 @@ describe('the source contains no float-based formatting or arithmetic on values,
     expect(kinds('const I = Intl; const NF = Intl.NumberFormat; return Intl.NumberFormat;')).toEqual(['intl:Intl', 'intl:Intl.NumberFormat', 'intl:Intl.NumberFormat']);
     expect(kinds('const x: Intl.NumberFormat = a; const m = new Map<string, Intl.DateTimeFormat>(); const o: Intl.NumberFormatOptions = {}; type P = Intl.NumberFormatPart[];')).toEqual([]);
     expect(kinds('const a = f.format(utcDay(y, mo, d));')).toEqual(['intlcall:.format(utcDay(y,mo,d))']);
+    // after a template head the alias is told by the head, not by a punctuation token: found by the alias rule, not the call rule
+    expect(kinds('const a = `${Intl.NumberFormat}`;')).toEqual(['intl:Intl.NumberFormat']);
+    expect(kinds('const a = `x${Intl.DateTimeFormat}y`;')).toEqual(['intl:Intl.DateTimeFormat']);
   });
   it('the five Intl method names are reserved identifiers: a bound or computed method is a finding (control)', () => {
     expect(kinds('const { format } = nf;')).toEqual(['intlname:format']);
@@ -696,6 +757,14 @@ describe('the package shape: imports stay in src/, scripts, tsconfig files and t
     expect(one('x.ts', 'const r = require(p);')).toEqual(['import-dynamic "require("']);
     expect(one('x.ts', "const r = loader.require('../q'); const s = obj?.import(p);")).toEqual([]);
     expect(one('x.ts', "const r = require('../q');")).toEqual(['import-outside-src "../q"']);
+    // a method or signature DECLARATION named import / require is not a call; a ternary around a call is still a call
+    expect(one('x.ts', 'class K { import(s: string) { return s; } }')).toEqual([]);
+    expect(one('x.ts', 'type T = { require(s: string): unknown };')).toEqual([]);
+    expect(one('x.ts', 'interface I { import(): void; require?(s?: string): unknown }')).toEqual([]);
+    expect(one('x.ts', "const a = cond ? require('../q') : y;")).toEqual(['import-outside-src "../q"']);
+    expect(one('x.ts', 'const a = cond ? require(p) : y;')).toEqual(['import-dynamic "require("']);
+    expect(one('x.ts', "async function f() { return await import('../q'); }")).toEqual(['import-outside-src "../q"']);
+    expect(one('x.ts', 'const a = import(x);')).toEqual(['import-dynamic "import("']);
     expect(one('x.ts', "export * as ns from '../extra/fast.ts';")).toEqual(['import-outside-src "../extra/fast.ts"']);
     expect(one('x.ts', "export { x } from '../extra/fast.ts';")).toEqual(['import-outside-src "../extra/fast.ts"']);
     expect(one('x.ts', '/// <reference path="../extra/types.d.ts" />\nexport const z = 1;')).toEqual(['import-outside-src "../extra/types.d.ts"']);
