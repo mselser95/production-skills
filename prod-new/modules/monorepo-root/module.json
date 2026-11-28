@@ -1,0 +1,33 @@
+{
+  "id": "monorepo-root",
+  "requires": [],
+  "conflicts": [],
+  "source": ".",
+  "slots": {
+    "REPO": {
+      "literal": "repo-name",
+      "description": "repository name (kebab-case), written in package.json and repo.yaml. The literal is a valid package name on purpose, so the module is readable unassembled."
+    }
+  },
+  "unit_kind": "none",
+  "placement": {
+    "package.json": "root",
+    "pnpm-workspace.yaml": "root",
+    "tsconfig.base.json": "root",
+    ".nvmrc": "root",
+    ".gitignore": "root",
+    ".editorconfig": "root",
+    "Makefile": "root",
+    "repo.yaml": "root",
+    "docs/repo-schema.md": "root",
+    "scripts/monorepo-settings-check.sh": "root",
+    "scripts/monorepo-run.sh": "root",
+    "scripts/monorepo_check.py": "root"
+  },
+  "root_merge": {
+    ".gitignore": "union-lines"
+  },
+  "exclude": [
+    "README.md"
+  ]
+}

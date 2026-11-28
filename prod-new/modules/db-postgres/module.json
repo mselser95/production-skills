@@ -21,5 +21,21 @@
     { "path": "scripts/tests/db-observability-selftest.sh", "role": "hermetic selftest and mutation proof of the parity check, the overlay rules and the scrape test with a fake docker (make selftests)" }
   ],
   "requires": [],
+  "conflicts": [],
+  "source": ".",
+  "slots": {},
+  "unit_kind": "database",
+  "placement": {
+    "db/**": "root",
+    "scripts/**": "root"
+  },
+  "units": [
+    {
+      "id": "db",
+      "kind": "database",
+      "language": "sql",
+      "path": "db"
+    }
+  ],
   "liabilities": ["pg19-reevaluate"]
 }
