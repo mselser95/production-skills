@@ -1,7 +1,7 @@
 # Frozen output digests of the real service-go, service-rust and service-python modules, computed from the assembler at commit d020897 (before T28c). Columns: module layout files sha256. A module's own files changing in a later commit changes its digest: update this file DELIBERATELY, after reading the diff (bash scripts/tests/assemble-multi-unit-selftest.sh --print-golden). Slots: SERVICE=payments OWNER=acme PACKAGE=paylib (python only), umask 022.
-service-go single 176 dc3435fda401e330705b7a8a0b0a8e6b7a254ed85b761bf3a3b3098b29005c53
-service-go monorepo 176 2c323072ce9767e40ed12a21d567d2995b3f7435fc81b9b0bb6aa479c12474a0
-service-rust single 46 9ba6c470046b0ac8672f9994de8c92b746b47fde6d1d2ea3537e9bfca0f3ad4c
-service-rust monorepo 46 b8ef0ad03d0c6e3473b7b8e255906b62be15aa875ce485ed5cc23b75aba711d6
-service-python single 57 5c7a5aec46a756fd88fe53c4f22e8af12fb6b08331d03cd0382e85d19a1afc04
-service-python monorepo 57 c1197d2e91a835e725f94461fe624dd517cf5b02c49baa3d0acb937ed64df445
+service-go single 176 843121a8f1e81c5c6c627bf3f7900c3c4484a1e6e07574fe7a91e3f40ea18edc
+service-go monorepo 176 ca26b4ebef13b6a62cb9ae41a3a2fe95b33328c1af98023f18051ce9d54f84d7
+service-rust single 46 504de69d9e7de6a73458bed1965b6ead0a6c68cf75be85c830aee5b5e9536d7e
+service-rust monorepo 46 065a4016d62e9bcdb9143f6bb95ffb601d30b39de52afb0c8bd8520ab4b5bda7
+service-python single 62 2f80125bfcfbfb408dccd9683eb01f6f0f15d51353d9a2e6964dbb593995eba4
+service-python monorepo 62 f73236c41dddebf9e3b294d66ff095eb45ee6231e532562807389f9406277d4e
