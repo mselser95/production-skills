@@ -54,8 +54,8 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   `db/observability/image.lock`). Read-only root, `cap_drop: [ALL]`, `no-new-privileges`, uid 65534, limits, a
   healthcheck that needs `pg_up 1`, waits for a healthy `db`. It logs in as `app_monitor` (member of `pg_monitor`,
   not superuser) with `sslmode=verify-full`, the password only as a FILE (`db_monitor_password` secret). The
-  port is NOT published: reach it on the compose network as `exporter:9187`, or opt in with an override file of
-  your own that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
+  port is NOT published: reach it on the compose network as `exporter:9187`, or opt in with a file of
+  your own, passed as one more `-f` (never named `compose.override.yml`: that is refused), that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
   `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`. Keep no `.env`
   in `db/`: compose loads it on its own and would substitute `${VAR}` from it, so `parity-check.sh` refuses one.
 - `db/observability/required-metrics.txt` - the contract: names a scrape must contain, each with its reason.
@@ -75,11 +75,15 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   (`--datasource.uri`, `--config.file`, ...), variable (`DATA_SOURCE_URI_FILE`, `DATA_SOURCE_NAME`, `PG*`), an
   overridden entrypoint or an extra mount is red. Variables are pinned as exact `NAME=VALUE` pairs (no value is a
   slot: `exporter.env` is a literal), mounts as `source destination` pairs, and the monitor secret's file in
-  `compose.yml` is pinned too. Anything compose could substitute from the host environment is refused:
-  a `$` (also `$$`) in the exporter's command, environment, `env_file` (path and contents), volumes, secrets,
-  entrypoint, image or user (`OVERLAY-INTERPOLATION`), a `db/.env` beside the compose files (`OVERLAY-DOTENV`),
-  `extends`, a top-level `include`, any top-level key but `services`, a second service, and `extra_hosts` / `dns` /
-  `links` / `network_mode` / `networks` on the exporter (`OVERLAY-NETWORK`), which could re-point the name `db`. It REFUSES (never guesses) a `__name__` matcher, a nameless
+  `compose.yml` is pinned too. What compose could take from anywhere but the overlay is refused, and only this:
+  in the overlay, a `$` (also `$$`) in the exporter's command, environment, `env_file` (path and contents), volumes, secrets,
+  entrypoint, image or user (`OVERLAY-INTERPOLATION`), `extends`, a top-level `include`, any top-level key but `services`, a second service, and `extra_hosts` / `dns` /
+  `links` / `network_mode` / `networks` on the exporter (`OVERLAY-NETWORK`), which could re-point the name `db`; in `compose.yml`, ANY `exporter` service (even `{}`), an `extends`
+  aimed at the overlay and an `include` (`BASE-EXPORTER`: compose merges a service key by key across files, so the
+  exporter is defined in the overlay alone); in `db/`, a `.env` (`OVERLAY-DOTENV`) and the files compose merges or
+  picks up by itself (`compose.override.y[a]ml`, `docker-compose[.override].y[a]ml`, `compose.yaml`:
+  `OVERLAY-OVERRIDE-FILE`). The connection URI is floored apart from the allow-list: host `db`, port 5432, a plain
+  database name and only `sslmode=verify-full` and `sslrootcert=/tls/server.crt` (`OVERLAY-URI`). It REFUSES (never guesses) a `__name__` matcher, a nameless
   selector, an unknown function, a keyword where an operand belongs (a series named `offset`), a `query`
   template in an annotation and any `record:` rule, understands subqueries `[5m:1m]`, and runs `promtool check rules` when promtool is on PATH. `make db-test`
   runs it first. Thresholds marked TUNABLE (temp files, WAL size) are starting points; see the runbook.

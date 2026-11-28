@@ -38,6 +38,15 @@
 #                    the overlay may only add the service `exporter`, as written: no `extends`, no
 #                    `include`, no other top-level key, and none of extra_hosts / dns / links /
 #                    network_mode / networks (they can re-point the name `db`)
+#   BASE-EXPORTER / OVERLAY-OVERRIDE-FILE
+#                    the exporter is defined in exactly ONE place, the overlay (compose merges a
+#                    service key by key across files, so a base fragment could add to it): the
+#                    base compose.yml may not have a service the overlay defines (even `{}`), an
+#                    `extends` aimed at one or at the overlay, or an `include`; and none of
+#                    compose.override.y[a]ml, docker-compose[.override].y[a]ml, compose.yaml may
+#                    sit in db/ (compose or a bare `docker compose up` would merge/pick them up).
+#                    With the base silent on the exporter, the overlay IS the merged service,
+#                    so every overlay check above judges what compose will run.
 #   RECORDING-RULE   a `record:` rule: recording rules are not checked yet
 #   PROMTOOL-CHECK   `promtool check rules` failed (run only when promtool is on PATH)
 # Exit: 0 green · 1 findings · 2 nothing was checked (python3 or PyYAML missing, a file
@@ -267,9 +276,12 @@ def metrics_of(expr):
                            "keyword is refused (it cannot be told from the operator)")
                 else:
                     bad = f"keyword `{text}` in a position PromQL does not allow"
-            elif text in FUNCS and (nxt == ("open", "(") or (text in AGG and nxt[0] == "id" and nxt[1].lower() in ("by", "without"))):
-                n_expect, n_after_agg = True, text in AGG
-                if text in AGG:
+            elif (text in FUNCS or low in AGG) and (nxt == ("open", "(") or (low in AGG and nxt[0] == "id" and nxt[1].lower() in ("by", "without"))):
+                # Prometheus's lexer lowercases keywords, and the aggregation operators are
+                # keywords (`SUM by (x) (m)` parses); function names are looked up exactly
+                # (`Rate(m[5m])` is an unknown function), so only AGG is matched in any case
+                n_expect, n_after_agg = True, low in AGG
+                if low in AGG:
                     agg_pending = True
                     n_mods = {"by", "without"}
             elif nxt == ("open", "("):
@@ -596,6 +608,14 @@ for k, v, where in env_entries:
         fail("OVERLAY-ENV-VALUE", f"exporter variable {k} ({where}) is not the value pinned in exporter-allowlist.txt (value hidden)")
 uri = env_vars.get("DATA_SOURCE_URI", "")
 qs = parse_qs(uri.partition("?")[2], keep_blank_values=True)
+# An independent FLOOR under the allow-list (a consistent edit of allow-list + env file must not
+# move the exporter): host `db`, port 5432, a plain database name, and a query string of exactly
+# the two TLS parameters, each once, and nothing else (`user`, `options`, `host`, a repeat ...).
+m_uri = re.fullmatch(r"db:5432/([A-Za-z_][A-Za-z0-9_]*)\?(.*)", uri, re.S)
+if not m_uri:
+    fail("OVERLAY-URI", "DATA_SOURCE_URI must be exactly db:5432/<identifier>?<query> (host db, port 5432)")
+elif sorted(m_uri.group(2).split("&")) != ["sslmode=verify-full", "sslrootcert=/tls/server.crt"]:
+    fail("OVERLAY-URI", "DATA_SOURCE_URI's query may carry only sslmode=verify-full and sslrootcert=/tls/server.crt, each once")
 if qs.get("sslmode") != ["verify-full"]:
     fail("OVERLAY-TLS", f"DATA_SOURCE_URI must carry exactly one sslmode, verify-full (found {qs.get('sslmode')})")
 rootcert = qs.get("sslrootcert") or []
@@ -654,6 +674,22 @@ for src_, _ in pairs:
         got = str(entry.get("file")) if isinstance(entry, dict) and "file" in entry else None
         if got != allow["secret-file"][name_] or (isinstance(entry, dict) and set(entry) != {"file"}):
             fail("OVERLAY-MOUNT-SOURCE", f"compose.yml top-level secret `{name_}` is not `file: {allow['secret-file'][name_]}` as exporter-allowlist.txt pins it (it must be the monitor's own password file)")
+# The exporter lives ONLY in the overlay: compose merges a service across files key by key, so a
+# fragment of it in the base (or an auto-merged file) would add keys this check never reads.
+ov_services = {str(k) for k in ov["services"]}
+if "include" in base:
+    fail("BASE-EXPORTER", "compose.yml has a top-level `include:` (another file this check does not read)")
+bsvc = base.get("services") if isinstance(base.get("services"), dict) else {}
+for k, v in bsvc.items():
+    if str(k) in ov_services:
+        fail("BASE-EXPORTER", f"compose.yml defines the service `{k}`, which the overlay defines: compose would merge the two and this check reads only the overlay (define it in one place)")
+    ext = v.get("extends") if isinstance(v, dict) else None
+    if ext is not None and (str(ext.get("service", "") if isinstance(ext, dict) else ext) in ov_services or "observability" in str(ext)):
+        fail("BASE-EXPORTER", f"compose.yml service `{k}` extends the overlay or one of its services")
+for name_ in ("compose.override.yml", "compose.override.yaml", "docker-compose.override.yml",
+              "docker-compose.override.yaml", "docker-compose.yml", "docker-compose.yaml", "compose.yaml"):
+    if exists(os.path.join(overlay_dir, name_)):
+        fail("OVERLAY-OVERRIDE-FILE", f"`{name_}` sits beside the compose files: compose merges or picks it up on its own, outside this check (delete it)")
 if not tls_ro:
     fail("OVERLAY-TLS-MOUNT", "the directory holding sslrootcert must be mounted read-only into the exporter")
 if not env_vars.get("DATA_SOURCE_PASS_FILE", "").startswith("/run/secrets/"):

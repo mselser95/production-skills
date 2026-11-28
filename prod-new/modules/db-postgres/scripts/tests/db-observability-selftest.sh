@@ -151,13 +151,15 @@ def fake_run(cmd, **kw):
 
 def run(script, want, f, old, new, pt):
     files = dict(tree)
-    if f.startswith("+"):    # `+name`: a file that does not exist in the tree is added (content = NEW)
-        files["db/" + f[1:]] = new
-    elif f:
-        k = "db/" + f
-        if old not in files.get(k, ""):
-            return "FAIL anchor not found in " + f + ": " + old[:60]
-        files[k] = files[k].replace(old, new)
+    # one edit, or several joined with \x01 in all three fields (a consistent edit of two files)
+    for f, old, new in zip(f.split("\x01"), old.split("\x01"), new.split("\x01")):
+        if f.startswith("+"):    # `+name`: a file that does not exist in the tree is added (content = NEW)
+            files["db/" + f[1:]] = new
+        elif f:
+            k = "db/" + f
+            if old not in files.get(k, ""):
+                return "FAIL anchor not found in " + f + ": " + old[:60]
+            files[k] = files[k].replace(old, new)
     code, lsrc = code_of(script)
     cur[0] = lsrc
     real_which, real_runner = shutil.which, subprocess.run
@@ -495,6 +497,48 @@ pmx "parity: query templates no longer refused" '(?<![.\w$])query\b' '(?<![.\w$]
 pmx "metacrash: a mutant that raises" 'if findings:' $'raise ValueError("meta")\nif findings:' -- "OVERLAY-DIGEST: exporter image" "$OV" "@$DIG" ""
 # a meta-case: a scenario that fails on the UNMUTATED copy is reported as such, never judged RED
 pmx "meta: vacuous scenario" 'if findings:' 'if False:' -- "THIS TEXT IS NEVER PRINTED" "" "" ""
+
+# ---- fourth review: the exporter is defined in ONE place; the URI has a floor of its own ----------------
+BASEANCH=$'default.\nservices:\n'
+bx() { pc "$1" 'BASE-EXPORTER: compose.yml defines the service `exporter`' "compose.yml" "$BASEANCH" "$BASEANCH$2"; }
+bx 'base fragment: the reviewer'"'"'s env_file with ${EXPORTER_EXTRA_ENV:-...} -> BASE-EXPORTER' $'  exporter:\n    env_file: ["${EXPORTER_EXTRA_ENV:-./observability/exporter/exporter.env}"]\n'
+bx 'base fragment: environment PGSSLMODE -> BASE-EXPORTER' $'  exporter:\n    environment: {PGSSLMODE: disable}\n'
+bx 'base fragment: extra_hosts -> BASE-EXPORTER' $'  exporter:\n    extra_hosts: ["db:203.0.113.9"]\n'
+bx 'base fragment: an empty `exporter: {}` -> BASE-EXPORTER' $'  exporter: {}\n'
+pc 'base: a service that extends the overlay exporter -> BASE-EXPORTER' 'BASE-EXPORTER: compose.yml service `sidecar` extends' "compose.yml" "$BASEANCH" "$BASEANCH"$'  sidecar:\n    extends: {file: compose.observability.yml, service: exporter}\n'
+pc 'base: a top-level include -> BASE-EXPORTER' 'BASE-EXPORTER: compose.yml has a top-level `include:`' "compose.yml" $'\nservices:\n' $'\ninclude: [other.yml]\nservices:\n'
+for _f in compose.override.yml compose.override.yaml docker-compose.override.yml docker-compose.override.yaml docker-compose.yml docker-compose.yaml compose.yaml; do
+  pc "a $_f beside the compose files -> OVERLAY-OVERRIDE-FILE" "OVERLAY-OVERRIDE-FILE: \`$_f\` sits beside" "+$_f" "" $'services: {}\n'
+done
+pc "an unrelated file name beside the compose files is fine" OK "+compose.timescale.example" "" $'x: 1\n'
+X1=$'\001'
+URI_OK='db:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt'
+pu() { # NAME WANT URI: the allow-list AND exporter.env edited consistently, so only the floor can notice
+  pc "$1" "$2" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=$3${X1}DATA_SOURCE_URI=$3"
+}
+pu "URI floor: host other, both files edited -> OVERLAY-URI" "OVERLAY-URI" 'other:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt'
+pu "URI floor: port 5433 -> OVERLAY-URI" "OVERLAY-URI" 'db:5433/app?sslmode=verify-full&sslrootcert=/tls/server.crt'
+pu "URI floor: &user=postgres -> OVERLAY-URI" "OVERLAY-URI" "$URI_OK&user=postgres"
+pu "URI floor: &host=other -> OVERLAY-URI" "OVERLAY-URI" "$URI_OK&host=other"
+pu "URI floor: sslmode twice -> OVERLAY-URI" "OVERLAY-URI" 'db:5432/app?sslmode=verify-full&sslmode=verify-full&sslrootcert=/tls/server.crt'
+pu "URI floor: &options=... -> OVERLAY-URI" "OVERLAY-URI" "$URI_OK&options=-csearch_path=x"
+pu "URI floor: a database name that is not an identifier -> OVERLAY-URI" "OVERLAY-URI" 'db:5432/app%20x?sslmode=verify-full&sslrootcert=/tls/server.crt'
+pu "URI floor: another plain database name stays green" OK 'db:5432/app2?sslmode=verify-full&sslrootcert=/tls/server.crt'
+# tokenizer: aggregation operators are keywords (case-insensitive), function names are exact
+pe "an aggregation in capitals is fine (Sum(m))" OK 'Sum(pg_up) == 0'
+pe "SUM by (x) (m) is fine" OK 'SUM by (instance) (pg_up) == 0'
+pe "Avg without (x) (m) is fine" OK 'Avg WITHOUT (instance) (pg_up) < 5'
+pe "a function name is case-sensitive: Rate( is unknown" 'unknown function `Rate(`' 'Rate(pg_up[5m]) == 0'
+pe "a function name is case-sensitive: ABSENT( is unknown" 'unknown function `ABSENT(`' 'ABSENT(pg_up) == 1'
+pe "lower-case rate( is fine" OK 'rate(pg_up[5m]) == 0'
+pmx "parity: the base exporter fragment check removed" '    if str(k) in ov_services:' '    if False:' -- 'BASE-EXPORTER: compose.yml defines the service `exporter`' "compose.yml" "$BASEANCH" "$BASEANCH"$'  exporter: {}\n'
+pmx "parity: the base exporter fragment check removed (reviewer's env_file)" '    if str(k) in ov_services:' '    if False:' -- 'BASE-EXPORTER: compose.yml defines the service `exporter`' "compose.yml" "$BASEANCH" "$BASEANCH"$'  exporter:\n    env_file: ["${EXPORTER_EXTRA_ENV:-./x.env}"]\n'
+pmx "parity: the override-file check removed" '    if exists(os.path.join(overlay_dir, name_)):' '    if False:' -- 'OVERLAY-OVERRIDE-FILE: `compose.override.yml` sits beside' "+compose.override.yml" "" $'services: {}\n'
+pmx "parity: the override-file list shortened (docker-compose.yaml)" '"docker-compose.yaml", ' '' -- 'OVERLAY-OVERRIDE-FILE: `docker-compose.yaml` sits beside' "+docker-compose.yaml" "" $'services: {}\n'
+pmx "parity: the URI floor back to the three old checks (host)" 'if not m_uri:' 'if False:' 'elif sorted(m_uri.group(2).split("&")) !=' 'elif False and sorted(m_uri.group(2).split("&")) !=' -- "OVERLAY-URI" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=other:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt${X1}DATA_SOURCE_URI=other:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt"
+pmx "parity: the URI floor back to the three old checks (&user=)" 'if not m_uri:' 'if False:' 'elif sorted(m_uri.group(2).split("&")) !=' 'elif False and sorted(m_uri.group(2).split("&")) !=' -- "OVERLAY-URI" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=$URI_OK&user=postgres${X1}DATA_SOURCE_URI=$URI_OK&user=postgres"
+pmx "parity: aggregation operators case-sensitive again (Sum( refused)" '(text in FUNCS or low in AGG) and (nxt == ("open", "(") or (low in AGG and' '(text in FUNCS) and (nxt == ("open", "(") or (low in AGG and' -- OK "$R" "expr: pg_up == 0" "expr: 'Sum(pg_up) == 0'"
+pmx "parity: function names case-insensitive (Rate( accepted)" '(text in FUNCS or low in AGG) and' '(low in FUNCS or low in AGG) and' -- 'unknown function `Rate(`' "$R" "expr: pg_up == 0" "expr: 'Rate(pg_up[5m]) == 0'"
 
 prun
 pjudge
@@ -972,18 +1016,37 @@ if [[ -r $workflow ]]; then
   expect_ok "CI: job db is wired (make db-test, PyYAML install and image pre-pull before it, timeout >= 10)" ciw "$workflow"
   WFA="$tmp/wf-nopyyaml.yaml"; WFB="$tmp/wf-pyyaml-late.yaml"; WFC="$tmp/wf-noprepull.yaml"; WFD="$tmp/wf-short.yaml"
   cp "$workflow" "$WFA"; replace_in "$WFA" "python3 -m pip install --quiet 'PyYAML==6.0.2'" "true" || flunk "CI scenario: no-PyYAML copy"
-  cp "$workflow" "$WFB"; replace_in "$WFB" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' || flunk "CI scenario: late-PyYAML copy"
+  cp "$workflow" "$WFB"; replace_in "$WFB" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        if: steps.changed.outputs.run == \'true\'\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' || flunk "CI scenario: late-PyYAML copy"
   cp "$workflow" "$WFC"; replace_in "$WFC" 'docker pull --quiet "$image@$digest"' 'true' || flunk "CI scenario: no-prepull copy"
   cp "$workflow" "$WFD"; replace_in "$WFD" $'    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' $'    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' || flunk "CI scenario: short-timeout copy"
   vmut "CI: the PyYAML install step removed from job db" "$workflow" "python3 -m pip install --quiet 'PyYAML==6.0.2'" "true" ciw
-  vmut "CI: the PyYAML install moved after the make db-test step" "$workflow" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' ciw
+  vmut "CI: the PyYAML install moved after the make db-test step" "$workflow" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        if: steps.changed.outputs.run == \'true\'\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' ciw
   vmut "CI: the image pre-pull removed from job db" "$workflow" 'docker pull --quiet "$image@$digest"' 'true' ciw
   vmut "CI: job db timeout lowered below 10 minutes" "$workflow" $'    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' $'    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' ciw
   ciw_refuses() { ! bash "$1" "$2" >/dev/null 2>&1; }   # SCRIPT WORKFLOW: the script must refuse
-  vmut "db-ci-wired: the PyYAML requirement removed" "$ciwired" 'if not before(lambda r: "pip install" in r and "PyYAML" in r):' 'if False:' ciw_refuses "$WFA"
+  vmut "db-ci-wired: the PyYAML requirement removed" "$ciwired" 'if not before(lambda l: PIP.match(l)):' 'if False:' ciw_refuses "$WFA"
   vmut "db-ci-wired: the PyYAML-before-db-test order removed" "$ciwired" 'steps[:first]' 'steps' ciw_refuses "$WFB"
-  vmut "db-ci-wired: the pre-pull requirement removed" "$ciwired" 'if not before(lambda r: "docker pull" in r and "image.lock" in r):' 'if False:' ciw_refuses "$WFC"
+  vmut "db-ci-wired: the pre-pull requirement removed" "$ciwired" 'if not before(lambda l: re.match(r"docker\s+pull\b", l)):' 'if False:' ciw_refuses "$WFC"
   vmut "db-ci-wired: the timeout requirement removed" "$ciwired" 'or tm < 10:' 'or tm < 0:' ciw_refuses "$WFD"
+  # fourth review: a line that merely MENTIONS pip install, and a step that is switched off by another `if`
+  PIPL="python3 -m pip install --quiet 'PyYAML==6.0.2'"
+  PIPSTEP=$'name: python + PyYAML (parity-check.sh parses YAML)\n        if: steps.changed.outputs.run == \'true\'\n'
+  PULLSTEP=$'name: pre-pull the observability images\n        if: steps.changed.outputs.run == \'true\'\n'
+  WFE="$tmp/wf-echo-pip.yaml"; WFF="$tmp/wf-pip-if-false.yaml"; WFG="$tmp/wf-pull-coe.yaml"; WFH="$tmp/wf-echo-pull.yaml"; WFI="$tmp/wf-sudo-pip.yaml"
+  cp "$workflow" "$WFE"; replace_in "$WFE" "$PIPL" "echo pip install PyYAML" || flunk "CI scenario: echo-pip copy"
+  cp "$workflow" "$WFF"; replace_in "$WFF" "$PIPSTEP" $'name: python + PyYAML (parity-check.sh parses YAML)\n        if: ${{ 1 == 2 }}\n' || flunk "CI scenario: pip-if-false copy"
+  cp "$workflow" "$WFG"; replace_in "$WFG" "$PULLSTEP" "$PULLSTEP"$'        continue-on-error: true\n' || flunk "CI scenario: pull-continue-on-error copy"
+  cp "$workflow" "$WFH"; replace_in "$WFH" 'docker pull --quiet "$image@$digest"' 'echo docker pull --quiet "$image@$digest"' || flunk "CI scenario: echo-pull copy"
+  cp "$workflow" "$WFI"; replace_in "$WFI" "$PIPL" "sudo pip install PyYAML" || flunk "CI scenario: sudo-pip copy"
+  expect_ok "CI: a workflow whose PyYAML line is 'sudo pip install PyYAML' is still wired" ciw "$WFI"
+  expect_ok "CI: 'echo pip install PyYAML' is refused" ciw_refuses "$ciwired" "$WFE"
+  expect_ok "CI: a PyYAML step with an 'if' other than the db-test step's is refused" ciw_refuses "$ciwired" "$WFF"
+  expect_ok "CI: a pre-pull step with continue-on-error: true is refused" ciw_refuses "$ciwired" "$WFG"
+  expect_ok "CI: 'echo docker pull' is refused" ciw_refuses "$ciwired" "$WFH"
+  vmut "db-ci-wired: pip install matched as a substring (echo pip install PyYAML passes)" "$ciwired" 'if not before(lambda l: PIP.match(l)):' 'if not before(lambda l: "pip install" in l and "PyYAML" in l):' ciw_refuses "$WFE"
+  vmut "db-ci-wired: the same-if requirement removed (if: 1 == 2 passes)" "$ciwired" ' and s.get("if") == test_if' '' ciw_refuses "$WFF"
+  vmut "db-ci-wired: continue-on-error of the pre-steps ignored" "$ciwired" 'not soft(s.get("continue-on-error")) and s.get("if") == test_if' 's.get("if") == test_if' ciw_refuses "$WFG"
+  vmut "db-ci-wired: docker pull matched as a substring (echo docker pull passes)" "$ciwired" 'if not before(lambda l: re.match(r"docker\s+pull\b", l)):' 'if not before(lambda l: "docker pull" in l):' ciw_refuses "$WFH"
 else flunk "CI wiring pin" "cannot read $workflow"; fi
 
 if ((skipped > 0)); then echo "$ok ok, $bad failed, $skipped skipped"; else echo "$ok ok, $bad failed"; fi
