@@ -22,7 +22,8 @@
     "docs/repo-schema.md": "root",
     "scripts/monorepo-settings-check.sh": "root",
     "scripts/monorepo-run.sh": "root",
-    "scripts/monorepo_check.py": "root"
+    "scripts/monorepo_check.py": "root",
+    "pnpm-lock.yaml": "root"
   },
   "root_merge": {
     ".gitignore": "union-lines"

@@ -12,9 +12,9 @@ packages:
 
 catalogMode: strict
 catalog:
-  "@types/node": 26.6.11
+  "@types/node": 26.6.6
   typescript: 7.0.2
-  vitest: 5.1.2
+  vitest: 5.1.1
 
 engineStrict: true
 strictPeerDependencies: true

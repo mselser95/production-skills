@@ -125,6 +125,12 @@ new stalled connections faster than 128 per 2 s can still occupy the head phase.
 reverse proxy / TLS terminator in front and have it enforce: TLS, client read and write
 timeouts, a request-size limit, and connection and rate limits per client.
 
+## Where its files land
+
+Layout `single`: everything at the repository root. Layout `monorepo`: every file of this module is a UNIT file
+and lands under `services/<id>/` (its own `.gitignore`, `Makefile`, `production.yaml`), so two instances never
+collide and the module places nothing at the repository root. It ships no CI workflow: the repository root's `.github/workflows/` is the only directory GitHub reads, and the root-level caller that runs `make check-fast` per unit belongs to the monorepo-root module (a later step). Its manifest also places `.github/`, `AGENTS.md`, `registries/`, `.prod/`, `docs/` and `scripts/` as unit files should the template gain them.
+
 ## Checks that run today
 
 ```

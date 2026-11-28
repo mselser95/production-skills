@@ -75,10 +75,13 @@ Create its directory (`services/<name>`, `apps/<name>`, `packages/<name>`, or `d
 to `repo.yaml`. Nothing else in this module changes. The unit brings its own `Makefile` (service) or
 `package.json` scripts (app, package) and takes dependency versions from the catalog.
 
+## The lockfile
+
+`pnpm-lock.yaml` is placed at the root (one file, generated with `pnpm install --lockfile-only --ignore-scripts` from the assembled monorepo-root + design-system workspace; importers are `packages/*`, so service ids do not matter). Catalog versions are at least 7 days old when it is generated. It names `@ds-scope/*`, so it matches only `--slot SCOPE=ds-scope`.
+
 ## Not here
 
-The lockfile (`pnpm-lock.yaml` depends on the units; create it once with `pnpm install` online and
-commit it), a CI workflow that runs `pnpm install --frozen-lockfile` (the settings check itself runs in `make check-fast` and `make verify`), the
+A CI workflow, at the repository root, that calls each unit's workflow (a unit's own `.github/workflows/` under `services/<id>/` is not read by GitHub), a CI workflow that runs `pnpm install --frozen-lockfile` (the settings check itself runs in `make check-fast` and `make verify`), the
 root `production.yaml` v2 `units:` stanza (a later step generates it from `repo.yaml`), the tools a unit
 uses (eslint, vitest config), Docker.
 

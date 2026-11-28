@@ -18,6 +18,30 @@ PostgreSQL 19 is deliberately not used yet (liability `pg19-reevaluate`).
   mismatch / 2 docker absent, image not local (use `--pull`) or not startable.
   Its selftest (`scripts/tests/db-pin-verify-live-selftest.sh`, fake `docker`) runs in `make selftests`.
 
+## Contents and placement
+
+Summary: PostgreSQL 18 image pin: one tested PostgreSQL + TimescaleDB pair, pinned by digest, with a static gate.
+Open liability: `pg19-reevaluate`.
+
+What the module contributes (the human text of the former descriptive manifest):
+
+| Path | Role |
+| --- | --- |
+| `db/image.lock` | the tested image pair (tags, per-platform digests, observed versions, verification date) |
+| `scripts/db-pin-check.sh` | offline gate (`make gates`): no latest, index digest on every reference, PG 18, pair rule, tag/version/data_directory consistency, staleness; checks compose files against the lock |
+| `scripts/db_pin_compose.py` | PyYAML parse of one compose file for the gate (services, build/extends refusal, duplicate keys) |
+| `scripts/tests/db-pin-check-selftest.sh` | hermetic selftest and mutation proof of the gate (`make selftests`) |
+| `scripts/db-bootstrap-test.sh` | Docker test (`make db-test`, CI job `db`): starts the compose stack in a throwaway project and runs the SQL assertions; `--variant plain\|timescale` |
+| `scripts/db-pin-verify-live.sh` | opt-in, needs Docker: starts each pinned image and compares its runtime facts with the lock; run when bumping the pair |
+| `scripts/tests/db-pin-verify-live-selftest.sh` | hermetic selftest of the live verifier with a fake docker (`make selftests`) |
+
+Assembly (`scripts/assemble.py`, manifest `unit` = database / sql): `db/**` and `scripts/**` are placed at the
+repository root in BOTH layouts, so `db/image.lock` and `scripts/db-pin-check.sh` keep the `$here/../db` relationship
+the scripts assume. This README is the one UNIT file: in layout `monorepo` it lands at `db/README.md` and gives the
+instance its `repo.yaml` entry (`id` `db`, kind `database`, path `db`). In layout `single` a unit file lands at the
+repository root, so this README would collide with a service's `README.md`: the single-layout add-on to a service
+repository is not assemblable until the assembler can place a unit file under another directory.
+
 ## The bootstrap test (Docker)
 
 `bash scripts/db-bootstrap-test.sh [--variant plain|timescale]` starts the module's compose stack in a

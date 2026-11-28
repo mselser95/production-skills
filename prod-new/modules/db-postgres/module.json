@@ -1,15 +1,17 @@
 {
   "id": "db-postgres",
-  "summary": "PostgreSQL 18 image pin: one tested PostgreSQL + TimescaleDB pair, pinned by digest, with a static gate.",
-  "contributes": [
-    { "path": "db/image.lock", "role": "the tested image pair (tags, per-platform digests, observed versions, verification date)" },
-    { "path": "scripts/db-pin-check.sh", "role": "offline gate (make gates): no latest, index digest on every reference, PG 18, pair rule, tag/version/data_directory consistency, staleness; checks compose files against the lock" },
-    { "path": "scripts/db_pin_compose.py", "role": "PyYAML parse of one compose file for the gate (services, build/extends refusal, duplicate keys)" },
-    { "path": "scripts/tests/db-pin-check-selftest.sh", "role": "hermetic selftest and mutation proof of the gate (make selftests)" },
-    { "path": "scripts/db-bootstrap-test.sh", "role": "Docker test (make db-test, CI job db): starts the compose stack in a throwaway project and runs the SQL assertions; --variant plain|timescale" },
-    { "path": "scripts/db-pin-verify-live.sh", "role": "opt-in, needs Docker: starts each pinned image and compares its runtime facts with the lock; run when bumping the pair" },
-    { "path": "scripts/tests/db-pin-verify-live-selftest.sh", "role": "hermetic selftest of the live verifier with a fake docker (make selftests)" }
-  ],
   "requires": [],
-  "liabilities": ["pg19-reevaluate"]
+  "conflicts": [],
+  "source": ".",
+  "slots": {},
+  "unit_kind": "database",
+  "unit": {
+    "kind": "database",
+    "language": "sql"
+  },
+  "placement": {
+    "db/**": "root",
+    "scripts/**": "root",
+    "README.md": "unit"
+  }
 }

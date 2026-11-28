@@ -15,15 +15,19 @@
     }
   },
   "unit_kind": "service",
+  "unit": {
+    "kind": "service",
+    "language": "rust"
+  },
   "placement": {
-    ".github/**": "root",
-    "CODEOWNERS": "root",
-    "AGENTS.md": "root",
-    ".gitignore": "root",
-    "registries/**": "root",
-    ".prod/**": "root",
-    "docs/**": "root",
-    "scripts/**": "root",
+    ".github/**": "unit",
+    "CODEOWNERS": "unit",
+    "AGENTS.md": "unit",
+    ".gitignore": "unit",
+    "registries/**": "unit",
+    ".prod/**": "unit",
+    "docs/**": "unit",
+    "scripts/**": "unit",
     "module.json": "unit",
     "production.yaml": "unit",
     "Cargo.toml": "unit",
@@ -37,9 +41,6 @@
     "observability/**": "unit",
     "Makefile": "unit",
     "crates/**": "unit"
-  },
-  "root_merge": {
-    ".gitignore": "union-lines"
   },
   "exclude": [
     "target/**"
