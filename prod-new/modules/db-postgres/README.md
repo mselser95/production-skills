@@ -86,15 +86,21 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   line at COLUMN 0 starting `services:`, `"services":` or `include:` (the top-level keys of a block-style compose
   document), or starts with `{` and has such a key, is `COMPOSE-UNREADABLE-FILE` (fail closed: it looks like a
   compose file and cannot be read). Consequences, on purpose: a SQL file or text file with a column-0 `services:`
-  line and no fence is refused; a file of a different kind with a top-level `services` mapping (a Helm
-  `values.yaml`, say) is a compose-shaped file and is refused: keep such files outside `db/`. A file over 1 MiB is
-  not parsed unless a line at column 0 starts `services:` / `"services":` / `include:` (the whole file is scanned
-  as text, cheap; a dump starting `include/x.sql` is not a key) or its first significant character is `{`; one that
-  has one is parsed in full and judged the same way; over 64 MiB a file is not read at all and is
+  line and no fence is refused; so is a `.properties`-style file with a `services:` line, a plain-text note with a
+  column-0 `services:` line, and a Markdown file WITHOUT a code fence around its snippet; a file of a different kind
+  with a top-level `services` mapping (a Helm `values.yaml`, say) is a compose-shaped file and is refused: keep such
+  files outside `db/`. A refusal names the line of the key and, when the parser reports one, the line of its error
+  (never the line's text); if the file is not a compose file, move it out of `db/` or rename that key. A file over
+  1 MiB is not parsed unless a line starts `services:` / `"services":` / `include:` at ANY indentation (the whole file
+  is scanned as text, cheap; a dump starting `include/x.sql` is not a key) or its first significant character is `{`;
+  one that has one is parsed in full and judged the same way, except that when it does not parse it is refused only
+  if the key line has the smallest indentation among the non-blank, non-comment lines of its first 64 KiB (a
+  top-level key of an indented document), else it is skipped (a `    services: text` line deep in a SQL dump is not
+  a compose key). Cost: a compose-shaped text file is parsed in pure Python at about 4 s per MiB, so a large
+  generated YAML under `db/` slows every check; keep large generated files out of `db/`. Over 64 MiB a file is not read at all and is
   `COMPOSE-UNCHECKED-FILE` (fail closed). A FIFO, socket or device is NOT skipped: it is reported as
   `COMPOSE-UNREADABLE-FILE` (not read, so no hang). Limits: other differences between PyYAML and compose's parser
-  (`%TAG` directives, scalars that start with a reserved indicator, `{{ }}`) and a document indented as a whole
-  (no key at column 0) in a file over 1 MiB are NOT covered by this check. A document with
+  (`%TAG` directives, scalars that start with a reserved indicator, `{{ }}`) are NOT covered by this check. A document with
   a `services` mapping (or null) or a top-level `include` is compose-shaped: it may not define a service the overlay
   defines (`BASE-EXPORTER`, whatever the file is called), and must be one of `compose.yml`, `compose.timescale.yml`,
   `compose.observability.yml` at those exact paths (else `COMPOSE-UNKNOWN-FILE`). YAML that is not compose-shaped

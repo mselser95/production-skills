@@ -738,18 +738,31 @@ pc "content rule GREEN: an empty file" OK "+empty" "" ""
 pc "content rule GREEN: a k8s multi-document manifest named fixture (no extension)" OK "+fixture" "" $'apiVersion: v1\nkind: Service\nmetadata: {name: x}\n---\napiVersion: v1\nkind: ConfigMap\ndata: {services: x}\n'
 pc "content rule GREEN: Markdown that documents a compose snippet in a fenced block" OK "+docs/snippet.md" "" $'# Title\n\nSome text.\n\n```yaml\nservices:\n  exporter: {}\n```\n'
 pc "content rule GREEN: SQL and shell text" OK "+q.sql" "" $'SELECT 1;\n-- services: none\n'
+# oversize, indented as a whole: the key is searched at ANY indentation (compose merges such a file); a file that does not
+# parse is unreadable only when the key line sits at the smallest indentation of its first 64 KiB, else it is skipped
+INDEXF=$'  services:\n    exporter:\n      environment: {PGSSLMODE: disable}\n'
+INDPAD="  $BIGPAD"
+DUMP5="$(python3 -B -c 'print("COPY t FROM stdin;\n" + "1\tabcdefghijklmnopqrstuvwxyz0123456789\n" * 70000, end="")')"
+DUMPN="$(python3 -B -c 'print("COPY t FROM stdin;\n" + "1\tabcdefghijklmnopqrstuvwxyz0123456789\n" * 140000, end="")')"
+pc "oversize indented: every line indented two spaces, then the exporter fragment -> BASE-EXPORTER + COMPOSE-UNKNOWN-FILE" $'BASE-EXPORTER: bigind.txt defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `bigind.txt`' "+bigind.txt" "" "$INDPAD"$'\n'"$INDEXF"
+pc "oversize indented GREEN: a 5 MiB SQL dump with an indented 'services: text' line deep inside a COPY block" OK "+dump5.sql" "" "$DUMP5"$'\n    services: text\n'"$DUMP5"
+pc "oversize GREEN: a 5 MiB dump with no services:/include: line" OK "+dumpn.sql" "" "$DUMPN"
+pc "oversize indented: an unparsable file whose key line is at the smallest indentation -> COMPOSE-UNREADABLE-FILE with both line numbers and the remedy" $'COMPOSE-UNREADABLE-FILE: `bigind-broken.txt` looks like a compose file and cannot be read (line 1 is a `services`/`include` key; the parse error is at line \nif this is not a compose file, move it out of db/ or rename that key' "+bigind-broken.txt" "" $'  services:\n    a: [\n'"$BIGPAD"
+pc "fail closed names the key line and the parse error line, never the line's text (small file)" $'COMPOSE-UNREADABLE-FILE: `smallbad.txt` looks like a compose file and cannot be read (line 2 is a `services`/`include` key; the parse error is at line 4): it cannot be shown harmless; if this is not a compose file, move it out of db/ or rename that key' "+smallbad.txt" "" $'x: 1\nservices:\n  a: [\n'
+pmx "parity: the any-indentation scan reverted to column 0 (an indented oversize compose file is skipped)" 'if oversize and not (ANY_KEY.search(text) or' 'if oversize and not (TOP_KEY.search(text) or' -- 'BASE-EXPORTER: bigind.txt defines the service `exporter`' "+bigind.txt" "" "$INDPAD"$'\n'"$INDEXF"
+pmx "parity: the smallest-indentation rule removed (a deep dump line makes an unparsable dump a false RED)" 'if least is not None and len(m.group(0)) - len(m.group(0).lstrip(" \t")) <= least:' 'if True:' -- OK "+dump6.sql" "" "x: [unclosed"$'\n'"$DUMP5"$'\n    services: text\n'
 pmx "parity: content judgment reverted to name-based (db/extra.json is not read)" $'        if not yaml_:\n            judge_lenient(rel_, p_, link_)\n            continue\n' $'        if not yaml_:\n            continue\n' -- $'BASE-EXPORTER: extra.json defines the service `exporter`' "+extra.json" "" "$EXFJ"
 pmx "parity: only the first document of a stream is read" 'docs = lenient_docs(text)' 'docs = (lenient_docs(text) or [None])[:1]' -- 'COMPOSE-UNKNOWN-FILE: `multi.txt`' "+multi.txt" "" $'a: 1\n---\n'"$EXF"
 pmx "parity: unknown-tag tolerance removed (!override fails the parse)" 'LenientLoader.add_multi_constructor("", _any_tag)' 'pass' -- 'COMPOSE-UNKNOWN-FILE: `ov.txt`' "+ov.txt" "" $'services:\n  exporter:\n    environment: !override {PGSSLMODE: disable}\n'
 pmx "parity: the binary (NUL byte) skip removed (a binary fixture becomes a false RED)" 'if b"\0" in data[:8192] and not utf16:' 'if False:' -- OK "+blob.bin" "" $'services:\n  exporter: {}\n\x03\x03'
-pmx "parity: the whole-file scan reverted to the first 4 KiB (a large compose file with a long header is skipped)" 'if len(data) > LENIENT_CAP and not (TOP_KEY.search(text) or' 'if len(data) > LENIENT_CAP and not (TOP_KEY.search(text[:4096]) or' -- 'BASE-EXPORTER: bigexp.txt defines the service `exporter`' "+bigexp.txt" "" "$HDRPAD"$'\n'"$BIGPAD"$'\n'"$EXF"
+pmx "parity: the whole-file scan reverted to the first 4 KiB (a large compose file with a long header is skipped)" 'if oversize and not (ANY_KEY.search(text) or' 'if oversize and not (ANY_KEY.search(text[:4096]) or' -- 'BASE-EXPORTER: bigexp.txt defines the service `exporter`' "+bigexp.txt" "" "$HDRPAD"$'\n'"$BIGPAD"$'\n'"$EXF"
 pmx "parity: the include key loosened back to a word boundary (a dump starting include/x.sql is a false RED)" '|include)[ \t]*:""")' '|include)\b""")' -- OK "+dump.sql" "" $'include/x.sql\nx: [unclosed\n'"$BIGPAD"
 pmx "parity: tab normalisation removed (a tab-commented file before the fragment is no longer read)" 'docs = lenient_docs(replace_inner_tabs(text))' 'docs = None' -- 'BASE-EXPORTER: x.bak defines the service `exporter`' "+x.bak" "" "$TABHDR$EXF"
-pmx "parity: the column-0 fail-closed removed (a broken compose-like file is skipped)" 'if TOP_KEY.search(text) or (first_significant(text).startswith("{") and FLOW_KEY.search(text)):' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `broken.txt`' "+broken.txt" "" $'services: {a: [\nb: 1\n'
-pmx "parity: the first-line condition restored (volumes: first is skipped again)" 'if TOP_KEY.search(text) or (first_significant' 'if (TOP_KEY.search(text) and re.match(r"services|include|name|version|x-", first_significant(text))) or (first_significant' -- 'COMPOSE-UNREADABLE-FILE: `volfirst.txt`' "+volfirst.txt" "" $'volumes:\n  a: [\nservices:\n  x: {}\n'
+pmx "parity: the column-0 fail-closed removed (a broken compose-like file is skipped)" 'if kl_ or flow_:' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `broken.txt`' "+broken.txt" "" $'services: {a: [\nb: 1\n'
+pmx "parity: the first-line condition restored (volumes: first is skipped again)" 'if kl_ or flow_:' 'if (kl_ and re.match(r"services|include|name|version|x-", first_significant(text))) or flow_:' -- 'COMPOSE-UNREADABLE-FILE: `volfirst.txt`' "+volfirst.txt" "" $'volumes:\n  a: [\nservices:\n  x: {}\n'
 pmx "parity: the fence exemption removed (Markdown with a fenced snippet becomes a false RED)" ' or bool(_FENCE.search(text))' '' -- OK "+docs/fence.md" "" $'# T\n\n```yaml\nservices:\n  exporter: {}\n```\n'
 pmx "parity: the shebang exemption removed (a script with a heredoc compose document becomes a false RED)" 'return text.lstrip("\ufeff").startswith("#!") or' 'return False or' -- OK "+bootstrap/gen.sh" "" $'#!/bin/sh\nset -e\ncat > x.yml <<EOF\nservices:\n  exporter: {}\nEOF\n'
-pmx "parity: the fail-closed branch removed (a tab-indented compose file is skipped)" 'if TOP_KEY.search(text) or (first_significant(text).startswith("{") and FLOW_KEY.search(text)):' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `tabbed.txt`' "+tabbed.txt" "" $'services:\n\texporter: {}\n'
+pmx "parity: the fail-closed branch removed (a tab-indented compose file is skipped)" 'if kl_ or flow_:' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `tabbed.txt`' "+tabbed.txt" "" $'services:\n\texporter: {}\n'
 pmx "parity: include is no longer compose-shaped" '"include" in doc or ("services" in doc' 'False or ("services" in doc' -- 'COMPOSE-UNKNOWN-FILE: `inc.yml`' "+inc.yml" "" $'include: [../elsewhere.yml]\n'
 dcx "compose mention: docker --context x compose -> refused outright (global flag)" 'no global flags' 'docker --context x compose -f compose.yml -f compose.observability.yml up -d'
 dcx "compose mention: docker --debug compose ps -> refused (global flag)" '`--debug`: write `docker compose` with no global flags' 'docker --debug compose ps'
@@ -843,6 +856,24 @@ if replace_in "$rtm" '        if special_:' '        if False:'; then
   if [[ $rcc == 1 && $outc == *'`pipe` is not a regular file'* && ($rc == 124 || $rc == 142 || $rc == 143 || $out != *'`pipe` is not a regular file'*) ]]; then echo "RED  mutation parity: the special-file rule removed (the FIFO is opened: the run hangs; control green)"; ok=$((ok + 1)); else flunk "mutation parity: special-file rule removed: GREEN or control not green" "rcc=$rcc rc=$rc"; fi
   rm -f "$rt/db/pipe"
 else flunk "mutant parity: special-file rule: anchor not found or no-op"; fi
+# the over-64 MiB branch on a real tree. Writing 65 MiB twice costs over 6 s here, so the selftest lowers the bound through
+# the script's TEST HOOK (honoured only with PARITY_SELFTEST=1) and writes 2.5 MiB; the real 65 MiB file was measured by hand
+hugerun() { PARITY_SELFTEST=1 PARITY_SELFTEST_HUGE_CAP=2097152 rtp "$1" "${2:-60}"; }
+head -c 2621440 /dev/zero | tr '\0' ' ' > "$rt/db/huge.txt"
+hugerun "$parity"
+if [[ $rc == 1 && $out == *'COMPOSE-UNCHECKED-FILE: `huge.txt` is over 64 MiB: it was not read'* && $out != *Traceback* ]]; then pass "real tree: a text file over the bound is COMPOSE-UNCHECKED-FILE, named (bound lowered by the test hook)"; else flunk "real tree: huge text file" "rc=$rc ${out:0:200}"; fi
+rtp "$parity"
+if [[ $rc == 0 && $out == *"parity-check: OK"* ]]; then pass "real tree: the same 2.5 MiB file without the hook is read as an ordinary large file (green)"; else flunk "real tree: huge.txt without the hook" "rc=$rc ${out:0:200}"; fi
+rtm="$tmp/mut/rt-huge.sh"; cp "$parity" "$rtm"
+if replace_in "$rtm" '    if len(data) > HUGE_CAP:' '    if False:'; then
+  hugerun "$parity"; rcc=$rc; outc="$out"; hugerun "$rtm" 20
+  if [[ $rcc == 1 && $outc == *'COMPOSE-UNCHECKED-FILE: `huge.txt`'* && ($rc == 0 || $out != *'COMPOSE-UNCHECKED-FILE: `huge.txt`'*) ]]; then echo "RED  mutation parity: the over-64 MiB branch removed (the huge file is read; control green)"; ok=$((ok + 1)); else flunk "mutation parity: over-64 MiB branch removed: GREEN or control not green" "rcc=$rcc rc=$rc"; fi
+else flunk "mutant parity: over-64 MiB branch: anchor not found or no-op"; fi
+rm -f "$rt/db/huge.txt"
+head -c 2621440 /dev/zero > "$rt/db/huge.bin"
+hugerun "$parity"
+if [[ $rc == 0 && $out == *"parity-check: OK"* ]]; then pass "real tree: a binary file over the bound is skipped (the NUL check runs first)"; else flunk "real tree: huge binary file" "rc=$rc ${out:0:200}"; fi
+rm -f "$rt/db/huge.bin"
 sect "promtool"
 # ---- 3. promtool ----------------------------------------------------------------------------------
 # red_pair NAME FN CTL MUT: FN must pass on CTL (the unmutated copy) and fail on MUT

@@ -56,8 +56,11 @@
 #                    TABs replaced by a space, as compose reads them), skipping binary (NUL in the first 8 KiB),
 #                    non-UTF-8, and unparsable PROSE (a line of three backticks/tildes) or SCRIPTS (first line `#!`);
 #                    any other unparsable file with a column-0 `services:` / `include:` line is
-#                    COMPOSE-UNREADABLE-FILE. A file over 1 MiB is scanned whole for such a line and parsed only if
-#                    it has one; over 64 MiB it is COMPOSE-UNCHECKED-FILE. A FIFO/socket/device is
+#                    COMPOSE-UNREADABLE-FILE (the message names the key's line and the parse error's line, never
+#                    the line's text). A file over 1 MiB is scanned whole for such a line at ANY indentation and
+#                    parsed only if it has one; if it then does not parse it is unreadable only when that line is at
+#                    the smallest indentation of the first 64 KiB's lines (a top-level key of an indented document),
+#                    else skipped; over 64 MiB it is COMPOSE-UNCHECKED-FILE. A FIFO/socket/device is
 #                    COMPOSE-UNREADABLE-FILE (not read, no hang). A compose-shaped
 #                    file (a `services` mapping or null, or an `include`) may not define a service the overlay
 #                    defines (BASE-EXPORTER) and must be one of the three listed files at its exact path (else
@@ -786,8 +789,13 @@ for name_ in listing:
 YAML_EXEMPT = ()   # exact relative paths a legitimate multi-document or tagged file may be exempted at (none ship)
 LENIENT_CAP = 1 << 20     # above this a file is not parsed unless a column-0 `services:` / `include:` line says it is compose
 HUGE_CAP = 64 << 20       # above this a file is not read at all: COMPOSE-UNCHECKED-FILE (fail closed)
+if os.environ.get("PARITY_SELFTEST") == "1" and os.environ.get("PARITY_SELFTEST_HUGE_CAP", "").isdigit():
+    HUGE_CAP = int(os.environ["PARITY_SELFTEST_HUGE_CAP"])   # TEST HOOK, honoured only with PARITY_SELFTEST=1: the selftest lowers the bound instead of writing 65 MiB
+HEAD_SCAN = 64 << 10      # the indentation of an oversize file's document is read from its first 64 KiB
 # the shape of a compose document's top-level key in block style (they sit at column 0): key syntax, not a word
 TOP_KEY = re.compile(r"""(?m)^(?:services|"services"|'services'|include)[ \t]*:""")
+# the same key at ANY indentation: only for files over LENIENT_CAP, where a document indented as a whole still merges
+ANY_KEY = re.compile(r"""(?m)^[ \t]*(?:services|"services"|'services'|include)[ \t]*:""")
 FLOW_KEY = re.compile(r"""["']?(?:services|include)["']?\s*:""")
 PARSE_ERRORS = (yaml.YAMLError, ValueError, TypeError, RecursionError, OverflowError)
 _LEAD = re.compile(r"(?m)^([ \t]*)(.*)$")
@@ -818,11 +826,34 @@ def first_significant(text):
     return ""
 
 
+PARSE_LINE = [0]   # the line PyYAML reported for the last failed lenient parse (0 = none)
+
+
 def lenient_docs(text):
     try:
         return list(yaml.load_all(text, Loader=LenientLoader))
-    except PARSE_ERRORS:
+    except PARSE_ERRORS as e:
+        mark = getattr(e, "problem_mark", None)
+        PARSE_LINE[0] = mark.line + 1 if mark is not None else 0
         return None
+
+
+def key_line(text, oversize):
+    """The 1-based line of the key that made a file look like compose, or 0. Up to LENIENT_CAP: the first key at column 0.
+    Over it: the first key line whose indentation is the SMALLEST among the non-blank, non-comment lines of the first
+    64 KiB (a top-level key of an indented document); a key nested deeper (a dump line `    services: x`) does not count."""
+    if not oversize:
+        m = TOP_KEY.search(text)
+        return text.count("\n", 0, m.start()) + 1 if m else 0
+    least = None
+    for ln in text[:HEAD_SCAN].splitlines():
+        t_ = ln.lstrip(" \t")
+        if t_ and not t_.startswith("#"):
+            least = len(ln) - len(t_) if least is None else min(least, len(ln) - len(t_))
+    for m in ANY_KEY.finditer(text):
+        if least is not None and len(m.group(0)) - len(m.group(0).lstrip(" \t")) <= least:
+            return text.count("\n", 0, m.start()) + 1
+    return 0
 
 
 def replace_inner_tabs(text):
@@ -856,8 +887,9 @@ def judge_lenient(rel_, p_, link_):
         text = data.decode("utf-16" if utf16 else "utf-8")
     except UnicodeDecodeError:
         return   # not text
-    if len(data) > LENIENT_CAP and not (TOP_KEY.search(text) or first_significant(text).startswith("{")):
-        return   # a large file is parsed only when a line of compose's own shape says it is worth it (cheap scan of the WHOLE file)
+    oversize = len(data) > LENIENT_CAP
+    if oversize and not (ANY_KEY.search(text) or first_significant(text).startswith("{")):
+        return   # a large file is parsed only when a line of compose's own shape (at any indentation) says it is worth it (cheap scan of the WHOLE file)
     tabs_ = ""
     docs = lenient_docs(text)
     if docs is None:
@@ -866,8 +898,12 @@ def judge_lenient(rel_, p_, link_):
     if docs is None:
         if is_prose_or_script(text):
             return
-        if TOP_KEY.search(text) or (first_significant(text).startswith("{") and FLOW_KEY.search(text)):
-            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} looks like a compose file and cannot be read: it cannot be shown harmless; delete it or move it outside db/")
+        kl_ = key_line(text, oversize)
+        flow_ = first_significant(text).startswith("{") and FLOW_KEY.search(text)
+        if kl_ or flow_:
+            where_ = f" (line {kl_} is a `services`/`include` key" if kl_ else " (it starts with `{` and has such a key"
+            where_ += f"; the parse error is at line {PARSE_LINE[0]})" if PARSE_LINE[0] else ")"
+            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} looks like a compose file and cannot be read{where_}: it cannot be shown harmless; if this is not a compose file, move it out of db/ or rename that key")
         return
     shaped = [d_ for d_ in docs if compose_shaped(d_)]
     for d_ in shaped:
