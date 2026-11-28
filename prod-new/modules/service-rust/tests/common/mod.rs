@@ -8,6 +8,16 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+/// The module directory, read at RUN time (cargo sets `CARGO_MANIFEST_DIR` for
+/// the checkout it runs a test for, which can differ from the one that
+/// compiled the binary); the compile-time value is only the fallback.
+pub fn manifest_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR").map_or_else(
+        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        std::path::PathBuf::from,
+    )
+}
+
 use svc_adapter::http::{Monitor, Options, Server};
 use svc_adapter::memory::MemoryStore;
 use svc_app::{Clock, EventStore, IdGenerator, Ledger, MetricsSource, Telemetry};

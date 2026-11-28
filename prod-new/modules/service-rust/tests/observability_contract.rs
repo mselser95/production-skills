@@ -69,7 +69,9 @@ fn parse_manifest(text: &str, default_kind: Option<&str>) -> BTreeMap<String, En
 }
 
 fn manifests() -> BTreeMap<String, Entry> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("observability");
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from)
+        .join("observability");
     let metrics = fs::read_to_string(dir.join("emitted-metrics.yaml")).unwrap();
     let spans = fs::read_to_string(dir.join("spans.yaml")).unwrap();
     let mut all = parse_manifest(&metrics, None);

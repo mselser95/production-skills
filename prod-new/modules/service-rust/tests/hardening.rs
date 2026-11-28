@@ -212,7 +212,7 @@ fn connections_that_sent_nothing_are_closed_at_shutdown_and_not_abandoned() {
 /// can see.
 #[test]
 fn the_tests_that_production_yaml_cites_exist_and_the_architecture_gate_is_present() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = common::manifest_dir();
     let yaml = std::fs::read_to_string(root.join("production.yaml")).unwrap();
     let rows: Vec<(String, String)> = yaml
         .lines()

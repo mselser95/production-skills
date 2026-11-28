@@ -59,8 +59,84 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
+/// The module directory, read at RUN time: cargo sets `CARGO_MANIFEST_DIR` for
+/// `cargo test` in the checkout it runs for, so a binary compiled in one
+/// checkout and executed by cargo for another inspects the other. The
+/// compile-time value is only the fallback for a binary run by hand.
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from)
+}
+
+/// The canonical form of a module path: the identity of a checkout, so the
+/// same checkout reached through a symlink or its real path is ONE owner.
+fn owner_id(module: &Path) -> String {
+    fs::canonicalize(module)
+        .unwrap_or_else(|_| module.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn shared_target_message(me: &str, other: &str) -> String {
+    format!(
+        "this target directory is shared with another checkout ({other}); cargo reuses build \
+         artefacts between checkouts that share a target directory, so neither checkout's \
+         result can be trusted. Give each checkout its own target directory (unset \
+         CARGO_TARGET_DIR, or point it at a per-checkout path), or run `cargo clean` if the \
+         other checkout is gone. (this checkout: {me})"
+    )
+}
+
+/// Target-directory ownership. `marker` holds the canonical path of the module
+/// that first used the target directory. Absent: created atomically
+/// (`create_new`) with `me`. Equal: fine. Different and still on disk: an
+/// error naming both. Different and gone from disk (deleted or moved): taken
+/// over, by removing the dead owner's marker and claiming again.
+fn claim_target(marker: &Path, me: &str) -> Result<(), String> {
+    use std::io::{ErrorKind, Write};
+    fs::create_dir_all(marker.parent().unwrap()).map_err(|e| e.to_string())?;
+    for _ in 0..100 {
+        match File::options().write(true).create_new(true).open(marker) {
+            Ok(mut f) => {
+                f.write_all(me.as_bytes()).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                let other = fs::read_to_string(marker).unwrap_or_default();
+                if other.is_empty() {
+                    // The winner has created the file and not written it yet.
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                } else if other == me {
+                    return Ok(());
+                } else if Path::new(&other).exists() {
+                    return Err(shared_target_message(me, &other));
+                } else if fs::read_to_string(marker).ok().as_deref() == Some(other.as_str()) {
+                    let _ = fs::remove_file(marker);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(format!(
+        "could not settle the owner of {}",
+        marker.display()
+    ))
+}
+
+/// Called first by EVERY test (`every_test_calls_the_ownership_guard_first`
+/// pins that): in a target directory owned by another checkout every test
+/// fails, so `cargo test` cannot be green there.
+fn guard() {
+    static OWNED: OnceLock<Result<(), String>> = OnceLock::new();
+    let r = OWNED.get_or_init(|| {
+        let module = root();
+        let target =
+            module.join(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()));
+        claim_target(&target.join("arch-fixtures/OWNER"), &owner_id(&module))
+    });
+    if let Err(m) = r {
+        panic!("{m}");
+    }
 }
 
 // ---- a minimal JSON reader, enough for `cargo metadata` (no dependency) ----
@@ -267,6 +343,7 @@ fn target_kinds() -> BTreeMap<String, Vec<String>> {
 
 #[test]
 fn the_dependency_graph_is_exactly_the_zone_rule() {
+    guard();
     let want: BTreeMap<String, Vec<String>> = [
         ("svc-domain", vec![]),
         ("svc-app", vec!["svc-domain"]),
@@ -289,6 +366,7 @@ fn the_dependency_graph_is_exactly_the_zone_rule() {
 
 #[test]
 fn every_member_inherits_the_workspace_lints() {
+    guard();
     for member in [
         "Cargo.toml",
         "crates/domain/Cargo.toml",
@@ -303,6 +381,7 @@ fn every_member_inherits_the_workspace_lints() {
 
 #[test]
 fn the_release_profile_keeps_overflow_checks_and_unwinds() {
+    guard();
     let t = squash(&fs::read_to_string(root().join("Cargo.toml")).unwrap());
     assert!(t.contains("[profile.release]"));
     assert!(t.contains("overflow-checks=true"));
@@ -784,6 +863,7 @@ fn refused_cargo_config_skipping(module: &Path, ceiling: &Path, skip: &Path) -> 
 
 #[test]
 fn no_cargo_configuration_sits_in_or_above_the_module() {
+    guard();
     let module = root();
     let found = refused_cargo_config(&module, &repository_root(&module));
     assert!(
@@ -881,6 +961,7 @@ fn assert_armed() {
 
 #[test]
 fn the_compiler_refuses_std_and_unsafe_code_in_domain_and_app() {
+    guard();
     // Run by THIS test, with its own arguments: not through `make`, not through
     // a variable a Makefile owns. Whatever else is edited, a `std` item, any
     // spelling of `extern crate std`, or an `unsafe` token is an error here.
@@ -895,6 +976,7 @@ fn the_compiler_refuses_std_and_unsafe_code_in_domain_and_app() {
 
 #[test]
 fn unsafe_code_is_forbidden_from_the_command_line_in_the_other_zones_too() {
+    guard();
     assert_armed();
     let tree = Tree::real();
     for (rel, unit) in [
@@ -929,6 +1011,7 @@ fn a_target_that_is_not_installed() -> &'static str {
 
 #[test]
 fn a_missing_no_std_target_fails_with_the_install_hint_and_never_skips() {
+    guard();
     let target = a_target_that_is_not_installed();
     let why = compile_forbidding_unsafe(&Tree::real(), "crates/domain", &nostd_unit(target))
         .expect_err("a compile for a target that is not installed must fail, not skip");
@@ -938,6 +1021,7 @@ fn a_missing_no_std_target_fails_with_the_install_hint_and_never_skips() {
 
 #[test]
 fn domain_and_app_have_no_build_script_proc_macro_or_extra_dependency() {
+    guard();
     let kinds = target_kinds();
     for krate in ["svc-domain", "svc-app"] {
         let k = &kinds[krate];
@@ -987,6 +1071,7 @@ fn src_files(crate_dir: &str) -> Vec<PathBuf> {
 
 #[test]
 fn early_message_domain_and_app_name_no_std_items() {
+    guard();
     for krate in ["crates/domain", "crates/app"] {
         let lib = squash(&fs::read_to_string(root().join(krate).join("src/lib.rs")).unwrap());
         assert!(lib.contains("#![no_std]"), "{krate}: #![no_std] missing");
@@ -1008,6 +1093,7 @@ fn early_message_domain_and_app_name_no_std_items() {
 
 #[test]
 fn only_config_rs_reads_the_environment() {
+    guard();
     let allowed = root().join("crates/platform/src/config.rs");
     let mut files: Vec<PathBuf> = ["domain", "app", "adapter", "platform"]
         .iter()
@@ -1033,6 +1119,7 @@ fn only_config_rs_reads_the_environment() {
 
 #[test]
 fn the_token_is_compared_through_the_constant_time_helper_only() {
+    guard();
     let http = squash(&fs::read_to_string(root().join("crates/adapter/src/http.rs")).unwrap());
     assert!(
         http.contains("ct_eq(token.as_bytes(),self.opts.auth_token.as_bytes())"),
@@ -1181,12 +1268,14 @@ fn l1_violations(
 
 #[test]
 fn l1_the_compiler_read_only_files_inside_the_src_of_domain_and_app() {
+    guard();
     let bad = l1_violations(&Tree::real(), host_build(), &PURE_CRATES);
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 #[test]
 fn l1_a_file_outside_src_is_named() {
+    guard();
     let src = Path::new("/w/crates/domain/src");
     let files: Vec<PathBuf> = ["/w/crates/domain/src/lib.rs", "/w/crates/domain/host/io.rs"]
         .into_iter()
@@ -1276,12 +1365,14 @@ fn l2_violations(units: &BTreeMap<String, HostUnit>, crates: &[(&str, &str, &str
 
 #[test]
 fn l2_no_conditional_compilation_and_no_file_inclusion_in_the_files_the_compiler_read() {
+    guard();
     let bad = l2_violations(host_build(), &PURE_CRATES);
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 #[test]
 fn l2_scanner_refuses_every_spelling_and_allows_only_the_test_line() {
+    guard();
     let refused = [
         "#[cfg(debug_assertions)]\nfn a() {}",
         "#[cfg(unix)]\nfn a() {}",
@@ -1387,6 +1478,7 @@ fn feature_violations(meta: &Json, built: &BTreeMap<String, Vec<String>>) -> Vec
 
 #[test]
 fn l3_domain_and_app_have_no_features_and_nobody_switches_one_on() {
+    guard();
     let built: BTreeMap<String, Vec<String>> = PURE_CRATES
         .iter()
         .map(|(lib, pkg, _)| ((*pkg).to_owned(), host_build()[*lib].features.clone()))
@@ -1396,6 +1488,7 @@ fn l3_domain_and_app_have_no_features_and_nobody_switches_one_on() {
 
 #[test]
 fn l3_checker_refuses_a_feature_an_optional_dependency_and_a_dependent_that_switches_one() {
+    guard();
     let meta = |domain_features: &str, app_deps: &str, adapter_dep: &str| {
         let json = format!(
             r#"{{"packages":[
@@ -1703,6 +1796,7 @@ type FixtureCase = (&'static str, fn(&Path), bool, bool, &'static [&'static str]
 
 #[test]
 fn every_attack_on_a_copy_of_domain_turns_its_layer_red_and_the_control_stays_green() {
+    guard();
     let cases: [FixtureCase; 8] = [
         ("control", no_attack, true, true, &[]),
         (
@@ -2013,6 +2107,7 @@ fn config_cases() -> Vec<ConfigCase> {
 
 #[test]
 fn the_compiler_gate_is_armed_and_no_cargo_configuration_can_lower_it() {
+    guard();
     for case in config_cases() {
         let (tree, base) = config_fixture(&case);
         let (want_refused, want_red, want_armed) = case.expect;
@@ -2068,6 +2163,7 @@ fn the_compiler_gate_is_armed_and_no_cargo_configuration_can_lower_it() {
 
 #[test]
 fn rust_toolchain_files_may_only_carry_channel_components_targets_and_profile() {
+    guard();
     let real = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
     assert_eq!(
         toolchain_text_violations("rust-toolchain.toml", &real),
@@ -2131,6 +2227,7 @@ fn toolchain_case(name: &str, files: &[(&str, &str)]) -> Vec<String> {
 /// never climb into the real module.
 #[test]
 fn the_parent_walks_stop_at_the_ceiling() {
+    guard();
     let unique = Scratch::new();
     let scratch = unique.path().join("walk-bound");
     let top = scratch.join("root");
@@ -2182,6 +2279,7 @@ fn the_parent_walks_stop_at_the_ceiling() {
 /// shared target directory.
 #[test]
 fn fixture_roots_are_per_checkout_and_stable() {
+    guard();
     let unique = Scratch::new();
     let (a, b) = (unique.path().join("a/mod"), unique.path().join("b/mod"));
     fs::create_dir_all(&a).unwrap();
@@ -2199,10 +2297,22 @@ fn fixture_roots_are_per_checkout_and_stable() {
 }
 
 /// The fixture lock excludes a second holder of the same case and nobody
-/// else, and a drop (a panic unwinds through it too) releases it.
+/// else, and a drop (a panic unwinds through it too) releases it. The names
+/// are unique per call and the test removes only the files it created: the
+/// `lock-pin` directory is shared with concurrent runs and is never removed.
 #[test]
 fn a_fixture_case_is_held_by_one_run_at_a_time() {
-    let name = format!("lock-pin-{}", std::process::id());
+    guard();
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = format!(
+        "lock-pin-{}-{}-{nanos:x}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
+    let other_name = format!("{name}-other");
     let (dir, held) = locked_case_dir("lock-pin", &name);
     let lock_file = dir.with_extension("lock");
     let other = File::options().append(true).open(&lock_file).unwrap();
@@ -2210,7 +2320,7 @@ fn a_fixture_case_is_held_by_one_run_at_a_time() {
         matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)),
         "a second holder of the same case got the lock"
     );
-    let (_, elsewhere) = locked_case_dir("lock-pin", &format!("{name}-other"));
+    let (other_dir, elsewhere) = locked_case_dir("lock-pin", &other_name);
     drop(elsewhere);
     drop(held);
     // A concurrent test's fork can hold a copy of the descriptor until its
@@ -2221,8 +2331,104 @@ fn a_fixture_case_is_held_by_one_run_at_a_time() {
             false
         }
     });
+    let _ = fs::remove_file(&lock_file);
+    let _ = fs::remove_file(other_dir.with_extension("lock"));
     assert!(released, "the lock was not released on drop");
-    let _ = fs::remove_dir_all(lock_file.parent().unwrap());
+}
+
+/// A `Scratch` directory is gone after its guard drops, also when the owner
+/// panics (the unwind runs the drop).
+#[test]
+fn a_scratch_directory_is_removed_when_its_guard_drops_also_on_panic() {
+    guard();
+    let plain = Scratch::new();
+    let p = plain.path().to_path_buf();
+    assert!(p.is_dir());
+    drop(plain);
+    assert!(!p.exists(), "a dropped Scratch left {}", p.display());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = std::thread::spawn(move || {
+        let s = Scratch::new();
+        tx.send(s.path().to_path_buf()).unwrap();
+        fs::write(s.path().join("f"), "x").unwrap();
+        panic!("the owner panics while the guard is alive");
+    });
+    let q = rx.recv().unwrap();
+    assert!(t.join().is_err(), "the thread was meant to panic");
+    assert!(!q.exists(), "a panicked Scratch left {}", q.display());
+}
+
+/// The ownership rules of a target directory, on a scratch marker.
+#[test]
+fn the_target_marker_refuses_a_live_foreign_owner_and_takes_over_a_dead_one() {
+    guard();
+    let sc = Scratch::new();
+    let marker = sc.path().join("t/arch-fixtures/OWNER");
+    let live_a = sc.path().join("a");
+    let live_b = sc.path().join("b");
+    fs::create_dir_all(&live_a).unwrap();
+    fs::create_dir_all(&live_b).unwrap();
+    let (a, b) = (owner_id(&live_a), owner_id(&live_b));
+    claim_target(&marker, &a).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), a);
+    claim_target(&marker, &a).unwrap();
+    let err = claim_target(&marker, &b).unwrap_err();
+    assert!(err.contains(&a) && err.contains(&b), "{err}");
+    assert!(err.contains("this target directory is shared with another checkout"));
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        a,
+        "a refusal must not take over"
+    );
+    fs::remove_dir_all(&live_a).unwrap();
+    claim_target(&marker, &b).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), b);
+    assert!(
+        claim_target(&marker, &a).is_err(),
+        "a dead checkout cannot displace a live owner"
+    );
+}
+
+/// One checkout reached through a symlink and through its real path is ONE
+/// owner (the marker stores the canonical path).
+#[cfg(unix)]
+#[test]
+fn a_checkout_through_a_symlink_is_the_same_owner() {
+    guard();
+    let sc = Scratch::new();
+    let real = sc.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = sc.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(owner_id(&real), owner_id(&link));
+    let marker = sc.path().join("t/OWNER");
+    claim_target(&marker, &owner_id(&real)).unwrap();
+    claim_target(&marker, &owner_id(&link)).unwrap();
+}
+
+/// Every `#[test]` in this file starts with `guard();`, so in a target
+/// directory owned by another checkout every test fails.
+#[test]
+fn every_test_calls_the_ownership_guard_first() {
+    guard();
+    let src = fs::read_to_string(root().join("tests/architecture.rs")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut tests = 0;
+    for (i, l) in lines.iter().enumerate() {
+        if *l == "#[test]" {
+            let mut j = i + 1;
+            while !lines[j].starts_with("fn ") {
+                j += 1;
+            }
+            tests += 1;
+            assert!(
+                lines[j + 1].trim() == "guard();",
+                "test `{}` does not call guard() first",
+                lines[j]
+            );
+        }
+    }
+    assert!(tests > 25, "found only {tests} tests");
 }
 
 /// The module-tree scans skip the ACTUAL target directory by path: a
@@ -2231,6 +2437,7 @@ fn a_fixture_case_is_held_by_one_run_at_a_time() {
 /// module's. The same files anywhere else in the module are still refused.
 #[test]
 fn the_module_scans_skip_the_actual_target_directory_by_path() {
+    guard();
     let unique = Scratch::new();
     let module = unique.path().join("module");
     let build = module.join("build");
@@ -2270,6 +2477,7 @@ fn the_module_scans_skip_the_actual_target_directory_by_path() {
 
 #[test]
 fn only_the_module_roots_rust_toolchain_toml_is_accepted_and_it_names_a_release_channel() {
+    guard();
     let real = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
     let green: [(&str, Vec<(&str, &str)>); 2] = [
         ("shipped", vec![("mod/rust-toolchain.toml", &real)]),

@@ -235,10 +235,9 @@ fn every_declared_metric_is_scrapeable_right_after_start() {
         .unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
-    let manifest = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("observability/emitted-metrics.yaml"),
-    )
-    .unwrap();
+    let manifest =
+        std::fs::read_to_string(common::manifest_dir().join("observability/emitted-metrics.yaml"))
+            .unwrap();
     let names: Vec<&str> = manifest
         .lines()
         .filter_map(|l| l.strip_prefix("- name: "))
