@@ -11,6 +11,11 @@
 #   - neither that step nor the job has `if:` set to a constant false or
 #     `continue-on-error:` set to anything but false. (A step `if` that is an
 #     expression, such as the change filter the workflow uses, is allowed.)
+# and the two steps `make db-test` cannot run without (a cold runner has no PyYAML and no
+# exporter image), plus the job's time budget:
+#   - a live step that runs `pip install` of PyYAML, BEFORE the `make db-test` step;
+#   - a live step that `docker pull`s the images named by observability/image.lock, before it;
+#   - `timeout-minutes` of the job is a number >= 10 (a cold pull plus five container runs).
 # Exit: 0 wired / 1 not wired / 2 python3 or PyYAML missing, file unreadable
 # (nothing was checked; never "unchecked = ok").
 set -uo pipefail
@@ -50,5 +55,23 @@ if not hits:
 live = [s for s in hits if not ("if" in s and never(s["if"])) and not soft(s.get("continue-on-error"))]
 if not live:
     print("db-ci-wired: FAIL the `make db-test` step has a constant-false `if` or continue-on-error", file=sys.stderr); sys.exit(1)
+first = steps.index(live[0])
+
+
+def live_step(s):
+    return not ("if" in s and never(s["if"])) and not soft(s.get("continue-on-error"))
+
+
+def before(pred):
+    return [i for i, s in enumerate(steps[:first]) if isinstance(s, dict) and isinstance(s.get("run"), str) and live_step(s) and pred(s["run"])]
+
+
+if not before(lambda r: "pip install" in r and "PyYAML" in r):
+    print("db-ci-wired: FAIL job `db` has no live step before `make db-test` that pip-installs PyYAML (parity-check.sh needs it)", file=sys.stderr); sys.exit(1)
+if not before(lambda r: "docker pull" in r and "image.lock" in r):
+    print("db-ci-wired: FAIL job `db` has no live step before `make db-test` that pre-pulls the images named by image.lock", file=sys.stderr); sys.exit(1)
+tm = job.get("timeout-minutes")
+if isinstance(tm, bool) or not isinstance(tm, (int, float)) or tm < 10:
+    print("db-ci-wired: FAIL job `db` needs timeout-minutes >= 10 (a cold pull and five container runs)", file=sys.stderr); sys.exit(1)
 print(f"db-test is run by job db, step {live[0].get('name', '(unnamed)')!r}")
 PY

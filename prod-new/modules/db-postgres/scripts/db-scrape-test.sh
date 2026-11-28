@@ -13,8 +13,9 @@
 #                               into a variable and printed, never the whole value
 #   exporter-args-allowlisted   the RUNNING exporter's command and entrypoint are exactly
 #   exporter-env-allowlisted    allowed by observability/exporter-allowlist.txt (the same file
-#   exporter-mounts-expected    parity-check.sh reads): every argument, every variable NAME (never
-#                               a value) and the set of mount destinations. A flag such as
+#   exporter-mounts-expected    parity-check.sh reads): every argument, every variable as an exact
+#                               NAME=VALUE pair (only NAMES are printed, never a value) and the set
+#                               of mount destinations. A flag such as
 #                               --datasource.uri, a DATA_SOURCE_URI_FILE or a mounted config file
 #                               would downgrade the connection where tls-verify-full cannot look.
 #   exporter-session-encrypted  from the database side: every app_monitor TCP session
@@ -210,18 +211,18 @@ fi
 # TLS parameters. Never a value: `--datasource.uri=...` or an env value may carry a password.
 # `%q` keeps one item on one line, so a value with a newline cannot forge another line.
 INSPECT_FMT='{{range .Config.Cmd}}cmd {{printf "%q" .}}{{"\n"}}{{end}}{{range .Config.Entrypoint}}entrypoint {{printf "%q" .}}{{"\n"}}{{end}}{{range .Config.Env}}env {{printf "%q" .}}{{"\n"}}{{end}}{{range .Mounts}}mount {{printf "%q" .Destination}}{{"\n"}}{{end}}'
-a_arg=(); a_env=(); a_ienv=(); a_ep=(); a_mount=()
+a_arg=(); a_env=(); a_envn=(); a_ienv=(); a_ep=(); a_mount=()
 while IFS= read -r l; do
   l="${l%%#*}"; [[ -n ${l//[[:space:]]/} ]] || continue
-  read -r k v <<<"$l"
+  read -r k v w <<<"$l"
   case "$k" in
-    arg) a_arg+=("$v") ;; env) a_env+=("$v") ;; image-env) a_ienv+=("$v") ;;
-    entrypoint) a_ep+=("$v") ;; mount) a_mount+=("$v") ;;
+    arg) a_arg+=("$v") ;; env) a_env+=("$v"); a_envn+=("${v%%=*}") ;; image-env) a_ienv+=("$v") ;;
+    entrypoint) a_ep+=("$v") ;; mount) a_mount+=("$w") ;;   # `mount <source> <destination>`: the running container is judged by destination
   esac
 done < "$dbdir/observability/exporter-allowlist.txt"
 in_list() { local x="$1"; shift; local y; for y in "$@"; do [[ $x == "$y" ]] && return 0; done; return 1; }
 
-insp_err=""; uri=""; have_uri=0; cmd_args=(); ep_args=(); env_names=(); mounts=()
+insp_err=""; uri=""; have_uri=0; cmd_args=(); ep_args=(); env_pairs=(); mounts=()
 exporter_inspect() {
   local cid l v
   if ! bcap 8 "${DC[@]}" ps -q exporter; then insp_err="compose ps failed"; return 1; fi
@@ -233,7 +234,7 @@ exporter_inspect() {
     case "$l" in
       'cmd "'*) cmd_args+=("$v") ;;
       'entrypoint "'*) ep_args+=("$v") ;;
-      'env "'*) env_names+=("${v%%=*}"); [[ $v == DATA_SOURCE_URI=* ]] && { uri="${v#DATA_SOURCE_URI=}"; have_uri=1; } ;;
+      'env "'*) env_pairs+=("$v"); [[ $v == DATA_SOURCE_URI=* ]] && { uri="${v#DATA_SOURCE_URI=}"; have_uri=1; } ;;
       'mount "'*) mounts+=("$v") ;;
     esac
   done < "$last"
@@ -263,11 +264,20 @@ exporter_args() { # flag NAMES only, never values
   [[ $e == "$w" ]] || { MSG="entrypoint is '$e', the allowlist says '$w'"; return 1; }
   MSG="${#cmd_args[@]} arguments, entrypoint $e"
 }
-exporter_env() { # variable NAMES only
-  local n bad=""
-  for n in ${env_names[@]+"${env_names[@]}"}; do in_list "$n" ${a_env[@]+"${a_env[@]}"} ${a_ienv[@]+"${a_ienv[@]}"} || bad="$bad $n"; done
-  [[ -z $bad ]] || { MSG="variables outside the allowlist (values hidden):$bad"; return 1; }
-  MSG="${#env_names[@]} variables"
+exporter_env() { # judged by exact NAME=VALUE; only NAMES are ever printed
+  local p n bad="" diff="" miss="" msg=""
+  for p in ${env_pairs[@]+"${env_pairs[@]}"}; do
+    n="${p%%=*}"
+    if in_list "$n" ${a_ienv[@]+"${a_ienv[@]}"}; then continue; fi
+    if in_list "$p" ${a_env[@]+"${a_env[@]}"}; then continue; fi
+    if in_list "$n" ${a_envn[@]+"${a_envn[@]}"}; then diff="$diff $n"; else bad="$bad $n"; fi
+  done
+  for n in ${a_env[@]+"${a_env[@]}"}; do in_list "$n" ${env_pairs[@]+"${env_pairs[@]}"} || miss="$miss ${n%%=*}"; done
+  [[ -z $bad ]] || msg="variables outside the allowlist (values hidden):$bad"
+  [[ -z $diff ]] || msg="${msg:+$msg; }value differs from the allowlist (values hidden):$diff"
+  [[ -z $miss ]] || msg="${msg:+$msg; }variables missing:$miss"
+  [[ -z $msg ]] || { MSG="$msg"; return 1; }
+  MSG="${#env_pairs[@]} variables, every value as pinned"
 }
 exporter_mounts() {
   local m bad="" miss=""

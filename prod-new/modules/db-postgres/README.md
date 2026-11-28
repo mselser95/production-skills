@@ -35,7 +35,9 @@ database never became healthy (the run ends right after the 30 s health wait) / 
   and ends green (so a required check never hangs on a skipped job). Pushes to master always run it.
   `make gates` also runs `bash scripts/db-ci-wired.sh`, which PARSES `pr.yaml` (python3 + PyYAML; a missing
   parser is exit 2) and requires a job `db` with a step whose `run` is exactly `make db-test`, with no constant
-  false `if` and no `continue-on-error` on that step or the job. (A grep for the line is satisfied by a comment.)
+  false `if` and no `continue-on-error` on that step or the job. It also requires, in that job, a live step that
+  pip-installs PyYAML and a live step that pre-pulls the images named by `image.lock`, both BEFORE the `make db-test`
+  step, and `timeout-minutes` >= 10. (A grep for the line is satisfied by a comment.)
 - GitHub runners are linux/amd64 and the lock's runtime facts were observed on arm64 only. The `db` job has
   run green once on `ubuntu-latest` (linux/amd64) for this module's pull request, at an earlier commit than
   the secrets, hardening and leak-check changes; it has NOT been observed on the current head, so nothing
@@ -54,7 +56,8 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   not superuser) with `sslmode=verify-full`, the password only as a FILE (`db_monitor_password` secret). The
   port is NOT published: reach it on the compose network as `exporter:9187`, or opt in with an override file of
   your own that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
-  `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`.
+  `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`. Keep no `.env`
+  in `db/`: compose loads it on its own and would substitute `${VAR}` from it, so `parity-check.sh` refuses one.
 - `db/observability/required-metrics.txt` - the contract: names a scrape must contain, each with its reason.
   A name no alert uses must say `dashboard-only`.
 - `db/observability/alerts/postgres.rules.yml` + `postgres.rules.test.yml` - 13 alerts (availability, exporter absent, collector
@@ -67,10 +70,16 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   digest-pinned (or differs from the lock), not read-only / `cap_drop: [ALL]` / `no-new-privileges` / non-root,
   publishes a port, carries a password in the environment or URI, lacks a healthcheck, a needed collector or
   resource limits, has anything but exactly one `sslmode=verify-full` and one `sslrootcert`, or mounts the
-  certificate read-write. The exporter's command, variable NAMES, entrypoint and mounts must lie within
+  certificate read-write. The exporter's command, variables, entrypoint and mounts must lie within
   `db/observability/exporter-allowlist.txt` (an ALLOW-list, one entry per line with its reason): any other flag
   (`--datasource.uri`, `--config.file`, ...), variable (`DATA_SOURCE_URI_FILE`, `DATA_SOURCE_NAME`, `PG*`), an
-  overridden entrypoint or an extra mount is red. It REFUSES (never guesses) a `__name__` matcher, a nameless
+  overridden entrypoint or an extra mount is red. Variables are pinned as exact `NAME=VALUE` pairs (no value is a
+  slot: `exporter.env` is a literal), mounts as `source destination` pairs, and the monitor secret's file in
+  `compose.yml` is pinned too. Anything compose could substitute from the host environment is refused:
+  a `$` (also `$$`) in the exporter's command, environment, `env_file` (path and contents), volumes, secrets,
+  entrypoint, image or user (`OVERLAY-INTERPOLATION`), a `db/.env` beside the compose files (`OVERLAY-DOTENV`),
+  `extends`, a top-level `include`, any top-level key but `services`, a second service, and `extra_hosts` / `dns` /
+  `links` / `network_mode` / `networks` on the exporter (`OVERLAY-NETWORK`), which could re-point the name `db`. It REFUSES (never guesses) a `__name__` matcher, a nameless
   selector, an unknown function, a keyword where an operand belongs (a series named `offset`), a `query`
   template in an annotation and any `record:` rule, understands subqueries `[5m:1m]`, and runs `promtool check rules` when promtool is on PATH. `make db-test`
   runs it first. Thresholds marked TUNABLE (temp files, WAL size) are starting points; see the runbook.
@@ -80,7 +89,7 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   the port not on the host, that `app_monitor` is not superuser and cannot create or insert, that the RUNNING
   exporter's `DATA_SOURCE_URI` (docker inspect; only the `sslmode`/`sslrootcert` parameters are read) has
   exactly one `sslmode=verify-full` and a `sslrootcert`, that its session is encrypted (`pg_stat_ssl`), and that
-  the RUNNING exporter's command, entrypoint, variable names (never values) and mount destinations are within
+  the RUNNING exporter's command, entrypoint, variables (exact `NAME=VALUE`; only names are ever printed) and mount destinations are within
   the same `exporter-allowlist.txt` (`exporter-args-allowlisted`, `exporter-env-allowlisted`,
   `exporter-mounts-expected`; one `docker inspect`).
   Exit 0 pass, 1 a failed assertion, 2 nothing could be asserted, 3 and 4 only with `--mutate`.
@@ -90,13 +99,15 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   Torn down with `down -v` of its own project on every exit path.
 - `bash scripts/tests/db-observability-selftest.sh` - hermetic selftest and mutation proof of all of the above
   (fake `docker`); runs `promtool test rules` locally when a `promtool` is on PATH, else prints a SKIP. Every
-  mutant is paired with an unmutated control that must be green first, else `its control is not green`.
+  mutant is paired with an unmutated control that must be green first, else `its control is not green`; a mutant
+  that dies of a shell error (`unbound variable`, `command not found`, a signal) is reported as crashed, not RED.
 
 Not proven offline: that the exporter image really emits the names in `required-metrics.txt` (several are marked
 UNVERIFIED there), that its busybox has `wget` for the healthcheck, and that the `DATA_SOURCE_*` variables work
 as written in v0.21.1. The scrape test is that proof; run it after every exporter bump. The `image-env`,
-`entrypoint` and `mount` entries of `exporter-allowlist.txt` are likewise UNVERIFIED until a real run: a
-mismatch prints the real value, and the entry is corrected deliberately.
+`entrypoint` and `mount` entries of `exporter-allowlist.txt` passed on real v0.21.1 containers in the third
+review (2026-11-28); a mismatch on a later image prints the real name or destination, and the entry is corrected
+deliberately.
 
 ## Bumping the pair
 

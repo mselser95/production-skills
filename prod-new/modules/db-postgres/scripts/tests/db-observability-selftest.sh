@@ -115,6 +115,8 @@ for root, _, names in os.walk(obsdir):
             tree["db/" + os.path.relpath(os.path.join(root, n), dbroot)] = f.read()
 with open(overlayfile, encoding="utf-8") as f:
     tree["db/compose.observability.yml"] = f.read()
+with open(os.path.join(os.path.dirname(overlayfile), "compose.yml"), encoding="utf-8") as f:
+    tree["db/compose.yml"] = f.read()
 
 codes, cache = {}, {}
 cur = [""]
@@ -149,7 +151,9 @@ def fake_run(cmd, **kw):
 
 def run(script, want, f, old, new, pt):
     files = dict(tree)
-    if f:
+    if f.startswith("+"):    # `+name`: a file that does not exist in the tree is added (content = NEW)
+        files["db/" + f[1:]] = new
+    elif f:
         k = "db/" + f
         if old not in files.get(k, ""):
             return "FAIL anchor not found in " + f + ": " + old[:60]
@@ -226,9 +230,12 @@ pjudge() {
       case) if [[ ${RES[i]} == PASS ]]; then pass "${PN[i]}"; else flunk "${PN[i]}" "${RES[i]#FAIL }"; fi ;;
       mut)
         c="${PL[i]}"
-        if [[ ${PN[i]} == meta:* ]]; then
+        if [[ ${PN[i]} == metacrash:* ]]; then
+          if [[ ${RES[c]} == PASS && ${RES[i]} == "FAIL rc=70 "* ]]; then pass "${PN[i]}: reported as crashed, not as RED"; else flunk "${PN[i]}: a crashing mutant was not reported as crashed" "${RES[i]#FAIL }"; fi
+        elif [[ ${PN[i]} == meta:* ]]; then
           if [[ ${RES[c]} != PASS ]]; then pass "${PN[i]}: reported as: control is not green"; else flunk "${PN[i]}: a vacuous scenario was not detected"; fi
         elif [[ ${RES[c]} != PASS ]]; then flunk "mutant ${PN[i]}: its control is not green" "${RES[c]#FAIL }"
+        elif [[ ${RES[i]} == "FAIL rc=70 "* ]]; then flunk "mutant ${PN[i]} crashed (the script raised, so the RED is not about the guarded behaviour)" "${RES[i]#FAIL rc=70 }"
         elif [[ ${RES[i]} == PASS ]]; then flunk "mutation ${PN[i]}: GREEN (the cases did not notice)"
         else echo "RED  mutation ${PN[i]}"; ok=$((ok + 1)); fi ;;
     esac
@@ -328,8 +335,51 @@ pc "an extra mount -> OVERLAY-MOUNTS" "OVERLAY-MOUNTS: exporter mounts ['/etc/x.
 pc "an extra secret -> OVERLAY-MOUNTS" "OVERLAY-MOUNTS: exporter mounts ['/run/secrets/other']" "$OV" $'      - db_monitor_password\n' $'      - db_monitor_password\n      - other\n'
 pc "a config -> OVERLAY-MOUNTS" "OVERLAY-MOUNTS: exporter must not use configs" "$OV" "    pids_limit: 64" $'    pids_limit: 64\n    configs:\n      - x'
 pc "the allowlist allowing --datasource.uri -> ALLOWLIST" 'ALLOWLIST: exporter-allowlist.txt allows the flag `--datasource.uri=x`' "$AL" "arg --no-collector.xlog_location" $'arg --datasource.uri=x\narg --no-collector.xlog_location'
-pc "the allowlist allowing PGSSLMODE -> ALLOWLIST" 'allows the variable `PGSSLMODE`' "$AL" "env DATA_SOURCE_USER " $'env PGSSLMODE\nenv DATA_SOURCE_USER '
+pc "the allowlist allowing PGSSLMODE -> ALLOWLIST" 'allows the variable `PGSSLMODE`' "$AL" "env DATA_SOURCE_USER=" $'env PGSSLMODE=disable\nenv DATA_SOURCE_USER='
 pc "a malformed allowlist line -> ALLOWLIST" 'ALLOWLIST: exporter-allowlist.txt:' "$AL" "arg --no-collector.xlog_location" $'argument --x\narg --no-collector.xlog_location'
+
+# B1 (third review): VALUES are pinned too, and nothing may come from the host environment or a `.env`
+INTERP='OVERLAY-INTERPOLATION: exporter `env_file` contents contain `$` on the line of `DATA_SOURCE_URI`'
+pc 'the reviewer'"'"'s ${H:-db} in exporter.env -> OVERLAY-INTERPOLATION and OVERLAY-ENV-VALUE' "$INTERP"$'\nOVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_URI (env_file)' "$EV" "DATA_SOURCE_URI=db:5432" 'DATA_SOURCE_URI=${H:-db}:5432'
+pc 'a ${H:-db} in the overlay environment (mapping) -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `environment` contains `$`' "$OV" $'    env_file:\n' $'    environment:\n      DATA_SOURCE_URI: "${H:-db}:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt"\n    env_file:\n'
+pc 'a ${H:-db} in the overlay environment (list) -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `environment` contains `$`' "$OV" $'    env_file:\n' $'    environment:\n      - "DATA_SOURCE_URI=${H:-db}:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt"\n    env_file:\n'
+pc 'a bare $VAR in exporter.env -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `env_file` contents contain `$` on the line of `DATA_SOURCE_USER`' "$EV" "DATA_SOURCE_USER=app_monitor" 'DATA_SOURCE_USER=$ROLE'
+pc 'a $$ (compose escape for a literal dollar) in exporter.env is refused too' 'OVERLAY-INTERPOLATION: exporter `env_file` contents contain `$` on the line of `DATA_SOURCE_USER`' "$EV" "DATA_SOURCE_USER=app_monitor" 'DATA_SOURCE_USER=app$$monitor'
+pc "a changed host -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_URI (env_file)' "$EV" "DATA_SOURCE_URI=db:5432" "DATA_SOURCE_URI=evil:5432"
+pc "a changed port -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_URI (env_file)' "$EV" "DATA_SOURCE_URI=db:5432" "DATA_SOURCE_URI=db:5433"
+pc "a changed database -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_URI (env_file)' "$EV" "db:5432/app?" "db:5432/other?"
+pc "a changed user -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_USER (env_file)' "$EV" "DATA_SOURCE_USER=app_monitor" "DATA_SOURCE_USER=postgres"
+pc "a changed password-file path -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_PASS_FILE (env_file)' "$EV" "DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password" "DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password"
+pc "an allowed variable with no value (taken from the host by compose) -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_USER (env_file)' "$EV" "DATA_SOURCE_USER=app_monitor" "DATA_SOURCE_USER"
+pc "a changed value in the overlay environment -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_USER (environment)' "$OV" $'    env_file:\n' $'    environment:\n      DATA_SOURCE_USER: postgres\n    env_file:\n'
+pc "the allowlist pinning another value than exporter.env -> OVERLAY-ENV-VALUE" 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_USER (env_file)' "$AL" "env DATA_SOURCE_USER=app_monitor" "env DATA_SOURCE_USER=postgres"
+pc "a .env beside the compose files -> OVERLAY-DOTENV" "OVERLAY-DOTENV" "+.env" "" "H=db:5432/app?sslmode=require&x="
+pc "overlay extends -> OVERLAY-EXTENDS" "OVERLAY-EXTENDS" "$OV" "    read_only: true" $'    read_only: true\n    extends:\n      file: other.yml\n      service: x'
+pc "overlay include -> OVERLAY-INCLUDE" "OVERLAY-INCLUDE" "$OV" $'\nservices:\n' $'\ninclude:\n  - other.yml\nservices:\n'
+pc "overlay extra_hosts re-pointing db -> OVERLAY-NETWORK" 'OVERLAY-NETWORK: exporter sets `extra_hosts`' "$OV" "    read_only: true" $'    read_only: true\n    extra_hosts:\n      - "db:10.0.0.9"'
+pc "overlay dns -> OVERLAY-NETWORK" 'OVERLAY-NETWORK: exporter sets `dns`' "$OV" "    read_only: true" $'    read_only: true\n    dns: [10.0.0.9]'
+pc "overlay networks with an alias -> OVERLAY-NETWORK" 'OVERLAY-NETWORK: exporter sets `networks`' "$OV" "    read_only: true" $'    read_only: true\n    networks:\n      default:\n        aliases: [db]'
+pc "overlay network_mode -> OVERLAY-NETWORK" 'OVERLAY-NETWORK: exporter sets `network_mode`' "$OV" "    read_only: true" $'    read_only: true\n    network_mode: "service:db"'
+pc "overlay with a second service -> OVERLAY-SERVICES" 'OVERLAY-SERVICES: the overlay defines the service `other`' "$OV" $'\nservices:\n' $'\nservices:\n  other:\n    image: x\n'
+pc "secret behind the password file swapped to the superuser's -> OVERLAY-MOUNT-SOURCE" 'OVERLAY-MOUNT-SOURCE: the mount at /run/secrets/db_monitor_password comes from `secret:db_superuser_password`' "$OV" $'    secrets:\n      - db_monitor_password' $'    secrets:\n      - source: db_superuser_password\n        target: db_monitor_password'
+pc "compose.yml: the monitor secret pointing at the superuser's file -> OVERLAY-MOUNT-SOURCE" 'OVERLAY-MOUNT-SOURCE: compose.yml top-level secret `db_monitor_password`' "compose.yml" '${DB_SECRETS_DIR:-./secrets}/db_monitor_password' '${DB_SECRETS_DIR:-./secrets}/db_superuser_password'
+pc "tls volume replaced by a bind of / -> OVERLAY-MOUNT-SOURCE" 'OVERLAY-MOUNT-SOURCE: the mount at /tls comes from `bind:/`' "$OV" "      - dbtls:/tls:ro" "      - /:/tls:ro"
+pc "tls volume replaced by another named volume -> OVERLAY-MOUNT-SOURCE" 'OVERLAY-MOUNT-SOURCE: the mount at /tls comes from `volume:pgdata`' "$OV" "      - dbtls:/tls:ro" "      - pgdata:/tls:ro"
+pc "overlay redefining a top-level secret -> OVERLAY-TOPLEVEL" 'OVERLAY-TOPLEVEL: the overlay defines a top-level `secrets:`' "$OV" "      start_period: 5s" $'      start_period: 5s\nsecrets:\n  db_monitor_password:\n    file: /etc/shadow'
+pc 'a $ in a top-level volume of the overlay -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: top-level `volumes:` contains `$`' "$OV" "      start_period: 5s" $'      start_period: 5s\nvolumes:\n  dbtls:\n    name: ${V}'
+pc 'a $ in the user -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `user` contains `$`' "$OV" 'user: "65534:65534"' 'user: "${U:-65534}"'
+pc 'a $ in the command -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `command` contains `$`' "$OV" "--collector.stat_statements.limit=100" '--collector.stat_statements.limit=$L'
+pc 'a $ in the volumes -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `volumes` contains `$`' "$OV" "dbtls:/tls:ro" '${V:-dbtls}:/tls:ro'
+pc 'a $ in the secrets -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `secrets` contains `$`' "$OV" $'    secrets:\n      - db_monitor_password' $'    secrets:\n      - ${S:-db_monitor_password}'
+pc 'a $ in the image -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `image` contains `$`' "$OV" "postgres-exporter:v0.21.1@" 'postgres-exporter:v${T}@'
+pc 'a $ in the entrypoint -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `entrypoint` contains `$`' "$OV" '    user: "65534:65534"' $'    user: "65534:65534"\n    entrypoint: ["$X"]'
+pc 'a $ in the env_file path -> OVERLAY-INTERPOLATION' 'OVERLAY-INTERPOLATION: exporter `env_file` path contains `$`' "$OV" "./observability/exporter/exporter.env" '${D:-.}/observability/exporter/exporter.env'
+pc "the allowlist allowing another entrypoint -> ALLOWLIST" 'ALLOWLIST: exporter-allowlist.txt allows the entrypoint `/bin/sh`' "$AL" "entrypoint /bin/postgres_exporter" "entrypoint /bin/sh"
+pc "the allowlist naming LD_PRELOAD as an image variable -> ALLOWLIST" 'allows the variable `LD_PRELOAD`' "$AL" "image-env PATH" "image-env LD_PRELOAD"
+pc "the allowlist pinning LD_PRELOAD as an env value -> ALLOWLIST" 'allows the variable `LD_PRELOAD`' "$AL" "env DATA_SOURCE_USER=" $'env LD_PRELOAD=/x\nenv DATA_SOURCE_USER='
+pc "an env line without a value in the allowlist -> ALLOWLIST" 'is `NAME=VALUE`' "$AL" "env DATA_SOURCE_USER=app_monitor" "env DATA_SOURCE_USER"
+pc 'a $ in a pinned env value of the allowlist -> ALLOWLIST' 'the value pinned for `DATA_SOURCE_USER` contains `$`' "$AL" "env DATA_SOURCE_USER=app_monitor" 'env DATA_SOURCE_USER=${R}'
+pc "a secret mount whose secret-file line is gone -> ALLOWLIST" 'has no `secret-file db_monitor_password <file>` line' "$AL" 'secret-file db_monitor_password ${DB_SECRETS_DIR:-./secrets}/db_monitor_password' '#'
 
 # B2: an OPERAND position never holds a keyword; subqueries; functions; query templates
 KW='refused (it cannot be told from the operator)'
@@ -360,6 +410,13 @@ pe "a subquery [5m:1m] is read" OK 'max_over_time(pg_up[5m:1m]) == 0'
 pe "a subquery [5m:] is read" OK 'max_over_time(pg_up[5m:]) == 0'
 pe "a subquery over a call is read, and its metric checked" 'UNKNOWN-METRIC: alert PostgresDown uses `pg_sub_x`' 'max_over_time(rate(pg_sub_x[5m])[30m:1m]) == 0'
 pe "a subquery with an offset is read" OK 'max_over_time(pg_up[5m:1m] offset 1h) == 0'
+# PromQL keywords are case-insensitive: promtool accepts these, so the extractor must too
+pe "uppercase AND between two selectors" OK 'pg_up == 0 AND pg_up < 5'
+pe "mixed-case Or between two selectors" OK 'pg_up == 0 Or pg_up < 1'
+pe "uppercase UNLESS between two selectors" OK 'pg_up == 0 UNLESS pg_up > 5'
+pe "uppercase BY after an aggregation" OK 'sum BY (instance) (pg_up) == 0'
+pe "uppercase OFFSET after a selector" OK 'pg_up OFFSET 5m == 0'
+pe "uppercase keyword in OPERAND position is still refused" '`AND` where an operand is expected' 'pg_up == 0 or AND > 0'
 pe "a colon outside a range -> EXPR-UNSUPPORTED" '`:` outside a range' 'pg_up == 0 :]'
 # the functions the extractor must understand: each takes its metric where the tokenizer looks
 FN=('quantile_over_time(0.5, @@[5m])' 'stddev_over_time(@@[5m])' 'stdvar_over_time(@@[5m])' 'hour(@@)' 'day_of_week(@@)' 'day_of_month(@@)'
@@ -407,20 +464,35 @@ pmx "parity: read-only tls mount rule removed" 'if not tls_ro:' 'if False:' -- "
 # the allowlist (B1)
 pmx "parity: command allowlist check removed (a --datasource.uri flag passes)" '    if c not in allow["arg"]:' '    if False:' -- 'OVERLAY-ARGS: exporter command carries `--datasource.uri`' "$OV" "$LISTEN" "$LISTEN      - --datasource.uri=db:5432/app?sslmode=require
 "
-pmx "parity: variable allowlist check removed (DATA_SOURCE_URI_FILE passes)" 'for k in sorted(env_names - allow["env"]):' 'for k in []:' -- 'OVERLAY-ENV: exporter defines the variable PGSSLMODE' "$EV" "DATA_SOURCE_USER=app_monitor" $'DATA_SOURCE_USER=app_monitor\nPGSSLMODE=disable'
-pmx "parity: variables of a bare env_file line not counted" 'env_names.add(k.strip())' 'pass' -- 'OVERLAY-ENV: exporter defines the variable PGHOST' "$EV" "DATA_SOURCE_USER=app_monitor" $'DATA_SOURCE_USER=app_monitor\nPGHOST'
-pmx "parity: mounts check removed (a config file mount passes)" 'if dests != allow["mount"]:' 'if False:' -- "OVERLAY-MOUNTS: exporter mounts ['/etc/x.yml']" "$OV" "      - dbtls:/tls:ro" $'      - dbtls:/tls:ro\n      - ./x.yml:/etc/x.yml:ro'
-pmx "parity: secrets not counted as mounts" '        dests.add("/run/secrets/" + str(sc))' '        pass' -- "OVERLAY-MOUNTS: exporter mounts ['/run/secrets/other']" "$OV" $'      - db_monitor_password\n' $'      - db_monitor_password\n      - other\n'
+pmx "parity: variable allowlist check removed (DATA_SOURCE_URI_FILE passes)" 'for k in sorted({k for k, _, _ in env_entries} - set(allow["env"])):' 'for k in []:' -- 'OVERLAY-ENV: exporter defines the variable PGSSLMODE' "$EV" "DATA_SOURCE_USER=app_monitor" $'DATA_SOURCE_USER=app_monitor\nPGSSLMODE=disable'
+pmx "parity: variables of a bare env_file line not counted" 'env_entries.append((k.strip(), v.strip() if eq else None, "env_file"))' 'eq and env_entries.append((k.strip(), v.strip(), "env_file"))' -- 'OVERLAY-ENV: exporter defines the variable PGHOST' "$EV" "DATA_SOURCE_USER=app_monitor" $'DATA_SOURCE_USER=app_monitor\nPGHOST'
+pmx "parity: mounts check removed (a config file mount passes)" 'if dests != want_dests:' 'if False:' -- "OVERLAY-MOUNTS: exporter mounts ['/etc/x.yml']" "$OV" "      - dbtls:/tls:ro" $'      - dbtls:/tls:ro\n      - ./x.yml:/etc/x.yml:ro'
+pmx "parity: secrets not counted as mounts" '        pairs.append(("secret:" + str(sc), "/run/secrets/" + str(sc)))' '        pass' -- "OVERLAY-MOUNTS: exporter mounts ['/run/secrets/other']" "$OV" $'      - db_monitor_password\n' $'      - db_monitor_password\n      - other\n'
 pmx "parity: entrypoint override no longer refused" 'if "entrypoint" in svc:' 'if False:' -- "OVERLAY-ENTRYPOINT" "$OV" '    user: "65534:65534"' $'    user: "65534:65534"\n    entrypoint: ["/bin/sh"]'
 pmx "parity: the allowlist may name --datasource flags" 'if a.startswith(("--datasource",' 'if a.startswith(("--zzz",' -- 'ALLOWLIST: exporter-allowlist.txt allows the flag `--datasource.uri=x`' "$AL" "arg --no-collector.xlog_location" $'arg --datasource.uri=x\narg --no-collector.xlog_location'
+# the third review: values, interpolation, sources
+pmx "parity: \`\$\` refusal removed (a \${VAR} in the user passes)" '    if "$" in str(svc.get(k)):' '    if False:' -- 'OVERLAY-INTERPOLATION: exporter `user` contains `$`' "$OV" 'user: "65534:65534"' 'user: "${U:-65534}"'
+pmx "parity: \`\$\` in exporter.env no longer refused (the \${H:-db} construct passes)" '            if "$" in line:' '            if False:' -- "$INTERP" "$EV" "DATA_SOURCE_URI=db:5432" 'DATA_SOURCE_URI=${H:-db}:5432'
+pmx "parity: values compared by name only (a changed host passes)" '    if k in allow["env"] and v != allow["env"][k]:' '    if False:' -- 'OVERLAY-ENV-VALUE: exporter variable DATA_SOURCE_URI (env_file)' "$EV" "DATA_SOURCE_URI=db:5432" "DATA_SOURCE_URI=evil:5432"
+pmx "parity: .env refusal removed" 'if exists(os.path.join(overlay_dir, ".env")):' 'if False:' -- "OVERLAY-DOTENV" "+.env" "" "H=db:5432/app?sslmode=require&x="
+pmx "parity: bind-source pin removed (a bind of / passes)" '    if dst_ in want_dests and (src_, dst_) not in allow["mount"]:' '    if False:' -- 'OVERLAY-MOUNT-SOURCE: the mount at /tls comes from `bind:/`' "$OV" "      - dbtls:/tls:ro" "      - /:/tls:ro"
+pmx "parity: secret-source pin removed (the monitor secret may point at the superuser's file)" 'if got != allow["secret-file"][name_] or (isinstance(entry, dict) and set(entry) != {"file"}):' 'if False:' -- 'OVERLAY-MOUNT-SOURCE: compose.yml top-level secret `db_monitor_password`' "compose.yml" '${DB_SECRETS_DIR:-./secrets}/db_monitor_password' '${DB_SECRETS_DIR:-./secrets}/db_superuser_password'
+pmx "parity: extra_hosts allowed" 'for k in ("extra_hosts", "dns",' 'for k in ("zzz_hosts", "dns",' -- 'OVERLAY-NETWORK: exporter sets `extra_hosts`' "$OV" "    read_only: true" $'    read_only: true\n    extra_hosts:\n      - "db:10.0.0.9"'
+pmx "parity: extends allowed" 'if "extends" in svc:' 'if False:' -- "OVERLAY-EXTENDS" "$OV" "    read_only: true" $'    read_only: true\n    extends:\n      file: other.yml\n      service: x'
+pmx "parity: include allowed" '    if k == "include":' '    if False:' -- "OVERLAY-INCLUDE" "$OV" $'\nservices:\n' $'\ninclude:\n  - other.yml\nservices:\n'
+pmx "parity: the allowlist may name LD_PRELOAD" '"PG_EXPORTER_", "LD_"' '"PG_EXPORTER_"' -- 'allows the variable `LD_PRELOAD`' "$AL" "image-env PATH" "image-env LD_PRELOAD"
+pmx "parity: the allowlist may name another entrypoint" '    if v != "/bin/postgres_exporter":' '    if False:' -- 'allows the entrypoint `/bin/sh`' "$AL" "entrypoint /bin/postgres_exporter" "entrypoint /bin/sh"
+pmx "parity: PromQL keywords case-sensitive again (a AND b read as a metric)" 'elif low in KEYWORDS:' 'elif text in KEYWORDS:' -- OK "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 AND pg_up < 5'"
 # the tokenizer (B2)
-pmx "parity: offset accepted as an operand" 'elif text == "offset" and not expect_operand and (prev_metric or prev[0] == "close"):' 'elif text == "offset":' -- '`offset` where an operand is expected' "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or offset > 0'"
-pmx "parity: and/unless/or accepted as operands" 'elif text in SETOPS and not expect_operand:' 'elif text in SETOPS:' -- '`and` where an operand is expected' "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or and > 0'"
+pmx "parity: offset accepted as an operand" 'elif low == "offset" and not expect_operand and (prev_metric or prev[0] == "close"):' 'elif low == "offset":' -- '`offset` where an operand is expected' "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or offset > 0'"
+pmx "parity: and/unless/or accepted as operands" 'elif low in SETOPS and not expect_operand:' 'elif low in SETOPS:' -- '`and` where an operand is expected' "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or and > 0'"
 pmx "parity: operand/operator tracking removed (a keyword is never refused)" 'elif expect_operand:' 'elif False:' -- '`by` where an operand is expected' "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or by > 0'"
 pmx "parity: subqueries refused again" '  | (?P<sub>:\s*(?:""" + DURATION + r""")?\s*(?=\]))
 ' '' -- OK "$R" "expr: pg_up == 0" "expr: 'max_over_time(pg_up[5m:1m]) == 0'"
 pmx "parity: a function dropped from the allowlist (quantile_over_time)" '"quantile_over_time", ' '' -- OK "$R" "expr: pg_up == 0" "expr: 'quantile_over_time(0.5, pg_up[5m]) == 0'"
 pmx "parity: query templates no longer refused" '(?<![.\w$])query\b' '(?<![.\w$])queryX\b' -- 'annotation summary uses a `query` template' "$R" '          summary: "PostgreSQL is not reachable by its exporter"' $'          summary: \'{{ query "pg_nope" }}\''
+# a meta-case: a mutant that RAISES is reported as crashed, never as RED
+pmx "metacrash: a mutant that raises" 'if findings:' $'raise ValueError("meta")\nif findings:' -- "OVERLAY-DIGEST: exporter image" "$OV" "@$DIG" ""
 # a meta-case: a scenario that fails on the UNMUTATED copy is reported as such, never judged RED
 pmx "meta: vacuous scenario" 'if findings:' 'if False:' -- "THIS TEXT IS NEVER PRINTED" "" "" ""
 
@@ -430,7 +502,7 @@ pjudge
 # ---- the real shell wrapper: three runs (argument parsing, default paths, exit codes) --------------
 out="$(bash "$parity" 2>&1)"; rc=$?
 if [[ $rc == 0 && $out == *"13 alerts"* ]]; then pass "parity-check default paths: 13 alerts read"; else flunk "parity-check default paths" "rc=$rc"; fi
-mkdir -p "$tmp/w/db"; cp -R "$obs" "$tmp/w/db/observability"; cp "$dbdir/compose.observability.yml" "$tmp/w/db/"
+mkdir -p "$tmp/w/db"; cp -R "$obs" "$tmp/w/db/observability"; cp "$dbdir/compose.observability.yml" "$dbdir/compose.yml" "$tmp/w/db/"
 replace_in "$tmp/w/db/$OV" "@$DIG" "" && { out="$(bash "$parity" --dir "$tmp/w/db/observability" 2>&1)"; rc=$?; }
 if [[ $rc == 1 && $out == *"OVERLAY-DIGEST: exporter image"* && $out == *"parity-check: RED"* ]]; then pass "parity-check --dir on a scratch copy: exit 1 with the finding"; else flunk "parity-check --dir wrapper" "rc=$rc"; fi
 # a missing PyYAML must be exit 2, not a green: python3 shim that cannot import yaml
@@ -536,19 +608,26 @@ mk_scrape "$tmp/m.allbad" 0 0 1 'pg_scrape_collector_success{collector="stat_sta
 BAD_ENV=(FAKE_METRICS="$tmp/m.allbad" FAKE_PUBLISHED=1 FAKE_ROLSUPER=t FAKE_WRITE_OK=1 FAKE_SSL=0/1)
 
 # the canned `docker inspect`, built from the REAL allowlist so the two cannot drift apart
-al_arg=(); al_ep=(); al_mount=()
+al_arg=(); al_ep=(); al_mount=(); al_env=()
 while IFS= read -r l; do
   l="${l%%#*}"; [[ -n ${l//[[:space:]]/} ]] || continue
-  read -r k v <<<"$l"
-  case "$k" in arg) al_arg+=("$v") ;; entrypoint) al_ep+=("$v") ;; mount) al_mount+=("$v") ;; esac
+  read -r k v w <<<"$l"
+  case "$k" in arg) al_arg+=("$v") ;; entrypoint) al_ep+=("$v") ;; env) al_env+=("$v") ;; mount) al_mount+=("$w") ;; esac
 done < "$obs/exporter-allowlist.txt"
 GOOD_URI='db:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt'
-mk_insp() { # FILE [URI [ENTRYPOINT [OMITTED-MOUNT [EXTRA-LINES]]]]
-  local f="$1" uri="${2:-$GOOD_URI}" ep="${3:-${al_ep[0]}}" omit="${4:-}" extra="${5:-}" a m
+mk_insp() { # FILE [URI [ENTRYPOINT [OMITTED-MOUNT [EXTRA-LINES [ENV-OVERRIDE]]]]]; ENV-OVERRIDE is NAME=VALUE (replace) or -NAME (drop)
+  local f="$1" uri="${2:-$GOOD_URI}" ep="${3:-${al_ep[0]}}" omit="${4:-}" extra="${5:-}" ovr="${6:-}" a m e n
   {
     for a in "${al_arg[@]}"; do printf 'cmd "%s"\n' "$a"; done
     printf 'entrypoint "%s"\n' "$ep"
-    printf 'env "PATH=/usr/bin"\nenv "DATA_SOURCE_URI=%s"\nenv "DATA_SOURCE_USER=hunter2zz"\nenv "DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password"\n' "$uri"
+    printf 'env "PATH=/usr/bin"\n'
+    for e in "${al_env[@]}"; do   # the running environment is the allow-listed pairs, so the two cannot drift
+      n="${e%%=*}"
+      [[ $n == DATA_SOURCE_URI ]] && e="$n=$uri"
+      [[ $ovr == "-$n" ]] && continue
+      [[ -n $ovr && $ovr == "$n="* ]] && e="$ovr"
+      printf 'env "%s"\n' "$e"
+    done
     for m in "${al_mount[@]}"; do [[ $m == "$omit" ]] || printf 'mount "%s"\n' "$m"; done
     [[ -z $extra ]] || printf '%s\n' "$extra"
   } > "$f"
@@ -642,13 +721,17 @@ sc_mutate_nodocker() { sdb "$1"; out="$(env PATH="$tmp/empty" "$BASH" "$1" ${SDB
 sc_mutate_start_fails() { srun "$1" FAKE_UP_RC=1 -- --mutate revoke-monitor; [[ $rc == 2 && $out == *"FAIL START"* ]]; }
 sc_mutate_survivor() { srun "$1" FAKE_REVOKE_NOOP=1 -- --mutate revoke-monitor; [[ $rc == 4 && $out == *"MUTATION SURVIVED"* ]]; }
 sc_no_revoke_without_mutate() { srun "$1"; ! grep -q 'REVOKE' "$LOGF"; }
+# The property, not a stopwatch: the run gave up THROUGH ITS OWN timeout path (the killed call is
+# reported as rc 124 in the FAIL START line, exit 2). Only a generous ceiling (HANG_CEIL, default
+# 60 s) bounds the run, so a loaded machine cannot turn this red; without the kill the call just
+# finishes by itself, there is no rc 124 and the case is red.
 sc_hang() {
-  local t0=$SECONDS; sdb "$1"
+  sdb "$1"
   : > "$tmp/hang.log"
-  out="$(tmo 30 env PATH="$tmp/bin:$PATH" FAKE_LOG="$tmp/hang.log" FAKE_HANG=1 FAKE_HANG_S="${HANGS:-60}" DB_SCRAPE_BUDGET_S=2 DB_SCRAPE_CLEANUP_S=1 bash "$1" ${SDB[@]+"${SDB[@]}"} 2>&1)"; rc=$?
-  ((SECONDS - t0 <= 8)) && [[ $rc == 2 && $out == *"FAIL START"* ]]
+  out="$(tmo "${HANG_CEIL:-60}" env PATH="$tmp/bin:$PATH" FAKE_LOG="$tmp/hang.log" FAKE_HANG=1 FAKE_HANG_S="${HANGS:-120}" DB_SCRAPE_BUDGET_S=2 DB_SCRAPE_CLEANUP_S=1 bash "$1" ${SDB[@]+"${SDB[@]}"} 2>&1)"; rc=$?
+  [[ $rc == 2 && $out == *"FAIL START"* && $out == *"(rc 124)"* ]]
 }
-sc_hang_short() { HANGS=4 sc_hang "$1"; }
+sc_hang_short() { HANGS=3 HANG_CEIL=20 sc_hang "$1"; }
 # the exporter's own connection settings, read from its container (never printed whole)
 sc_tls() { # SCRIPT URI WANT-substring
   new_insp "$2"; srun "$1" "FAKE_INSPECT=$INSP"
@@ -658,7 +741,8 @@ sc_tls_ok() { srun "$1"; [[ $rc == 0 && $out == *"PASS exporter-tls-verify-full:
 sc_ssl() { srun "$1" "FAKE_SSL=$2"; [[ $rc == 1 && $out == *"FAIL exporter-session-encrypted"* ]]; }
 sc_inspect_fails() {
   srun "$1" FAKE_INSPECT_RC=1
-  [[ $rc == 1 && $out == *"FAIL exporter-tls-verify-full"* && $out == *"FAIL exporter-args-allowlisted"* && $out == *"FAIL exporter-env-allowlisted"* && $out == *"FAIL exporter-mounts-expected"* ]]
+  [[ $rc == 1 && $out == *"FAIL exporter-tls-verify-full: docker inspect failed"* && $out == *"FAIL exporter-args-allowlisted: docker inspect failed"* \
+    && $out == *"FAIL exporter-env-allowlisted: docker inspect failed"* && $out == *"FAIL exporter-mounts-expected: docker inspect failed"* ]]
 }
 # B1: a downgrade through anything the allowlist does not list is RED where tls-verify-full cannot look
 ARGS_BAD=$'cmd "--datasource.uri=db:5432/app?sslmode=require&pw=hunter2zz"\ncmd "--datasource.uri-file=/x"\ncmd "--config.file=/x"\ncmd "--web.config.file=/y"\ncmd "--collector.stat_statements.limit=999"\ncmd "--bogus.flag"'
@@ -678,6 +762,17 @@ sc_env_bad() {
   [[ $rc == 1 && $out == *"FAIL exporter-env-allowlisted"* && $out == *" DATA_SOURCE_URI_FILE "* && $out == *" DATA_SOURCE_NAME "* && $out == *" PGSSLMODE "* \
     && $out == *" DATA_SOURCE_PASS "* && $out == *" PG_EXPORTER_PASSWORD"* && $out != *hunter2zz* && $out != *"PASS exporter-env-allowlisted"* ]]
 }
+# the running environment is judged by exact NAME=VALUE; only NAMES are printed
+sc_env_value() { # SCRIPT NAME=VALUE (the wrong value) NAME
+  new_insp "" "" "" "" "$2"; srun "$1" "FAKE_INSPECT=$INSP"
+  [[ $rc == 1 && $out == *"FAIL exporter-env-allowlisted: "*"value differs from the allowlist (values hidden): $3"* && $out != *"PASS exporter-env-allowlisted"* \
+    && $out != *hunter2zz* && $out != *evil* && $out != *db_superuser_password* ]]
+}
+sc_env_host() { # the URI points at another host: the TLS assertion still passes, the exact value does not
+  new_insp "evil:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt"; srun "$1" "FAKE_INSPECT=$INSP"
+  [[ $rc == 1 && $out == *"PASS exporter-tls-verify-full"* && $out == *"value differs from the allowlist (values hidden): DATA_SOURCE_URI"* && $out != *evil* ]]
+}
+sc_env_missing() { new_insp "" "" "" "" "-DATA_SOURCE_USER"; srun "$1" "FAKE_INSPECT=$INSP"; [[ $rc == 1 && $out == *"FAIL exporter-env-allowlisted: variables missing: DATA_SOURCE_USER"* ]]; }
 sc_mounts_bad() {
   new_insp "" "" "/tls" 'mount "/etc/exporter.yml"'; srun "$1" "FAKE_INSPECT=$INSP"
   [[ $rc == 1 && $out == *"FAIL exporter-mounts-expected: mounts: unexpected [/etc/exporter.yml] missing [/tls]"* ]]
@@ -735,6 +830,10 @@ expect_ok "scrape test: docker inspect fails -> RED on all four exporter asserti
 expect_ok "scrape test: flags --datasource.uri (require), --datasource.uri-file, --config.file, --web.config.file, a changed value, an unknown flag -> RED, values hidden" sc_args_bad "$PLAIN"
 expect_ok "scrape test: flag --datasource.uri with sslmode=disable -> RED while tls-verify-full stays green" sc_args_disable "$PLAIN"
 expect_ok "scrape test: DATA_SOURCE_URI_FILE, DATA_SOURCE_NAME, PGSSLMODE, DATA_SOURCE_PASS, PG_EXPORTER_PASSWORD -> RED by name, values hidden" sc_env_bad "$PLAIN"
+expect_ok "scrape test: a running DATA_SOURCE_USER with another value -> RED by name, value hidden" sc_env_value "$PLAIN" "DATA_SOURCE_USER=hunter2zz" DATA_SOURCE_USER
+expect_ok "scrape test: a running DATA_SOURCE_PASS_FILE pointing at the superuser's file -> RED by name, value hidden" sc_env_value "$PLAIN" "DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password" DATA_SOURCE_PASS_FILE
+expect_ok "scrape test: a running URI with another host -> env RED, tls assertion still green, host hidden" sc_env_host "$PLAIN"
+expect_ok "scrape test: a pinned variable missing from the running container -> RED" sc_env_missing "$PLAIN"
 expect_ok "scrape test: an extra mount and a missing one -> RED" sc_mounts_bad "$PLAIN"
 expect_ok "scrape test: an overridden entrypoint -> RED" sc_entrypoint_bad "$PLAIN"
 expect_ok "scrape test: monitor session not encrypted (ssl = f) -> RED" sc_ssl_bad "$PLAIN"
@@ -797,14 +896,22 @@ vverdict() {
     CK+=("$key"); CR+=("$res")
   fi
   ((res == 0)) || { VV=NOCONTROL; return 0; }
-  if "$fn" "$copy" "$@" >/dev/null 2>&1; then VV=GREEN; else VV=RED; fi
+  out=""; rc=0   # what the scenario leaves behind is the MUTANT's run (scenarios that run no script leave these empty)
+  if "$fn" "$copy" "$@" >/dev/null 2>&1; then VV=GREEN
+  elif crashed "$rc" "$out"; then VV=CRASH
+  else VV=RED; fi
 }
+# crashed RC OUTPUT: the mutant died of a shell error rather than failing the guarded assertion.
+# A RED caused by `unbound variable` or a typo proves nothing about the check the mutant targets.
+CRASH_RE='unbound variable|command not found|syntax error|bash: [^ ]*: No such file or directory'
+crashed() { [[ $1 == 126 || $1 == 127 || ($1 -ge 129 && $1 -le 159) || $2 =~ $CRASH_RE ]]; }
 vmut() {
   vverdict "$@"
   case "$VV" in
     RED) echo "RED  mutation $1"; ok=$((ok + 1)) ;;
     NOANCHOR) flunk "mutant $1: anchor not found or the patch is a no-op, so the mutant did not run" "$3" ;;
     NOCONTROL) flunk "mutant $1: its control is not green" ;;
+    CRASH) flunk "mutant $1 crashed (a shell error or a signal, so its RED says nothing about the guarded behaviour)" "rc=$rc" ;;
     *) flunk "mutation $1: GREEN (the cases did not notice)" ;;
   esac
 }
@@ -813,6 +920,10 @@ vverdict "meta" "$scrape" 'proj="dbscrape-$$"' 'proj="dbscrape-fixed"' sc_mispla
 if [[ $VV == NOCONTROL ]]; then pass "meta: a scenario that fails on the unmutated copy is reported as: control is not green"; else flunk "meta: vacuous setup was judged $VV, not NOCONTROL"; fi
 vverdict "meta" "$scrape" 'proj="dbscrape-$$"' 'proj="dbscrape-$$"' sc_clean
 if [[ $VV == NOANCHOR ]]; then pass "meta: a patch that changes nothing is a failure, not a pass"; else flunk "meta: a no-op patch was judged $VV"; fi
+# the crash class: a mutant that dies of `unbound variable` is CRASH, never RED (the shape of the old
+# `if true; then` mutant of the TLS assertion, which left MSG unset)
+vverdict "meta" "$scrape" 'if exporter_tls; then' 'if true; then' sc_tls "db:5432/app?sslmode=require&sslrootcert=/tls/server.crt" "sslmode"
+if [[ $VV == CRASH ]]; then pass "meta: a mutant that dies of an unbound variable is reported as crashed, not RED"; else flunk "meta: a crashing mutant was judged $VV, not CRASH"; fi
 vverdict "meta" "$scrape" 'THIS ANCHOR DOES NOT EXIST' 'x' sc_clean
 if [[ $VV == NOANCHOR ]]; then pass "meta: an anchor that is not found is a failure"; else flunk "meta: a missing anchor was judged $VV"; fi
 
@@ -824,7 +935,7 @@ vmut "scrape test: teardown trap removed" "$scrape" 'trap cleanup EXIT' ':' sc_t
 vmut "scrape test: published-port check removed" "$scrape" "grep -Eq '$PORT_RE' \"\$last\"; then" 'false; then' sc_published
 vmut "scrape test: port regex ':[0-9]+' reads 'invalid IP:0' as published" "$scrape" "grep -Eq '$PORT_RE'" "grep -Eq ':[0-9]+'" sc_port_ok $'invalid IP:0\n:0'
 vmut "scrape test: promtool container without a writable /tmp" "$scrape" '--tmpfs /tmp:rw,noexec,nosuid,size=64m ' '' sc_promtool
-vmut "scrape test: exporter TLS assertion removed" "$scrape" 'if exporter_tls; then' 'if true; then' sc_tls "db:5432/app?sslmode=require&sslrootcert=/tls/server.crt" "sslmode"
+vmut "scrape test: exporter TLS assertion removed" "$scrape" 'if exporter_tls; then' 'if exporter_tls || true; then' sc_tls "db:5432/app?sslmode=require&sslrootcert=/tls/server.crt" "sslmode"
 vmut "scrape test: duplicated sslmode accepted" "$scrape" '((nmodes == 1 && nvf == 1 && nroot == 1))' '((nvf >= 1 && nroot == 1))' sc_tls "db:5432/app?sslmode=verify-full&sslmode=require&sslrootcert=/tls/server.crt" "sslmode"
 vmut "scrape test: encryption assertion ignores unencrypted sessions" "$scrape" '[[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then' 'true; then' sc_ssl_bad
 vmut "scrape test: any failure counts as the revoke being detected" "$scrape" '    if ((broke == 0)); then' '    if true; then' sc_mutate_broken_scrape
@@ -835,13 +946,16 @@ vmut "scrape test: watchdog kill removed (hung docker is no longer bounded)" "$s
 # B1: the allowlist applied to the RUNNING container
 vmut "scrape test: command allowlist check removed (a --datasource.uri flag passes)" "$scrape" 'in_list "$a" ${a_arg[@]+"${a_arg[@]}"} || bad="$bad ${a%%=*}"' 'true' sc_args_bad
 vmut "scrape test: command allowlist check removed (sslmode=disable flag passes)" "$scrape" 'in_list "$a" ${a_arg[@]+"${a_arg[@]}"} || bad="$bad ${a%%=*}"' 'true' sc_args_disable
-vmut "scrape test: variable allowlist check removed (DATA_SOURCE_URI_FILE passes)" "$scrape" 'in_list "$n" ${a_env[@]+"${a_env[@]}"} ${a_ienv[@]+"${a_ienv[@]}"} || bad="$bad $n"' 'true' sc_env_bad
-vmut "scrape test: image-baked variables not allowed (PATH reported)" "$scrape" ' ${a_ienv[@]+"${a_ienv[@]}"} ||' ' ||' sc_clean
+vmut "scrape test: variable allowlist check removed (DATA_SOURCE_URI_FILE passes)" "$scrape" 'if in_list "$n" ${a_envn[@]+"${a_envn[@]}"}; then diff="$diff $n"; else bad="$bad $n"; fi' ':' sc_env_bad
+vmut "scrape test: image-baked variables not allowed (PATH reported)" "$scrape" '    if in_list "$n" ${a_ienv[@]+"${a_ienv[@]}"}; then continue; fi' '    :' sc_clean
+vmut "scrape test: variable values compared by name only (another user passes)" "$scrape" '    if in_list "$p" ${a_env[@]+"${a_env[@]}"}; then continue; fi' '    if in_list "$n" ${a_envn[@]+"${a_envn[@]}"}; then continue; fi' sc_env_value "DATA_SOURCE_USER=hunter2zz" DATA_SOURCE_USER
+vmut "scrape test: variable values compared by name only (another host passes)" "$scrape" '    if in_list "$p" ${a_env[@]+"${a_env[@]}"}; then continue; fi' '    if in_list "$n" ${a_envn[@]+"${a_envn[@]}"}; then continue; fi' sc_env_host
+vmut "scrape test: a missing pinned variable not noticed" "$scrape" '  for n in ${a_env[@]+"${a_env[@]}"}; do in_list "$n" ${env_pairs[@]+"${env_pairs[@]}"} || miss="$miss ${n%%=*}"; done' '  :' sc_env_missing
 vmut "scrape test: mount check removed (a config file mount passes)" "$scrape" '[[ -z $bad && -z $miss ]] ||' 'true ||' sc_mounts_bad
 vmut "scrape test: missing mounts not noticed" "$scrape" 'for m in ${a_mount[@]+"${a_mount[@]}"}; do in_list "$m" ${mounts[@]+"${mounts[@]}"} || miss="$miss $m"; done' ':' sc_mounts_bad
 vmut "scrape test: entrypoint comparison removed" "$scrape" '[[ $e == "$w" ]] ||' 'true ||' sc_entrypoint_bad
 vmut "scrape test: argument values printed (a value could carry a password)" "$scrape" 'bad="$bad ${a%%=*}"' 'bad="$bad $a"' sc_args_bad
-vmut "scrape test: variable values kept with their names (and printed)" "$scrape" 'env_names+=("${v%%=*}")' 'env_names+=("$v")' sc_env_bad
+vmut "scrape test: a differing variable printed with its value" "$scrape" 'then diff="$diff $n"; else' 'then diff="$diff $p"; else' sc_env_value "DATA_SOURCE_USER=hunter2zz" DATA_SOURCE_USER
 vmut "scrape test: a failing inspect passes the exporter assertions" "$scrape" 'insp_err="docker inspect failed"; : > "$last"; return 1; fi' 'insp_err="docker inspect failed"; : > "$last"; return 0; fi' sc_inspect_fails
 vmut "scrape test: a third failing collector explained by the revoke" "$scrape" '[[ -n $bad && -z $rest ]] || broke=1' ':' sc_mutate_walstat
 # the Makefile pin
@@ -849,5 +963,28 @@ vmut "Makefile: the parity line removed from db-test" "$makefile" $'\t@bash prod
 vmut "Makefile: the scrape test removed from db-test" "$makefile" $'\t@bash prod-new/modules/db-postgres/scripts/db-scrape-test.sh --promtool\n' '' mk_pin
 vmut "Makefile: the --mutate exit-1 requirement removed" "$makefile" '[ $$rc -eq 1 ]' 'true' mk_pin
 vmut "Makefile: parity moved after the bootstrap tests" "$makefile" $'\t@bash prod-new/modules/db-postgres/db/observability/parity-check.sh\n\t@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain\n' $'\t@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain\n\t@bash prod-new/modules/db-postgres/db/observability/parity-check.sh\n' mk_pin
+# ---- 5b. the CI job `db` really installs PyYAML and pre-pulls before `make db-test`, with time to finish -----
+# db-ci-wired.sh on the repo's workflow, then on scratch copies of it with one step broken (PAIRED: the
+# untouched copy must be green), and mutants of db-ci-wired.sh itself against workflows it must refuse.
+ciwired="$scripts/db-ci-wired.sh"; workflow="$scripts/../../../../.github/workflows/pr.yaml"
+ciw() { bash "$ciwired" "$1" >/dev/null 2>&1; }          # green = the workflow is wired
+if [[ -r $workflow ]]; then
+  expect_ok "CI: job db is wired (make db-test, PyYAML install and image pre-pull before it, timeout >= 10)" ciw "$workflow"
+  WFA="$tmp/wf-nopyyaml.yaml"; WFB="$tmp/wf-pyyaml-late.yaml"; WFC="$tmp/wf-noprepull.yaml"; WFD="$tmp/wf-short.yaml"
+  cp "$workflow" "$WFA"; replace_in "$WFA" "python3 -m pip install --quiet 'PyYAML==6.0.2'" "true" || flunk "CI scenario: no-PyYAML copy"
+  cp "$workflow" "$WFB"; replace_in "$WFB" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' || flunk "CI scenario: late-PyYAML copy"
+  cp "$workflow" "$WFC"; replace_in "$WFC" 'docker pull --quiet "$image@$digest"' 'true' || flunk "CI scenario: no-prepull copy"
+  cp "$workflow" "$WFD"; replace_in "$WFD" $'    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' $'    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' || flunk "CI scenario: short-timeout copy"
+  vmut "CI: the PyYAML install step removed from job db" "$workflow" "python3 -m pip install --quiet 'PyYAML==6.0.2'" "true" ciw
+  vmut "CI: the PyYAML install moved after the make db-test step" "$workflow" $'      # `make db-test` starts with parity-check.sh, which parses YAML.\n' $'      - name: early db-test\n        run: make db-test\n\n      # `make db-test` starts with parity-check.sh, which parses YAML.\n' ciw
+  vmut "CI: the image pre-pull removed from job db" "$workflow" 'docker pull --quiet "$image@$digest"' 'true' ciw
+  vmut "CI: job db timeout lowered below 10 minutes" "$workflow" $'    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' $'    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n\n      - name: did the database module' ciw
+  ciw_refuses() { ! bash "$1" "$2" >/dev/null 2>&1; }   # SCRIPT WORKFLOW: the script must refuse
+  vmut "db-ci-wired: the PyYAML requirement removed" "$ciwired" 'if not before(lambda r: "pip install" in r and "PyYAML" in r):' 'if False:' ciw_refuses "$WFA"
+  vmut "db-ci-wired: the PyYAML-before-db-test order removed" "$ciwired" 'steps[:first]' 'steps' ciw_refuses "$WFB"
+  vmut "db-ci-wired: the pre-pull requirement removed" "$ciwired" 'if not before(lambda r: "docker pull" in r and "image.lock" in r):' 'if False:' ciw_refuses "$WFC"
+  vmut "db-ci-wired: the timeout requirement removed" "$ciwired" 'or tm < 10:' 'or tm < 0:' ciw_refuses "$WFD"
+else flunk "CI wiring pin" "cannot read $workflow"; fi
+
 if ((skipped > 0)); then echo "$ok ok, $bad failed, $skipped skipped"; else echo "$ok ok, $bad failed"; fi
 ((bad == 0))

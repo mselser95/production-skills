@@ -3,7 +3,10 @@
 One section per alert in `alerts/postgres.rules.yml`; the heading is the anchor the
 alert's `runbook` annotation points at (`parity-check.sh` fails a missing one).
 Run SQL as a human operator through the container's unix socket, never as the
-monitoring role.
+monitoring role. Start the stack from `db/` with `docker compose -f compose.yml -f
+compose.observability.yml up -d` and keep no `.env` file there: compose loads it on its own
+and substitutes `${VAR}` from it, so a stray `.env` can re-point the exporter's connection
+(`parity-check.sh` refuses one).
 
 ## PostgresDown
 

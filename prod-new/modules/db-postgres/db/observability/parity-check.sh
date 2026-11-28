@@ -27,6 +27,17 @@
 #                    within exporter-allowlist.txt (an ALLOW-list: db-scrape-test.sh applies the
 #                    same file to the running container); the allowlist names no way to carry a
 #                    connection other than the overlay's
+#   OVERLAY-ENV-VALUE / OVERLAY-INTERPOLATION / OVERLAY-DOTENV / OVERLAY-MOUNT-SOURCE
+#                    VALUES are pinned too: every exporter variable (env_file contents and
+#                    `environment:`) equals an allow-listed NAME=VALUE exactly; a `$` (also `$$`) in
+#                    the exporter's command, environment, env_file, volumes, secrets, entrypoint,
+#                    image or user is refused (compose substitutes it from the host environment or
+#                    a `.env`); a `db/.env` beside the compose files is refused; each mount's
+#                    source -> destination and the monitor secret's file in compose.yml are pinned
+#   OVERLAY-EXTENDS / OVERLAY-INCLUDE / OVERLAY-TOPLEVEL / OVERLAY-SERVICES / OVERLAY-NETWORK
+#                    the overlay may only add the service `exporter`, as written: no `extends`, no
+#                    `include`, no other top-level key, and none of extra_hosts / dns / links /
+#                    network_mode / networks (they can re-point the name `db`)
 #   RECORDING-RULE   a `record:` rule: recording rules are not checked yet
 #   PROMTOOL-CHECK   `promtool check rules` failed (run only when promtool is on PATH)
 # Exit: 0 green · 1 findings · 2 nothing was checked (python3 or PyYAML missing, a file
@@ -127,7 +138,8 @@ if not required:
 #     and string values only); ranges `[5m]` and subqueries `[5m:1m]`, `[5m:]`;
 #     `offset <duration>` after a selector, a range, a subquery or a parenthesis;
 #   - numbers, including hex, exponents, `Inf` and `NaN` in any case;
-#   - operators `+ - * / % ^ == != < > <= >=` and `and or unless atan2` (and `bool`);
+#   - operators `+ - * / % ^ == != < > <= >=` and `and or unless atan2` (and `bool`); keywords
+#     are case-insensitive in operator position (`a AND b`, `m OFFSET 5m`, `sum BY (x) (m)`);
 #   - grouping: `by without on ignoring group_left group_right` with an optional label list;
 #   - functions and aggregations from FUNCS, each followed by `(` (aggregations may be
 #     followed by `by` or `without`);
@@ -231,31 +243,31 @@ def metrics_of(expr):
             low = text.lower()
             if low in ("inf", "nan"):
                 n_expect = False
-            elif text in KEYWORDS:
-                if text in mods:
-                    if text in ("by", "without", "on", "ignoring"):
+            elif low in KEYWORDS:   # PromQL keywords are case-insensitive: `a AND b`, `m OFFSET 5m`
+                if low in mods:
+                    if low in ("by", "without", "on", "ignoring"):
                         if nxt != ("open", "("):
                             bad = f"`{text}` without a label list"
-                        elif text in ("on", "ignoring"):
+                        elif low in ("on", "ignoring"):
                             pending_group = "g:on"
                         else:
                             pending_group = "g:pre" if after_agg else "g:post"
-                    elif text in ("group_left", "group_right"):
+                    elif low in ("group_left", "group_right"):
                         if nxt == ("open", "("):
                             pending_group = "g:grp"
                         n_expect = True
                     else:   # bool
                         n_expect, n_mods = True, {"on", "ignoring"}
-                elif text in SETOPS and not expect_operand:
+                elif low in SETOPS and not expect_operand:
                     n_expect, n_mods = True, {"on", "ignoring"}
-                elif text == "offset" and not expect_operand and (prev_metric or prev[0] == "close"):
+                elif low == "offset" and not expect_operand and (prev_metric or prev[0] == "close"):
                     n_expect = False
                 elif expect_operand:
                     bad = (f"`{text}` where an operand is expected: a metric named like a PromQL "
                            "keyword is refused (it cannot be told from the operator)")
                 else:
                     bad = f"keyword `{text}` in a position PromQL does not allow"
-            elif text in FUNCS and (nxt == ("open", "(") or (text in AGG and nxt[0] == "id" and nxt[1] in ("by", "without"))):
+            elif text in FUNCS and (nxt == ("open", "(") or (text in AGG and nxt[0] == "id" and nxt[1].lower() in ("by", "without"))):
                 n_expect, n_after_agg = True, text in AGG
                 if text in AGG:
                     agg_pending = True
@@ -272,7 +284,7 @@ def metrics_of(expr):
         elif kind in ("num", "str"):
             n_expect = False
         elif kind == "dur":
-            if not (prev == ("id", "offset") or (prev == ("op", "-") and prev2 == ("id", "offset"))):
+            if not ((prev[0] == "id" and prev[1].lower() == "offset") or (prev == ("op", "-") and prev2[0] == "id" and prev2[1].lower() == "offset")):
                 bad = f"duration `{text}` outside a range and `offset`"
             n_expect = False
         elif kind == "sub":
@@ -420,31 +432,91 @@ if lk["exporter.tag"] == "latest":
     fail("OVERLAY-DIGEST", f"{lock_path}: exporter.tag is latest")
 
 # exporter-allowlist.txt: the one list db-scrape-test.sh applies to the RUNNING container.
-allow = {"arg": set(), "env": set(), "image-env": set(), "entrypoint": set(), "mount": set()}
+allow = {"arg": set(), "env": {}, "image-env": set(), "entrypoint": set(), "mount": set(), "secret-file": {}}
+SHAPE = {"mount": 2, "secret-file": 2}   # words after the kind; every other kind carries one
 for n, raw in enumerate(read(os.path.join(obs, "exporter-allowlist.txt")).splitlines(), 1):
     line = raw.partition("#")[0].strip()
     if not line:
         continue
     kind, _, value = line.partition(" ")
     value = value.strip()
-    if kind not in allow or not value or " " in value:
+    parts = value.split()
+    if kind not in allow or len(parts) != SHAPE.get(kind, 1):
         fail("ALLOWLIST", f"exporter-allowlist.txt:{n}: `{line}` is not `<kind> <value>` of a known kind")
         continue
-    allow[kind].add(value)
+    if kind == "env":
+        name, eq, val = value.partition("=")
+        if not eq or not name:
+            fail("ALLOWLIST", f"exporter-allowlist.txt:{n}: an `env` line is `NAME=VALUE` (the value is pinned too)")
+        elif name in allow["env"]:
+            fail("ALLOWLIST", f"exporter-allowlist.txt:{n}: `{name}` is pinned twice")
+        else:
+            allow["env"][name] = val
+    elif kind == "mount":
+        allow["mount"].add((parts[0], parts[1]))
+    elif kind == "secret-file":
+        allow["secret-file"][parts[0]] = parts[1]
+    else:
+        allow[kind].add(value)
 # The allowlist itself may never name a way to carry a connection other than the
 # overlay's: those are the downgrades it exists to refuse.
 for a in sorted(allow["arg"]):
     if a.startswith(("--datasource", "--config.file", "--web.config.file", "--extend.query-path",
                      "--auto-discover-databases", "--collector.stat_statements.include_query")):
         fail("ALLOWLIST", f"exporter-allowlist.txt allows the flag `{a}`, a way to change the connection or export query text")
-for v in sorted(allow["env"] | allow["image-env"]):
-    if v in ("DATA_SOURCE_NAME", "DATA_SOURCE_URI_FILE", "DATA_SOURCE_PASS", "DATA_SOURCE_USER_FILE") or v.startswith(("PG", "PG_EXPORTER_")):
-        fail("ALLOWLIST", f"exporter-allowlist.txt allows the variable `{v}`, a way to change the connection")
+for v in sorted(set(allow["env"]) | allow["image-env"]):
+    if v in ("DATA_SOURCE_NAME", "DATA_SOURCE_URI_FILE", "DATA_SOURCE_PASS", "DATA_SOURCE_USER_FILE") or v.startswith(("PG", "PG_EXPORTER_", "LD_")):
+        fail("ALLOWLIST", f"exporter-allowlist.txt allows the variable `{v}`, a way to change the connection or to load code")
+for v in sorted(allow["env"]):
+    if "$" in allow["env"][v]:
+        fail("ALLOWLIST", f"exporter-allowlist.txt: the value pinned for `{v}` contains `$` (compose would substitute it)")
+for v in sorted(allow["entrypoint"]):
+    if v != "/bin/postgres_exporter":
+        fail("ALLOWLIST", f"exporter-allowlist.txt allows the entrypoint `{v}`, not the image's /bin/postgres_exporter")
+for src, dst in sorted(allow["mount"]):
+    if src.startswith("secret:") and src[7:] not in allow["secret-file"]:
+        fail("ALLOWLIST", f"exporter-allowlist.txt: `mount {src}` has no `secret-file {src[7:]} <file>` line pinning where the secret comes from")
 
 ov = load(overlay_path)
 svc = ((ov or {}).get("services") or {}).get("exporter") if isinstance(ov, dict) else None
 if not isinstance(svc, dict):
     die(f"{overlay_path} has no service `exporter`")
+
+# Everything compose could take from somewhere else than THIS file: another file, the host
+# environment, a `.env`. The service is judged as written; these refusals keep it that way.
+overlay_dir = os.path.dirname(overlay_path)
+
+
+def exists(path):
+    try:
+        open(path, "rb").close()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+if exists(os.path.join(overlay_dir, ".env")):
+    fail("OVERLAY-DOTENV", "a `.env` file sits beside the compose files: compose loads it on its own and substitutes `${VAR}` from it, so the exporter could connect elsewhere (delete it, or pass variables with an explicit --env-file)")
+for k in sorted(str(k) for k in ov):
+    if k == "include":
+        fail("OVERLAY-INCLUDE", "the overlay has a top-level `include:` (another file this check does not read)")
+    elif k not in ("services", "name") and not k.startswith("x-"):
+        fail("OVERLAY-TOPLEVEL", f"the overlay defines a top-level `{k}:`; it may only add the service (a redefined secret or volume changes what the exporter mounts)")
+    if k in ("secrets", "volumes", "configs", "networks") and "$" in str(ov.get(k)):
+        fail("OVERLAY-INTERPOLATION", f"top-level `{k}:` contains `$` (compose substitutes it from the host environment or `.env`)")
+for k in sorted(str(k) for k in ov["services"]):
+    if k != "exporter":
+        fail("OVERLAY-SERVICES", f"the overlay defines the service `{k}`; it may only add `exporter`")
+if "extends" in svc:
+    fail("OVERLAY-EXTENDS", "exporter uses `extends:` (the service is then built from a file this check does not read)")
+for k in ("extra_hosts", "dns", "dns_search", "dns_opt", "links", "external_links", "network_mode", "networks"):
+    if k in svc:
+        fail("OVERLAY-NETWORK", f"exporter sets `{k}`, which can re-point the name `db` the connection uses")
+for k in ("command", "environment", "volumes", "secrets", "entrypoint", "image", "user"):
+    if "$" in str(svc.get(k)):
+        fail("OVERLAY-INTERPOLATION", f"exporter `{k}` contains `$` (compose substitutes it from the host environment or `.env`)")
 
 image = str(svc.get("image", ""))
 if not re.fullmatch(r"[^@\s]+:[^@\s:/]+@sha256:[0-9a-f]{64}", image) or ":latest@" in image:
@@ -490,25 +562,38 @@ for flag in ("--collector.stat_statements", "--collector.stat_checkpointer",
         fail("OVERLAY-COLLECTORS", f"exporter command lacks {flag}, which a required metric needs")
 if "--collector.stat_statements.include_query" in cmd:
     fail("OVERLAY-COLLECTORS", "exporter must not export query text (include_query)")
-# The connection: non-secret settings from an env file, the password only as a file.
-env_vars, env_names = {}, set()
+# The connection: non-secret settings from an env file, the password only as a file. Every
+# entry (env_file content AND `environment:`, mapping and list forms) must equal an allow-listed
+# NAME=VALUE exactly; a name without a value is taken from the host by compose, so it never equals.
+env_entries = []   # (name, value or None, where)
 efs = svc.get("env_file") or []
 for ef in [efs] if isinstance(efs, (str, dict)) else efs:
-    p = os.path.normpath(os.path.join(os.path.dirname(overlay_path), str(ef.get("path", "") if isinstance(ef, dict) else ef)))
+    efp = str(ef.get("path", "") if isinstance(ef, dict) else ef)
+    if "$" in efp:
+        fail("OVERLAY-INTERPOLATION", "exporter `env_file` path contains `$`")
+        continue
+    p = os.path.normpath(os.path.join(overlay_dir, efp))
     for raw in read(p).splitlines():
         line = raw.strip()
         if line and not line.startswith("#"):
-            k, _, v = line.partition("=")
-            env_names.add(k.strip())
-            if "=" in line:
-                env_vars[k.strip()] = v.strip()
+            if "$" in line:
+                fail("OVERLAY-INTERPOLATION", f"exporter `env_file` contents contain `$` on the line of `{line.partition('=')[0].strip()}` (value hidden; compose substitutes it from the host environment or `.env`)")
+            k, eq, v = line.partition("=")
+            env_entries.append((k.strip(), v.strip() if eq else None, "env_file"))
 env = svc.get("environment") or {}
 if isinstance(env, list):
-    env = dict(str(e).partition("=")[::2] for e in env)
-env_names |= {str(k) for k in env}
-env_vars.update({str(k): str(v) for k, v in env.items()})
-for k in sorted(env_names - allow["env"]):
+    for e in env:
+        k, eq, v = str(e).partition("=")
+        env_entries.append((k, v if eq else None, "environment"))
+else:
+    for k, v in env.items():
+        env_entries.append((str(k), None if v is None else str(v), "environment"))
+env_vars = {k: v for k, v, _ in env_entries if v is not None}
+for k in sorted({k for k, _, _ in env_entries} - set(allow["env"])):
     fail("OVERLAY-ENV", f"exporter defines the variable {k}, which is not in exporter-allowlist.txt (it can change the connection)")
+for k, v, where in env_entries:
+    if k in allow["env"] and v != allow["env"][k]:
+        fail("OVERLAY-ENV-VALUE", f"exporter variable {k} ({where}) is not the value pinned in exporter-allowlist.txt (value hidden)")
 uri = env_vars.get("DATA_SOURCE_URI", "")
 qs = parse_qs(uri.partition("?")[2], keep_blank_values=True)
 if qs.get("sslmode") != ["verify-full"]:
@@ -528,19 +613,47 @@ for v in svc.get("volumes") or []:
         target, ro = (parts[1] if len(parts) > 1 else ""), "ro" in parts[2:]
     if rootcert and target and rootcert[0].startswith(target.rstrip("/") + "/") and ro:
         tls_ro = True
-# Mounts must equal the shipped set EXACTLY: a config file mounted in could carry auth_modules.
-dests = set()
+# Mounts must equal the shipped set EXACTLY, source -> destination: a config file mounted in
+# could carry auth_modules, and the password secret must be the MONITOR's.
+pairs = []   # (source, destination)
 for v in svc.get("volumes") or []:
-    dests.add(str(v.get("target", "")) if isinstance(v, dict) else (str(v).split(":") + [""])[1] or str(v).split(":")[0])
+    if isinstance(v, dict):
+        kind_, src_, dst_ = str(v.get("type", "volume")), str(v.get("source", "")), str(v.get("target", ""))
+        pairs.append((("bind:" if kind_ == "bind" else f"{kind_}:") + src_, dst_))
+    else:
+        parts = str(v).split(":")
+        src_, dst_ = (parts[0], parts[1]) if len(parts) > 1 else ("", parts[0])
+        pairs.append((("bind:" if src_.startswith((".", "/", "~")) or "/" in src_ else "volume:") + src_, dst_))
 for sc in svc.get("secrets") or []:
     if isinstance(sc, dict):
-        dests.add(str(sc.get("target") or "/run/secrets/" + str(sc.get("source", ""))))
+        tgt_ = str(sc.get("target") or sc.get("source", ""))   # a relative target lives under /run/secrets
+        pairs.append(("secret:" + str(sc.get("source", "")), tgt_ if tgt_.startswith("/") else "/run/secrets/" + tgt_))
     else:
-        dests.add("/run/secrets/" + str(sc))
+        pairs.append(("secret:" + str(sc), "/run/secrets/" + str(sc)))
+dests = {d for _, d in pairs}
+want_dests = {d for _, d in allow["mount"]}
 if svc.get("configs") or svc.get("volumes_from"):
     fail("OVERLAY-MOUNTS", "exporter must not use configs or volumes_from (a mounted file can change the connection)")
-if dests != allow["mount"]:
-    fail("OVERLAY-MOUNTS", f"exporter mounts {sorted(dests - allow['mount'])} that exporter-allowlist.txt does not list; missing {sorted(allow['mount'] - dests)}")
+if dests != want_dests:
+    fail("OVERLAY-MOUNTS", f"exporter mounts {sorted(dests - want_dests)} that exporter-allowlist.txt does not list; missing {sorted(want_dests - dests)}")
+for src_, dst_ in pairs:
+    if dst_ in want_dests and (src_, dst_) not in allow["mount"]:
+        want_src = sorted(s_ for s_, d_ in allow["mount"] if d_ == dst_)
+        fail("OVERLAY-MOUNT-SOURCE", f"the mount at {dst_} comes from `{src_}`, exporter-allowlist.txt says {want_src}")
+# The top-level definitions behind those mounts live in compose.yml (the overlay has none).
+base_path = os.path.join(overlay_dir, "compose.yml")
+base = load(base_path)
+base = base if isinstance(base, dict) else {}
+for src_, _ in pairs:
+    kind_, _, name_ = src_.partition(":")
+    if kind_ == "volume":
+        if "$" in str((base.get("volumes") or {}).get(name_)):
+            fail("OVERLAY-INTERPOLATION", f"compose.yml top-level volume `{name_}` contains `$`")
+    elif kind_ == "secret" and name_ in allow["secret-file"]:
+        entry = (base.get("secrets") or {}).get(name_)
+        got = str(entry.get("file")) if isinstance(entry, dict) and "file" in entry else None
+        if got != allow["secret-file"][name_] or (isinstance(entry, dict) and set(entry) != {"file"}):
+            fail("OVERLAY-MOUNT-SOURCE", f"compose.yml top-level secret `{name_}` is not `file: {allow['secret-file'][name_]}` as exporter-allowlist.txt pins it (it must be the monitor's own password file)")
 if not tls_ro:
     fail("OVERLAY-TLS-MOUNT", "the directory holding sslrootcert must be mounted read-only into the exporter")
 if not env_vars.get("DATA_SOURCE_PASS_FILE", "").startswith("/run/secrets/"):
