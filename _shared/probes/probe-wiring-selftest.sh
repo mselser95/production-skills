@@ -199,5 +199,47 @@ else
   printf '  FAIL  %-58s %s/%s bad (lifted %s lines) %s\n' "valid exception read as stale on a long list" "$bad_iters" "$iters" "$(wc -l <<<"$lift" | tr -d ' ')" "$first_bad"; failed=$((failed+1))
 fi
 
+# 20. THE RUNNER AS AN INVOKER SURFACE (scripts/evidence-record.sh owns GATES and the suite list; the
+#     Makefile only calls it). provenance: candidate; ttl: 2027-02-27; pinning: true
+#     rfix <name> <makefile recipe line> <runner body> : a fixture whose only probe, r.sh, is named
+#     (or not) by a scratch runner, with the Makefile calling it (or not).
+rfix() {
+  local d; d=$(fixture "$1" -- r.sh)
+  mkdir -p "$d/scripts"
+  printf 'PROBES := _shared/probes\ngates:\n%b\n' "$2" > "$d/Makefile"
+  printf '#!/usr/bin/env bash\n%b\n' "$3" > "$d/scripts/evidence-record.sh"
+  echo "$d"
+}
+GATES_R='GATES=(\n  "g-r|bash _shared/probes/r.sh"\n)\nPRE_IDS=()\nPOST_IDS=()\nAGG_IDS=()'
+CALL='\t@bash scripts/evidence-record.sh --run gates'
+d=$(rfix rn-ok "$CALL" "$GATES_R")
+check "runner: r.sh in GATES, the Makefile drives the runner -> 0" 0 "$d"
+d=$(rfix rn-nodrive '\t@true' "$GATES_R")
+check "runner: r.sh in GATES but the Makefile does not call the runner -> orphan" 1 "$d" "orphaned: _shared/probes/r.sh"
+d=$(rfix rn-comment "$CALL" '# r.sh: bash _shared/probes/r.sh\nGATES=(\n  # "g-r|bash _shared/probes/r.sh"\n)\nPRE_IDS=()\nPOST_IDS=()\nAGG_IDS=()')
+check "runner: r.sh named only in comments of the runner -> orphan" 1 "$d" "orphaned: _shared/probes/r.sh"
+d=$(rfix rn-removed "$CALL" 'GATES=(\n  "g-x|bash _shared/probes/x.sh"\n)\nPRE_IDS=()\nPOST_IDS=()\nAGG_IDS=()')
+check "runner: r.sh removed from GATES -> orphan" 1 "$d" "orphaned: _shared/probes/r.sh"
+d=$(rfix rn-string "$CALL" 'NOTE="bash _shared/probes/r.sh"\nGATES=(\n)\nPRE_IDS=()\nPOST_IDS=()\nAGG_IDS=()')
+check "runner: r.sh named in a string that is not a GATES entry -> orphan" 1 "$d" "orphaned: _shared/probes/r.sh"
+d=$(rfix rn-post "$CALL" 'GATES=(\n  "g-r|bash _shared/probes/r.sh"\n)\nPRE_IDS=()\nPOST_IDS=(g-r)\nAGG_IDS=()')
+check "runner: a post-group gate is NOT driven by --run gates -> orphan" 1 "$d" "orphaned: _shared/probes/r.sh"
+d=$(rfix rn-attest '\t@bash scripts/evidence-record.sh --attest' 'GATES=(\n  "g-r|bash _shared/probes/r.sh"\n)\nPRE_IDS=()\nPOST_IDS=(g-r)\nAGG_IDS=()')
+check "runner: --attest drives every GATES entry, a post gate included -> 0" 0 "$d"
+d=$(rfix rn-id '\t@bash scripts/evidence-record.sh --run g-r' 'GATES=(\n  "g-r|bash _shared/probes/r.sh"\n)\nPRE_IDS=()\nPOST_IDS=(g-r)\nAGG_IDS=()')
+check "runner: --run <id> drives that gate -> 0" 0 "$d"
+d=$(rfix rn-mkcomment '# bash scripts/evidence-record.sh --run gates' "$GATES_R")
+check "runner: a Makefile COMMENT calling the runner drives nothing -> orphan" 1 "$d" "orphaned: _shared/probes/r.sh"
+
+d=$(fixture rn-helper -- a.sh); mkdir -p "$d/scripts"
+printf 'PROBES := _shared/probes\ngates:\n\t@bash $(PROBES)/a.sh\n\t@bash scripts/evidence-record.sh --run gates\n' > "$d/Makefile"
+printf '#!/usr/bin/env bash\necho stub\n' > "$d/scripts/h.sh"
+printf 'GATES=(\n)\nPRE_IDS=()\nPOST_IDS=()\nAGG_IDS=()\nRUNNER_HELPERS=(\n  scripts/h.sh\n)\n' > "$d/scripts/evidence-record.sh"
+out=$( cd "$d" && bash "$PROBE" scripts 2>&1 ); rc=$?
+if (( rc == 0 )); then printf '  ok    %-58s\n' "runner: a RUNNER_HELPERS script is wired while the runner is driven"; ok=$((ok+1)); else printf '  FAIL  %-58s rc=%s\n' "runner helper" "$rc"; failed=$((failed+1)); fi
+printf 'GATES=(\n)\nPRE_IDS=()\nPOST_IDS=()\nAGG_IDS=()\nRUNNER_HELPERS=(\n)\n' > "$d/scripts/evidence-record.sh"
+out=$( cd "$d" && bash "$PROBE" scripts 2>&1 ); rc=$?
+if (( rc == 1 )) && grep -qF "orphaned: scripts/h.sh" <<<"$out"; then printf '  ok    %-58s\n' "runner: a script not in RUNNER_HELPERS is an orphan"; ok=$((ok+1)); else printf '  FAIL  %-58s rc=%s\n' "runner helper absent" "$rc"; failed=$((failed+1)); fi
+
 echo "$ok ok, $failed failed"
 (( failed == 0 )) || exit 1

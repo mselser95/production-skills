@@ -145,17 +145,25 @@ else fail "process count differs or too high: 50 rows -> $c50, 2000 rows -> $c20
 # 13b. wiring on the REAL repo files: the gate must be run by `make gates` AND be
 # listed in the evidence recorder's GATES, or CI breaks (uncovered) / the gate is orphaned.
 ROOT="$(cd "$HERE/../.." && pwd)"
-mk_runs_gate() { local t; t=$(sed -n '/^gates:/,/^$/p' "$1" | grep -vE '^[[:space:]]*#'); grep -qE '(^|[/ ])row-catalogue\.sh([[:space:]]|$)' <<<"$t"; }
+# The Makefile no longer lists gates: `make gates` is one line calling scripts/evidence-record.sh --run gates,
+# which runs the `main` group of GATES. So "make gates runs row-catalogue" is now "GATES lists it AND it is
+# in the main group", i.e. not in PRE_IDS / POST_IDS / AGG_IDS (those are run at other times).
 er_lists_gate() { local t; t=$(sed -n '/^GATES=(/,/^)/p' "$1" | grep -vE '^[[:space:]]*#'); grep -qE '"row-catalogue\|bash [^"]*row-catalogue\.sh"' <<<"$t"; }
-if mk_runs_gate "$ROOT/Makefile"; then pass "wiring: Makefile gates: recipe runs row-catalogue.sh"
-else fail "wiring: Makefile gates: recipe does not run row-catalogue.sh"; fi
+er_main_gate() { local g; g=$(grep -E '^(PRE_IDS|POST_IDS|AGG_IDS)=\(' "$1"); er_lists_gate "$1" && [[ "$g" != *row-catalogue* ]]; }
+mk_calls_runner() { local t; t=$(sed -n '/^gates:/,/^$/p' "$1" | grep -vE '^[[:space:]]*#'); grep -qE 'evidence-record\.sh --run gates' <<<"$t"; }
+if mk_calls_runner "$ROOT/Makefile"; then pass "wiring: Makefile gates: recipe calls the runner (--run gates)"
+else fail "wiring: Makefile gates: recipe does not call evidence-record.sh --run gates"; fi
 if er_lists_gate "$ROOT/scripts/evidence-record.sh"; then pass "wiring: evidence-record.sh GATES lists row-catalogue"
 else fail "wiring: evidence-record.sh GATES does not list row-catalogue"; fi
-# mutations on scratch copies: removing either entry must flip the check RED
-grep -v 'row-catalogue' "$ROOT/Makefile" > "$T/Makefile.mut"
+if er_main_gate "$ROOT/scripts/evidence-record.sh"; then pass "wiring: row-catalogue is in the main group, the one --run gates executes"
+else fail "wiring: row-catalogue is not in the main group of GATES"; fi
+# mutations on scratch copies: each removal must flip its check RED
+grep -v 'evidence-record' "$ROOT/Makefile" > "$T/Makefile.mut"
 grep -v 'row-catalogue' "$ROOT/scripts/evidence-record.sh" > "$T/er.mut"
-if mk_runs_gate "$T/Makefile.mut"; then fail "mutation wiring-makefile: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-makefile: RED (Makefile copy without the line is refused)"; fi
+sed 's/^POST_IDS=(/POST_IDS=(row-catalogue /' "$ROOT/scripts/evidence-record.sh" > "$T/er.post"
+if mk_calls_runner "$T/Makefile.mut"; then fail "mutation wiring-makefile: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-makefile: RED (Makefile copy that does not call the runner is refused)"; fi
 if er_lists_gate "$T/er.mut"; then fail "mutation wiring-gates-array: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-gates-array: RED (GATES copy without the entry is refused)"; fi
+if er_main_gate "$T/er.post"; then fail "mutation wiring-group: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-group: RED (row-catalogue moved out of the main group is refused)"; fi
 
 # 14. mutations: a scratch copy of the gate with ONE check removed must be caught
 mutant() { # <name> <sed-expr> <case-dir-prepared-by-caller> <want-rc-of-original> <substring>

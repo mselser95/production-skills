@@ -47,44 +47,66 @@ check "NEG: overrides without the flag -> warning printed" 1 "$(grep -c 'set but
 check "NEG: overrides without the flag -> real defaults used" 1 "$(grep -c 'real-selftest.sh' "$FR/benchmarks/mutation-baseline.md")"
 check "NEG: overrides without the flag -> fake suites not recorded" 0 "$(grep -c 'a-selftest.sh' "$FR/benchmarks/mutation-baseline.md")"
 
+# ---- the set of suites is compared too: a row with no suite and a suite with no row both FAIL ----
+# provenance: candidate; ttl: 2027-02-27; pinning: true
+# A suite dropped from the glob used to pass silently (its row just went unchecked) and a suite with
+# no row was only a printed NEW. Both are failures now, and `--write` re-records exactly the suites
+# that ran, so rows and suites agree after it.
+printf '#!/usr/bin/env bash\necho "fake selftest: 6 case(s) passed"\n' > "$TMP/e-selftest.sh"
+cp "$TMP/good.md" "$TMP/base.md"
+check "set: rows and suites agree (a, b) -> passes (control)" 0 "$(run)"
+MUTATION_BASELINE_SUITES="$TMP/a-selftest.sh" ; export MUTATION_BASELINE_SUITES
+check "set: a recorded row (b) whose suite did not run -> FAIL" 1 "$(run)"
+check "set: ...and the MISSING line names it" 1 "$(grep -c 'MISSING  b-selftest.sh' "$TMP/out")"
+MUTATION_BASELINE_SUITES="$TMP/a-selftest.sh $TMP/b-selftest.sh $TMP/e-selftest.sh"; export MUTATION_BASELINE_SUITES
+check "set: a suite that ran with no row (e) -> FAIL" 1 "$(run)"
+check "set: ...and the NEW line names it" 1 "$(grep -c 'NEW      e-selftest.sh' "$TMP/out")"
+check "set: --write re-records exactly the suites that ran (a, b, e)" 0 "$(run --write)"
+check "set: ...three rows plus the total" 4 "$(grep -c '^| ' "$TMP/base.md" | awk '{print $1 - 1}')"
+check "set: ...and check mode then passes" 0 "$(run)"
+MUTATION_BASELINE_SUITES="$TMP/a-selftest.sh $TMP/b-selftest.sh"; export MUTATION_BASELINE_SUITES
+check "set: the baseline now has a row (e) for a suite that is gone -> FAIL" 1 "$(run)"
+cp "$TMP/good.md" "$TMP/base.md"
+
 # ---- counts from the single recorded pass (scripts/run-once.sh) -------------------------------
 # provenance: candidate; ttl: 2027-02-27; pinning: true
 # `make selftests` runs each suite once and records its count; check mode reads that count when the
-# line is vouched for (same suite, same command string, zero exit, same tree identity, same run) and
+# line is vouched for (same suite, same canonical command, zero exit, same tree identity, same run) and
 # executes the suite when it is not. Each fake suite logs its own execution, so "read" and "ran"
-# are told apart by the log, not by the verdict alone. --write must never read the record.
+# are told apart by the log, not by the verdict alone. --write must never read the record. The fake
+# suites take their count and exit code from files next to them (c.cases / c.rc: a suite run through
+# scripts/run-once.sh no longer sees the caller's environment), so a recorded line is a REAL run of the suite.
 RO="$root/scripts/run-once.sh"; EV="$TMP/results.tsv"; XL="$TMP/exec.log"
-for s in c d; do printf '#!/usr/bin/env bash\necho x >> "%s"\necho "fake: 4 case(s) passed"\n' "$XL" > "$TMP/$s-selftest.sh"; done
+for s in c d; do printf '#!/usr/bin/env bash\necho x >> "%s"\necho "fake: $(cat "%s/%s.cases" 2>/dev/null || echo 4) case(s) passed"\nexit "$(cat "%s/%s.rc" 2>/dev/null || echo 0)"\n' "$XL" "$TMP" "$s" "$TMP" "$s" > "$TMP/$s-selftest.sh"; done
 SU2="$TMP/c-selftest.sh $TMP/d-selftest.sh"
 runr() { EVIDENCE_RESULTS="$EV" EVIDENCE_RUN_ID=mb1 MUTATION_BASELINE_SUITES="$SU2" MUTATION_BASELINE_FILE="$TMP/base2.md" bash "$MB" "$@" >"$TMP/out3" 2>&1; echo $?; }
 rec() { EVIDENCE_RESULTS="$EV" EVIDENCE_RUN_ID=mb1 bash "$RO" --quiet --count "$@" >/dev/null 2>&1; }
 runs() { local n; n=$(grep -c . "$XL" 2>/dev/null); echo "${n:-0}"; }
+recsuite() { rec "selftest:$TMP/$1-selftest.sh" -- bash "$TMP/$1-selftest.sh"; }   # a real, recorded run of a fake suite
 : > "$XL"; rm -f "$EV"
-rec --as "bash $TMP/c-selftest.sh" "selftest:$TMP/c-selftest.sh" -- bash -c 'echo "99 case(s) passed"'
+echo 99 > "$TMP/c.cases"; recsuite c; rm -f "$TMP/c.cases"; : > "$XL"
 check "--write executes the suites and ignores a recorded count (two rows of 4)" "0 2 2" "$(runr --write) $(runs) $(grep -c '| 4 |' "$TMP/base2.md")"
-: > "$XL"; rm -f "$EV"
-rec "selftest:$TMP/c-selftest.sh" -- bash "$TMP/c-selftest.sh"
-check "check mode: a recorded count is read, only the unrecorded suite is executed" "0 2" "$(runr) $(runs)"
+: > "$XL"; rm -f "$EV"; recsuite c; : > "$XL"
+check "check mode: a recorded count is read, only the unrecorded suite is executed" "0 1" "$(runr) $(runs)"
 check "check mode: it says how many counts came from the single pass" 1 "$(grep -c '1 of 2 suite count(s) read from the single recorded pass' "$TMP/out3")"
-: > "$XL"; rm -f "$EV"
-rec --as "bash $TMP/c-selftest.sh" "selftest:$TMP/c-selftest.sh" -- bash -c 'echo "2 case(s) passed"'
-rec --as "bash $TMP/d-selftest.sh" "selftest:$TMP/d-selftest.sh" -- bash -c 'echo "4 case(s) passed"'
+: > "$XL"; rm -f "$EV"; echo 2 > "$TMP/c.cases"; recsuite c; rm -f "$TMP/c.cases"; recsuite d; : > "$XL"
 check "check mode: the recorded count is what is compared (2 < 4 -> FELL, no suite executed)" "1 0" "$(runr) $(runs)"
 check "check mode: ...and the FELL line names the suite" 1 "$(grep -c 'FELL     c-selftest.sh  4 -> 2' "$TMP/out3")"
 : > "$XL"; awk -F'\t' -v OFS='\t' '{$9="0000000000000000000000000000000000000000+clean"; print}' "$EV" > "$EV.t"; mv "$EV.t" "$EV"
 check "check mode: a count line with another tree identity is NOT trusted (suites executed, 4 >= 4)" "0 2" "$(runr) $(runs)"
 : > "$XL"; rm -f "$EV"
-rec --as "bash $TMP/other.sh" "selftest:$TMP/c-selftest.sh" -- bash -c 'echo "2 case(s) passed"'
-check "check mode: a count line under another command string is NOT trusted" "0 2" "$(runr) $(runs)"
+rec "selftest:$TMP/c-selftest.sh" -- bash -c "CASES=2 bash $TMP/c-selftest.sh"; : > "$XL"
+check "check mode: a count line recorded under another argv (bash -c ...) is NOT trusted" "0 2" "$(runr) $(runs)"
 : > "$XL"; rm -f "$EV"
-rec --as "bash $TMP/c-selftest.sh" "selftest:$TMP/c-selftest.sh" -- bash -c 'echo "2 case(s) passed"; exit 1'
+echo 2 > "$TMP/c.cases"; echo 1 > "$TMP/c.rc"; recsuite c; rm -f "$TMP/c.cases" "$TMP/c.rc"; : > "$XL"
 check "check mode: a FAILED recorded run's count is NOT trusted (suites executed)" "0 2" "$(runr) $(runs)"
-: > "$XL"; rm -f "$EV"
-rec --as "bash $TMP/c-selftest.sh" "selftest:$TMP/c-selftest.sh" -- bash -c 'echo "2 case(s) passed"'
-printf 'garbage\n' >> "$EV"
+: > "$XL"; rm -f "$EV"; echo 2 > "$TMP/c.cases"; recsuite c; rm -f "$TMP/c.cases"; printf 'garbage\n' >> "$EV"; : > "$XL"
 check "check mode: a malformed results file is NOT trusted (suites executed)" "0 2" "$(runr) $(runs)"
 : > "$XL"; rm -f "$EV"
 check "check mode: no results file at all -> both executed" "0 2" "$(runr) $(runs)"
+: > "$XL"; rm -f "$EV"; recsuite c; : > "$XL"
+(EVIDENCE_RESULTS="$EV" MUTATION_BASELINE_SUITES="$SU2" MUTATION_BASELINE_FILE="$TMP/base2.md" bash "$MB" >"$TMP/out3" 2>&1; echo $? >"$TMP/rc3")
+check "check mode: with no run id nothing recorded is trusted (both executed)" "0 2" "$(cat "$TMP/rc3") $(runs)"
 
 if (( FAILED > 0 )); then echo "mutation-baseline selftest: $FAILED of $CASES case(s) FAILED"; exit 1; fi
 echo "mutation-baseline selftest: $CASES case(s) passed"

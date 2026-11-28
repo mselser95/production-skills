@@ -63,9 +63,12 @@ if [[ $rc -eq 1 && "$out" == *"PyYAML is unavailable"* ]]; then ok_ "missing PyY
 
 # ---- wiring of THIS probe (probe-wiring.sh also counts the --write target) ------
 wiring() { # wiring <dir with Makefile and .github/workflows/pr.yaml> : prints what is missing
-  local d="$1" miss="" gl
-  gl="$(awk '/^gates:/{f=1;next} f&&/^[^\t]/{f=0} f' "$d/Makefile" | grep -E 'skill-weight\.sh')"
-  { [[ -n "$gl" ]] && grep -vq -- '--write' <<<"$gl"; } || miss="$miss gates-line"
+  local d="$1" miss="" gl ids
+  # `make gates` is one line calling scripts/evidence-record.sh --run gates, which runs the `main` group
+  # of its GATES: the gates line is "the recipe calls the runner" and "skill-weight is not moved out of main".
+  gl="$(awk '/^gates:/{f=1;next} f&&/^[^\t]/{f=0} f' "$d/Makefile" | grep -E 'evidence-record\.sh --run gates')"
+  ids="$(grep -E '^(PRE_IDS|POST_IDS|AGG_IDS)=\(' "$d/scripts/evidence-record.sh")"
+  { [[ -n "$gl" && "$ids" != *skill-weight* ]]; } || miss="$miss gates-line"
   grep -Eq '^[[:space:]]*bash _shared/probes/skill-weight-selftest\.sh[[:space:]]*$' "$d/.github/workflows/pr.yaml" || miss="$miss ci-selftest"
   grep -Eq '^[[:space:]]*bash _shared/probes/skill-weight\.sh[[:space:]]*$' "$d/.github/workflows/pr.yaml" || miss="$miss ci-probe"
   grep -Eq '^[[:space:]]*"[A-Za-z0-9_-]+\|bash _shared/probes/skill-weight\.sh"[[:space:]]*$' "$d/scripts/evidence-record.sh" || miss="$miss evidence-gates"
@@ -74,10 +77,13 @@ wiring() { # wiring <dir with Makefile and .github/workflows/pr.yaml> : prints w
 w="$tmp/wire"; mkdir -p "$w/.github/workflows" "$w/scripts"
 cp "$real_root/scripts/evidence-record.sh" "$w/scripts/evidence-record.sh"
 cp "$real_root/Makefile" "$w/Makefile"; cp "$real_root/.github/workflows/pr.yaml" "$w/.github/workflows/pr.yaml"
-m="$(wiring "$real_root")"; if [[ -z "$m" ]]; then ok_ "the repo's gates: recipe, pr.yaml and scripts/evidence-record.sh GATES all carry skill-weight.sh"; else bad_ "repo wiring" "missing: $m"; fi
-grep -v 'bash $(PROBES)/skill-weight.sh$' "$real_root/Makefile" >"$w/Makefile"
-m="$(wiring "$w")"; if [[ "$m" == "gates-line" ]]; then ok_ "wiring: gates: line removed (the --write target does not count) is caught"; else bad_ "wiring gates" "got [$m]"; fi
+m="$(wiring "$real_root")"; if [[ -z "$m" ]]; then ok_ "the repo's gates: recipe (calls the runner), pr.yaml and scripts/evidence-record.sh GATES all carry skill-weight.sh"; else bad_ "repo wiring" "missing: $m"; fi
+grep -v 'evidence-record' "$real_root/Makefile" >"$w/Makefile"
+m="$(wiring "$w")"; if [[ "$m" == "gates-line" ]]; then ok_ "wiring: gates: recipe that does not call the runner is caught"; else bad_ "wiring gates" "got [$m]"; fi
 cp "$real_root/Makefile" "$w/Makefile"
+sed 's/^POST_IDS=(/POST_IDS=(skill-weight /' "$real_root/scripts/evidence-record.sh" >"$w/scripts/evidence-record.sh"
+m="$(wiring "$w")"; if [[ "$m" == "gates-line" ]]; then ok_ "wiring: skill-weight moved out of the main group (not run by --run gates) is caught"; else bad_ "wiring group" "got [$m]"; fi
+cp "$real_root/scripts/evidence-record.sh" "$w/scripts/evidence-record.sh"
 grep -v 'bash _shared/probes/skill-weight.sh$' "$real_root/.github/workflows/pr.yaml" >"$w/.github/workflows/pr.yaml"
 m="$(wiring "$w")"; if [[ "$m" == "ci-probe" ]]; then ok_ "wiring: pr.yaml probe line removed is caught"; else bad_ "wiring ci probe" "got [$m]"; fi
 grep -v 'bash _shared/probes/skill-weight-selftest.sh$' "$real_root/.github/workflows/pr.yaml" >"$w/.github/workflows/pr.yaml"
