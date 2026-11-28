@@ -1,0 +1,21 @@
+# The ONE place versions and install policy are written. A workspace package says
+# "catalog:" (or "catalog:<name>") for a third-party dependency and "workspace:*" for
+# a sibling; scripts/monorepo-settings-check.sh refuses anything else, and refuses a
+# package that re-states a setting below.
+packages:
+  - apps/*
+  - packages/*
+
+catalogMode: strict
+catalog:
+  "@types/node": 26.6.11
+  typescript: 7.0.2
+  vitest: 5.1.2
+
+engineStrict: true
+strictPeerDependencies: true
+strictDepBuilds: true
+onlyBuiltDependencies: []
+blockExoticSubdeps: true
+minimumReleaseAge: 10080
+trustPolicy: no-downgrade

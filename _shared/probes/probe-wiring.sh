@@ -180,6 +180,8 @@ declare -A EXCEPT=(
   # invoker here. Its verdicts are proven by prove-mutation-selftest.sh, which
   # `make selftests` runs via the *-selftest.sh glob.
   [prod-new/modules/db-postgres/scripts/db-pin-verify-live.sh]="opt-in verifier, needs Docker and the images (the offline gate is db-pin-check.sh); a human runs it when bumping the image pair (README); proven by db-pin-verify-live-selftest.sh with a fake docker"
+  [prod-new/modules/monorepo-root/scripts/monorepo-run.sh]="the root Makefile of a GENERATED monorepo calls it to delegate a target to every unit; this repo is not a monorepo; proven here by monorepo-root-selftest.sh on an assembled tree"
+  [prod-new/modules/monorepo-root/scripts/monorepo-settings-check.sh]="gate of a GENERATED monorepo (catalog-only versions, one lockfile, repo.yaml inventory); this repo has no workspace; proven here by monorepo-root-selftest.sh, one breaking case per rule"
   [_shared/probes/prove-mutation.sh]="agent tool run by prod-implementer in target repos; proven here by prove-mutation-selftest.sh"
   [_shared/probes/gate-run.sh]="agent tool run inside target repos by prod-implementer/mechanic/author; proven by gate-run-selftest.sh"
   [_shared/probes/brand-strings.sh]="scans a generated tree for a user-supplied brand denylist; this repo has neither; run in scaffolded repos, proven here by brand-strings-selftest.sh"

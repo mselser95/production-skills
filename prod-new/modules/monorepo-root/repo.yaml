@@ -1,0 +1,8 @@
+# Inventory of the units of this repository: the one list the root Makefile and the
+# settings check read. Schema: docs/repo-schema.md. To add a unit, add its directory
+# and one entry here, nothing else.
+version: v2
+repo:
+  name: repo-name
+  layout: monorepo
+units: []
