@@ -47,12 +47,19 @@
 #                    sit in db/ (compose or a bare `docker compose up` would merge/pick them up).
 #                    With the base silent on the exporter, the overlay IS the merged service,
 #                    so every overlay check above judges what compose will run.
-#   COMPOSE-UNKNOWN-FILE / COMPOSE-UNREADABLE-FILE  (THE GUARANTEE, about FILES)
-#                    db/ is walked recursively; every .yml/.yaml (any case, any depth) is loaded
-#                    strictly. One that is compose-shaped (a `services` mapping or an `include`) may
-#                    not define a service the overlay defines, whatever it is called (BASE-EXPORTER),
-#                    and must be one of the three listed files at its exact path (else
-#                    COMPOSE-UNKNOWN-FILE). A YAML file that cannot be read is COMPOSE-UNREADABLE-FILE.
+#   COMPOSE-UNKNOWN-FILE / COMPOSE-UNREADABLE-FILE / COMPOSE-UNCHECKED-FILE / COMPOSE-SYMLINK-DIR
+#                    (THE GUARANTEE, about FILES) db/ is walked recursively and EVERY regular file, whatever
+#                    its name or extension, is judged by its CONTENT (compose merges any file given with -f;
+#                    JSON is YAML). *.yml/*.yaml are loaded strictly (one plain document; unreadable =
+#                    COMPOSE-UNREADABLE-FILE); other names are read leniently (all documents, unknown tags and
+#                    duplicate keys tolerated, merge keys resolved), skipping binary (NUL in the first 8 KiB),
+#                    non-UTF-8 and unparsable files, except an unparsable file that STARTS like compose and has a
+#                    `services:` / `include:` line (COMPOSE-UNREADABLE-FILE) and a file over 1 MiB that starts a
+#                    line with `services` / `include` in its first 4 KiB (COMPOSE-UNCHECKED-FILE). A compose-shaped
+#                    file (a `services` mapping or null, or an `include`) may not define a service the overlay
+#                    defines (BASE-EXPORTER) and must be one of the three listed files at its exact path (else
+#                    COMPOSE-UNKNOWN-FILE). A link to a directory is COMPOSE-SYMLINK-DIR; a link to a file is
+#                    judged by its target; a dangling link is COMPOSE-UNREADABLE-FILE.
 #                    So no `docker compose` command naming only files under db/ can merge anything
 #                    into the exporter. A file from OUTSIDE db/ (`-f ../x.yml`) or stdin is not read.
 #   COMPOSE-DOC-FILE a LINT over documented commands (every *.md under db/, the top-level README,
@@ -83,7 +90,7 @@ command -v python3 >/dev/null 2>&1 || { echo "parity-check: python3 is not avail
 python3 -B -c 'import yaml' 2>/dev/null || { echo "parity-check: PyYAML is not importable, nothing was checked (pip install PyYAML)" >&2; exit 2; }
 
 exec python3 -B - "$dir" "$overlay" "$lock" <<'PY'
-import os, re, shutil, subprocess, sys
+import os, re, shutil, stat, subprocess, sys
 from urllib.parse import parse_qs
 import yaml
 
@@ -123,6 +130,23 @@ def _map(loader, node, deep=False):
 
 
 UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _map)
+
+
+class LenientLoader(yaml.SafeLoader):
+    """Used ONLY to recognise what compose would accept in a file that is not named *.yml/*.yaml: it must not be
+    stricter than compose. Duplicate keys are tolerated, merge keys are resolved (SafeLoader), and any tag it does not
+    know (`!reset`, `!override`, `!Ref`...) is read as the plain node underneath instead of failing the parse."""
+
+
+def _any_tag(loader, suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    return loader.construct_mapping(node, deep=True)
+
+
+LenientLoader.add_multi_constructor("", _any_tag)
 
 
 def load(path):
@@ -733,25 +757,88 @@ for name_ in listing:
         continue
     cf = load(os.path.join(overlay_dir, name_))
     judge_compose(name_, cf if isinstance(cf, dict) else {})
-# THE GUARANTEE is about FILES, not command lines. Walk db/ recursively: every regular file whose name ends in
-# .yml or .yaml (any case, any depth, no name skipped) is loaded with the strict loader. A document that is a
-# mapping with a `services` mapping (or a top-level `include`) is compose-shaped: it may not define a service
-# the overlay defines (whatever it is CALLED), and it must be one of the closed list at its exact path. Other
-# YAML (Prometheus config, alert rules) is untouched. So no `docker compose` command that names only files
-# under db/ can merge anything into the exporter, however the command line is spelled.
+# THE GUARANTEE is about FILES, not command lines. Walk db/ recursively; EVERY regular file (any name or extension,
+# any depth, hidden ones too) is judged by its CONTENT, because compose merges any file passed with `-f`, whatever it
+# is called, and JSON is YAML:
+#  * `*.yml` / `*.yaml` (any case): loaded with the STRICT loader (one plain document: no tags, no merge keys, no
+#    duplicate keys); one that cannot be read is COMPOSE-UNREADABLE-FILE.
+#  * every other name: read LENIENTLY, only to recognise compose-shaped content. Skipped without a finding: a file
+#    with a NUL byte in its first 8 KiB (binary: images, DER certificates, dumps; UTF-16 with a BOM is text), a file
+#    that is not UTF-8, a file over 1 MiB whose first 4 KiB have no line starting `services` or `include` (one that
+#    has is COMPOSE-UNCHECKED-FILE), and a file that does not parse as YAML (compose could not read it either) UNLESS
+#    it STARTS like a compose document (first line that is not blank / `#` / `---`: `services:`, `include:`, `name:`,
+#    `version:`, `x-...:`, `{`, `%YAML`) AND has a line `services:` / `"services":` / `include:`: then
+#    COMPOSE-UNREADABLE-FILE (fail closed: PyYAML rejects it, compose's parser might not). All documents of a
+#    multi-document stream are read, unknown tags and duplicate keys are tolerated, merge keys are resolved.
+#  * a document that is a mapping with a `services` mapping (or null) or a top-level `include` is compose-shaped: it
+#    may not define a service the overlay defines (BASE-EXPORTER, whatever it is CALLED) and must be one of the closed
+#    list at its exact path (else COMPOSE-UNKNOWN-FILE). Other YAML (Prometheus config, alert rules) is untouched.
+#  * a symlink to a FILE is judged by its target's content (the target is named in a finding); a symlink to a
+#    DIRECTORY is COMPOSE-SYMLINK-DIR (os.walk does not enter it); a dangling link is COMPOSE-UNREADABLE-FILE.
+# So no `docker compose` command that names only files under db/ can merge anything into the exporter, however the
+# command line is spelled.
 YAML_EXEMPT = ()   # exact relative paths a legitimate multi-document or tagged file may be exempted at (none ship)
+LENIENT_CAP = 1 << 20
+OVERSIZE_LEAD = re.compile(rb"(?m)^[\"']?(?:services|include)\b")
+COMPOSE_START = re.compile(r"""^(?:["']?(?:services|include|name|version)["']?\s*:|x-[\w.-]*\s*:|\{|%YAML)""")
+COMPOSE_KEYLINE = re.compile(r"""(?m)^\s*(?:services|"services"|include)\s*:""")
+PARSE_ERRORS = (yaml.YAMLError, ValueError, TypeError, RecursionError, OverflowError)
 
 
 def is_yaml_name(n):
     return n.lower().endswith((".yml", ".yaml"))
 
 
+def compose_shaped(doc):
+    return isinstance(doc, dict) and ("include" in doc or ("services" in doc and (doc["services"] is None or isinstance(doc["services"], dict))))
+
+
 def load_soft(path):
     try:
         with open(path, encoding="utf-8") as fh:
             return True, yaml.load(fh.read(), Loader=UniqueKeyLoader)
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+    except (OSError, UnicodeDecodeError) + PARSE_ERRORS as e:
         return False, " ".join(str(e).split())[:120]
+
+
+def starts_like_compose(text):
+    for ln in text.lstrip("\ufeff").splitlines():
+        s_ = ln.strip()
+        if s_ and not s_.startswith("#") and s_ != "---":
+            return bool(COMPOSE_START.match(s_))
+    return False
+
+
+def judge_lenient(rel_, p_, link_):
+    """A file whose name says nothing about YAML: find out from its CONTENT whether compose would take it."""
+    try:
+        with open(p_, "rb") as fh:
+            data = fh.read(LENIENT_CAP + 1)
+    except OSError as e:
+        fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} cannot be read ({e.strerror}): a file that cannot be read cannot be shown harmless")
+        return
+    utf16 = data[:2] in (b"\xff\xfe", b"\xfe\xff")
+    if b"\0" in data[:8192] and not utf16:
+        return   # binary
+    if len(data) > LENIENT_CAP:
+        if OVERSIZE_LEAD.search(data[:4096]):
+            fail("COMPOSE-UNCHECKED-FILE", f"`{rel_}`{link_} is over 1 MiB and starts like a compose file: it was not read; delete it or move it outside db/")
+        return
+    try:
+        text = data.decode("utf-16" if utf16 else "utf-8")
+    except UnicodeDecodeError:
+        return   # not text
+    try:
+        docs = list(yaml.load_all(text, Loader=LenientLoader))
+    except PARSE_ERRORS:
+        if starts_like_compose(text) and COMPOSE_KEYLINE.search(text):
+            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} looks like a compose file and cannot be read: it cannot be shown harmless; delete it or move it outside db/")
+        return
+    shaped = [d_ for d_ in docs if compose_shaped(d_)]
+    for d_ in shaped:
+        judge_compose(rel_ + link_, d_)
+    if shaped:
+        fail("COMPOSE-UNKNOWN-FILE", f"`{rel_}`{link_} is a compose-shaped file (a `services` mapping or an `include`, whatever its name) that this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}, at those exact paths); a command that merges it could add to the exporter: delete it or move it outside db/")
 
 
 def walk_error(e):
@@ -764,31 +851,45 @@ for root_, dirs_, files_ in os.walk(overlay_dir, onerror=walk_error):
     dirs_.sort()
     rel_root = os.path.relpath(root_, overlay_dir).replace(os.sep, "/")
     for d_ in dirs_:
-        if is_yaml_name(d_):
-            fail("COMPOSE-UNREADABLE-FILE", f"`{(rel_root + '/' if rel_root != '.' else '') + d_}` is a directory (or a link to one) named like a YAML file; delete it")
+        reld_ = (rel_root + "/" if rel_root != "." else "") + d_
+        if os.path.islink(os.path.join(root_, d_)):   # os.walk lists a link to a directory here and does not enter it
+            fail("COMPOSE-SYMLINK-DIR", f"`{reld_}` is a link to the directory `{os.path.realpath(os.path.join(root_, d_))}`: a directory reached through a link is not read; put the files under db/ or remove the link")
+        elif is_yaml_name(d_):
+            fail("COMPOSE-UNREADABLE-FILE", f"`{reld_}` is a directory (or a link to one) named like a YAML file; delete it")
     for n_ in sorted(files_):
         rel_ = (rel_root + "/" if rel_root != "." else "") + n_
         p_ = os.path.join(root_, n_)
         if n_.lower().endswith(".md"):
             md_seen.append((rel_, p_))
-        if not is_yaml_name(n_):
+        yaml_ = is_yaml_name(n_)
+        if yaml_:
+            yaml_seen.append(rel_)
+        if os.path.abspath(p_) == ov_abs or (yaml_ and rel_ in YAML_EXEMPT):
             continue
-        yaml_seen.append(rel_)
-        if os.path.abspath(p_) == ov_abs or rel_ in YAML_EXEMPT:
-            continue
-        if "/" not in rel_ and re.fullmatch(r"(docker-)?compose.*\.ya?ml", n_, re.I):
+        if yaml_ and "/" not in rel_ and re.fullmatch(r"(docker-)?compose.*\.ya?ml", n_, re.I):
             continue   # judged by the compose-file loop above
+        link_ = f" (a link to `{os.path.realpath(p_)}`)" if os.path.islink(p_) else ""
         if nonregular(p_):
-            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}` is not a regular file (a dangling link?): it cannot be shown harmless; delete it")
+            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} is not a regular file (a dangling link?): it cannot be shown harmless; delete it")
+            continue
+        try:
+            special_ = not stat.S_ISREG(os.stat(p_).st_mode)
+        except OSError:
+            special_ = False
+        if special_:
+            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} is not a regular file (a pipe, socket or device): it cannot be shown harmless; delete it")
+            continue
+        if not yaml_:
+            judge_lenient(rel_, p_, link_)
             continue
         ok_, doc_ = load_soft(p_)
         if not ok_:
-            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}` cannot be read as strict YAML ({doc_}): a file that cannot be read cannot be shown harmless")
+            fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} cannot be read as strict YAML ({doc_}): a file that cannot be read cannot be shown harmless")
             continue
-        if isinstance(doc_, dict) and (isinstance(doc_.get("services"), dict) or "include" in doc_):
-            judge_compose(rel_, doc_)
+        if compose_shaped(doc_):
+            judge_compose(rel_ + link_, doc_)
             if rel_ not in COMPOSE_CLOSED:
-                fail("COMPOSE-UNKNOWN-FILE", f"`{rel_}` is a compose-shaped YAML file (a `services` mapping or an `include`) that this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}, at those exact paths); a command that merges it could add to the exporter: delete it or move it outside db/")
+                fail("COMPOSE-UNKNOWN-FILE", f"`{rel_}`{link_} is a compose-shaped YAML file (a `services` mapping or an `include`) that this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}, at those exact paths); a command that merges it could add to the exporter: delete it or move it outside db/")
 # COMPOSE MENTIONS, by an ALLOW-LIST of command shapes. A deny-list of the spellings of "use this
 # file" (`--file`, `--file=x`, `-fx`, a `\` continuation, `--profile x -f`, `COMPOSE_FILE=`,
 # `docker-compose`, `podman compose`...) always misses one. So: join `\` continuations; a "mention" is

@@ -159,6 +159,24 @@ def cached_load(text, Loader=None):
 
 
 yaml.load = cached_load
+real_load_all = yaml.load_all
+
+
+def cached_load_all(text, Loader=None):
+    # the lenient walk parses every non-YAML file under db/ (SQL, shell, text) once per loader variant, failures included
+    key = ("all", cur[0], text)
+    if key not in cache:
+        try:
+            cache[key] = (True, list(real_load_all(text, Loader=Loader)))
+        except Exception as e:  # cached and re-raised: the script's own handler decides
+            cache[key] = (False, e)
+    ok, val = cache[key]
+    if not ok:
+        raise val
+    return iter(val)
+
+
+yaml.load_all = cached_load_all
 
 
 def code_of(path):
@@ -180,7 +198,7 @@ def run(script, want, f, old, new, pt):
     # one edit, or several joined with \x01 in all three fields (a consistent edit of two files)
     for f, old, new in zip(f.split("\x01"), old.split("\x01"), new.split("\x01")):
         if f.startswith("+"):    # `+name`: a file that does not exist in the tree is added (content = NEW)
-            files["db/" + f[1:]] = new
+            files["db/" + f[1:]] = new.replace("\x03", "\0")   # \x03 stands for a NUL byte (the case file is NUL-separated)
         elif f:
             k = "db/" + f
             if old not in files.get(k, ""):
@@ -206,7 +224,7 @@ def run(script, want, f, old, new, pt):
         def vopen(path, mode="r", *a, **kw):
             p = os.path.normpath(str(path))
             if p in vf:
-                return io.StringIO(vf[p])
+                return io.BytesIO(vf[p].encode("utf-8")) if "b" in mode else io.StringIO(vf[p])
             raise FileNotFoundError(2, "No such file or directory", str(path))
 
         b["open"] = vopen
@@ -658,6 +676,7 @@ pmx "parity: function names case-insensitive (Rate( accepted)" '(text in FUNCS o
 # loaded; a compose-shaped one may not define the overlay's service and must be on the closed list. These cases
 # are real parity runs on the tree with one extra file; the command spelling does not matter any more.
 EXF=$'services:\n  exporter:\n    environment: {PGSSLMODE: disable}\n'
+BIGPAD="$(head -c 1100000 /dev/zero | tr '\0' '#')"
 pc "file rule: db/extra.yml with the exporter fragment -> BASE-EXPORTER + COMPOSE-UNKNOWN-FILE" $'BASE-EXPORTER: extra.yml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `extra.yml`' "+extra.yml" "" "$EXF"
 pc "file rule: the same file named notes.yaml -> RED" $'BASE-EXPORTER: notes.yaml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `notes.yaml`' "+notes.yaml" "" "$EXF"
 pc "file rule: the same file in db/bootstrap/x.yml -> RED" $'BASE-EXPORTER: bootstrap/x.yml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `bootstrap/x.yml`' "+bootstrap/x.yml" "" "$EXF"
@@ -669,14 +688,44 @@ pc "file rule: an unparsable db/junk.yml -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UN
 pc "file rule: a two-document file -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `two.yml`' "+two.yml" "" $'a: 1\n---\nservices: {exporter: {}}\n'
 pc "round-7 exploit: a global-flag command in the README merging extra.yml -> RED by the file rule AND the lint" $'BASE-EXPORTER: extra.yml defines the service `exporter`\nCOMPOSE-DOC-FILE: README.md:' "../README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' 'docker --context x compose -f compose.yml -f compose.observability.yml -f extra.yml up -d'$'\x01'"$EXF"
 pc "round-7 exploit: a command in db/bootstrap/NOTES.md naming a fourth file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: bootstrap/NOTES.md documents `docker compose -f extra.yml`' "+bootstrap/NOTES.md" "" $'docker compose -f compose.yml -f extra.yml up -d\n'
+# eighth review: the file rule judges EVERY file under db/ by CONTENT, not by name (compose merges any file given with -f,
+# JSON is YAML). Real parity runs on the tree with one extra file; \x03 in a case body stands for a NUL byte.
+EXFJ='{"services": {"exporter": {"environment": {"DATA_SOURCE_NAME": "postgresql://evil@attacker:5432/postgres"}}}}'
+for nm in extra.json extra extra.compose extra.yml.txt bootstrap/extra.yaml.bak 'extra.yml~' .x .hid/x; do
+  if [[ $nm == *.json ]]; then body="$EXFJ"; else body="$EXF"; fi
+  pc "content rule: the exporter fragment as db/$nm -> BASE-EXPORTER + COMPOSE-UNKNOWN-FILE" $'BASE-EXPORTER: '"$nm"$' defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `'"$nm"'`' "+$nm" "" "$body"
+done
+pc "content rule: a JSON compose file WITHOUT the exporter -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `other.json`' "+other.json" "" '{"services":{"other":{"image":"x"}}}'
+pc "content rule: a file with only an include, any name -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `inc.txt`' "+inc.txt" "" $'include: [../elsewhere.yml]\n'
+pc "content rule: services with a null value, any name -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `nullsvc.txt`' "+nullsvc.txt" "" $'services:\n'
+pc "content rule: a docker stack file (version + services), any name -> RED by design" 'COMPOSE-UNKNOWN-FILE: `stack.txt`' "+stack.txt" "" $'version: "3.8"\nservices:\n  web: {image: x}\n'
+pc "content rule: the SECOND document of a multi-document file is compose-shaped -> RED" $'BASE-EXPORTER: multi.txt defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `multi.txt`' "+multi.txt" "" $'a: 1\n---\n'"$EXF"
+pc "content rule: !override on the exporter's environment -> RED (unknown tags are read, not a parse failure)" $'BASE-EXPORTER: ov.txt defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `ov.txt`' "+ov.txt" "" $'services:\n  exporter:\n    environment: !override {PGSSLMODE: disable}\n'
+pc "content rule: a merge key is resolved (services under an anchor merge) -> RED" 'COMPOSE-UNKNOWN-FILE: `merge.txt`' "+merge.txt" "" $'x-base: &b {image: x}\nservices:\n  web:\n    <<: *b\n'
+pc "content rule: a file PyYAML rejects (tab indent) that starts like compose -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `tabbed.txt` looks like a compose file and cannot be read' "+tabbed.txt" "" $'services:\n\texporter: {}\n'
+pc "content rule: an oversize file (over 1 MiB) starting like compose -> COMPOSE-UNCHECKED-FILE" 'COMPOSE-UNCHECKED-FILE: `big.txt`' "+big.txt" "" $'services: {}\n'"$BIGPAD"
+pc "content rule GREEN: an oversize file that does not start like compose is skipped" OK "+big-ok.txt" "" $'a: 1\n'"$BIGPAD"
+pc "content rule GREEN: a small binary file (a NUL byte, compose-looking text before it) is skipped" OK "+blob.bin" "" $'services:\n  exporter: {}\n\x03\x03'
+pc "content rule GREEN: JSON that is not compose-shaped" OK "+data.json" "" '{"a": 1}'
+pc "content rule GREEN: an empty file" OK "+empty" "" ""
+pc "content rule GREEN: a k8s multi-document manifest named fixture (no extension)" OK "+fixture" "" $'apiVersion: v1\nkind: Service\nmetadata: {name: x}\n---\napiVersion: v1\nkind: ConfigMap\ndata: {services: x}\n'
+pc "content rule GREEN: Markdown that documents a compose snippet in a fenced block" OK "+docs/snippet.md" "" $'# Title\n\nSome text.\n\n```yaml\nservices:\n  exporter: {}\n```\n'
+pc "content rule GREEN: SQL and shell text" OK "+q.sql" "" $'SELECT 1;\n-- services: none\n'
+pmx "parity: content judgment reverted to name-based (db/extra.json is not read)" $'        if not yaml_:\n            judge_lenient(rel_, p_, link_)\n            continue\n' $'        if not yaml_:\n            continue\n' -- $'BASE-EXPORTER: extra.json defines the service `exporter`' "+extra.json" "" "$EXFJ"
+pmx "parity: only the first document of a stream is read" 'docs = list(yaml.load_all(text, Loader=LenientLoader))' 'docs = [next(yaml.load_all(text, Loader=LenientLoader), None)]' -- 'COMPOSE-UNKNOWN-FILE: `multi.txt`' "+multi.txt" "" $'a: 1\n---\n'"$EXF"
+pmx "parity: unknown-tag tolerance removed (!override fails the parse)" 'LenientLoader.add_multi_constructor("", _any_tag)' 'pass' -- 'COMPOSE-UNKNOWN-FILE: `ov.txt`' "+ov.txt" "" $'services:\n  exporter:\n    environment: !override {PGSSLMODE: disable}\n'
+pmx "parity: the binary (NUL byte) skip removed (a binary fixture becomes a false RED)" 'if b"\0" in data[:8192] and not utf16:' 'if False:' -- OK "+blob.bin" "" $'services:\n  exporter: {}\n\x03\x03'
+pmx "parity: the size cap removed (a large compose file is parsed, not reported as unchecked)" 'if len(data) > LENIENT_CAP:' 'if False:' -- 'COMPOSE-UNCHECKED-FILE: `big.txt`' "+big.txt" "" $'services: {}\n'"$BIGPAD"
+pmx "parity: the fail-closed branch removed (a tab-indented compose file is skipped)" 'if starts_like_compose(text) and COMPOSE_KEYLINE.search(text):' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `tabbed.txt`' "+tabbed.txt" "" $'services:\n\texporter: {}\n'
+pmx "parity: include is no longer compose-shaped" '"include" in doc or ("services" in doc' 'False or ("services" in doc' -- 'COMPOSE-UNKNOWN-FILE: `inc.yml`' "+inc.yml" "" $'include: [../elsewhere.yml]\n'
 dcx "compose mention: docker --context x compose -> refused outright (global flag)" 'no global flags' 'docker --context x compose -f compose.yml -f compose.observability.yml up -d'
 dcx "compose mention: docker --debug compose ps -> refused (global flag)" '`--debug`: write `docker compose` with no global flags' 'docker --debug compose ps'
 dcx "compose mention: docker -H tcp://h compose ps -> refused (global flag)" '`-H`: write `docker compose` with no global flags' 'docker -H tcp://h compose ps'
 dcx "compose mention: docker --host=h compose ps -> refused (global flag)" '`--host=h`: write `docker compose` with no global flags' 'docker --host=h compose ps'
 pmx "parity: the recursive walk reduced to the top level" 'for root_, dirs_, files_ in os.walk(overlay_dir, onerror=walk_error):' 'for root_, dirs_, files_ in [next(os.walk(overlay_dir, onerror=walk_error))]:' -- 'COMPOSE-UNKNOWN-FILE: `observability/deep/dir/y.YAML`' "+observability/deep/dir/y.YAML" "" "$EXF"
-pmx "parity: the walk restricted to compose-named files" $'        if not is_yaml_name(n_):\n            continue\n' $'        if not re.fullmatch(r"(docker-)?compose.*\\.ya?ml", n_, re.I):\n            continue\n' -- 'BASE-EXPORTER: extra.yml defines the service `exporter`' "+extra.yml" "" "$EXF"
+pmx "parity: the walk restricted to compose-named files" $'        yaml_ = is_yaml_name(n_)\n' $'        yaml_ = is_yaml_name(n_)\n        if not re.fullmatch(r"(docker-)?compose.*\\.ya?ml", n_, re.I):\n            continue\n' -- 'BASE-EXPORTER: extra.yml defines the service `exporter`' "+extra.yml" "" "$EXF"
 pmx "parity: the compose-shaped -> unknown file rule removed" '            if rel_ not in COMPOSE_CLOSED:' '            if False:' -- 'COMPOSE-UNKNOWN-FILE: `other.yml`' "+other.yml" "" $'services: {other: {image: x}}\n'
-pmx "parity: the non-overlay service check removed from the walk" '            judge_compose(rel_, doc_)' '            pass' -- 'BASE-EXPORTER: extra.yml defines the service `exporter`' "+extra.yml" "" "$EXF"
+pmx "parity: the non-overlay service check removed from the walk" '            judge_compose(rel_ + link_, doc_)' '            pass' -- 'BASE-EXPORTER: extra.yml defines the service `exporter`' "+extra.yml" "" "$EXF"
 pmx "parity: the unreadable-file rule removed" '        if not ok_:' '        if False:' -- 'COMPOSE-UNREADABLE-FILE: `junk.yml`' "+junk.yml" "" $'a: [unclosed\n'
 pmx "parity: the markdown scan restricted to the README and RUNBOOK (db/**/*.md not scanned)" 'DOC_SOURCES += [(r_, p_) for r_, p_ in md_seen if os.path.abspath(p_) != _rb]' 'pass' -- 'COMPOSE-DOC-FILE: bootstrap/NOTES.md documents `docker compose -f extra.yml`' "+bootstrap/NOTES.md" "" $'docker compose -f compose.yml -f extra.yml up -d\n'
 pmx "parity: a global docker flag is not a mention" '|docker(?:\s+-{1,2}[\w-]+(?:=\S+)?(?:\s+(?!compose\b|-)\S+)?)+\s+compose\b' '' -- '`--debug`: write `docker compose` with no global flags' "../README.md" "$README_CMD" 'docker --debug compose ps'
@@ -704,6 +753,27 @@ mkdir -p "$tmp/w/dirtarget"; ln -s "$tmp/w/dirtarget" "$tmp/w/db/compose.dirlink
 out="$(bash "$parity" --dir "$tmp/w/db/observability" 2>&1)"; rc=$?
 if [[ $rc == 1 && $out == *"COMPOSE-UNKNOWN-FILE: \`compose.dirlink.yml\` is not a regular file"* && $out == *"COMPOSE-UNKNOWN-FILE: \`compose.dangling.yml\` is not a regular file"* && $out != *Traceback* ]]; then pass "a compose-named symlink to a directory or to nothing: a named finding, exit 1, no traceback"; else flunk "compose-named symlink to a directory" "rc=$rc ${out:0:200}"; fi
 rm -f "$tmp/w/db/compose.dirlink.yml" "$tmp/w/db/compose.dangling.yml"
+# eighth review: links under db/ (real runs on a scratch copy of the module: the harness above has no symlinks).
+# A link to a DIRECTORY is refused (os.walk does not enter it, so `-f link/extra.yml` would go unread); a link to a
+# FILE is judged by its target's content; a dangling link is refused whatever its name.
+sl="$tmp/sl"; mkdir -p "$sl/outside"
+cp -R "$dbdir" "$sl/db"; cp -R "$scripts" "$sl/scripts"; cp "$modroot/README.md" "$sl/README.md"; mkdir "$sl/db/inner-target"; printf 'hello\n' > "$sl/db/inner-target/a.txt"
+slp() { out="$(bash "$1" --dir "$sl/db/observability" 2>&1)"; rc=$?; }
+printf 'hello\n' > "$sl/outside/ok.txt"; ln -s "$sl/outside/ok.txt" "$sl/db/ok-link"
+slp "$parity"
+if [[ $rc == 0 && $out == *"parity-check: OK"* ]]; then pass "links: the scratch copy with a link to a harmless file is green (control)"; else flunk "links: control copy is not green" "rc=$rc ${out:0:200}"; fi
+printf '%s' "$EXF" > "$sl/outside/extra.yml"; printf '%s' "$EXF" > "$sl/outside/frag.txt"
+ln -s "$sl/outside" "$sl/db/link_out"; ln -s "$sl/db/inner-target" "$sl/db/link_in"; ln -s "$sl/nowhere" "$sl/db/dangling"; ln -s "$sl/outside/frag.txt" "$sl/db/frag-link"
+slp "$parity"
+if [[ $rc == 1 && $out == *'COMPOSE-SYMLINK-DIR: `link_out` is a link to the directory'* && $out == *'COMPOSE-SYMLINK-DIR: `link_in` is a link to the directory'* && $out == *'COMPOSE-UNREADABLE-FILE: `dangling`'* \
+   && $out == *'BASE-EXPORTER: frag-link (a link to `'*'outside/frag.txt`) defines the service `exporter`'* && $out == *'COMPOSE-UNKNOWN-FILE: `frag-link` (a link to `'* && $out != *'ok-link'* && $out != *Traceback* ]]; then
+  pass "links: a link to a directory (outside and inside db/), a dangling link and a link to a compose file are refused; the link to harmless content is not"
+else flunk "links: findings" "rc=$rc ${out:0:300}"; fi
+lm="$tmp/mut/links.sh"; cp "$parity" "$lm"
+if replace_in "$lm" 'if os.path.islink(os.path.join(root_, d_)):' 'if False:'; then
+  slp "$lm"
+  if [[ $rc == 1 && $out != *COMPOSE-SYMLINK-DIR* && $out == *'COMPOSE-UNREADABLE-FILE: `dangling`'* ]]; then echo "RED  mutation parity: the symlinked-directory rule removed (same tree, control above green)"; ok=$((ok + 1)); else flunk "mutation parity: the symlinked-directory rule removed: still reported" "rc=$rc"; fi
+else flunk "mutant parity: symlinked-directory rule: anchor not found or no-op"; fi
 
 sect "promtool"
 # ---- 3. promtool ----------------------------------------------------------------------------------
@@ -1130,9 +1200,13 @@ PORT_RE=':[1-9][0-9]*[[:space:]]*$'   # the scrape test's published-port regex, 
 vmut "scrape test: required-metric check removed" "$scrape" 'if [[ $l == "PASS "* ]]; then emit PASS "required-metric ${l#PASS }"; else emit FAIL "required-metric ${l#FAIL }" "absent from the scrape"; fi' 'emit PASS "required-metric ${l#* }"' sc_missing
 vmut "scrape test: pg_up check removed" "$scrape" 'if [[ $up == 1 ]]; then' 'if true; then' sc_pgup
 # the watchdog is killed with KILL: a TERM right after its fork runs the parent's traps in it (cleanup deletes the scratch dir)
-sc_wd_kill() { grep -qF 'kill -KILL "$wd"' "$1"; }
+# The race (a TERM before the forked watchdog resets the parent's traps) was NOT reproducible on 300 immediate
+# commands here, so the check stays textual but is anchored: a non-comment line of bounded()'s own body that IS the
+# command `kill -KILL "$wd"` (a comment or a string that mentions it does not count).
+sc_wd_kill() { local n; n="$(sed -n '/^bounded() {$/,/^}$/p' "$1" | grep -v '^[[:space:]]*#' | grep -cE '^[[:space:]]*kill -KILL "\$wd"([[:space:]]|;|$)')"; ((n >= 1)); }
 expect_ok "scrape test: the watchdog is killed with KILL, never a trap-able signal" sc_wd_kill "$scrape"
 vmut "scrape test: watchdog killed with TERM (its fork-time trap race deletes the scratch dir)" "$scrape" 'kill -KILL "$wd"' 'kill "$wd"' sc_wd_kill
+vmut "scrape test: watchdog killed with TERM, the KILL command left only in a comment" "$scrape" $'  kill -KILL "$wd" 2>/dev/null; wait "$wd" 2>/dev/null' $'  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null  # was: kill -KILL "$wd" 2>/dev/null' sc_wd_kill
 vmut "scrape test: cleanup/project with a fixed name instead of the unique one" "$scrape" 'proj="dbscrape-$$"' 'proj="dbscrape-fixed"' sc_teardown
 vmut "scrape test: teardown trap removed" "$scrape" 'trap cleanup EXIT' ':' sc_teardown
 vmut "scrape test: published-port check removed" "$scrape" "grep -Eq '$PORT_RE' \"\$last\"; then" 'false; then' sc_published
@@ -1293,6 +1367,10 @@ if [[ -r $workflow ]]; then
   CHGATE=$'        run: make db-test\n'; CHMOV="$CHPRE$CHAFTER"; CHMOV="${CHMOV/"$CHGATE"/"$CHGATE"$'\n'"$CHUNK"}"
   printf '%s' "$CHMOV" > "$WCD"
   [[ $CHMOV != "$CHB" && $CHMOV == *"$CHGATE"*"$CHST"* ]] || flunk "CI scenario: late change-detection copy was not built"
+  WCE="$tmp/wf-changed-twice.yaml"; printf '%s' "$CHPRE$CHUNK$CHUNK$CHAFTER" > "$WCE"
+  [[ $CHPRE$CHUNK$CHUNK$CHAFTER != "$CHB" && $(grep -c '^        id: changed$' "$WCE") == 2 ]] || flunk "CI scenario: two-steps-with-id-changed copy was not built"
+  expect_ok "CI: two steps with id changed are refused (the output read would be ambiguous)" ciw_names "$ciwired" "$WCE" 'exactly one step with id `changed` (found 2)'
+  vmut "db-ci-wired: the one-step-with-that-id rule removed (two steps with id changed pass)" "$ciwired" 'if len(cands) != 1:' 'if False:' ciw_refuses "$WCE"
   expect_ok "CI: a change-detection step that always writes run=false is refused, naming the step" ciw_names "$ciwired" "$WCA" "differs from the pinned text"
   expect_ok "CI: a change-detection path filter with a typo is refused, naming the step" ciw_names "$ciwired" "$WCB" "did the database module change?"
   expect_ok "CI: a renamed change-detection id is refused" ciw_names "$ciwired" "$WCC" 'exactly one step with id `changed`'

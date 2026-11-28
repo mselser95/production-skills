@@ -64,17 +64,28 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   your own OUTSIDE `db/`, passed as one more `-f` (any other compose-named file inside `db/` is refused; a file you pass from OUTSIDE `db/` is never read by `parity-check.sh`, so what it adds is your responsibility), that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
   `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`. Keep no `.env`
   in `db/`: compose loads it on its own and would substitute `${VAR}` from it, so `parity-check.sh` refuses one.
-  THE GUARANTEE (it is about files): no YAML file under `db/` other than the overlay defines the exporter service,
-  and no compose-shaped file exists there beyond the three listed; so any `docker compose` command that only names
-  files under `db/` gets the pinned exporter. A file from OUTSIDE `db/` passed with `-f`, or a compose file fed on
-  stdin, is outside what this check reads and is the caller's responsibility. `parity-check.sh` enforces it by
-  walking `db/` recursively and loading every `.yml`/`.yaml` (any case, any depth) with a strict loader: a document
-  with a `services` mapping (or a top-level `include`) is compose-shaped, may not define a service the overlay
+  THE GUARANTEE (it is about files): no file under `db/` - whatever its name or extension, at any depth - defines
+  the exporter service other than the overlay, and no compose-shaped file exists there beyond the three listed; a
+  directory reached through a symbolic link is refused; so any `docker compose` command that only names files under
+  `db/` gets the pinned exporter. A file from OUTSIDE `db/` passed with `-f`, or a compose file fed on stdin, is
+  outside what this check reads and is the caller's responsibility. `parity-check.sh` enforces it by walking `db/`
+  recursively and judging EVERY regular file by its content, because compose merges any file passed with `-f`,
+  whatever it is called, and JSON is YAML. EVERY `.yml`/`.yaml` file (any case, any depth), compose or not, must be
+  a single plain YAML document (no tags, no merge keys, no duplicate keys) and is loaded with a strict loader, so
+  that what the check reads is exactly what compose merges; one that cannot be read is `COMPOSE-UNREADABLE-FILE`
+  (for the three listed files this exits 2, fail closed). Files with any other name are read leniently, only to
+  find compose-shaped content: all documents of a multi-document stream, unknown tags (`!override`, `!reset`) and
+  merge keys accepted. Skipped without a finding: binary files (a NUL byte in the first 8 KiB), files that are not
+  UTF-8, and files that do not parse as YAML (compose could not read them either), except one that STARTS like a
+  compose document (`services:`, `include:`, `name:`, `version:`, `x-...:`, `{`, `%YAML`) and has a `services:` or
+  `include:` line, which is `COMPOSE-UNREADABLE-FILE` (a parser might accept what PyYAML rejects); a file over 1 MiB
+  that has a line starting `services` or `include` in its first 4 KiB is `COMPOSE-UNCHECKED-FILE`. A document with
+  a `services` mapping (or null) or a top-level `include` is compose-shaped: it may not define a service the overlay
   defines (`BASE-EXPORTER`, whatever the file is called), and must be one of `compose.yml`, `compose.timescale.yml`,
   `compose.observability.yml` at those exact paths (else `COMPOSE-UNKNOWN-FILE`). YAML that is not compose-shaped
-  (the Prometheus alert rules and their tests) is left alone; a YAML file that cannot be read is
-  `COMPOSE-UNREADABLE-FILE` (a compose file must be plain YAML: no `<<` merge keys, no `!override`/`!reset` tags, one
-  document; for the three listed files this exits 2, fail closed). Compose-named files outside the list, the
+  (the Prometheus alert rules and their tests) is left alone. A link to a directory is `COMPOSE-SYMLINK-DIR` (the
+  walk does not enter it: put the files under `db/` or remove the link); a link to a file is judged by its target's
+  content, and a finding names the target; a dangling link is refused. Compose-named files outside the list, the
   auto-merged names (`compose.override.y[a]ml`, `docker-compose*.y[a]ml`, `compose.yaml`) and a compose-named link
   that is not a regular file are refused by name as well.
   The documented commands are a LINT, not the guarantee: `COMPOSE-DOC-FILE` refuses the spellings it knows in every
