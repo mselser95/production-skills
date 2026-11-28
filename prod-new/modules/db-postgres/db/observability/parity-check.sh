@@ -52,10 +52,13 @@
 #                    its name or extension, is judged by its CONTENT (compose merges any file given with -f;
 #                    JSON is YAML). *.yml/*.yaml are loaded strictly (one plain document; unreadable =
 #                    COMPOSE-UNREADABLE-FILE); other names are read leniently (all documents, unknown tags and
-#                    duplicate keys tolerated, merge keys resolved), skipping binary (NUL in the first 8 KiB),
-#                    non-UTF-8 and unparsable files, except an unparsable file that STARTS like compose and has a
-#                    `services:` / `include:` line (COMPOSE-UNREADABLE-FILE) and a file over 1 MiB that starts a
-#                    line with `services` / `include` in its first 4 KiB (COMPOSE-UNCHECKED-FILE). A compose-shaped
+#                    duplicate keys tolerated, merge keys resolved; a parse failure is retried with non-leading
+#                    TABs replaced by a space, as compose reads them), skipping binary (NUL in the first 8 KiB),
+#                    non-UTF-8, and unparsable PROSE (a line of three backticks/tildes) or SCRIPTS (first line `#!`);
+#                    any other unparsable file with a column-0 `services:` / `include:` line is
+#                    COMPOSE-UNREADABLE-FILE. A file over 1 MiB is scanned whole for such a line and parsed only if
+#                    it has one; over 64 MiB it is COMPOSE-UNCHECKED-FILE. A FIFO/socket/device is
+#                    COMPOSE-UNREADABLE-FILE (not read, no hang). A compose-shaped
 #                    file (a `services` mapping or null, or an `include`) may not define a service the overlay
 #                    defines (BASE-EXPORTER) and must be one of the three listed files at its exact path (else
 #                    COMPOSE-UNKNOWN-FILE). A link to a directory is COMPOSE-SYMLINK-DIR; a link to a file is
@@ -764,12 +767,15 @@ for name_ in listing:
 #    duplicate keys); one that cannot be read is COMPOSE-UNREADABLE-FILE.
 #  * every other name: read LENIENTLY, only to recognise compose-shaped content. Skipped without a finding: a file
 #    with a NUL byte in its first 8 KiB (binary: images, DER certificates, dumps; UTF-16 with a BOM is text), a file
-#    that is not UTF-8, a file over 1 MiB whose first 4 KiB have no line starting `services` or `include` (one that
-#    has is COMPOSE-UNCHECKED-FILE), and a file that does not parse as YAML (compose could not read it either) UNLESS
-#    it STARTS like a compose document (first line that is not blank / `#` / `---`: `services:`, `include:`, `name:`,
-#    `version:`, `x-...:`, `{`, `%YAML`) AND has a line `services:` / `"services":` / `include:`: then
-#    COMPOSE-UNREADABLE-FILE (fail closed: PyYAML rejects it, compose's parser might not). All documents of a
-#    multi-document stream are read, unknown tags and duplicate keys are tolerated, merge keys are resolved.
+#    that is not UTF-8 (compose rejects binary and non-UTF-8 files too), and a file over 1 MiB with no column-0
+#    `services:` / `"services":` / `include:` line and not starting with `{` (the WHOLE file is scanned as text; one
+#    that has such a line is parsed in full), and a file that parses neither as is nor after replacing every TAB that
+#    is not leading indentation with a space (PyYAML rejects `a: 1<TAB># c`, compose accepts it) when it is PROSE
+#    (a line starting with three backticks or tildes) or a SCRIPT (first line `#!`): a YAML parser rejects such a line
+#    at column 0 after a mapping, so compose could not merge it either. Any OTHER file that parses neither way and has a
+#    column-0 `services:` / `"services":` / `include:` line (or starts with `{` and has the key) is
+#    COMPOSE-UNREADABLE-FILE (fail closed). Over 64 MiB: COMPOSE-UNCHECKED-FILE. All documents of a multi-document
+#    stream are read, unknown tags and duplicate keys are tolerated, merge keys are resolved.
 #  * a document that is a mapping with a `services` mapping (or null) or a top-level `include` is compose-shaped: it
 #    may not define a service the overlay defines (BASE-EXPORTER, whatever it is CALLED) and must be one of the closed
 #    list at its exact path (else COMPOSE-UNKNOWN-FILE). Other YAML (Prometheus config, alert rules) is untouched.
@@ -778,11 +784,14 @@ for name_ in listing:
 # So no `docker compose` command that names only files under db/ can merge anything into the exporter, however the
 # command line is spelled.
 YAML_EXEMPT = ()   # exact relative paths a legitimate multi-document or tagged file may be exempted at (none ship)
-LENIENT_CAP = 1 << 20
-OVERSIZE_LEAD = re.compile(rb"(?m)^[\"']?(?:services|include)\b")
-COMPOSE_START = re.compile(r"""^(?:["']?(?:services|include|name|version)["']?\s*:|x-[\w.-]*\s*:|\{|%YAML)""")
-COMPOSE_KEYLINE = re.compile(r"""(?m)^\s*(?:services|"services"|include)\s*:""")
+LENIENT_CAP = 1 << 20     # above this a file is not parsed unless a column-0 `services:` / `include:` line says it is compose
+HUGE_CAP = 64 << 20       # above this a file is not read at all: COMPOSE-UNCHECKED-FILE (fail closed)
+# the shape of a compose document's top-level key in block style (they sit at column 0): key syntax, not a word
+TOP_KEY = re.compile(r"""(?m)^(?:services|"services"|'services'|include)[ \t]*:""")
+FLOW_KEY = re.compile(r"""["']?(?:services|include)["']?\s*:""")
 PARSE_ERRORS = (yaml.YAMLError, ValueError, TypeError, RecursionError, OverflowError)
+_LEAD = re.compile(r"(?m)^([ \t]*)(.*)$")
+_FENCE = re.compile(r"(?m)^(?:```|~~~)")
 
 
 def is_yaml_name(n):
@@ -801,44 +810,70 @@ def load_soft(path):
         return False, " ".join(str(e).split())[:120]
 
 
-def starts_like_compose(text):
+def first_significant(text):
     for ln in text.lstrip("\ufeff").splitlines():
         s_ = ln.strip()
         if s_ and not s_.startswith("#") and s_ != "---":
-            return bool(COMPOSE_START.match(s_))
-    return False
+            return s_
+    return ""
+
+
+def lenient_docs(text):
+    try:
+        return list(yaml.load_all(text, Loader=LenientLoader))
+    except PARSE_ERRORS:
+        return None
+
+
+def replace_inner_tabs(text):
+    """PyYAML rejects a TAB after a token (`a: 1<TAB># c`, `data:<TAB>`); compose's parser accepts it. Every TAB that is
+    not leading indentation becomes one space (a tab as indentation is illegal for both parsers: left alone)."""
+    return _LEAD.sub(lambda m: m.group(1) + m.group(2).replace("\t", " "), text)
+
+
+def is_prose_or_script(text):
+    """Skipped when NEITHER parse reads it: a Markdown file (a line starting with three backticks or three tildes) or a
+    script (first line `#!`). Such a line at column 0 after a mapping is a syntax error for a YAML parser, so compose
+    could not merge the file either (that is the premise; the README states it)."""
+    return text.lstrip("\ufeff").startswith("#!") or bool(_FENCE.search(text))
 
 
 def judge_lenient(rel_, p_, link_):
     """A file whose name says nothing about YAML: find out from its CONTENT whether compose would take it."""
     try:
         with open(p_, "rb") as fh:
-            data = fh.read(LENIENT_CAP + 1)
+            data = fh.read(HUGE_CAP + 1)
     except OSError as e:
         fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} cannot be read ({e.strerror}): a file that cannot be read cannot be shown harmless")
         return
     utf16 = data[:2] in (b"\xff\xfe", b"\xfe\xff")
     if b"\0" in data[:8192] and not utf16:
         return   # binary
-    if len(data) > LENIENT_CAP:
-        if OVERSIZE_LEAD.search(data[:4096]):
-            fail("COMPOSE-UNCHECKED-FILE", f"`{rel_}`{link_} is over 1 MiB and starts like a compose file: it was not read; delete it or move it outside db/")
+    if len(data) > HUGE_CAP:
+        fail("COMPOSE-UNCHECKED-FILE", f"`{rel_}`{link_} is over 64 MiB: it was not read, so it cannot be shown harmless; delete it or move it outside db/")
         return
     try:
         text = data.decode("utf-16" if utf16 else "utf-8")
     except UnicodeDecodeError:
         return   # not text
-    try:
-        docs = list(yaml.load_all(text, Loader=LenientLoader))
-    except PARSE_ERRORS:
-        if starts_like_compose(text) and COMPOSE_KEYLINE.search(text):
+    if len(data) > LENIENT_CAP and not (TOP_KEY.search(text) or first_significant(text).startswith("{")):
+        return   # a large file is parsed only when a line of compose's own shape says it is worth it (cheap scan of the WHOLE file)
+    tabs_ = ""
+    docs = lenient_docs(text)
+    if docs is None:
+        docs = lenient_docs(replace_inner_tabs(text))
+        tabs_ = " (read after replacing tabs, as compose does)"
+    if docs is None:
+        if is_prose_or_script(text):
+            return
+        if TOP_KEY.search(text) or (first_significant(text).startswith("{") and FLOW_KEY.search(text)):
             fail("COMPOSE-UNREADABLE-FILE", f"`{rel_}`{link_} looks like a compose file and cannot be read: it cannot be shown harmless; delete it or move it outside db/")
         return
     shaped = [d_ for d_ in docs if compose_shaped(d_)]
     for d_ in shaped:
         judge_compose(rel_ + link_, d_)
     if shaped:
-        fail("COMPOSE-UNKNOWN-FILE", f"`{rel_}`{link_} is a compose-shaped file (a `services` mapping or an `include`, whatever its name) that this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}, at those exact paths); a command that merges it could add to the exporter: delete it or move it outside db/")
+        fail("COMPOSE-UNKNOWN-FILE", f"`{rel_}`{link_} is a compose-shaped file{tabs_} (a `services` mapping or an `include`, whatever its name) that this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}, at those exact paths); a command that merges it could add to the exporter: delete it or move it outside db/")
 
 
 def walk_error(e):

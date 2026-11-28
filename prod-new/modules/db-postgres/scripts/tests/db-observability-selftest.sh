@@ -703,8 +703,35 @@ pc "content rule: the SECOND document of a multi-document file is compose-shaped
 pc "content rule: !override on the exporter's environment -> RED (unknown tags are read, not a parse failure)" $'BASE-EXPORTER: ov.txt defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `ov.txt`' "+ov.txt" "" $'services:\n  exporter:\n    environment: !override {PGSSLMODE: disable}\n'
 pc "content rule: a merge key is resolved (services under an anchor merge) -> RED" 'COMPOSE-UNKNOWN-FILE: `merge.txt`' "+merge.txt" "" $'x-base: &b {image: x}\nservices:\n  web:\n    <<: *b\n'
 pc "content rule: a file PyYAML rejects (tab indent) that starts like compose -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `tabbed.txt` looks like a compose file and cannot be read' "+tabbed.txt" "" $'services:\n\texporter: {}\n'
-pc "content rule: an oversize file (over 1 MiB) starting like compose -> COMPOSE-UNCHECKED-FILE" 'COMPOSE-UNCHECKED-FILE: `big.txt`' "+big.txt" "" $'services: {}\n'"$BIGPAD"
-pc "content rule GREEN: an oversize file that does not start like compose is skipped" OK "+big-ok.txt" "" $'a: 1\n'"$BIGPAD"
+# ninth review. PyYAML rejects a TAB after a token that compose's parser accepts: the lenient read retries with every
+# non-leading tab replaced by one space; what still does not parse is refused when it has compose's own shape (a
+# column-0 `services:` / `include:` line), except prose with a code fence and scripts with a shebang. \t is a TAB.
+TABHDR=$'volumes:\n  data: {}\t# named volume\n'; TABTRAIL=$'volumes:\n  data:\t\n'; TABNET=$'networks:\n  n: {}\t# c\n'
+for nm in extra.txt x.bak 'y.yml~'; do
+  for tb in "$TABHDR" "$TABTRAIL" "$TABNET"; do
+    pc "tab rule: a tab-commented file before the exporter fragment as db/$nm -> BASE-EXPORTER + COMPOSE-UNKNOWN-FILE" $'BASE-EXPORTER: '"$nm"$' defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `'"$nm"'` is a compose-shaped file (read after replacing tabs' "+$nm" "" "$tb$EXF"
+  done
+done
+pc "tab rule: key<TAB>value inside the exporter block -> RED" $'BASE-EXPORTER: kv.txt defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `kv.txt`' "+kv.txt" "" $'services:\n  exporter:\n    image:\tx\n'
+pc "tab rule: tabs AND an unknown tag -> RED" $'BASE-EXPORTER: tag.txt defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `tag.txt`' "+tag.txt" "" "$TABHDR"$'services:\n  exporter:\n    environment: !override {PGSSLMODE: disable}\n'
+pc "tab rule: a tab file with NO exporter, compose-shaped -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `tabother.txt` is a compose-shaped file (read after replacing tabs' "+tabother.txt" "" "$TABHDR"$'services:\n  web: {image: x}\n'
+pc "tab rule: a tab file that does not start like compose (volumes: first) -> RED" 'BASE-EXPORTER: tabfirst.txt defines the service `exporter`' "+tabfirst.txt" "" "$TABNET$EXF"
+pc "fail closed: a broken compose-like file (unbalanced braces), column-0 services: -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `broken.txt` looks like a compose file and cannot be read' "+broken.txt" "" $'services: {a: [\nb: 1\n'
+pc "fail closed: a broken file that starts with volumes: and has a column-0 services: -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `volfirst.txt` looks like a compose file' "+volfirst.txt" "" $'volumes:\n  a: [\nservices:\n  x: {}\n'
+pc "fail closed: a column-0 include: in an unparsable file -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `incbroken.txt` looks like a compose file' "+incbroken.txt" "" $'x: [\ninclude: [a.yml]\n'
+pc "fail closed: SQL with a column-0 services: line and no fence -> RED (accepted consequence, contrived)" 'COMPOSE-UNREADABLE-FILE: `q2.sql` looks like a compose file' "+q2.sql" "" $'SELECT 1;\nservices:\n  exporter\n'
+pc "prose GREEN: Markdown with a fenced compose snippet at column 0" OK "+docs/fence.md" "" $'# T\n\n```yaml\nservices:\n  exporter: {}\n```\n'
+pc "prose GREEN: Markdown with a fenced compose snippet and tabs" OK "+docs/fencetab.md" "" $'# T\n\n```yaml\nvolumes:\n  d: {}\t# c\nservices:\n  exporter: {}\n```\n'
+pc "prose GREEN: a tilde fence" OK "+docs/tilde.txt" "" $'text\n~~~\nservices:\n  exporter: {}\n~~~\n'
+pc "script GREEN: a shell script with a heredoc compose document at column 0" OK "+bootstrap/gen.sh" "" $'#!/bin/sh\nset -e\ncat > x.yml <<EOF\nservices:\n  exporter: {}\nEOF\n'
+pc "BOM: a UTF-8 BOM before the exporter fragment -> RED" 'BASE-EXPORTER: bom.txt defines the service `exporter`' "+bom.txt" "" $'﻿'"$EXF"
+# oversize (over 1 MiB): the WHOLE file is scanned for a column-0 key line (cheap); only a file that has one is parsed
+HDRPAD="# $(head -c 4500 /dev/zero | tr '\0' h)"
+pc "oversize: a long comment header, a large body, then the exporter fragment -> BASE-EXPORTER + COMPOSE-UNKNOWN-FILE" $'BASE-EXPORTER: bigexp.txt defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `bigexp.txt`' "+bigexp.txt" "" "$HDRPAD"$'\n'"$BIGPAD"$'\n'"$EXF"
+pc "oversize: a compose-shaped file without the exporter -> COMPOSE-UNKNOWN-FILE" 'COMPOSE-UNKNOWN-FILE: `bigother.txt`' "+bigother.txt" "" "$HDRPAD"$'\n'"$BIGPAD"$'\nservices: {other: {image: x}}\n'
+pc "oversize GREEN: a dump whose first line is include/x.sql (a path, not the key)" OK "+dump.sql" "" $'include/x.sql\nx: [unclosed\n'"$BIGPAD"
+pc "oversize GREEN: a large file with no services:/include: line" OK "+big-ok.txt" "" $'a: 1\n'"$BIGPAD"
+pc "oversize: a large file with a column-0 key line that does not parse -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `bigbroken.txt` looks like a compose file' "+bigbroken.txt" "" $'x: [\nservices:\n'"$BIGPAD"
 pc "content rule GREEN: a small binary file (a NUL byte, compose-looking text before it) is skipped" OK "+blob.bin" "" $'services:\n  exporter: {}\n\x03\x03'
 pc "content rule GREEN: JSON that is not compose-shaped" OK "+data.json" "" '{"a": 1}'
 pc "content rule GREEN: an empty file" OK "+empty" "" ""
@@ -712,11 +739,17 @@ pc "content rule GREEN: a k8s multi-document manifest named fixture (no extensio
 pc "content rule GREEN: Markdown that documents a compose snippet in a fenced block" OK "+docs/snippet.md" "" $'# Title\n\nSome text.\n\n```yaml\nservices:\n  exporter: {}\n```\n'
 pc "content rule GREEN: SQL and shell text" OK "+q.sql" "" $'SELECT 1;\n-- services: none\n'
 pmx "parity: content judgment reverted to name-based (db/extra.json is not read)" $'        if not yaml_:\n            judge_lenient(rel_, p_, link_)\n            continue\n' $'        if not yaml_:\n            continue\n' -- $'BASE-EXPORTER: extra.json defines the service `exporter`' "+extra.json" "" "$EXFJ"
-pmx "parity: only the first document of a stream is read" 'docs = list(yaml.load_all(text, Loader=LenientLoader))' 'docs = [next(yaml.load_all(text, Loader=LenientLoader), None)]' -- 'COMPOSE-UNKNOWN-FILE: `multi.txt`' "+multi.txt" "" $'a: 1\n---\n'"$EXF"
+pmx "parity: only the first document of a stream is read" 'docs = lenient_docs(text)' 'docs = (lenient_docs(text) or [None])[:1]' -- 'COMPOSE-UNKNOWN-FILE: `multi.txt`' "+multi.txt" "" $'a: 1\n---\n'"$EXF"
 pmx "parity: unknown-tag tolerance removed (!override fails the parse)" 'LenientLoader.add_multi_constructor("", _any_tag)' 'pass' -- 'COMPOSE-UNKNOWN-FILE: `ov.txt`' "+ov.txt" "" $'services:\n  exporter:\n    environment: !override {PGSSLMODE: disable}\n'
 pmx "parity: the binary (NUL byte) skip removed (a binary fixture becomes a false RED)" 'if b"\0" in data[:8192] and not utf16:' 'if False:' -- OK "+blob.bin" "" $'services:\n  exporter: {}\n\x03\x03'
-pmx "parity: the size cap removed (a large compose file is parsed, not reported as unchecked)" 'if len(data) > LENIENT_CAP:' 'if False:' -- 'COMPOSE-UNCHECKED-FILE: `big.txt`' "+big.txt" "" $'services: {}\n'"$BIGPAD"
-pmx "parity: the fail-closed branch removed (a tab-indented compose file is skipped)" 'if starts_like_compose(text) and COMPOSE_KEYLINE.search(text):' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `tabbed.txt`' "+tabbed.txt" "" $'services:\n\texporter: {}\n'
+pmx "parity: the whole-file scan reverted to the first 4 KiB (a large compose file with a long header is skipped)" 'if len(data) > LENIENT_CAP and not (TOP_KEY.search(text) or' 'if len(data) > LENIENT_CAP and not (TOP_KEY.search(text[:4096]) or' -- 'BASE-EXPORTER: bigexp.txt defines the service `exporter`' "+bigexp.txt" "" "$HDRPAD"$'\n'"$BIGPAD"$'\n'"$EXF"
+pmx "parity: the include key loosened back to a word boundary (a dump starting include/x.sql is a false RED)" '|include)[ \t]*:""")' '|include)\b""")' -- OK "+dump.sql" "" $'include/x.sql\nx: [unclosed\n'"$BIGPAD"
+pmx "parity: tab normalisation removed (a tab-commented file before the fragment is no longer read)" 'docs = lenient_docs(replace_inner_tabs(text))' 'docs = None' -- 'BASE-EXPORTER: x.bak defines the service `exporter`' "+x.bak" "" "$TABHDR$EXF"
+pmx "parity: the column-0 fail-closed removed (a broken compose-like file is skipped)" 'if TOP_KEY.search(text) or (first_significant(text).startswith("{") and FLOW_KEY.search(text)):' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `broken.txt`' "+broken.txt" "" $'services: {a: [\nb: 1\n'
+pmx "parity: the first-line condition restored (volumes: first is skipped again)" 'if TOP_KEY.search(text) or (first_significant' 'if (TOP_KEY.search(text) and re.match(r"services|include|name|version|x-", first_significant(text))) or (first_significant' -- 'COMPOSE-UNREADABLE-FILE: `volfirst.txt`' "+volfirst.txt" "" $'volumes:\n  a: [\nservices:\n  x: {}\n'
+pmx "parity: the fence exemption removed (Markdown with a fenced snippet becomes a false RED)" ' or bool(_FENCE.search(text))' '' -- OK "+docs/fence.md" "" $'# T\n\n```yaml\nservices:\n  exporter: {}\n```\n'
+pmx "parity: the shebang exemption removed (a script with a heredoc compose document becomes a false RED)" 'return text.lstrip("\ufeff").startswith("#!") or' 'return False or' -- OK "+bootstrap/gen.sh" "" $'#!/bin/sh\nset -e\ncat > x.yml <<EOF\nservices:\n  exporter: {}\nEOF\n'
+pmx "parity: the fail-closed branch removed (a tab-indented compose file is skipped)" 'if TOP_KEY.search(text) or (first_significant(text).startswith("{") and FLOW_KEY.search(text)):' 'if False:' -- 'COMPOSE-UNREADABLE-FILE: `tabbed.txt`' "+tabbed.txt" "" $'services:\n\texporter: {}\n'
 pmx "parity: include is no longer compose-shaped" '"include" in doc or ("services" in doc' 'False or ("services" in doc' -- 'COMPOSE-UNKNOWN-FILE: `inc.yml`' "+inc.yml" "" $'include: [../elsewhere.yml]\n'
 dcx "compose mention: docker --context x compose -> refused outright (global flag)" 'no global flags' 'docker --context x compose -f compose.yml -f compose.observability.yml up -d'
 dcx "compose mention: docker --debug compose ps -> refused (global flag)" '`--debug`: write `docker compose` with no global flags' 'docker --debug compose ps'
@@ -775,6 +808,41 @@ if replace_in "$lm" 'if os.path.islink(os.path.join(root_, d_)):' 'if False:'; t
   if [[ $rc == 1 && $out != *COMPOSE-SYMLINK-DIR* && $out == *'COMPOSE-UNREADABLE-FILE: `dangling`'* ]]; then echo "RED  mutation parity: the symlinked-directory rule removed (same tree, control above green)"; ok=$((ok + 1)); else flunk "mutation parity: the symlinked-directory rule removed: still reported" "rc=$rc"; fi
 else flunk "mutant parity: symlinked-directory rule: anchor not found or no-op"; fi
 
+# ninth review: what a virtual tree cannot hold (UTF-16, a FIFO) runs on a real scratch copy of db/.
+# The FIFO is reported RED as unreadable (fail closed) and the run RETURNS (no hang: a hard limit on the call).
+rt="$tmp/rt"; mkdir -p "$rt"; cp -R "$dbdir" "$rt/db"
+rtp() { out="$(tmo "${2:-60}" bash "$1" --dir "$rt/db/observability" 2>&1)"; rc=$?; }
+rtp "$parity"
+if [[ $rc == 0 && $out == *"parity-check: OK"* ]]; then pass "real tree: the scratch copy is green (control)"; else flunk "real tree: control is not green" "rc=$rc ${out:0:200}"; fi
+python3 -B - "$rt/db" "$EXF" <<'PYR'
+import os, sys
+d, f = sys.argv[1], sys.argv[2]
+os.mkfifo(d + "/pipe")
+open(d + "/u16le.txt", "wb").write(b"\xff\xfe" + f.encode("utf-16-le"))
+open(d + "/u16be.dat", "wb").write(b"\xfe\xff" + f.encode("utf-16-be"))
+open(d + "/u8bom.txt", "wb").write(b"\xef\xbb\xbf" + f.encode())
+PYR
+rtp "$parity"
+if [[ $rc == 1 && $out == *'COMPOSE-UNREADABLE-FILE: `pipe` is not a regular file'* && $out != *Traceback* ]]; then pass "real tree: a FIFO is RED (unreadable, fail closed) and the run returns"; else flunk "real tree: FIFO" "rc=$rc ${out:0:200}"; fi
+for nm in u16le.txt u16be.dat u8bom.txt; do
+  if [[ $out == *"BASE-EXPORTER: $nm defines the service \`exporter\`"* && $out == *"COMPOSE-UNKNOWN-FILE: \`$nm\`"* ]]; then pass "real tree: the exporter fragment as $nm (BOM) is RED"; else flunk "real tree: $nm" "${out:0:200}"; fi
+done
+rm -f "$rt/db/u16le.txt" "$rt/db/u16be.dat" "$rt/db/u8bom.txt"
+rm -f "$rt/db/pipe"
+rtm="$tmp/mut/rt-utf16.sh"; cp "$parity" "$rtm"
+if replace_in "$rtm" 'utf16 = data[:2] in (b"\xff\xfe", b"\xfe\xff")' 'utf16 = False'; then
+  python3 -B -c 'import sys; open(sys.argv[1] + "/u16le.txt", "wb").write(b"\xff\xfe" + sys.argv[2].encode("utf-16-le"))' "$rt/db" "$EXF"
+  rtp "$parity"; rcc=$rc; outc="$out"; rtp "$rtm"
+  if [[ $rcc == 1 && $outc == *'BASE-EXPORTER: u16le.txt'* && ($rc == 0 || $out != *'BASE-EXPORTER: u16le.txt'*) ]]; then echo "RED  mutation parity: UTF-16 detection removed (a UTF-16 compose file is read as binary; control green)"; ok=$((ok + 1)); else flunk "mutation parity: UTF-16 detection removed: GREEN or control not green" "rcc=$rcc rc=$rc"; fi
+  rm -f "$rt/db/u16le.txt"
+else flunk "mutant parity: UTF-16 detection: anchor not found or no-op"; fi
+rtm="$tmp/mut/rt-fifo.sh"; cp "$parity" "$rtm"
+if replace_in "$rtm" '        if special_:' '        if False:'; then
+  python3 -B -c 'import os, sys; os.mkfifo(sys.argv[1] + "/pipe")' "$rt/db"
+  rtp "$parity"; rcc=$rc; outc="$out"; rtp "$rtm" 5
+  if [[ $rcc == 1 && $outc == *'`pipe` is not a regular file'* && ($rc == 124 || $rc == 142 || $rc == 143 || $out != *'`pipe` is not a regular file'*) ]]; then echo "RED  mutation parity: the special-file rule removed (the FIFO is opened: the run hangs; control green)"; ok=$((ok + 1)); else flunk "mutation parity: special-file rule removed: GREEN or control not green" "rcc=$rcc rc=$rc"; fi
+  rm -f "$rt/db/pipe"
+else flunk "mutant parity: special-file rule: anchor not found or no-op"; fi
 sect "promtool"
 # ---- 3. promtool ----------------------------------------------------------------------------------
 # red_pair NAME FN CTL MUT: FN must pass on CTL (the unmutated copy) and fail on MUT

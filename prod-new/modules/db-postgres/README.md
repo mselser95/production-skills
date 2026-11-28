@@ -75,11 +75,26 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   that what the check reads is exactly what compose merges; one that cannot be read is `COMPOSE-UNREADABLE-FILE`
   (for the three listed files this exits 2, fail closed). Files with any other name are read leniently, only to
   find compose-shaped content: all documents of a multi-document stream, unknown tags (`!override`, `!reset`) and
-  merge keys accepted. Skipped without a finding: binary files (a NUL byte in the first 8 KiB), files that are not
-  UTF-8, and files that do not parse as YAML (compose could not read them either), except one that STARTS like a
-  compose document (`services:`, `include:`, `name:`, `version:`, `x-...:`, `{`, `%YAML`) and has a `services:` or
-  `include:` line, which is `COMPOSE-UNREADABLE-FILE` (a parser might accept what PyYAML rejects); a file over 1 MiB
-  that has a line starting `services` or `include` in its first 4 KiB is `COMPOSE-UNCHECKED-FILE`. A document with
+  merge keys accepted. A file that does not parse is read once more with every TAB that is not leading
+  indentation replaced by one space (PyYAML rejects `a: 1<TAB># c`, compose's parser accepts it); if it parses then,
+  it is judged like any other file (and a finding says "read after replacing tabs, as compose does"). Skipped
+  without a finding: binary files (a NUL byte in the first 8 KiB; UTF-16 with a BOM is text), files that are not
+  UTF-8 (compose rejects both), and files that parse neither way when they are PROSE or a SCRIPT: a line that starts
+  with three backticks or three tildes (Markdown) or a first line `#!`. The reason is one premise: a YAML parser
+  rejects such a line at column 0 after a mapping (checked for PyYAML here; compose's Go parser is not run by
+  this check), so compose could not merge that file either. Every other file that parses neither way and has a
+  line at COLUMN 0 starting `services:`, `"services":` or `include:` (the top-level keys of a block-style compose
+  document), or starts with `{` and has such a key, is `COMPOSE-UNREADABLE-FILE` (fail closed: it looks like a
+  compose file and cannot be read). Consequences, on purpose: a SQL file or text file with a column-0 `services:`
+  line and no fence is refused; a file of a different kind with a top-level `services` mapping (a Helm
+  `values.yaml`, say) is a compose-shaped file and is refused: keep such files outside `db/`. A file over 1 MiB is
+  not parsed unless a line at column 0 starts `services:` / `"services":` / `include:` (the whole file is scanned
+  as text, cheap; a dump starting `include/x.sql` is not a key) or its first significant character is `{`; one that
+  has one is parsed in full and judged the same way; over 64 MiB a file is not read at all and is
+  `COMPOSE-UNCHECKED-FILE` (fail closed). A FIFO, socket or device is NOT skipped: it is reported as
+  `COMPOSE-UNREADABLE-FILE` (not read, so no hang). Limits: other differences between PyYAML and compose's parser
+  (`%TAG` directives, scalars that start with a reserved indicator, `{{ }}`) and a document indented as a whole
+  (no key at column 0) in a file over 1 MiB are NOT covered by this check. A document with
   a `services` mapping (or null) or a top-level `include` is compose-shaped: it may not define a service the overlay
   defines (`BASE-EXPORTER`, whatever the file is called), and must be one of `compose.yml`, `compose.timescale.yml`,
   `compose.observability.yml` at those exact paths (else `COMPOSE-UNKNOWN-FILE`). YAML that is not compose-shaped
