@@ -36,14 +36,41 @@ says the module places a per-unit (slot-dependent) file at the root. Error messa
 `module[unit-id]`.
 
 REPO INVENTORY. Layout monorepo, when a module contributes a root `repo.yaml`: the assembler
-fills the units list. Contract: the file holds EXACTLY ONE line `units: []` at column 0 (an
-exact line match, not a substring), else exit 2. That line becomes `units:` plus one flow-style
-line per instance that places unit files:
-`  - { id: "x", kind: "service", language: "go", path: "services/x" }`, every scalar json.dumps()
-quoted (JSON strings are YAML strings, so `true`, `123` or `null` stay strings), sorted by path;
-kind and language come from the module's `unit` {kind, language}, and an instance with unit
-files whose module declares none is exit 2. Two instances at one path: exit 1. No repo.yaml,
-nothing is generated.
+fills the units list WITHOUT reading YAML. The file (after slot substitution, what would be
+written) is accepted only if EVERY line is one of these shapes, else exit 2 with the line number
+and the reason: blank; a whole-line comment `^ *#.*$`; a top-level scalar `key: value` (key
+[a-z][a-z0-9_]*; value a plain token [A-Za-z0-9][A-Za-z0-9._-]* or a one-line double-quoted string
+without backslash or inner quote; no trailing comment); a mapping opener `key:` followed by one or
+more children `  key: value` (two spaces, ONE nesting level); exactly ONE line `units: []`. And:
+no top-level (or child) key twice, `units` included; no line starting with `---` or `...`; none of
+`| > & * ! % @ { } [ ]`, a backtick or a backslash, outside the `units: []` line and comments; no CR, tab, BOM, control or
+Unicode line-break character; the file ends with a newline. Anything that is not this flat shape
+(a second document, a block or multi-line scalar, a flow mapping, an anchor) is a refusal, so the
+one `units: []` line is always a real top-level key. That line becomes `units:` plus one flow-style
+line per unit: `  - { id: "x", kind: "service", language: "go", path: "services/x" }`, every scalar
+json.dumps() quoted (JSON strings are YAML strings), sorted by path. The assembler re-reads its OWN
+output with the same line rules plus that entry shape before the final rename; a mismatch is an
+internal error, exit 2, nothing written. Units: each instance that places unit files (kind and
+language from the module's `unit`; none declared is exit 2) and each unit a module declares with
+`units`. With an inventory every id must match ^[a-z][a-z0-9-]*$ (the schema of the generated
+repository), else exit 2 naming the id. Two units at one path: exit 1. No repo.yaml, nothing is
+generated; layout single never generates.
+
+DECLARED UNITS (manifest key `units`, a module that ships SEVERAL fixed units, e.g. two workspace
+packages placed as root files): a list of {id, kind, language, path}; mutually exclusive with
+`unit`; `path` must equal the directory the kind rule gives for that id (packages/<id>, apps/<id>,
+services/<id>, db); id and path hold no slot placeholder; at least one file the module places must
+land inside that directory (else exit 2). Declared ids share the global id uniqueness (NFC +
+casefold) and the directory clash rules of --unit instances. Such a module has no unit slot:
+`--unit MODULE:ID` on it is exit 2, use --module. The module's OWN root files may land inside its
+OWN declared directories; any other module's files there are refused.
+
+ROOT FILES INSIDE A UNIT DIRECTORY (layout monorepo): a path placed as `root` that falls inside
+the unit directory of ANY instance (or declared unit) is refused, exit 1, naming the path, the
+contributing module and the unit (a module's own declared units excepted). LINKS of a unit-placed
+file (layout monorepo) must resolve inside THEIR OWN unit directory: a link to another unit is
+refused (couples), and so is a link to the repository root, an ancestor of the unit (`..`) or
+anything else outside the unit (no real module places a link today). Layout single is unchanged.
 
 SLOT VALUES. ONE grammar for every value, checked before anything else:
   1 to 64 characters (the length cap), each in [A-Za-z0-9._-], the first in
@@ -135,6 +162,7 @@ MANIFEST KEYS (MANIFEST_KEYS below is the one list; unknown key -> exit 2):
                 `slots` when given.
   unit          optional {"kind": service|app|package|database, "language": str}: the inventory
                 entry (repo.yaml) and, for kind, the unit directory. Both keys required when present.
+  units         optional list of fixed units {id, kind, language, path} (see DECLARED UNITS).
   exclude       [globs] never placed, never reported unplaced; a glob containing
                 `..` or starting with `/` is exit 2. When `source` is
                 the module dir itself, module.json at its root is always excluded.
@@ -198,7 +226,7 @@ VALUE_RX = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?")
 SLOT_NAME_RX = re.compile(r"[A-Z][A-Z0-9_]*")
 MODULE_ID_RX = re.compile(r"[a-z][a-z0-9-]*")
 MANIFEST_KEYS = ("id", "source", "placement", "requires", "conflicts", "unit_kind",
-                 "exclude", "root_merge", "strict_slots", "slot_allow", "slots", "unit_slot", "unit")
+                 "exclude", "root_merge", "strict_slots", "slot_allow", "slots", "unit_slot", "unit", "units")
 SLOT_KEYS = ("description", "literal", "max_len", "charset")
 CHARSETS = ("lower", "lower-digits-dash", "identifier")
 MAX_VALUE = 64
@@ -208,7 +236,16 @@ SPECIAL = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
 SIGNALS = tuple(getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT") if hasattr(signal, n))
 LAYOUTS = ("single", "monorepo")
 UNIT_DIRS = {"service": "services", "app": "apps", "package": "packages", "database": None}
-UNITS_LINE = b"units: []"
+UNITS_LINE = "units: []"
+INV_ID = re.compile(r"[a-z][a-z0-9-]*")
+_SC = r'(?:[A-Za-z0-9][A-Za-z0-9._-]*|"[^"\\]*")'
+_JS = r'"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-f]{4}))*"'
+INV_TOP = re.compile(r"([a-z][a-z0-9_]*): " + _SC)
+INV_OPEN = re.compile(r"([a-z][a-z0-9_]*):")
+INV_CHILD = re.compile(r"  ([a-z][a-z0-9_]*): " + _SC)
+INV_COMMENT = re.compile(r" *#.*")
+INV_ENTRY = re.compile(r"  - \{ id: %s, kind: %s, language: %s, path: %s \}" % (_JS, _JS, _JS, _JS))
+INV_FORBID = frozenset("|>&*!%@\\`{}[]")
 STRATEGIES = ("union-lines",)
 TOKEN = re.compile(rb"<([A-Z][A-Z0-9_]*)>")
 WORD = re.compile(r"[A-Za-z0-9_]")
@@ -613,6 +650,30 @@ def load_manifest(mid, mdir):
             bad("unit kind %r is not one of %s" % (u["kind"], ", ".join(sorted(UNIT_DIRS))))
         if not re.fullmatch(r"[a-z][a-z0-9]*", u["language"]):
             bad("unit language %r must match [a-z][a-z0-9]*" % u["language"])
+    if "units" in m:
+        if "unit" in m:
+            bad("keys 'unit' and 'units' are mutually exclusive")
+        us_ = m["units"]
+        if not isinstance(us_, list) or not us_:
+            bad("key 'units' must be a non-empty list of {id, kind, language, path}")
+        for d in us_:
+            if not isinstance(d, dict) or set(d) != {"id", "kind", "language", "path"} \
+                    or not all(isinstance(x, str) and x for x in d.values()):
+                bad("each entry of 'units' must be {\"id\", \"kind\", \"language\", \"path\"}, all non-empty strings")
+            if "<" in d["id"] or "<" in d["path"]:
+                bad("units entry %r: a slot placeholder is not allowed in a declared id or path "
+                    "(declared units are fixed)" % d["id"])
+            if not INV_ID.fullmatch(d["id"]):
+                bad("units entry id %r must match ^[a-z][a-z0-9-]*$" % d["id"])
+            if d["kind"] not in UNIT_DIRS:
+                bad("units entry %r: kind %r is not one of %s" % (d["id"], d["kind"], ", ".join(sorted(UNIT_DIRS))))
+            if not re.fullmatch(r"[a-z][a-z0-9]*", d["language"]):
+                bad("units entry %r: language %r must match [a-z][a-z0-9]*" % (d["id"], d["language"]))
+            base = UNIT_DIRS[d["kind"]]
+            want = "db" if base is None else base + "/" + d["id"]
+            if d["path"] != want:
+                bad("units entry %r: path %r must be %r (the unit directory of kind %s)"
+                    % (d["id"], d["path"], want, d["kind"]))
     rm = m.get("root_merge", {})
     if not isinstance(rm, dict):
         bad("key 'root_merge' must be an object")
@@ -700,6 +761,8 @@ def parse_unit(spec):
     mid, sep, uid = parts[0].partition(":")
     if not sep or not mid or not uid:
         die(2, "bad --unit %r (want MODULE:ID[,SLOT=VALUE...])" % spec)
+    if ":" in uid:
+        die(2, "bad --unit %r: a unit id may not contain ':'" % spec)
     over = {}
     for kv in parts[1:]:
         k, sep, v = kv.partition("=")
@@ -711,25 +774,120 @@ def parse_unit(spec):
     return mid, uid, over
 
 
+def inventory_problem(data, generated=False):
+    """The LINE ALLOW-LIST (see REPO INVENTORY in the header). `data` is bytes. Returns None when
+    every line is allowed, else (line number, reason). generated=True also allows the entry lines
+    this tool writes under `units:`, and wants exactly one units key (empty or filled)."""
+    if data.startswith(b"\xef\xbb\xbf"):
+        return 1, "a byte-order mark is not allowed"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return 1, "not valid UTF-8"
+    if not text.endswith("\n"):
+        return text.count("\n") + 1, "the file must end with a newline"
+    lines = text[:-1].split("\n")
+    seen, units_empty, units_open = set(), 0, 0
+    opener = None  # [key, line number, child count, child keys]
+
+    def unclosed():
+        return None if opener is None or opener[2] else (opener[1], "mapping `%s:` has no child line" % opener[0])
+    for n, ln in enumerate(lines, 1):
+        for ch in ln:
+            o = ord(ch)
+            if o < 0x20 or 0x7f <= o <= 0x9f or o in (0x2028, 0x2029, 0xfeff):
+                return n, "control, tab, carriage-return or line-break character U+%04X is not allowed" % o
+        if ln.strip(" ") == "" or INV_COMMENT.fullmatch(ln):
+            continue
+        if ln.startswith("---") or ln.startswith("..."):
+            return n, "a YAML document marker (`---` / `...`) is not allowed"
+        if ln == UNITS_LINE:
+            if unclosed():
+                return unclosed()
+            if "units" in seen:
+                return n, "top-level key `units` appears twice"
+            seen.add("units")
+            units_empty += 1
+            opener = None
+            continue
+        if ln.startswith(" ") and generated and opener is not None and opener[0] == "units" \
+                and INV_ENTRY.fullmatch(ln):
+            opener[2] += 1
+            continue
+        bad = next((c for c in ln if c in INV_FORBID), None)
+        if bad is not None:
+            return n, "forbidden character %r (only `units: []` and comments may hold it)" % bad
+        if ln.startswith(" "):
+            c = INV_CHILD.fullmatch(ln) if opener is not None else None
+            if c is None:
+                return n, "indented line is not a `  key: value` child of a `key:` line"
+            if c.group(1) in opener[3]:
+                return n, "child key `%s` appears twice" % c.group(1)
+            opener[3].add(c.group(1))
+            opener[2] += 1
+            continue
+        if unclosed():
+            return unclosed()
+        opener = None
+        t, o = INV_TOP.fullmatch(ln), INV_OPEN.fullmatch(ln)
+        if t is None and o is None:
+            return n, "line is not one of the allowed shapes (blank, whole-line comment, `key: token`, " \
+                      "`key: \"text\"`, `key:` with children, `units: []`)"
+        key = (t or o).group(1)
+        if key in seen:
+            return n, "top-level key `%s` appears twice" % key
+        seen.add(key)
+        if o is not None:
+            opener = [key, n, 0, set()]
+            if generated and key == "units":
+                units_open += 1
+    if unclosed():
+        return unclosed()
+    if generated and opener is not None and opener[0] == "units" and not opener[2]:
+        return opener[1], "units: has no entry"
+    if units_empty + units_open != 1:
+        return 0, "must hold exactly one line `units: []` (found %d)" % (units_empty + units_open)
+    return None
+
+
+def inv_rows(ents):
+    """The generated entry lines, sorted by path. ents: (id, module, path, {kind, language})."""
+    return ["  - { id: %s, kind: %s, language: %s, path: %s }" % (
+        json.dumps(uid), json.dumps(u["kind"]), json.dumps(u["language"]), json.dumps(path))
+        for uid, _, path, u in sorted(ents, key=lambda t: (t[2], t[0]))]
+
+
 def fill_inventory(plan, insts):
-    """Fill the `units: []` line of a contributed root repo.yaml with one entry per instance that
-    placed unit files. Returns nothing; exits 2/1 on a contract violation."""
+    """Fill the `units: []` line of a contributed root repo.yaml with one entry per unit. Returns
+    nothing; exits 2/1 on a contract violation."""
     e = plan.get("repo.yaml")
     if e is None or e["kind"] != "file":
         return
-    lines = e["data"].split(b"\n")
-    at = [n for n, ln in enumerate(lines) if ln == UNITS_LINE]
-    if len(at) != 1:
-        die(2, "repo.yaml (module %s) must hold exactly one line `units: []` at column 0 (found %d); "
-            "the assembler fills that line and parses no YAML" % (" + ".join(e["mods"]), len(at)))
+    who = " + ".join(e["mods"])
+    prob = inventory_problem(e["data"])
+    if prob is not None:
+        die(2, "repo.yaml (module %s)%s: %s; the assembler fills the `units: []` line and accepts only a "
+            "flat file (see REPO INVENTORY in its header)"
+            % (who, " line %d" % prob[0] if prob[0] else "", prob[1]))
     ents = {}
+
+    def add(uid, mid, path, u):
+        if not INV_ID.fullmatch(uid):
+            die(2, "unit id %r (module %s) does not match ^[a-z][a-z0-9-]*$, which the generated repo.yaml "
+                "requires" % (uid, mid))
+        if fold(path) in ents:
+            die(1, "units %s and %s (modules %s and %s) share the path %s: repo.yaml lists one unit per path"
+                % (ents[fold(path)][0], uid, ents[fold(path)][1], mid, path))
+        ents[fold(path)] = (uid, mid, path, u)
     for i in insts:
+        for d in i["decl"]:
+            add(d["id"], i["mid"], d["path"], d)
         if not i["nunit"]:
             continue
         u = i["m"].get("unit")
         if u is None:
-            die(2, "module %s (unit %s) places unit files but declares no `unit` {kind, language}; "
-                "repo.yaml needs both" % (i["mid"], i["uid"]))
+            die(2, "module %s places unit files but declares no `unit` {kind, language}; "
+                "repo.yaml needs both" % i["label"])
         uid = i["uid"] if i["uid"] is not None else i["slots"].get(i["m"].get("unit_slot", "SERVICE"))
         if uid is None:
             die(2, "module %s places unit files but has no unit id for repo.yaml: give it with --unit"
@@ -737,17 +895,18 @@ def fill_inventory(plan, insts):
         path = i["dir"]
         if not path or escapes("/assemble-root", path) or any(reserved(c) for c in path.split("/")):
             die(1, "unit %s (module %s): unit path %r is not a safe relative path" % (uid, i["mid"], path))
-        if fold(path) in ents:
-            die(1, "units %s and %s (modules %s and %s) share the path %s: repo.yaml lists one unit per path"
-                % (ents[fold(path)][0], uid, ents[fold(path)][1], i["mid"], path))
-        ents[fold(path)] = (uid, i["mid"], path, u)
-    rows = []
-    for uid, _, path, u in sorted(ents.values(), key=lambda t: (t[2], t[0])):
-        rows.append("  - { id: %s, kind: %s, language: %s, path: %s }" % (
-            json.dumps(uid), json.dumps(u["kind"]), json.dumps(u["language"]), json.dumps(path)))
+        add(uid, i["mid"], path, u)
+    rows = inv_rows(ents.values())
     if rows:
-        lines[at[0]:at[0] + 1] = [b"units:"] + [r.encode() for r in rows]
-        e["data"] = b"\n".join(lines)
+        lines = e["data"].decode().split("\n")
+        at = lines.index(UNITS_LINE)
+        lines[at:at + 1] = ["units:"] + rows
+        data = "\n".join(lines).encode()
+        prob = inventory_problem(data, generated=True)
+        if prob is not None:
+            die(2, "internal error: the generated repo.yaml fails its own line check (line %d: %s); "
+                "nothing written" % prob)
+        e["data"] = data
 
 
 def run():
@@ -812,6 +971,10 @@ def run():
             mans[i["mid"]]["_id"] = i["mid"]
         m = i["m"] = mans[i["mid"]]
         us = m.get("unit_slot", "SERVICE")
+        i["decl"] = m.get("units", [])
+        if i["explicit"] and i["decl"]:
+            die(2, "module %s declares fixed `units` and has no unit slot: --unit %s:%s cannot be used, "
+                "use --module %s" % (i["mid"], i["mid"], i["uid"], i["mid"]))
         i["label"] = "%s[%s]" % (i["mid"], i["uid"]) if i["explicit"] else i["mid"]
         i["slots"] = dict(slots)
         i["nunit"] = 0
@@ -875,18 +1038,26 @@ def run():
                             "(required by layout monorepo)" % (i["mid"], us))
         else:
             i["dir"] = base + "/" + i["slots"][us]
+    # every unit with a directory: instances that place unit files, and declared units
+    uall = []
+    for i in insts:
+        if i["dir"] is not None:
+            uall.append({"label": i["label"], "dir": i["dir"], "id": i["uid"], "mid": i["mid"],
+                         "explicit": i["explicit"], "inst": i, "decl": False})
+        for d in i["decl"]:
+            uall.append({"label": "%s[%s]" % (i["mid"], d["id"]), "dir": d["path"], "id": d["id"],
+                         "mid": i["mid"], "explicit": True, "inst": i, "decl": True})
     seen = {}
-    for i in (x for x in insts if x["explicit"]):
-        k = fold(i["uid"])
+    for x in (x for x in uall if x["explicit"]):
+        k = fold(x["id"])
         if k in seen:
             die(2, "unit id %r (module %s) and unit id %r (module %s) are the same id (ids are compared "
                 "NFC-normalised and case-insensitively); nothing written"
-                % (seen[k]["uid"], seen[k]["mid"], i["uid"], i["mid"]))
-        seen[k] = i
-    for n, x in enumerate(insts):
-        for y in insts[n + 1:]:
-            if (x["explicit"] or y["explicit"]) and x["dir"] is not None and y["dir"] is not None \
-                    and dirs_clash(x["dir"], y["dir"]):
+                % (seen[k]["id"], seen[k]["mid"], x["id"], x["mid"]))
+        seen[k] = x
+    for n, x in enumerate(uall):
+        for y in uall[n + 1:]:
+            if (x["explicit"] or y["explicit"]) and dirs_clash(x["dir"], y["dir"]):
                 die(2, "unit %s and unit %s would share the unit directory %r (equal or nested); "
                     "nothing written" % (x["label"], y["label"], x["dir"] or ".") +
                     ("" if x["dir"] == y["dir"] else " vs %r" % (y["dir"] or ".")))
@@ -905,6 +1076,7 @@ def run():
     dstat = {}
     bad_paths, bad_content, unplaced, bad_lit, bad_esc, bad_link = [], [], [], [], [], []
     cand_cache = {}
+    root_placed = []  # (out path, instance) of every file or link placed as `root`
     for i in insts:
         m, mid, islots = i["m"], i["label"], i["slots"]
         mod_path = os.path.join(mdir, i["mid"])
@@ -933,7 +1105,7 @@ def run():
         if i["dir_err"]:
             die(2, i["dir_err"])
         if src not in cand_cache:
-            cand_cache[src] = candidates(src, a.strict_tracked, i["mid"])
+            cand_cache[src] = candidates(src, a.strict_tracked, mid)
         cands = cand_cache[src]
         if not [r for r in cands if not (self_dir and r == "module.json")]:
             die(1, "module %s: source %s yields no files (an empty or unlistable source is an "
@@ -1019,6 +1191,8 @@ def run():
                 dir_modes[od] = (dstat[sd] & ~umask) | stat.S_IWUSR
             ent["mods"] = [mid]
             ent["by"] = [i["mid"]]
+            if target == "root":
+                root_placed.append((out, i))
             if target == "unit":
                 i["nunit"] += 1
             ent["merge"] = any(rx.match(out) for rx in merge_rx)
@@ -1075,14 +1249,35 @@ def run():
         e = plan[out]
         if e["kind"] != "link" or not e.get("udir"):
             continue
-        for y in insts:
+        nk, uk = fold(e["norm"]), fold(e["udir"])
+        for y in uall:
             d = y["dir"]
-            if d and fold(d) != fold(e["udir"]) and (fold(e["norm"]) == fold(d)
-                                                      or fold(e["norm"]).startswith(fold(d) + "/")):
+            if d and fold(d) != uk and (nk == fold(d) or nk.startswith(fold(d) + "/")):
                 bad_link.append("%s -> %s (module %s): the target reaches the unit directory %s of "
                                 "unit %s; a link between units couples them"
                                 % (out, e["data"], " + ".join(e["mods"]), d, y["label"]))
                 break
+        else:
+            if not (nk == uk or nk.startswith(uk + "/")):
+                bad_link.append("%s -> %s (module %s): the target %s is outside the unit directory %s; a "
+                                "link of a unit must stay inside its own unit"
+                                % (out, e["data"], " + ".join(e["mods"]), e["norm"], e["udir"]))
+
+    if a.layout == "monorepo":
+        for out, r in root_placed:
+            ok_ = fold(out)
+            for y in uall:
+                d = fold(y["dir"])
+                if d and (ok_ == d or ok_.startswith(d + "/")) and not (y["decl"] and y["inst"] is r):
+                    bad_esc.append("%r (module %s): a root file inside the unit directory %s of unit %s"
+                                   % (out, r["label"], y["dir"], y["label"]))
+                    break
+    for i in insts:
+        for d in i["decl"]:
+            pre = fold(d["path"]) + "/"
+            if not any(i["label"] in e["mods"] and fold(o).startswith(pre) for o, e in plan.items()):
+                die(2, "module %s declares unit %s at %s, but places no file inside that directory"
+                    % (i["mid"], d["id"], d["path"]))
 
     if unplaced or bad_paths or bad_content or bad_lit or bad_esc or bad_link:
         for label, items in (("literal", bad_lit), ("unplaced", unplaced), ("path", bad_paths),
