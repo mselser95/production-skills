@@ -1,0 +1,40 @@
+# exporter-allowlist.txt - the ONLY things the exporter may be started with.
+#
+# ONE file, read by BOTH parity-check.sh (the overlay as shipped) and db-scrape-test.sh
+# (the RUNNING container, from `docker inspect`), so the two cannot drift. Everything
+# not listed is refused, including a flag or variable nobody has heard of yet: the
+# exporter has several ways to carry a connection (--datasource.uri, --datasource.uri-file,
+# DATA_SOURCE_URI_FILE, DATA_SOURCE_NAME, libpq PG* variables, a --config.file with
+# auth_modules) and a deny-list of them loses the day a new one ships.
+#
+# Format: `<kind> <value>  # why`. Kinds:
+#   arg         one exact element of the container command (a flag with its value, as one string)
+#   env         a variable NAME the overlay or exporter.env may define
+#   image-env   a variable NAME the image itself bakes in (the running container only)
+#   entrypoint  the image's entrypoint (the overlay may not override it)
+#   mount       a destination path inside the container; the set must match EXACTLY
+#
+# UNVERIFIED against a running v0.21.1 container: image-env, entrypoint and mount were
+# written from the image's documented layout. A mismatch prints the real value in
+# db-scrape-test.sh; correct the entry deliberately, never by widening it blindly.
+
+arg --web.listen-address=:9187                     # the port the healthcheck and the scrape use
+arg --collector.stat_statements                    # pg_stat_statements metrics (required)
+arg --collector.stat_statements.limit=100          # bounds the series count
+arg --collector.stat_checkpointer                  # PG 17+ checkpoint counters (required)
+arg --collector.database_wraparound                # xid wraparound alert (required)
+arg --collector.long_running_transactions          # long transaction alert (required)
+arg --no-collector.process_idle                    # off on purpose: extra series
+arg --no-collector.xlog_location                   # off on purpose: no consumer
+arg --no-collector.stat_wal_receiver               # off on purpose: no consumer
+
+env DATA_SOURCE_URI                                # host/db and the TLS parameters, no password
+env DATA_SOURCE_USER                               # the least-privilege role app_monitor
+env DATA_SOURCE_PASS_FILE                          # the password as a FILE under /run/secrets
+
+image-env PATH                                     # baked into every image
+
+entrypoint /bin/postgres_exporter                  # the image's own
+
+mount /tls                                         # the server certificate, read-only (verify-full trust anchor)
+mount /run/secrets/db_monitor_password             # the monitor password file (compose secret)

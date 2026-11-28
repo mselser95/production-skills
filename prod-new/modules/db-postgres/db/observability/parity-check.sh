@@ -22,6 +22,11 @@
 #                    sslrootcert), LIMITS (cpus, mem_limit, pids_limit), TLS-MOUNT (read-only)
 #   EXPR-NAME-MATCHER / EXPR-UNSUPPORTED   an alert expression uses a `__name__` matcher or a
 #                    construct the metric extractor cannot read (it refuses, never guesses)
+#   OVERLAY-ARGS / OVERLAY-ENV / OVERLAY-ENTRYPOINT / OVERLAY-MOUNTS / ALLOWLIST
+#                    the exporter's command, variable names, entrypoint and mounts must be
+#                    within exporter-allowlist.txt (an ALLOW-list: db-scrape-test.sh applies the
+#                    same file to the running container); the allowlist names no way to carry a
+#                    connection other than the overlay's
 #   RECORDING-RULE   a `record:` rule: recording rules are not checked yet
 #   PROMTOOL-CHECK   `promtool check rules` failed (run only when promtool is on PATH)
 # Exit: 0 green · 1 findings · 2 nothing was checked (python3 or PyYAML missing, a file
@@ -119,16 +124,22 @@ if not required:
 # never a silent pass. What it understands, after strings and `#` comments are removed:
 #   - metric names: an identifier that is not a keyword or a function, followed by `{`,
 #     `[`, `)`, `,`, an operator or the end; label matchers `{a="b", c=~"d"}` (label names
-#     and string values only); range durations `[5m]` and `[5m:1m]`; `offset <duration>`;
+#     and string values only); ranges `[5m]` and subqueries `[5m:1m]`, `[5m:]`;
+#     `offset <duration>` after a selector, a range, a subquery or a parenthesis;
 #   - numbers, including hex, exponents, `Inf` and `NaN` in any case;
-#   - operators `+ - * / % ^ == != < > <= >=` and `and or unless bool atan2`;
+#   - operators `+ - * / % ^ == != < > <= >=` and `and or unless atan2` (and `bool`);
 #   - grouping: `by without on ignoring group_left group_right` with an optional label list;
 #   - functions and aggregations from FUNCS, each followed by `(` (aggregations may be
 #     followed by `by` or `without`);
 #   - `absent(x)` and `absent_over_time(x[5m])` use the metric x.
+# The tokenizer tracks whether an OPERAND or an OPERATOR is expected next (start, after `(`,
+# `,` and after every binary or set operator an operand is expected). A keyword where an
+# operand is expected, such as `pg_up == 0 or offset > 0`, is a metric NAMED like a keyword:
+# valid PromQL that alerts on a series nobody listed, so it is REFUSED, not skipped.
 # Refused: any `__name__` (a metric written as a label matcher is invisible here), a
 # selector that starts with `{` without a metric name, an unknown function, `@`, a
-# duration outside `[...]`/`offset`, unbalanced brackets, any character not listed.
+# duration outside `[...]`/`offset`, unbalanced brackets, a keyword out of place, any
+# character not listed.
 AGG = {"sum", "avg", "min", "max", "count", "group", "stddev", "stdvar", "topk", "bottomk",
        "quantile", "count_values"}
 FUNCS = AGG | {"rate", "increase", "irate", "delta", "idelta", "deriv", "predict_linear",
@@ -137,15 +148,21 @@ FUNCS = AGG | {"rate", "increase", "irate", "delta", "idelta", "deriv", "predict
                "sqrt", "exp", "ln", "log2", "log10", "label_replace", "label_join", "sort",
                "sort_desc", "histogram_quantile", "avg_over_time", "sum_over_time",
                "min_over_time", "max_over_time", "count_over_time", "last_over_time",
-               "changes", "resets", "timestamp"}
-GROUPING = {"by", "without", "on", "ignoring", "group_left", "group_right"}
-BINKW = {"and", "or", "unless", "bool", "atan2", "offset"}
+               "changes", "resets", "timestamp", "quantile_over_time", "stddev_over_time",
+               "stdvar_over_time", "hour", "day_of_week", "day_of_month", "minute", "month",
+               "year", "sgn"}
+SETOPS = {"and", "or", "unless", "atan2"}
+CMPOPS = {"==", "!=", "<", "<=", ">", ">="}
+BINOPS = CMPOPS | {"+", "-", "*", "/", "%", "^"}
+KEYWORDS = SETOPS | {"by", "without", "on", "ignoring", "group_left", "group_right", "bool", "offset"}
+DURATION = r"(?:[0-9]+(?:ms|s|m|h|d|w|y))+"
 TOK = re.compile(r"""
     (?P<ws>\s+)
   | (?P<str>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`)
   | (?P<comment>\#[^\n]*)
-  | (?P<dur>(?:[0-9]+(?:ms|s|m|h|d|w|y))+(?![A-Za-z0-9_.]))
+  | (?P<dur>""" + DURATION + r"""(?![A-Za-z0-9_.]))
   | (?P<num>(?:0[xX][0-9a-fA-F]+|(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)(?![A-Za-z0-9_:.]))
+  | (?P<sub>:\s*(?:""" + DURATION + r""")?\s*(?=\]))
   | (?P<id>[A-Za-z_:][A-Za-z0-9_:]*)
   | (?P<op>==|!=|<=|>=|=~|!~|[-+*/%^<>=,:])
   | (?P<open>[(\[{])
@@ -168,14 +185,18 @@ def metrics_of(expr):
         if m.lastgroup not in ("ws", "comment"):
             toks.append((m.lastgroup, m.group(0)))
     out, stack = set(), []
-    prev = ("", "")          # the previous token
-    prev_metric = False       # the previous token was a metric name
-    prev2 = ("", "")
-    pending_group = False
+    prev = prev2 = ("", "")    # the two previous tokens
+    prev_metric = False        # the previous token was a metric name
+    pending_group = ""         # the kind of label list the next `(` opens
+    agg_pending = False        # an aggregation name waits for its `(`
+    after_agg = False          # the previous token was an aggregation name
+    expect_operand = True      # an operand (not an operator) comes next
+    mods = set()               # keywords that are legal right here
     for i, (kind, text) in enumerate(toks):
         nxt = toks[i + 1] if i + 1 < len(toks) else ("", "")
         top = stack[-1] if stack else ""
         bad = None
+        n_expect, n_mods, n_after_agg = expect_operand, set(), False
         if top == "{":
             if kind == "id":
                 pass
@@ -185,49 +206,82 @@ def metrics_of(expr):
                 pass
             elif kind == "close" and text == "}":
                 stack.pop()
+                n_expect = False
             else:
                 bad = f"`{text}` inside a label matcher"
-        elif top == "g":
+        elif top.startswith("g"):
             if kind == "id" or (kind == "op" and text == ","):
                 pass
             elif kind == "close" and text == ")":
                 stack.pop()
+                n_expect = top != "g:post"   # `sum(x) by (l)` is followed by an operator
+                if top == "g:on":
+                    n_mods = {"group_left", "group_right"}
             else:
                 bad = f"`{text}` inside a grouping label list"
         elif top == "[":
-            if kind == "dur" or (kind == "op" and text == ":"):
+            if kind == "dur" or (kind == "sub" and prev[0] == "dur"):
                 pass
             elif kind == "close" and text == "]":
                 stack.pop()
+                n_expect = False
             else:
                 bad = f"`{text}` inside a range"
         elif kind == "id":
             low = text.lower()
             if low in ("inf", "nan"):
-                pass
-            elif text in GROUPING:
-                if nxt == ("open", "("):
-                    pending_group = True
-                elif text not in ("group_left", "group_right"):
-                    bad = f"`{text}` without a label list"
-            elif text in BINKW:
-                pass
+                n_expect = False
+            elif text in KEYWORDS:
+                if text in mods:
+                    if text in ("by", "without", "on", "ignoring"):
+                        if nxt != ("open", "("):
+                            bad = f"`{text}` without a label list"
+                        elif text in ("on", "ignoring"):
+                            pending_group = "g:on"
+                        else:
+                            pending_group = "g:pre" if after_agg else "g:post"
+                    elif text in ("group_left", "group_right"):
+                        if nxt == ("open", "("):
+                            pending_group = "g:grp"
+                        n_expect = True
+                    else:   # bool
+                        n_expect, n_mods = True, {"on", "ignoring"}
+                elif text in SETOPS and not expect_operand:
+                    n_expect, n_mods = True, {"on", "ignoring"}
+                elif text == "offset" and not expect_operand and (prev_metric or prev[0] == "close"):
+                    n_expect = False
+                elif expect_operand:
+                    bad = (f"`{text}` where an operand is expected: a metric named like a PromQL "
+                           "keyword is refused (it cannot be told from the operator)")
+                else:
+                    bad = f"keyword `{text}` in a position PromQL does not allow"
             elif text in FUNCS and (nxt == ("open", "(") or (text in AGG and nxt[0] == "id" and nxt[1] in ("by", "without"))):
-                pass
+                n_expect, n_after_agg = True, text in AGG
+                if text in AGG:
+                    agg_pending = True
+                    n_mods = {"by", "without"}
             elif nxt == ("open", "("):
                 bad = f"unknown function `{text}(`"
             else:
                 out.add(text)
+                n_expect = False
                 prev_metric = True
                 prev2, prev = prev, (kind, text)
+                expect_operand, mods, after_agg = n_expect, n_mods, False
                 continue
         elif kind in ("num", "str"):
-            pass
+            n_expect = False
         elif kind == "dur":
             if not (prev == ("id", "offset") or (prev == ("op", "-") and prev2 == ("id", "offset"))):
                 bad = f"duration `{text}` outside a range and `offset`"
+            n_expect = False
+        elif kind == "sub":
+            bad = "`:` outside a range"
         elif kind == "op":
-            pass
+            if text in BINOPS and not expect_operand:
+                n_expect, n_mods = True, {"on", "ignoring"} | ({"bool"} if text in CMPOPS else set())
+            elif text in BINOPS or text == ",":
+                n_expect = True
         elif kind == "open":
             if text == "{":
                 if not prev_metric:
@@ -240,11 +294,21 @@ def metrics_of(expr):
                 else:
                     bad = "`[` that does not follow a selector"
             else:
-                stack.append("g" if pending_group else "(")
-                pending_group = False
+                if pending_group:
+                    stack.append(pending_group)
+                elif agg_pending:
+                    stack.append("A")
+                    agg_pending = False
+                else:
+                    stack.append("(")
+                pending_group = ""
+                n_expect = True
         elif kind == "close":
-            if text == ")" and top == "(":
+            if text == ")" and top in ("(", "A"):
                 stack.pop()
+                n_expect = False
+                if top == "A":
+                    n_mods = {"by", "without"}
             else:
                 bad = f"unbalanced `{text}`"
         if bad:
@@ -252,6 +316,7 @@ def metrics_of(expr):
             return out, refusals
         prev_metric = False
         prev2, prev = prev, (kind, text)
+        expect_operand, mods, after_agg = n_expect, n_mods, n_after_agg
     if stack:
         refusals.append(("EXPR-UNSUPPORTED", "unbalanced brackets"))
     return out, refusals
@@ -294,6 +359,10 @@ for name, r in alerts.items():
     for k in ("summary", "description", "runbook"):
         if not str(ann.get(k, "")).strip():
             fail("ANNOTATION", f"alert {name} has no {k} annotation")
+    for where, vals in (("label", labels), ("annotation", ann)):
+        for k, v in vals.items():
+            if re.search(r"\{\{[^}]*?(?<![.\w$])query\b", str(v), re.S):
+                fail("ANNOTATION", f"alert {name}: {where} {k} uses a `query` template, an expression nothing here can check")
     rb = str(ann.get("runbook", "")).strip()
     if rb:
         path, _, anchor = rb.partition("#")
@@ -350,6 +419,28 @@ if not re.fullmatch(r"sha256:[0-9a-f]{64}", lk["exporter.digest"]):
 if lk["exporter.tag"] == "latest":
     fail("OVERLAY-DIGEST", f"{lock_path}: exporter.tag is latest")
 
+# exporter-allowlist.txt: the one list db-scrape-test.sh applies to the RUNNING container.
+allow = {"arg": set(), "env": set(), "image-env": set(), "entrypoint": set(), "mount": set()}
+for n, raw in enumerate(read(os.path.join(obs, "exporter-allowlist.txt")).splitlines(), 1):
+    line = raw.partition("#")[0].strip()
+    if not line:
+        continue
+    kind, _, value = line.partition(" ")
+    value = value.strip()
+    if kind not in allow or not value or " " in value:
+        fail("ALLOWLIST", f"exporter-allowlist.txt:{n}: `{line}` is not `<kind> <value>` of a known kind")
+        continue
+    allow[kind].add(value)
+# The allowlist itself may never name a way to carry a connection other than the
+# overlay's: those are the downgrades it exists to refuse.
+for a in sorted(allow["arg"]):
+    if a.startswith(("--datasource", "--config.file", "--web.config.file", "--extend.query-path",
+                     "--auto-discover-databases", "--collector.stat_statements.include_query")):
+        fail("ALLOWLIST", f"exporter-allowlist.txt allows the flag `{a}`, a way to change the connection or export query text")
+for v in sorted(allow["env"] | allow["image-env"]):
+    if v in ("DATA_SOURCE_NAME", "DATA_SOURCE_URI_FILE", "DATA_SOURCE_PASS", "DATA_SOURCE_USER_FILE") or v.startswith(("PG", "PG_EXPORTER_")):
+        fail("ALLOWLIST", f"exporter-allowlist.txt allows the variable `{v}`, a way to change the connection")
+
 ov = load(overlay_path)
 svc = ((ov or {}).get("services") or {}).get("exporter") if isinstance(ov, dict) else None
 if not isinstance(svc, dict):
@@ -385,7 +476,14 @@ if not hc.get("test"):
 dep = ((svc.get("depends_on") or {}).get("db") or {}) if isinstance(svc.get("depends_on"), dict) else {}
 if dep.get("condition") != "service_healthy":
     fail("OVERLAY-DEPENDS", "exporter must depend on db with condition: service_healthy")
-cmd = [str(c) for c in svc.get("command") or []]
+if not isinstance(svc.get("command") or [], list):
+    fail("OVERLAY-ARGS", "exporter command must be a list of arguments")
+cmd = [str(c) for c in (svc.get("command") if isinstance(svc.get("command"), list) else [])]
+for c in cmd:
+    if c not in allow["arg"]:
+        fail("OVERLAY-ARGS", f"exporter command carries `{c.partition('=')[0]}` (value hidden), which is not in exporter-allowlist.txt as written (any other flag, or another value, can change the connection)")
+if "entrypoint" in svc:
+    fail("OVERLAY-ENTRYPOINT", "exporter must not override the image's entrypoint")
 for flag in ("--collector.stat_statements", "--collector.stat_checkpointer",
              "--collector.database_wraparound", "--collector.long_running_transactions"):
     if flag not in cmd:
@@ -393,18 +491,24 @@ for flag in ("--collector.stat_statements", "--collector.stat_checkpointer",
 if "--collector.stat_statements.include_query" in cmd:
     fail("OVERLAY-COLLECTORS", "exporter must not export query text (include_query)")
 # The connection: non-secret settings from an env file, the password only as a file.
-env_vars = {}
-for ef in svc.get("env_file") or []:
-    p = os.path.normpath(os.path.join(os.path.dirname(overlay_path), str(ef)))
+env_vars, env_names = {}, set()
+efs = svc.get("env_file") or []
+for ef in [efs] if isinstance(efs, (str, dict)) else efs:
+    p = os.path.normpath(os.path.join(os.path.dirname(overlay_path), str(ef.get("path", "") if isinstance(ef, dict) else ef)))
     for raw in read(p).splitlines():
         line = raw.strip()
-        if line and not line.startswith("#") and "=" in line:
+        if line and not line.startswith("#"):
             k, _, v = line.partition("=")
-            env_vars[k.strip()] = v.strip()
+            env_names.add(k.strip())
+            if "=" in line:
+                env_vars[k.strip()] = v.strip()
 env = svc.get("environment") or {}
 if isinstance(env, list):
     env = dict(str(e).partition("=")[::2] for e in env)
+env_names |= {str(k) for k in env}
 env_vars.update({str(k): str(v) for k, v in env.items()})
+for k in sorted(env_names - allow["env"]):
+    fail("OVERLAY-ENV", f"exporter defines the variable {k}, which is not in exporter-allowlist.txt (it can change the connection)")
 uri = env_vars.get("DATA_SOURCE_URI", "")
 qs = parse_qs(uri.partition("?")[2], keep_blank_values=True)
 if qs.get("sslmode") != ["verify-full"]:
@@ -424,6 +528,19 @@ for v in svc.get("volumes") or []:
         target, ro = (parts[1] if len(parts) > 1 else ""), "ro" in parts[2:]
     if rootcert and target and rootcert[0].startswith(target.rstrip("/") + "/") and ro:
         tls_ro = True
+# Mounts must equal the shipped set EXACTLY: a config file mounted in could carry auth_modules.
+dests = set()
+for v in svc.get("volumes") or []:
+    dests.add(str(v.get("target", "")) if isinstance(v, dict) else (str(v).split(":") + [""])[1] or str(v).split(":")[0])
+for sc in svc.get("secrets") or []:
+    if isinstance(sc, dict):
+        dests.add(str(sc.get("target") or "/run/secrets/" + str(sc.get("source", ""))))
+    else:
+        dests.add("/run/secrets/" + str(sc))
+if svc.get("configs") or svc.get("volumes_from"):
+    fail("OVERLAY-MOUNTS", "exporter must not use configs or volumes_from (a mounted file can change the connection)")
+if dests != allow["mount"]:
+    fail("OVERLAY-MOUNTS", f"exporter mounts {sorted(dests - allow['mount'])} that exporter-allowlist.txt does not list; missing {sorted(allow['mount'] - dests)}")
 if not tls_ro:
     fail("OVERLAY-TLS-MOUNT", "the directory holding sslrootcert must be mounted read-only into the exporter")
 if not env_vars.get("DATA_SOURCE_PASS_FILE", "").startswith("/run/secrets/"):

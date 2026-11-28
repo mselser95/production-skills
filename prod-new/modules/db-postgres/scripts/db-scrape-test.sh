@@ -11,6 +11,12 @@
 #                               own container) has exactly one sslmode, verify-full, and one
 #                               non-empty sslrootcert; only those two parameters are read
 #                               into a variable and printed, never the whole value
+#   exporter-args-allowlisted   the RUNNING exporter's command and entrypoint are exactly
+#   exporter-env-allowlisted    allowed by observability/exporter-allowlist.txt (the same file
+#   exporter-mounts-expected    parity-check.sh reads): every argument, every variable NAME (never
+#                               a value) and the set of mount destinations. A flag such as
+#                               --datasource.uri, a DATA_SOURCE_URI_FILE or a mounted config file
+#                               would downgrade the connection where tls-verify-full cannot look.
 #   exporter-session-encrypted  from the database side: every app_monitor TCP session
 #                               (the exporter's) has pg_stat_ssl.ssl = true, and there is one
 #   exporter-not-published      the exporter port is not mapped to the host
@@ -26,9 +32,10 @@
 #               revoke pg_monitor from app_monitor before the scrape and EXPECT it to go
 #               RED (the wal collector needs pg_ls_waldir, which pg_monitor grants).
 #               The mutation is judged by its SPECIFIC effect: exit 1 only when the scrape
-#               was fetched, pg_up is 1, the collector `wal` or `database` fails, the metric
-#               pg_wal_size_bytes is absent and NO other assertion failed (pg_wal_segments
-#               and pg_database_size_bytes are explained too: measured on the pinned images). Any other failure pattern is exit 3. Nothing is
+#               was fetched, pg_up is 1, ONLY the collectors `wal` and `database` fail, the
+#               metric pg_wal_size_bytes is absent and NO other assertion failed
+#               (pg_wal_segments and pg_database_size_bytes are explained too: measured on
+#               the pinned images). Any other failure pattern is exit 3. Nothing is
 #               restored: the project is torn down.
 #   --promtool  also run `promtool test rules` in the pinned Prometheus image
 #               (observability/image.lock `prometheus.*`), --network none, read-only.
@@ -80,6 +87,7 @@ budget="${DB_SCRAPE_BUDGET_S:-60}"; cleanup_s="${DB_SCRAPE_CLEANUP_S:-20}"
 proj="dbscrape-$$"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/dbscrape.XXXXXX")" || exit 2
 last="$scratch/last"; metrics="$scratch/metrics"; envf="$scratch/env"; secdir="$scratch/secrets"
+mkfifo "$scratch/hold" && exec 3<>"$scratch/hold" || { echo "FAIL START: cannot create the watchdog fifo" >&2; rm -rf "$scratch"; exit 2; }
 : > "$last"
 DC=(docker compose -p "$proj" --env-file "$envf" -f "$dbdir/compose.yml" -f "$dbdir/compose.observability.yml")
 deadline=$((SECONDS + budget))
@@ -89,22 +97,22 @@ pass=0; fail=0; failed=()
 # kill IS the process), output to $last, killed after SECS. rc 124 = timed out.
 bounded() {
   local secs="$1" pid wd rc; shift
-  "$@" >"$last" 2>&1 &
+  "$@" 3>&- >"$last" 2>&1 &
   pid=$!
-  (
-    sleep "$secs" & sp=$!
-    trap 'kill "$sp" 2>/dev/null; exit 0' TERM
-    wait "$sp"
-    kill -KILL "$pid" 2>/dev/null
-  ) &
+  # The watchdog waits with the `read -t` builtin on a fifo nobody writes to (fd 3, opened once
+  # below): no `sleep` process per call, and nothing left behind when it is killed. It never
+  # holds the caller's output pipe either.
+  ( read -t "$secs" -u 3 _; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
   wd=$!
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   ((rc == 137)) && rc=124
   return "$rc"
 }
-cap() { # CAP -> min(CAP, seconds left, at least 1)
-  local l=$((deadline - SECONDS)); ((l > $1)) && l=$1; ((l < 1)) && l=1; echo "$l"
+bcap() { # CAP CMD...: bounded, killed after min(CAP, what is left of the budget, at least 1); no subshell
+  local c="$1" l=$((deadline - SECONDS)); shift
+  ((l < c)) && c=$l; ((c < 1)) && c=1
+  bounded "$c" "$@"
 }
 
 cleanup() {
@@ -128,7 +136,7 @@ finish() {
     fi
     # The revoke breaks the wal collector (pg_ls_waldir) and removes pg_wal_size_bytes;
     # nothing else may fail, and the scrape must have been fetched with pg_up 1.
-    local f broke=0 has_wal=0 has_coll=0
+    local f rest broke=0 has_wal=0 has_coll=0
     for f in "${failed[@]}"; do
       case "$f" in
         collectors-succeed) has_coll=1 ;;
@@ -139,7 +147,9 @@ finish() {
       esac
     done
     [[ $up == 1 ]] || broke=1
-    [[ $bad == *'collector="wal"'* || $bad == *'collector="database"'* ]] || broke=1
+    # only the wal and database collectors may fail (a third failing collector is another cause)
+    rest="${bad//collector=\"wal\"/}"; rest="${rest//collector=\"database\"/}"; rest="${rest// /}"
+    [[ -n $bad && -z $rest ]] || broke=1
     ((has_wal && has_coll)) || broke=1
     if ((broke == 0)); then echo "RED as intended: --mutate $mutate was detected (${failed[*]})"; exit 1; fi
     echo "the run broke for another reason: --mutate $mutate failed [${failed[*]}], pg_up '${up:-absent}', failing collectors '${bad:-none}'; the revoke explains only the wal/database collector and pg_wal_size_bytes"; exit 3
@@ -148,28 +158,28 @@ finish() {
   exit 1
 }
 
-rnd() { head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+seed="$(od -An -tx1 -N 60 /dev/urandom | tr -d ' \n')"; si=0   # one read for all five passwords
 mkdir -m 700 "$secdir" || exit 2
-for n in superuser migrator app readonly monitor; do printf '%s' "$n$(rnd)" > "$secdir/db_${n}_password"; done
+for n in superuser migrator app readonly monitor; do printf '%s' "$n${seed:$((si * 12)):12}" > "$secdir/db_${n}_password"; si=$((si + 1)); done
 chmod 644 "$secdir"/db_*_password
 printf 'DB_SECRETS_DIR=%s\n' "$secdir" > "$envf"
 
 # ---- start --------------------------------------------------------------------------
 # `up -d --wait` returns when db and exporter are healthy (the exporter's healthcheck is
 # `pg_up 1`), or fails. The pull of an absent image happens here too, inside the budget.
-t="$(cap 45)"
+t=$((deadline - SECONDS)); ((t > 45)) && t=45; ((t < 1)) && t=1
 bounded "$t" "${DC[@]}" up -d --wait --wait-timeout "$((t > 3 ? t - 2 : 1))"; rc=$?
 if ((rc != 0)); then
   echo "FAIL START: compose up --wait failed or timed out after ${t}s (rc $rc); last lines:"; tail -n 8 "$last"
-  bounded "$(cap 8)" "${DC[@]}" logs --tail 12 exporter db && tail -n 24 "$last"
+  bcap 8 "${DC[@]}" logs --tail 12 exporter db && tail -n 24 "$last"
   exit 2
 fi
 
 sup_psql() { # SQL as the superuser over the container's unix socket (never over TCP)
-  bounded "$(cap 10)" "${DC[@]}" exec -T db sh -c 'PGPASSWORD="$(cat /run/secrets/db_superuser_password)" PGCONNECT_TIMEOUT=5 exec psql -X -q -At -U postgres -d app -c "$1"' sh "$1"
+  bcap 10 "${DC[@]}" exec -T db sh -c 'PGPASSWORD="$(cat /run/secrets/db_superuser_password)" PGCONNECT_TIMEOUT=5 exec psql -X -q -At -U postgres -d app -c "$1"' sh "$1"
 }
 mon_psql() { # SQL as app_monitor over TLS
-  bounded "$(cap 10)" "${DC[@]}" exec -T db sh -c 'PGPASSWORD="$(cat /run/secrets/db_monitor_password)" PGSSLMODE=require PGCONNECT_TIMEOUT=5 exec psql -X -q -At -h 127.0.0.1 -U app_monitor -d app -c "$1"' sh "$1"
+  bcap 10 "${DC[@]}" exec -T db sh -c 'PGPASSWORD="$(cat /run/secrets/db_monitor_password)" PGSSLMODE=require PGCONNECT_TIMEOUT=5 exec psql -X -q -At -h 127.0.0.1 -U app_monitor -d app -c "$1"' sh "$1"
 }
 
 # A user table, so the per-table series exist; the statement also seeds pg_stat_statements.
@@ -185,26 +195,55 @@ fi
 # ---- scrape and assert ----------------------------------------------------------------
 # From the db container to the exporter by its service name: proves the compose network
 # path, not the exporter's own loopback.
-if bounded "$(cap 10)" "${DC[@]}" exec -T db wget -q -O - http://exporter:9187/metrics && [[ -s $last ]]; then
+if bcap 10 "${DC[@]}" exec -T db wget -q -O - http://exporter:9187/metrics && [[ -s $last ]]; then
   cp "$last" "$metrics"
-  emit PASS scrape-fetched "$(wc -l < "$metrics" | tr -d ' ') lines"
+  nl=0; while IFS= read -r _; do nl=$((nl + 1)); done < "$metrics"
+  emit PASS scrape-fetched "$nl lines"
 else
   : > "$metrics"
   emit FAIL scrape-fetched "the exporter did not answer from inside the compose network: $(tail -n 2 "$last" | tr '\n' ' ')"
 fi
 
-# The RUNNING exporter's own connection settings, from docker inspect of its container.
-# Only the DATA_SOURCE_URI line is kept (it holds no password: that is a file), then only
-# the sslmode and sslrootcert parameters are printed; $last is emptied right after.
+# The RUNNING exporter's own configuration, from ONE docker inspect of its container, judged
+# against observability/exporter-allowlist.txt (parity-check.sh reads the same file for the
+# overlay as shipped). Printed: flag NAMES, variable NAMES, mount destinations, and the two
+# TLS parameters. Never a value: `--datasource.uri=...` or an env value may carry a password.
+# `%q` keeps one item on one line, so a value with a newline cannot forge another line.
+INSPECT_FMT='{{range .Config.Cmd}}cmd {{printf "%q" .}}{{"\n"}}{{end}}{{range .Config.Entrypoint}}entrypoint {{printf "%q" .}}{{"\n"}}{{end}}{{range .Config.Env}}env {{printf "%q" .}}{{"\n"}}{{end}}{{range .Mounts}}mount {{printf "%q" .Destination}}{{"\n"}}{{end}}'
+a_arg=(); a_env=(); a_ienv=(); a_ep=(); a_mount=()
+while IFS= read -r l; do
+  l="${l%%#*}"; [[ -n ${l//[[:space:]]/} ]] || continue
+  read -r k v <<<"$l"
+  case "$k" in
+    arg) a_arg+=("$v") ;; env) a_env+=("$v") ;; image-env) a_ienv+=("$v") ;;
+    entrypoint) a_ep+=("$v") ;; mount) a_mount+=("$v") ;;
+  esac
+done < "$dbdir/observability/exporter-allowlist.txt"
+in_list() { local x="$1"; shift; local y; for y in "$@"; do [[ $x == "$y" ]] && return 0; done; return 1; }
+
+insp_err=""; uri=""; have_uri=0; cmd_args=(); ep_args=(); env_names=(); mounts=()
+exporter_inspect() {
+  local cid l v
+  if ! bcap 8 "${DC[@]}" ps -q exporter; then insp_err="compose ps failed"; return 1; fi
+  read -r cid < "$last"
+  [[ -n $cid ]] || { insp_err="no exporter container"; return 1; }
+  if ! bcap 8 docker inspect -f "$INSPECT_FMT" "$cid"; then insp_err="docker inspect failed"; : > "$last"; return 1; fi
+  while IFS= read -r l; do
+    v="${l#* \"}"; v="${v%\"}"
+    case "$l" in
+      'cmd "'*) cmd_args+=("$v") ;;
+      'entrypoint "'*) ep_args+=("$v") ;;
+      'env "'*) env_names+=("${v%%=*}"); [[ $v == DATA_SOURCE_URI=* ]] && { uri="${v#DATA_SOURCE_URI=}"; have_uri=1; } ;;
+      'mount "'*) mounts+=("$v") ;;
+    esac
+  done < "$last"
+  : > "$last"
+  return 0
+}
 exporter_tls() {
-  local cid line uri query p modes="" nmodes=0 nvf=0 nroot=0 root="" kv
-  if ! bounded "$(cap 8)" "${DC[@]}" ps -q exporter; then echo "FAIL: compose ps failed"; return 1; fi
-  cid="$(tr -d ' \n' < "$last")"
-  [[ -n $cid ]] || { echo "FAIL: no exporter container"; return 1; }
-  if ! bounded "$(cap 8)" docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid"; then echo "FAIL: docker inspect failed"; return 1; fi
-  line="$(grep '^DATA_SOURCE_URI=' "$last" | head -n 1)"; : > "$last"
-  [[ -n $line ]] || { echo "FAIL: the exporter has no DATA_SOURCE_URI"; return 1; }
-  uri="${line#DATA_SOURCE_URI=}"; query=""
+  local query p modes="" nmodes=0 nvf=0 nroot=0 root="" kv
+  ((have_uri)) || { MSG="FAIL: the exporter has no DATA_SOURCE_URI"; return 1; }
+  query=""
   [[ $uri == *\?* ]] && query="${uri#*\?}"
   IFS='&' read -r -a kv <<<"$query"
   for p in ${kv[@]+"${kv[@]}"}; do
@@ -214,10 +253,37 @@ exporter_tls() {
       sslrootcert) nroot=$((nroot + 1)) ;;
     esac
   done
-  if ((nmodes == 1 && nvf == 1 && nroot == 1)) && [[ -n $root ]]; then echo "sslmode=verify-full sslrootcert=$root"; return 0; fi
-  echo "sslmode parameters:${modes:- none} (want exactly sslmode=verify-full), sslrootcert count $nroot value '${root:-empty}'"; return 1
+  if ((nmodes == 1 && nvf == 1 && nroot == 1)) && [[ -n $root ]]; then MSG="sslmode=verify-full sslrootcert=$root"; return 0; fi
+  MSG="sslmode parameters:${modes:- none} (want exactly sslmode=verify-full), sslrootcert count $nroot value '${root:-empty}'"; return 1
 }
-if tls_msg="$(exporter_tls)"; then emit PASS exporter-tls-verify-full "$tls_msg"; else emit FAIL exporter-tls-verify-full "${tls_msg#FAIL: }"; fi
+exporter_args() { # flag NAMES only, never values
+  local a bad="" e="${ep_args[*]-}" w="${a_ep[*]-}"
+  for a in ${cmd_args[@]+"${cmd_args[@]}"}; do in_list "$a" ${a_arg[@]+"${a_arg[@]}"} || bad="$bad ${a%%=*}"; done
+  [[ -z $bad ]] || { MSG="arguments outside the allowlist (values hidden):$bad"; return 1; }
+  [[ $e == "$w" ]] || { MSG="entrypoint is '$e', the allowlist says '$w'"; return 1; }
+  MSG="${#cmd_args[@]} arguments, entrypoint $e"
+}
+exporter_env() { # variable NAMES only
+  local n bad=""
+  for n in ${env_names[@]+"${env_names[@]}"}; do in_list "$n" ${a_env[@]+"${a_env[@]}"} ${a_ienv[@]+"${a_ienv[@]}"} || bad="$bad $n"; done
+  [[ -z $bad ]] || { MSG="variables outside the allowlist (values hidden):$bad"; return 1; }
+  MSG="${#env_names[@]} variables"
+}
+exporter_mounts() {
+  local m bad="" miss=""
+  for m in ${mounts[@]+"${mounts[@]}"}; do in_list "$m" ${a_mount[@]+"${a_mount[@]}"} || bad="$bad $m"; done
+  for m in ${a_mount[@]+"${a_mount[@]}"}; do in_list "$m" ${mounts[@]+"${mounts[@]}"} || miss="$miss $m"; done
+  [[ -z $bad && -z $miss ]] || { MSG="mounts: unexpected [${bad# }] missing [${miss# }]"; return 1; }
+  MSG="${#mounts[@]} mounts as expected"
+}
+if exporter_inspect; then
+  if exporter_tls; then emit PASS exporter-tls-verify-full "$MSG"; else emit FAIL exporter-tls-verify-full "${MSG#FAIL: }"; fi
+  if exporter_args; then emit PASS exporter-args-allowlisted "$MSG"; else emit FAIL exporter-args-allowlisted "$MSG"; fi
+  if exporter_env; then emit PASS exporter-env-allowlisted "$MSG"; else emit FAIL exporter-env-allowlisted "$MSG"; fi
+  if exporter_mounts; then emit PASS exporter-mounts-expected "$MSG"; else emit FAIL exporter-mounts-expected "$MSG"; fi
+else
+  for chk in exporter-tls-verify-full exporter-args-allowlisted exporter-env-allowlisted exporter-mounts-expected; do emit FAIL "$chk" "$insp_err"; done
+fi
 
 up="$(awk '$1 == "pg_up" { print $2 }' "$metrics")"
 if [[ $up == 1 ]]; then emit PASS pg-up; else emit FAIL pg-up "pg_up is '${up:-absent}', want 1"; fi
@@ -242,7 +308,7 @@ done <<<"$missing"
 # From the DATABASE side: the exporter's own backend (role app_monitor, over TCP) is encrypted.
 # sup_psql runs over the unix socket, so it never counts itself.
 if sup_psql "SELECT count(*) FILTER (WHERE s.ssl) || '/' || count(*) FROM pg_stat_activity a JOIN pg_stat_ssl s USING (pid) WHERE a.usename = 'app_monitor' AND a.client_addr IS NOT NULL"; then
-  enc="$(tr -d ' \n' < "$last")"
+  read -r enc < "$last"
   if [[ $enc =~ ^([0-9]+)/([0-9]+)$ ]] && ((BASH_REMATCH[2] >= 1)) && [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then
     emit PASS exporter-session-encrypted "$enc sessions encrypted"
   else
@@ -253,24 +319,24 @@ else
 fi
 
 # Published on the host? `port` succeeds with a mapping only when one exists.
-if bounded "$(cap 8)" "${DC[@]}" port exporter 9187 && grep -Eq ':[1-9][0-9]*[[:space:]]*$' "$last"; then
+if bcap 8 "${DC[@]}" port exporter 9187 && grep -Eq ':[1-9][0-9]*[[:space:]]*$' "$last"; then
   emit FAIL exporter-not-published "port 9187 is mapped to the host: $(tr '\n' ' ' < "$last")"
 else
   emit PASS exporter-not-published
 fi
 
-if mon_psql "SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication FROM pg_roles WHERE rolname = current_user" && [[ $(tr -d ' \n' < "$last") == f ]]; then
+if mon_psql "SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication FROM pg_roles WHERE rolname = current_user" && read -r mrs < "$last" && [[ $mrs == f ]]; then
   emit PASS monitor-not-superuser
 else
   emit FAIL monitor-not-superuser "app_monitor has an elevated attribute or could not be read: $(tail -n 2 "$last" | tr '\n' ' ')"
 fi
 if mon_psql 'CREATE TABLE public.monitor_write_probe (i int)'; then
   emit FAIL monitor-cannot-create "app_monitor created a table"
-elif [[ $(cat "$last") == *"permission denied"* ]]; then emit PASS monitor-cannot-create
+elif [[ $(<"$last") == *"permission denied"* ]]; then emit PASS monitor-cannot-create
 else emit FAIL monitor-cannot-create "refused, but not with permission denied: $(tail -n 2 "$last" | tr '\n' ' ')"; fi
 if mon_psql 'INSERT INTO public.scrape_probe VALUES (2)'; then
   emit FAIL monitor-cannot-write "app_monitor inserted a row"
-elif [[ $(cat "$last") == *"permission denied"* ]]; then emit PASS monitor-cannot-write
+elif [[ $(<"$last") == *"permission denied"* ]]; then emit PASS monitor-cannot-write
 else emit FAIL monitor-cannot-write "refused, but not with permission denied: $(tail -n 2 "$last" | tr '\n' ' ')"; fi
 
 # ---- the alert tests, in the pinned Prometheus image (opt-in) ---------------------------

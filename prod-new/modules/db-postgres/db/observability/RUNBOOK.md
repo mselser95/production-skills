@@ -13,6 +13,8 @@ The exporter cannot log in or the server is not answering, so every other alert 
 
 Prometheus has no `pg_up` series at all, which is different from `pg_up == 0`: the exporter is not running or not reachable, so `PostgresDown` and every other alert cannot fire. First: `docker compose ps exporter` and `docker compose logs --tail 50 exporter` (a crash loop, an exporter that cannot start). Second: whether Prometheus can reach `exporter:9187` on the compose network, and whether its scrape job still names this target. Third: the exporter's healthcheck and that its `db` dependency is healthy.
 
+TUNABLE (like the thresholds): the alert expression is `absent(pg_up)` with no `job` matcher, because this module ships no Prometheus scrape config and the job label is yours to choose. In a Prometheus that scrapes several exporters, scope it with your job label, `absent(pg_up{job="<your job>"})`, or another exporter's `pg_up` hides a dead one.
+
 ## PostgresExporterCollectorFailing
 
 One collector fails on every scrape and, since exporter 0.21.0, all of its metrics are dropped, so alerts that use them cannot fire. First: which one, from `pg_scrape_collector_success == 0` (the `collector` label). Second: the exporter log for that collector's error, usually `permission denied` (was `pg_monitor` revoked from `app_monitor`?) or a missing extension (`pg_stat_statements` not created in the `app` database). Third: compare with `scripts/db-scrape-test.sh`, which fails on exactly this.

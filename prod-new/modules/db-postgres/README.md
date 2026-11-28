@@ -67,26 +67,36 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   digest-pinned (or differs from the lock), not read-only / `cap_drop: [ALL]` / `no-new-privileges` / non-root,
   publishes a port, carries a password in the environment or URI, lacks a healthcheck, a needed collector or
   resource limits, has anything but exactly one `sslmode=verify-full` and one `sslrootcert`, or mounts the
-  certificate read-write. It REFUSES (never guesses) a `__name__` matcher, a nameless selector, an unknown
-  function and any `record:` rule, and runs `promtool check rules` when promtool is on PATH. `make db-test`
+  certificate read-write. The exporter's command, variable NAMES, entrypoint and mounts must lie within
+  `db/observability/exporter-allowlist.txt` (an ALLOW-list, one entry per line with its reason): any other flag
+  (`--datasource.uri`, `--config.file`, ...), variable (`DATA_SOURCE_URI_FILE`, `DATA_SOURCE_NAME`, `PG*`), an
+  overridden entrypoint or an extra mount is red. It REFUSES (never guesses) a `__name__` matcher, a nameless
+  selector, an unknown function, a keyword where an operand belongs (a series named `offset`), a `query`
+  template in an annotation and any `record:` rule, understands subqueries `[5m:1m]`, and runs `promtool check rules` when promtool is on PATH. `make db-test`
   runs it first. Thresholds marked TUNABLE (temp files, WAL size) are starting points; see the runbook.
 - `bash scripts/db-scrape-test.sh [--mutate revoke-monitor] [--promtool]` - NEEDS DOCKER, not run by the
   selftest. Starts `db` + `exporter` as project `dbscrape-<pid>` with a 60 s budget (`DB_SCRAPE_BUDGET_S`),
   scrapes from the db container, and asserts `pg_up 1`, no failing collector, every required metric present,
   the port not on the host, that `app_monitor` is not superuser and cannot create or insert, that the RUNNING
   exporter's `DATA_SOURCE_URI` (docker inspect; only the `sslmode`/`sslrootcert` parameters are read) has
-  exactly one `sslmode=verify-full` and a `sslrootcert`, and that its session is encrypted (`pg_stat_ssl`).
+  exactly one `sslmode=verify-full` and a `sslrootcert`, that its session is encrypted (`pg_stat_ssl`), and that
+  the RUNNING exporter's command, entrypoint, variable names (never values) and mount destinations are within
+  the same `exporter-allowlist.txt` (`exporter-args-allowlisted`, `exporter-env-allowlisted`,
+  `exporter-mounts-expected`; one `docker inspect`).
   Exit 0 pass, 1 a failed assertion, 2 nothing could be asserted, 3 and 4 only with `--mutate`.
   `--mutate revoke-monitor` revokes `pg_monitor` first and exits 1 only when the failures are the ones the revoke
   explains (wal/database collector, `pg_wal_size_bytes`); any other failure is exit 3; exit 4 means the mutation
   survived. `--promtool` also runs `promtool test rules` in the pinned Prometheus image (no network, read-only).
   Torn down with `down -v` of its own project on every exit path.
 - `bash scripts/tests/db-observability-selftest.sh` - hermetic selftest and mutation proof of all of the above
-  (fake `docker`); runs `promtool test rules` locally when a `promtool` is on PATH, else prints a SKIP.
+  (fake `docker`); runs `promtool test rules` locally when a `promtool` is on PATH, else prints a SKIP. Every
+  mutant is paired with an unmutated control that must be green first, else `its control is not green`.
 
 Not proven offline: that the exporter image really emits the names in `required-metrics.txt` (several are marked
 UNVERIFIED there), that its busybox has `wget` for the healthcheck, and that the `DATA_SOURCE_*` variables work
-as written in v0.21.1. The scrape test is that proof; run it after every exporter bump.
+as written in v0.21.1. The scrape test is that proof; run it after every exporter bump. The `image-env`,
+`entrypoint` and `mount` entries of `exporter-allowlist.txt` are likewise UNVERIFIED until a real run: a
+mismatch prints the real value, and the entry is corrected deliberately.
 
 ## Bumping the pair
 

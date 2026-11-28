@@ -21,6 +21,10 @@ groups:
       - alert: PostgresExporterAbsent
         # pg_up == 0 cannot fire when the exporter itself is dead: its series is then
         # ABSENT, not 0. absent() returns 1 exactly when no pg_up series exists.
+        # TUNABLE (like the two thresholds below): the expression has NO job matcher, because
+        # this module ships no Prometheus scrape config and the job label is the operator's
+        # choice. In a Prometheus that scrapes more than one postgres_exporter, another
+        # exporter's pg_up hides a dead one: scope it, e.g. absent(pg_up{job="<your job>"}).
         expr: absent(pg_up)
         for: 5m
         labels:
