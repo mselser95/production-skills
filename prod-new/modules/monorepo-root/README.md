@@ -78,15 +78,19 @@ constructs; dependency specs are an allow-list too (only the three spec forms be
 | database | none | `check-fast`, `verify`, `test` |
 
 One function decides "this unit has target T", used by the check and by `scripts/monorepo-run.sh`: for a service
-or database it asks make for its own verdict, `make -C <unit> -n <T>` with stdout and stderr captured. T is present
-only when make exits 0, does not say `Nothing to be done for T` or `T is up to date` (GNU make 3.81 and 4.x
-wordings; the `make[N]:` form of a sub-make counts as noise, so a recipe that forwards with `$(MAKE)` is a recipe),
-and prints at least one line that is not a `make: Entering/Leaving directory` notice. So a name only in `.PHONY`
-(with or without a `$(info)` banner) and an empty recipe are not targets. A target whose name is also a FILE in the
-unit directory, with no prerequisites and no `.PHONY`, makes make say "is up to date": it is reported missing, and
-the fix is `.PHONY: <target>`. A catch-all rule (`%:` or `.DEFAULT:`) answers any name, so a mandatory target could
-not be told from a forwarded one: a unit whose Makefile answers a random probe name is refused (`unit-target`,
-`catch-all rule: targets cannot be verified`), by the check and by the runner. For an app or package the function
+or database it reads make's RULE DATA BASE, never what make prints. One `make -C <unit> -pq -- .` per unit (all
+targets are answered from it) prints the data base make built from the Makefile; only the block after the LAST
+`# Make data base, printed on` line is read (a `$(info)` banner that imitates one comes before it), and only its
+`# Implicit Rules` and `# Files` sections. T is present when an entry for exactly `T:` (not under `# Not a target:`)
+has a `commands to execute (from ...)` (make 3.81) or `recipe to execute (from ...)` (4.x) marker followed by a
+non-empty recipe line. `-s`, `.SILENT` and `$(info)` banners do not change the data base, so a name only in `.PHONY`,
+`T: ;` and `T: other` without a recipe are not targets. A target whose name is also a FILE in the unit directory,
+without `.PHONY`, would be "up to date" and never run: it is reported missing, and the fix is `.PHONY: <target>`. A
+catch-all rule (`%:` or `.DEFAULT:` with a recipe) answers any name: with no explicit rule for T the unit is refused
+(`unit-target`, `catch-all rule: targets cannot be verified`), by the check and by the runner; an explicit rule for T
+wins, as in make. A make that prints no data base at all (not GNU make, stopped before reading the Makefile) makes
+the unit's targets unverifiable: RED, never "present"; a make that exits 2 (no Makefile, an error in it) leaves its
+targets missing. For an app or package the function
 reads `package.json` `scripts`. A unit that lacks a mandatory target makes the runner FAIL before any unit target is
 run, and `make check-fast` / `make verify` stop at the settings check first. A target that exists but does nothing
 (`verify: ; true`) cannot be judged by a tool and counts as present.
@@ -96,11 +100,19 @@ asserts it ran that many.
 
 ## Limits
 
-The check inspects units by asking make (`make -n`). That evaluates the unit Makefile: a parse-time `$(shell ...)`,
-a `+`-prefixed recipe line or a `$(MAKE)` line can still execute code. The root does not sandbox make. What it
-guarantees is narrower and true: no unit TARGET RECIPE is run for `check-fast`, `verify` or `test` when a mandatory
-target is missing. The units are the repository's own code and are trusted to the same degree `make check-fast`
-trusts them. Not proven: GNU make 4.x on a real Linux host (its wordings are asserted with a fake `make`).
+The check inspects each service/database unit with one `make -pq -- .`. Make parses the unit Makefile: a parse-time
+`$(shell ...)` runs, and make remakes a Makefile or included file that has a rule. No recipe line runs during the
+inspection, `+`-prefixed and `$(MAKE)` lines included (measured on GNU make 3.81 and pinned by a selftest case; a unit
+that declares the goal `.` phony and gives it a recipe is not covered). The root does not sandbox make: the units are the
+repository's own code and are trusted to the degree `make check-fast` trusts them. No unit TARGET RECIPE is run for
+`check-fast`, `verify` or `test` when a mandatory target is missing.
+
+Install scripts: `strictDepBuilds` and `onlyBuiltDependencies: []` govern DEPENDENCIES only. A workspace package's own
+`preinstall` / `postinstall` / `prepare` scripts are the repository's own code and DO run on a plain `pnpm install`.
+This module's root Makefile and root `package.json` have no install target (they only delegate to `monorepo-run.sh`);
+a human or CI that installs should pass `--ignore-scripts` (`pnpm install --frozen-lockfile --ignore-scripts`), as the
+live selftest does for its network installs.
+Not proven: GNU make 4.x on a real Linux host (its data base wording is asserted only with a hand-written fixture served by a fake `make`).
 
 ## Adding a unit
 

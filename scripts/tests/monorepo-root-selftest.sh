@@ -470,6 +470,22 @@ b2ok() { local out rc; : > "$LOG"; out="$(make -s -C "$2" verify 2>&1)"; rc=$?; 
 T1="$(mk2 info 'check-fast:\n\t@echo "x $@" >> "$(LOG)"\n$(info building orders)\n.PHONY: check-fast verify\n')"
 b2red "a \$(info) banner + .PHONY and no verify rule: root make verify is RED, no unit recipe ran" "$T1" "svc-x: Makefile has no verify target"
 T2="$(mk2 phony 'check-fast:\n\t@echo "x $@" >> "$(LOG)"\n.PHONY: check-fast verify\n')"
+# review 3, B1: a Makefile that silences make's own verdict (-s / .SILENT) and has no verify RULE is still RED
+T1s="$(mk2 silent 'MAKEFLAGS += -s\n$(info building orders)\ncheck-fast:\n\t@echo "x $@" >> "$(LOG)"\n.PHONY: check-fast verify\n')"
+b2red "round 3: MAKEFLAGS += -s + \$(info) + .PHONY and no verify rule: root make verify is RED" "$T1s" "svc-x: Makefile has no verify target"
+T1t="$(mk2 silent2 '.SILENT:\n$(info building orders)\ncheck-fast:\n\t@echo "x $@" >> "$(LOG)"\n.PHONY: check-fast verify\n')"
+b2red "round 3: the .SILENT: variant is RED too" "$T1t" "svc-x: Makefile has no verify target"
+T3s="$(mk2 realsilent 'MAKEFLAGS += -s\n'"$RULE"'$(info make: '"'"'verify'"'"' is up to date.)\n.PHONY: check-fast verify\n')"
+b2ok "a real verify rule with -s and the old false-RED banner (\$(info make: 'verify' is up to date.)) is present (control)" "$T3s"
+# review 3, B2: what inspection executes. The unit's check-fast recipe has a `+` line and a $(MAKE) line, the top
+# level a $(shell); verify is missing so the root refuses. The docs say: the Makefile is parsed (parse-time
+# $(shell) runs), no recipe line runs.
+TM="$(mk2 marker 'MAKEFLAGS += -s\n$(shell touch PARSEMARK)\n.PHONY: check-fast verify sub\ncheck-fast:\n\t+touch PLUSMARK\n\t$(MAKE) sub\nsub:\n\ttouch SUBMARK\n')"
+: > "$LOG"; out="$(make -s -C "$TM" verify 2>&1)"; rc=$?
+U="$TM/services/x"
+[[ $rc -ne 0 && "$out" == *"svc-x: Makefile has no verify target"* && -e "$U/PARSEMARK" && ! -e "$U/PLUSMARK" && ! -e "$U/SUBMARK" ]] \
+  && pass "inspection with a mandatory target missing: the parse-time \$(shell) ran, no recipe line ran (a + line and a \$(MAKE) line included)" \
+  || fail "inspection markers" "rc=$rc parse=$([[ -e $U/PARSEMARK ]] && echo yes) plus=$([[ -e $U/PLUSMARK ]] && echo yes) sub=$([[ -e $U/SUBMARK ]] && echo yes) $(head -c 200 <<<"$out")"
 T3="$(mk2 real "$RULE"'$(info building orders)\n.PHONY: check-fast verify\n')"
 b2ok "the same Makefile with a real verify rule (banner, .PHONY): present, runs (control)" "$T3"
 T4="$(mk2 file "$RULE")"
@@ -478,20 +494,81 @@ b2red "a catch-all %: rule is RED (targets cannot be verified), no recipe ran" "
 T6="$(mk2 default '.DEFAULT:\n\t@echo "fwd $@" >> "$(LOG)"\n')"
 : > "$LOG"; out="$(bash "$T5/scripts/monorepo-run.sh" verify 2>&1)"; rc=$?
 [[ $rc -eq 2 && "$out" == *"catch-all rule"* && ! -s "$LOG" ]] && pass "the runner alone refuses a catch-all unit, no recipe ran" || fail "runner catch-all" "rc=$rc $(head -c 200 <<<"$out")"
-# make 4.x wordings, asserted with a FAKE make on PATH so a Linux host is covered without GNU make 4
+# make 4.x data base, asserted with a FAKE make on PATH so a Linux host is covered without GNU make 4. The data base
+# below is HAND-WRITTEN from the documented 4.x format (ASCII quotes, "recipe to execute"); it is NOT a capture of a
+# real GNU make 4. FAKE_MAKE_MODE: v4 (check-fast has a recipe, verify is only .PHONY) | v4both | nodb | rc2
 FB="$tmp/fakebin"; mkdir -p "$FB"
 cat > "$FB/make" <<'E'
 #!/usr/bin/env bash
-# fake make 4.x: `make -C <dir> -n <target>` in 4.x wording (ASCII quotes). FAKE_MAKE_MODE: top | sub | present
-t="${*: -1}"
-case "$t" in __monorepo_probe_*) echo "make: *** No rule to make target '$t'.  Stop." >&2; exit 2;; esac
+# fake make: `make -C <dir> -pq -- .`
 echo "make: Entering directory '$2'"
 case "${FAKE_MAKE_MODE:-}" in
-  present) echo "echo $t" ;;
-  top) case "$t" in check-fast) echo "make: Nothing to be done for 'check-fast'." ;; *) echo "make: '$t' is up to date." ;; esac ;;
-  sub) case "$t" in check-fast) echo "make[1]: Nothing to be done for 'check-fast'." ;; *) echo "make[1]: '$t' is up to date." ;; esac ;;
+  nodb) echo "this is not GNU make"; exit 0 ;;
 esac
+cat <<'DB'
+# GNU Make 4.3
+# Built for x86_64-pc-linux-gnu
+
+# Make data base, printed on Thu Jan  1 00:00:00 2026
+
+# Variables
+
+# automatic
+<D = $(patsubst %/,%,$(dir $<))
+
+# Implicit Rules
+
+%.o: %.c
+#  recipe to execute (built-in):
+	$(COMPILE.c) $(OUTPUT_OPTION) $<
+
+# Files
+
+# Not a target:
+.c.o:
+#  Builtin rule
+#  recipe to execute (built-in):
+	$(COMPILE.c) $(OUTPUT_OPTION) $<
+
+check-fast:
+#  Phony target (prerequisite of .PHONY).
+#  Implicit rule search has not been done.
+#  File does not exist.
+#  File has not been updated.
+#  recipe to execute (from 'Makefile', line 3):
+	@echo check-fast
+	
+
+DB
+if [[ "${FAKE_MAKE_MODE:-}" == v4both ]]; then cat <<'DB'
+verify:
+#  Phony target (prerequisite of .PHONY).
+#  Implicit rule search has not been done.
+#  File does not exist.
+#  File has not been updated.
+#  recipe to execute (from 'Makefile', line 5):
+	@echo verify
+	
+
+DB
+else cat <<'DB'
+verify:
+#  Phony target (prerequisite of .PHONY).
+#  Implicit rule search has not been done.
+#  File does not exist.
+#  File has not been updated.
+
+DB
+fi
+cat <<'DB'
+# files hash-table stats:
+# Load=2/1024=0%, Rehash=0, Collisions=0/2=0%
+# Finished Make data base on Thu Jan  1 00:00:00 2026
+
+DB
 echo "make: Leaving directory '$2'"
+[[ "${FAKE_MAKE_MODE:-}" == rc2 ]] && exit 2
+exit 0
 E
 chmod +x "$FB/make"
 # symlinked unit inside the repo, and its control (two real directories)
@@ -501,14 +578,14 @@ M7="$tmp/b3g"; mkfake "$M7"; svc_make "$M7/services/a" a "check-fast verify"; ln
 # git: a tracked node_modules/
 G="$tmp/gt"; cp -R "$B" "$G"; mkdir -p "$G/node_modules/x"; printf '{}' > "$G/node_modules/x/package.json"; git -C "$G" init -q 2>/dev/null
 # the in-process matrix (module under test = the assembled copy of it)
-"$py" -B - "$D/scripts/monorepo_check.py" "$W" "$T2" "$T4" "$T6" "$FB" "$M7" "$G" <<'P' > "$tmp/matrix.out" 2>&1
+"$py" -B - "$D/scripts/monorepo_check.py" "$W" "$T2" "$T4" "$T6" "$FB" "$M7" "$G" "$tmp" <<'P' > "$tmp/matrix.out" 2>&1
 import importlib.util, json, os, re, shutil, subprocess, sys
-mod, W, T2, T4, T6, FB, M7, G = sys.argv[1:9]
+mod, W, T2, T4, T6, FB, M7, G, TMP = sys.argv[1:10]
 spec = importlib.util.spec_from_file_location("mc", mod); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 def say(ok, name, detail=""):
     print(("ok   " if ok else "FAIL ") + name + ("" if ok else " -- " + detail[:300].replace("\n", " | ")))
 def run(root):
-    m._catch_all.clear()
+    m._db_cache.clear()
     return ["%s:%d: %s %s" % f for f in m.check(root)]
 def has(lines, pat): return any(re.search(pat, l) for l in lines)
 def edit(rel, fn, root=W):
@@ -548,14 +625,70 @@ os.remove(os.path.join(T4, "services/x/verify")); out = run(T4)
 say(out == [], "the same unit without the file: present (control)", "\n".join(out))
 out = run(T6)
 say(has(out, "unit-target unit svc-x: Makefile catch-all rule .*targets cannot be verified"), "a .DEFAULT: rule is RED too", "\n".join(out))
-# make 4.x wordings through a fake make on PATH
+# review 3: "unit has target T" is read from make's rule data base (`make -pq -- .`), not from what make prints.
+# One scenario table: Makefile shape -> state of `verify` (check-fast always has a real rule).
+CF = "check-fast:\n\t@echo cf\n"
+RV = "verify:\n\t@echo v\n"
+UD = os.path.join(TMP, "units"); os.makedirs(UD)
+def state(name, text, files=(), target="verify", extra=None):
+    d = os.path.join(UD, name); os.makedirs(d)
+    if text is not None: open(os.path.join(d, "Makefile"), "w").write(text)
+    for f in files: open(os.path.join(d, f), "w").close()
+    for f, body in (extra or {}).items(): open(os.path.join(d, f), "w").write(body)
+    m._db_cache.clear(); return m.make_target_state(d, target)
+SCEN = [
+    ("round 3: MAKEFLAGS += -s + $(info) + .PHONY only", "MAKEFLAGS += -s\n$(info banner)\n.PHONY: check-fast verify\n" + CF, "absent"),
+    (".SILENT: + $(info) + .PHONY only", ".SILENT:\n$(info banner)\n.PHONY: check-fast verify\n" + CF, "absent"),
+    ("round 2: a $(info) banner + .PHONY only", "$(info building orders)\n.PHONY: check-fast verify\n" + CF, "absent"),
+    (".PHONY only", ".PHONY: check-fast verify\n" + CF, "absent"),
+    ("a real rule with -s", "MAKEFLAGS += -s\n.PHONY: verify\n" + RV, "present"),
+    ("a real rule with .SILENT", ".SILENT:\n.PHONY: verify\n" + RV, "present"),
+    ("a real rule with a banner", "$(info building orders)\n" + RV, "present"),
+    ("a real rule with $(info make: 'verify' is up to date.) (the banner that used to cause a false RED)", "$(info make: 'verify' is up to date.)\n" + RV, "present"),
+    ("verify: ; (an explicit empty recipe)", "verify: ;\n", "absent"),
+    ("verify: other with no recipe", "verify: other\nother:\n\t@echo o\n", "absent"),
+    ("check-fast verify: on one line", "check-fast verify:\n\t@echo x\n", "present"),
+    ("a double-colon rule", "verify::\n\t@echo v\n", "present"),
+    ("a rule in an included file", "include rules.mk\n", "present"),
+    ("a file named verify, no .PHONY", RV, "idle"),
+    ("a file named verify, with .PHONY", ".PHONY: verify\n" + RV, "present"),
+    ("a catch-all %: with a recipe", "%:\n\t@echo fwd\n", "catch-all"),
+    ("a catch-all %: ; (empty recipe)", "%: ;\n", "absent"),
+    (".DEFAULT: with a recipe", ".DEFAULT:\n\t@echo fwd\n", "catch-all"),
+    ("an explicit rule beside a catch-all: the explicit rule wins", RV + "%:\n\t@echo fwd\n", "present"),
+    ("a FAKE data base printed through $(info) claiming verify has commands", "TAB := $(shell printf '\\t')\n$(info # Make data base, printed on Mon Jan  1 2026)\n$(info # Files)\n$(info verify:)\n$(info #  commands to execute (from `Makefile', line 1):)\n$(info $(TAB)@evil)\n" + CF, "absent"),
+    ("no Makefile", None, "absent"),
+    ("a Makefile with a syntax error", "this is not a makefile\n", "absent"),
+]
+for i, (name, text, want) in enumerate(SCEN):
+    files = ("verify",) if name.startswith("a file named verify") else ()
+    got = state("u%d" % i, text, files, extra={"rules.mk": RV} if "included" in name else None)
+    say(got == want, "make data base: %s -> %s" % (name, want), "got %s" % got)
+# the same function through the check: an unverifiable unit is RED, never "present"
 path0 = os.environ["PATH"]; os.environ["PATH"] = FB + os.pathsep + path0
-for mode, name in (("top", "make 4.x wording ('T' is up to date / Nothing to be done for 'T')"), ("sub", "make 4.x recursive wording (make[1]: ...)")):
+for mode, want, name in (("v4", ("no verify target",), "a hand-written make 4.x data base (ASCII quotes, `recipe to execute`): check-fast present, verify (only .PHONY) missing"),
+                         ("nodb", ("no rule data base",), "a make that prints no data base (not GNU make) is RED: targets cannot be verified"),
+                         ("rc2", ("no check-fast target", "no verify target"), "a make that exits 2 (no Makefile / an error) leaves both mandatory targets missing")):
     os.environ["FAKE_MAKE_MODE"] = mode; out = run(T2)
-    say(has(out, "no check-fast target") and has(out, "no verify target"), name + ": both mandatory targets missing", "\n".join(out))
-os.environ["FAKE_MAKE_MODE"] = "present"; out = run(T2)
-say(out == [], "the fake make with directory notices and a command line: both present (control)", "\n".join(out))
+    okk = all(has(out, w) for w in want) and (mode != "v4" or not has(out, "no check-fast target")) and (mode != "nodb" or not has(out, "no verify target"))
+    say(okk, name, "\n".join(out))
+os.environ["FAKE_MAKE_MODE"] = "nodb"
+r = subprocess.run([sys.executable, "-B", mod, "units", T2, "verify"], capture_output=True, text=True)
+say(r.returncode == 2 and "no rule data base" in r.stderr and r.stdout == "", "the runner's `units` refuses a make that prints no data base (rc 2, no unit listed)", r.stdout + r.stderr)
+os.environ["FAKE_MAKE_MODE"] = "v4both"; out = run(T2)
+say(out == [], "the hand-written 4.x data base with a recipe for both targets: both present (control; real GNU make 4 is NOT validated)", "\n".join(out))
 os.environ["PATH"] = path0; os.environ.pop("FAKE_MAKE_MODE")
+# a manifest that does not parse: ONE pkg-parse finding, no stray-package-json and no "no test script" besides
+for label, raw in (("a trailing comma", '{"name":"a","version":"1.0.0","scripts":{"test":"true",}}'), ("a BOM", "\ufeff" + '{"name":"a","version":"1.0.0","scripts":{"test":"true"}}')):
+    pj = os.path.join(W, "packages/a/package.json"); old = open(pj, encoding="utf-8").read()
+    open(pj, "w", encoding="utf-8").write(raw); out = run(W); open(pj, "w", encoding="utf-8").write(old)
+    mine = [l for l in out if l.startswith("packages/a/package.json:")]
+    say(len(mine) == 1 and "pkg-parse" in mine[0] and len(out) == 1, "package.json with %s: exactly ONE finding (pkg-parse), no stray / no-test-script follow-ups" % label, "\n".join(out))
+# make remakes a Makefile or an included file that has a rule: that is the one other thing inspection executes
+rd = os.path.join(UD, "remake"); os.makedirs(rd)
+open(os.path.join(rd, "Makefile"), "w").write("-include gen.mk\ngen.mk:\n\ttouch gen.mk\n" + RV)
+m._db_cache.clear(); m.make_target_state(rd, "verify")
+say(os.path.exists(os.path.join(rd, "gen.mk")), "inspection remakes an included file that has a rule (make's own makefile remaking runs; documented)")
 # warnings
 out = run(M7)
 say(has(out, r"^repo.yaml:\d+: unit-path unit svc-b: path services/b: services/b is a symlink"), "an in-repo unit symlink (services/b -> a) is refused by the check", "\n".join(out))
