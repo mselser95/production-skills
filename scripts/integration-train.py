@@ -35,7 +35,12 @@ What this tool does to your repository:
  (itrain-*/w<k>/tree) used by that one run only, with a fresh TMPDIR (itrain-*/w<k>/tmp)
  and stdin on /dev/null; HOME stays yours, so a verify must not keep state under HOME
  or in absolute paths (one that climbs two levels up reaches the shared private root).
- A verify child that calls setsid survives a timeout (the tool cannot see it). SIGKILL
+ A verify must not write outside its worktree and its TMPDIR: a write into the shared
+ private git directory (config, refs/ incl. refs/stash, logs/, packed-refs, info/, hooks/,
+ a new top-level file) is DETECTED - the private repository is digested before and after
+ each verify run and a difference voids the run (exit 2: "verify changed the private
+ repository: config"), nothing lands; writes elsewhere (HOME, absolute paths) are NOT
+ detected. A verify child that calls setsid survives a timeout (the tool cannot see it). SIGKILL
  of the tool leaves exactly one itrain-* directory under TMPDIR and nothing in your
  repository; a later start prints a one-line notice for such directories older than a
  day (it never deletes them). A caller that is a partial clone or a shallow clone is
@@ -77,16 +82,30 @@ Algorithm (one batch per invocation):
     first half and still test the second. A single candidate red alone is
     'ejected: red', its last 20 output lines in a file.
  6. The survivors are joined and verified again unless that exact set already
-    passed. Red there although every member passed in a group: find the smallest
-    red prefix by halving, name the minimal failing set, eject the LATER member
-    as 'interaction', repeat. A tree never verified green never lands.
- 7. Recovery (default; --no-recover disables it): for each member ejected
-    'inferred', in input order, verify (landed set + that member, input order)
-    once. Green: the member JOINS and that set is the verified landed set. Red:
-    it stays ejected, now PROVEN (the 'inferred' flag is dropped; with a
-    non-empty landed set the record gains "red_with": the landed set, because
-    only "red together with them" was run, never the member alone). Cost: one run per inferred
-    member, counted in 'runs'.
+    passed. Red there although every member passed in a group: search (by halving,
+    starting from prefixes a run already measured) for the earliest red prefix, shrink
+    its other members greedily, and eject the LATER member. The search only decides
+    which runs to make. What is CLAIMED comes only from runs: "with": [S] and
+    "verified_red": [S + member] name a set it was verified red with (a run of exactly
+    that set, joined on the base, was red; it is not shown to be the smallest such set and a different
+    partner may exist); the reason is 'interaction' only when the member ALONE was also
+    run and was green ("verified_green_alone": true). A member run alone and red is
+    'red' (and carries "verified_red": [member]); a red record WITHOUT "inferred" and
+    WITHOUT "red_with" is therefore a statement about the member alone. A tree never
+    verified green never lands.
+ 7. Recovery (default; --no-recover disables it, and then nothing is retried): every
+    member whose ejection is not a property of itself alone - 'inferred' (its own run was
+    skipped), 'interaction', or red with "red_with" - gets ONE run of (landed set +
+    member, input order), in input order, against the landed set as it grows. Green: the
+    member JOINS and that run is the verification of the new landed tree. Red: it stays
+    ejected and its record is REPLACED by what that run measured: "red_with": [landed
+    set at that moment] (or 'interaction' with "with" when the member alone is known
+    green), "verified_red" the set that was run; with an empty landed set the run IS the
+    member alone. A join conflict leaves it 'conflict'. A candidate run alone and red is
+    never retried there, but see below. Cost: at most one run per retried member, counted in 'runs'.
+    After those retries, every member run ALONE and red (no conflict) also gets ONE run against the
+    final landed set (a fixer may have landed): green joins; red keeps it out with "red_with" the
+    landed set, "verified_red" the run set and "verified_red_alone": true.
  8. Delivery (only with --keep, only after the final green verification): the landed
     commits are packed in the private repository (`pack-objects --revs --stdout`),
     stored in yours (`index-pack --stdin`) and the branch is created with
@@ -118,6 +137,10 @@ tool refuses (exit 2): pass --repo.
 Limits: verify output goes to a file; only the last 64 KiB / 20 lines are kept in memory;
 --flaky-rerun regexes match LINE BY LINE over the file (never across lines; a line longer
 than 64 KiB is matched in 64 KiB pieces).
+Content git itself refuses to check out (exit 128: a .git entry, a symlinked .gitmodules) ejects
+only that candidate: 'ejected: uncheckoutable', git's first error line
+(control characters escaped) in "error". A private root that cannot be removed is named on
+stderr and in the JSON ("leftover"); the exit code is unchanged.
 Exit: 0 all admitted landed, 1 something ejected, 2 usage/git/delivery/unexpected error,
       3 nothing was verified, 128+N after SIGHUP/SIGINT/SIGTERM (129/130/143). The last
       stdout line is one JSON object; on an unexpected exception it carries "error".
@@ -128,6 +151,26 @@ class Fatal(Exception):
     pass
 
 
+class GitFail(Fatal):
+    """A git call that exited with a status the caller did not expect; .line = git's first error line."""
+    def __init__(self, msg, line="", rc=None, sub=""):
+        Fatal.__init__(self, msg)
+        self.line = line
+        self.rc = rc
+        self.sub = sub
+
+
+def esc(s):
+    """Control characters escaped the way the JSON escapes them: a human-readable line never
+    carries a raw ESC, newline or C1 control."""
+    return re.sub("[\x00-\x1f\x7f-\x9f]",
+                  lambda m: "\\u007f" if m.group(0) == "\x7f" else json.dumps(m.group(0))[1:-1], str(s))
+
+
+def say(msg):
+    print(esc(msg))
+
+
 MIN_GIT = (2, 31)
 BATCH_CAP = 64
 TAIL_BYTES = 65536
@@ -136,7 +179,7 @@ TIMEOUT_CAP = 7 * 86400
 IDENT_NAME = "integration-train"
 IDENT_EMAIL = "train@localhost"
 SIGS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
-QUIET = ("conflict", "empty", "unrelated", "unrepresentable-on-this-filesystem")
+QUIET = ("conflict", "empty", "unrelated", "unrepresentable-on-this-filesystem", "uncheckoutable")
 STALE_SECONDS = 86400
 UNREP = "unrepresentable-on-this-filesystem"
 
@@ -189,28 +232,43 @@ def nul_names(text):
     return set(n for n in text.split("\0") if n)
 
 
+def clear_flags(path):
+    """Drop BSD file flags (macOS `chflags uchg`) that make unlink fail; never follows a symlink."""
+    fn = getattr(os, "lchflags", None)
+    if fn is not None:
+        try:
+            fn(path, 0)
+        except OSError:
+            pass
+
+
 def force_remove(path):
     """Remove `path` entirely: first make every directory under it owner-traversable (never
     following a symlink), then rmtree; retried once. A symlink is unlinked, never entered."""
     for _ in (0, 1):
         if os.path.islink(path) or not os.path.isdir(path):
+            clear_flags(path)
             try:
                 os.unlink(path)
             except OSError:
                 pass
         else:
+            clear_flags(path)
             try:
                 os.chmod(path, 0o700)
             except OSError:
                 pass
-            for root, dirs, _files in os.walk(path, followlinks=False):
+            for root, dirs, files in os.walk(path, followlinks=False):
                 for d in dirs:
                     full = os.path.join(root, d)
                     if not os.path.islink(full):
+                        clear_flags(full)
                         try:
                             os.chmod(full, 0o700)
                         except OSError:
                             pass
+                for f in files:
+                    clear_flags(os.path.join(root, f))
             shutil.rmtree(path, ignore_errors=True)
         if not os.path.lexists(path):
             return
@@ -258,6 +316,12 @@ class Train:
         self.fold = None
         self.names = {}
         self.base_sha = ""
+        self.delivered = ""  # the branch name once delivery completed (a late signal still reports it)
+        self.pending = None  # (branch, sha) while update-ref may be in flight
+        self.landed_out = []
+        self.commits_out = {}
+        self.batch_n = 0
+        self.json_done = False
 
     # ---- plumbing -------------------------------------------------------
     def make_root(self):
@@ -332,7 +396,8 @@ class Train:
         p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
         if p.returncode not in ok:
             first = (p.stderr.strip().split("\n") or [""])[0][:200]
-            raise Fatal("git %s failed (exit %d): %s" % (sub, p.returncode, first))
+            raise GitFail("git %s failed (exit %d): %s" % (sub, p.returncode, first), first,
+                          p.returncode, sub)
         return p
 
     def check_git_version(self):
@@ -612,6 +677,17 @@ class Train:
                 else:
                     self.eject(cid, "conflict", ["does not apply cleanly on the joined tree"])
                 continue
+            except GitFail as e:
+                # git itself (exit 128, "fatal") refuses to check this candidate's content out
+                # (measured: a tree holding a .git entry, a symlinked .gitmodules): this candidate
+                # alone, never the train. Any other git failure stays fatal (exit 2).
+                if e.rc != 128 or e.sub not in ("cherry-pick", "merge", "commit"):
+                    raise
+                self.drop_worktree(wt)
+                wt = self.new_worktree(last)
+                line = esc(e.line)
+                self.eject(cid, "uncheckoutable", [line], {"error": line})
+                continue
             batch.append(cid)
             self.commits[tuple(batch)] = sha
             last = sha
@@ -637,8 +713,8 @@ class Train:
         if extra:
             rec.update(extra)
         self.ejected.append(rec)
-        print("ejected: %s (%s)%s%s" % (cid, why, " inferred" if extra and extra.get("inferred") else "",
-                                        " log=" + log if log else ""))
+        say("ejected: %s (%s)%s%s" % (cid, why, " inferred" if extra and extra.get("inferred") else "",
+                                     " log=" + log if log else ""))
 
     # ---- join -----------------------------------------------------------
     def kill_group(self, p):
@@ -669,6 +745,41 @@ class Train:
                     if r.search(line):
                         return r.pattern
 
+    SNAP_TREES = ("config", "packed-refs", "refs", "logs", "info", "hooks")
+
+    def priv_snapshot(self):
+        """Digest, per component, of the private repository's state a verify could use to carry
+        a result from one run to the next. Excludes objects/ and worktrees/ (the tool's own)."""
+        import hashlib
+        out = {}
+        for comp in self.SNAP_TREES:
+            h = hashlib.sha256()
+            base = os.path.join(self.priv, comp)
+            for root, dirs, files in os.walk(base, followlinks=False):
+                dirs.sort()
+                for n in sorted(files + [d for d in dirs if os.path.islink(os.path.join(root, d))]):
+                    full = os.path.join(root, n)
+                    h.update(os.path.relpath(full, base).encode("utf-8", "surrogateescape") + b"\0")
+                    try:
+                        if os.path.islink(full):
+                            h.update(b"L" + os.readlink(full).encode("utf-8", "surrogateescape"))
+                        else:
+                            with open(full, "rb") as fh:
+                                h.update(fh.read())
+                    except OSError as e:
+                        h.update(b"E%d" % (e.errno or 0))
+                    h.update(b"\0")
+                for d in dirs:
+                    h.update(b"D" + os.path.relpath(os.path.join(root, d), base).encode("utf-8", "surrogateescape") + b"\0")
+            if os.path.isfile(base):
+                with open(base, "rb") as fh:
+                    h.update(fh.read())
+            h.update(b"X" if os.path.lexists(base) else b"-")
+            out[comp] = h.hexdigest()
+        names = sorted(n for n in os.listdir(self.priv) if n not in ("objects", "worktrees"))
+        out["top-level"] = hashlib.sha256("\0".join(names).encode("utf-8", "surrogateescape")).hexdigest()
+        return out
+
     def exec_once(self, wt, ids):
         self.n_exec += 1
         self.runs += 1
@@ -677,6 +788,7 @@ class Train:
         out = os.path.join(self.tmp, "out%d.log" % self.n_exec)
         vtmp = os.path.join(os.path.dirname(wt), "tmp")  # this run's own TMPDIR, removed with it
         os.mkdir(vtmp)
+        snap = self.priv_snapshot()
         t0 = time.time()
         reason = None
         env = dict(self.venv)
@@ -697,12 +809,17 @@ class Train:
                 self.kill_group(p)
                 p.poll()
         dt = time.time() - t0
+        after = self.priv_snapshot()
+        changed = [k for k in snap if snap[k] != after[k]]
+        if changed:
+            raise Fatal("verify changed the private repository: %s (this run is void; nothing lands)"
+                        % ", ".join(changed))
         tail = self.tail_of(out)
         ok = rc == 0 and reason is None
         if reason == "timeout":
             tail = (tail + ["TIMEOUT after %ss" % self.a.verify_timeout])[-TAIL_LINES:]
-        print("run %d: [%s] %s %.2fs" % (self.runs, ",".join(ids), "green" if ok else
-                                         "red (%s)" % (reason or "exit %d" % rc), dt))
+        say("run %d: [%s] %s %.2fs" % (self.runs, ",".join(ids), "green" if ok else
+                                       "red (%s)" % (reason or "exit %d" % rc), dt))
         return ok, tail, reason, out
 
     def run_clean(self, sha, ids):
@@ -713,6 +830,19 @@ class Train:
             return self.exec_once(wt, ids)
         finally:
             self.drop_worktree(wt)
+
+    def ran(self, ids):
+        """What a RUN measured for exactly this id set: True green, False red, None never run (a
+        join conflict is not a run)."""
+        e = self.cache.get(tuple(ids))
+        if e is None or e[2] == "conflict":
+            return None
+        return e[0]
+
+    def red(self, ids):
+        """verify(ids) and report only a RUN-measured red."""
+        self.verify(ids)
+        return self.ran(ids) is False
 
     def join(self, ids):
         """The commit holding base + ids (input order), joined in a temp worktree."""
@@ -747,7 +877,7 @@ class Train:
         if not ok and reason is None and self.a.flaky_rerun:
             matched = self.flaky_match(log)
             if matched is not None:
-                print("rerun: matched %s" % matched)
+                say("rerun: matched %s" % matched)
                 os.unlink(log)
                 ok, tail, reason, log = self.run_clean(sha, ids)
         os.unlink(log)
@@ -758,27 +888,36 @@ class Train:
         return ok
 
     # ---- bisection ------------------------------------------------------
-    def bisect(self, items, mode):
-        """mode: u unknown, p red just proven by a run, i red inferred (run skipped)."""
+    def bisect(self, items, mode, proof=None):
+        """mode: u unknown, p red just proven by a run, i red inferred (run skipped). `proof` is the
+        set a RUN last measured red that contains `items` (what an inferred ejection rests on)."""
         if mode == "u":
             if self.verify(items):
                 return list(items), []
             mode = "p"
+            proof = list(items)
         if len(items) == 1:
             tail, reason = self.last_red.get(items[0], ([], None))
-            extra = {"inferred": True} if mode == "i" else None
+            if reason == "conflict":
+                extra = None
+            elif mode == "i":
+                extra = {"inferred": True, "verified_red": list(proof or items)}
+            else:
+                extra = {"verified_red": [items[0]]}
             self.eject(items[0], reason or "red", tail, extra)
             return [], list(items)
         if mode == "i":
-            print("skip: own run of [%s] (second half known red)" % ",".join(items))
+            say("skip: own run of [%s] (second half known red)" % ",".join(items))
         h = (len(items) + 1) // 2
         first, second = items[:h], items[h:]
-        g1, b1 = self.bisect(first, "u")
+        g1, b1 = self.bisect(first, "u", proof)
         mode2 = "i" if not b1 else "u"
-        g2, b2 = self.bisect(second, mode2)
+        g2, b2 = self.bisect(second, mode2, proof)
         return g1 + g2, b1 + b2
 
     def final_join(self, survivors):
+        """Every claim made here rests on a RUN of exactly the set named (see `ran`); the search
+        for the member to eject only decides WHICH runs to make, never what is claimed."""
         survivors = list(survivors)
         while survivors:
             ok = self.verify(survivors)
@@ -786,51 +925,110 @@ class Train:
                 return survivors
             if len(survivors) == 1:
                 tail, reason = self.cache[tuple(survivors)][1:]
-                self.eject(survivors[0], reason or "red", tail)
+                self.eject(survivors[0], reason or "red", tail,
+                           None if reason == "conflict" else {"verified_red": list(survivors)})
                 return []
-            lo, hi = 1, len(survivors)
+            n = len(survivors)
+            lo, hi = 0, n
+            for k in range(1, n):  # bounds come from runs already made, never assumed
+                r = self.ran(survivors[:k])
+                if r is True:
+                    lo = k
+                elif r is False and k < hi:
+                    hi = k
             while hi - lo > 1:
                 mid = (lo + hi) // 2
-                if self.verify(survivors[:mid]):
-                    lo = mid
-                else:
+                if self.red(survivors[:mid]):
                     hi = mid
+                else:
+                    lo = mid
             m = survivors[hi - 1]
             core = list(survivors[:hi - 1])
             for e in list(core):
                 trial = [x for x in core if x != e] + [m]
-                if not self.verify(trial):
+                if self.red(trial):
                     core = [x for x in core if x != e]
             tail = self.cache[tuple(core + [m])][1]
-            if core:
-                print("interaction: %s fails together with %s; ejecting the later one (%s)"
-                      % (m, ",".join(core), m))
-                self.eject(m, "interaction", tail, {"with": core})
+            alone = self.ran([m])
+            if core and alone is None:
+                self.verify([m])
+                alone = self.ran([m])
+            if alone is False:  # the member alone was RUN red: a property of the candidate itself
+                at = self.cache[(m,)]
+                self.eject(m, at[2] or "red", at[1], {"verified_red": [m]})
+            elif alone is True:
+                say("interaction: %s is green alone and red together with %s; ejecting the later one (%s)"
+                    % (m, ",".join(core), m))
+                self.eject(m, "interaction", tail, {"with": core, "verified_red": core + [m],
+                                                    "verified_green_alone": True})
             else:
-                self.eject(m, "red", tail)
+                self.eject(m, "red", tail, {"red_with": core, "verified_red": core + [m]})
             survivors = [x for x in survivors if x != m]
         return survivors
 
+    @staticmethod
+    def retryable(rec):
+        """An ejection whose label is not a property of the candidate ALONE."""
+        return bool(rec.get("inferred")) or rec["why"] == "interaction" or "red_with" in rec
+
+    def alone_red(self, rec):
+        """An ejection that rests on the member's OWN run, red, not yet retried with the landed set."""
+        return (rec["why"] == "red" and not rec.get("inferred") and "red_with" not in rec
+                and rec.get("verified_red") == [rec["id"]])
+
     def recover(self, landed):
-        """Give every member ejected 'inferred' one verified chance to join the landed set."""
+        """Every member ejected for a reason that is not a property of itself alone gets ONE run as
+        (landed set + member): green joins (that run IS the verification of the new landed tree);
+        red keeps it out and its record is REPLACED by what that run measured."""
         if self.a.no_recover:
             return landed
         order = {cid: i for i, cid in enumerate(self.a.candidates)}
-        for rec in sorted([e for e in self.ejected if e.get("inferred")], key=lambda e: order[e["id"]]):
-            trial = sorted(landed + [rec["id"]], key=lambda x: order[x])
-            if self.verify(trial):
+        for rec in sorted([e for e in self.ejected if self.retryable(e)], key=lambda e: order[e["id"]]):
+            cid = rec["id"]
+            trial = sorted(landed + [cid], key=lambda x: order[x])
+            self.verify(trial)
+            res = self.ran(trial)
+            for k in ("inferred", "with", "red_with", "verified_red", "verified_green_alone", "error"):
+                rec.pop(k, None)
+            if res is True:
                 landed = trial
                 self.ejected.remove(rec)
-                print("recovered: %s joins the landed set (verified green together)" % rec["id"])
-            elif self.cache[tuple(trial)][2] == "conflict":
-                print("recover: %s does not join the landed set; stays ejected (inferred)" % rec["id"])
+                say("recovered: %s joins the landed set (verified green together)" % cid)
+            elif res is None:
+                rec["why"] = "conflict"
+                say("recover: %s does not join the landed set; stays ejected (conflict)" % cid)
             else:
-                # red WITH the landed set is proven; red alone is not (no run of it alone
-                # exists), so a non-empty landed set is recorded as "red_with"
-                rec.pop("inferred", None)
-                if landed:
+                if not landed:
+                    rec["why"] = self.cache[tuple(trial)][2] or "red"
+                    rec["verified_red"] = trial
+                elif self.ran([cid]) is True:
+                    rec["why"] = "interaction"
+                    rec["with"] = list(landed)
+                    rec["verified_red"] = trial
+                    rec["verified_green_alone"] = True
+                else:
+                    rec["why"] = "red"
                     rec["red_with"] = list(landed)
-                print("proven: %s is red together with the landed set" % rec["id"])
+                    rec["verified_red"] = trial
+                say("proven: %s is red together with the landed set" % cid)
+        # Item 0: a member run alone and red may be a fixer's victim (a later-landing member
+        # repairs it). Once each, in input order, against the landed set as it stands NOW.
+        for rec in sorted([e for e in self.ejected if self.alone_red(e)], key=lambda e: order[e["id"]]):
+            cid = rec["id"]
+            if not landed:
+                break
+            trial = sorted(landed + [cid], key=lambda x: order[x])
+            self.verify(trial)
+            res = self.ran(trial)
+            if res is True:
+                landed = trial
+                self.ejected.remove(rec)
+                say("recovered: %s (red alone) joins the landed set (verified green together)" % cid)
+            elif res is False:
+                rec["red_with"] = list(landed)
+                rec["verified_red"] = trial
+                rec["verified_red_alone"] = True
+                say("proven: %s (red alone) is also red together with the landed set" % cid)
         return landed
 
     # ---- driver ---------------------------------------------------------
@@ -894,12 +1092,19 @@ class Train:
                      stdout=fh)
         with open(packf, "rb") as fh:
             self.git("index-pack", "--stdin", caller="gitdir", stdin=fh)
+        self.pending = (branch, sha)  # a signal INSIDE update-ref may land after the ref exists
         self.git("update-ref", "refs/heads/" + branch, sha, "", caller="gitdir")  # "" = must not exist
+        self.delivered = branch  # from here a signal must still name the branch
         got = self.git("rev-parse", "--verify", "refs/heads/" + branch, caller="gitdir").stdout.strip()
         if got != sha:
             raise Fatal("branch %s does not point at %s" % (branch, sha[:12]))
         self.git("cat-file", "-e", sha + "^{tree}", caller="gitdir")
         return branch
+
+    def summary(self, branch):
+        return {"landed": self.landed_out, "ejected": self.ejected, "deferred": self.deferred,
+                "runs": self.runs, "batch": self.batch_n, "branch": branch,
+                "commits": self.commits_out, "runs_per": self.runs_per}
 
     def run(self):
         if self.a.flaky_rerun:
@@ -941,20 +1146,23 @@ class Train:
         failure = ""
         final = ""
         if batch:
-            print("batch: %d admitted (window %d): %s" % (len(batch), window, ",".join(batch)))
+            say("batch: %d admitted (window %d): %s" % (len(batch), window, ",".join(batch)))
             if self.verify(batch):
                 good = list(batch)
             else:
-                good, _ = self.bisect(batch, "p")
+                good, _ = self.bisect(batch, "p", list(batch))
             landed = self.final_join(good)
             landed = self.recover(landed)
+            self.batch_n = len(batch)
             if landed:
                 for k in range(1, len(landed) + 1):
                     commits[landed[k - 1]] = self.commits[tuple(landed[:k])]
+                self.landed_out, self.commits_out = list(landed), commits
                 final = self.commits[tuple(landed)]
                 if self.a.keep:
                     try:
                         branch = self.deliver(final)
+                        self.delivered = branch
                     except Fatal as e:
                         failure = str(e)
                         self.keep_root = True
@@ -962,24 +1170,31 @@ class Train:
             quiet = [e for e in self.ejected if e["why"] in QUIET]
             first_green = self.runs == 1 and not reds and landed == batch
             self.write_state(window, len(batch), len(reds), first_green, not quiet)
+        self.cleanup()  # before the summary, so a root that cannot be removed is IN it
+        leftover = ""
+        if not self.keep_root and self.tmp and os.path.lexists(self.tmp):
+            leftover = self.tmp
+            print("error: could not remove the private root %s (a file flag or permission this tool "
+                  "could not clear); remove it by hand" % esc(leftover), file=sys.stderr)
         for d in self.deferred:
-            print("deferred: %s: %s" % (d["id"], d["why"]))
+            say("deferred: %s: %s" % (d["id"], d["why"]))
         for cid in landed:
-            print("landed: %s %s" % (cid, commits[cid]))
+            say("landed: %s %s" % (cid, commits[cid]))
         if branch:
-            print("integration branch: %s" % branch)
+            say("integration branch: %s" % branch)
         elif landed and not failure:
-            print("nothing was written to your repository (use --keep to deliver the landed branch)")
-        print("runs: %d (per candidate: %s)" % (
+            say("nothing was written to your repository (use --keep to deliver the landed branch)")
+        say("runs: %d (per candidate: %s)" % (
             self.runs, " ".join("%s=%d" % (k, v) for k, v in self.runs_per.items())))
-        print("batch: %d" % len(batch))
-        summary = {"landed": landed, "ejected": self.ejected, "deferred": self.deferred,
-                   "runs": self.runs, "batch": len(batch), "branch": branch,
-                   "commits": commits, "runs_per": self.runs_per}
+        say("batch: %d" % len(batch))
+        summary = self.summary(branch)
+        if leftover:
+            summary["leftover"] = leftover
         if failure:
             summary.update({"delivery_error": failure, "commit": final, "private_root": self.tmp})
             print("error: verified but NOT delivered: %s; commit %s is in the private repository %s"
-                  " (kept)" % (failure, final, self.priv), file=sys.stderr)
+                  " (kept)" % (esc(failure), final, esc(self.priv)), file=sys.stderr)
+        self.json_done = True
         print(json.dumps(summary, separators=(",", ":")))
         sys.stdout.flush()
         if failure:
@@ -1027,7 +1242,9 @@ def parse(argv):
     ap.add_argument("--verify-timeout", type=_positive_float, default=None, metavar="SECONDS",
                     help="kill the verify process group after SECONDS (> 0); counts as red 'timeout'")
     ap.add_argument("--no-recover", action="store_true",
-                    help="do not re-verify members ejected 'inferred' together with the landed set")
+                    help="do not retry members ejected for a reason that is not a property of "
+                         "themselves alone (inferred / interaction / red_with), nor members that "
+                         "were red alone, against the final landed set")
     ap.add_argument("--keep", action="store_true",
                     help="deliver the landed commits as ONE new branch in your repository (the only "
                          "write; without it nothing is written)")
@@ -1048,7 +1265,23 @@ def parse(argv):
     return a
 
 
+def _early_exit(signum, frame):
+    sys.exit(128 + signum)
+
+
 def main(argv):
+    # FIRST: the handlers, before argument parsing, git or mkdtemp. While no private root
+    # exists a signal just exits 128+n; Train swaps in its own handler once it exists.
+    for sig in SIGS:
+        signal.signal(sig, _early_exit)
+    if os.environ.get("TRAIN_SELFTEST"):  # test hooks, honoured only under the selftest's variable
+        rf = os.environ.get("TRAIN_TEST_READY_FILE")
+        if rf:
+            with open(rf, "w") as fh:
+                fh.write("ready\n")
+        pause = os.environ.get("TRAIN_TEST_PAUSE_AFTER_HANDLERS")
+        if pause:
+            time.sleep(float(pause))
     a = parse(argv)
     if not os.path.isdir(a.repo):
         print("error: --repo %s is not a directory" % a.repo, file=sys.stderr)
@@ -1059,9 +1292,24 @@ def main(argv):
         signal.signal(sig, t.on_signal)
     try:
         return t.run()
+    except SystemExit:
+        if not t.delivered and t.pending and not t.json_done:
+            try:  # the signal may have hit update-ref after the ref was created: look, never assume
+                got = t.git("rev-parse", "--verify", "-q", "refs/heads/" + t.pending[0], caller="gitdir",
+                            ok=(0, 1)).stdout.strip()
+                if got == t.pending[1]:
+                    t.delivered = t.pending[0]
+            except BaseException:  # noqa: BLE001
+                pass
+        if t.delivered and not t.json_done:  # a signal after delivery: the branch must be named
+            t.json_done = True
+            say("integration branch: %s (delivered before the signal arrived)" % t.delivered)
+            print(json.dumps(t.summary(t.delivered), separators=(",", ":")))
+            sys.stdout.flush()
+        raise
     except Fatal as e:
         sys.stdout.flush()
-        print("error: %s" % e, file=sys.stderr)
+        print("error: %s" % esc(e), file=sys.stderr)
         return 2
     except Exception as e:  # noqa: BLE001 -- the contract: never a traceback, always a JSON line
         sys.stdout.flush()
