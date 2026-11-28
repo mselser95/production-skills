@@ -30,6 +30,7 @@
     "scripts/**": "root",
     "production.yaml": "unit",
     "Makefile": "unit",
+    "unit.mk": "unit",
     "pyproject.toml": "unit",
     "uv.lock": "unit",
     ".python-version": "unit",
@@ -40,7 +41,9 @@
     "observability/**": "unit",
     "verification/**": "unit",
     "regressions/**": "unit",
-    "benchmarks/**": "unit"
+    "benchmarks/**": "unit",
+    "ci/**": "unit",
+    "gates/**": "unit"
   },
   "exclude": [
     "**/.venv/**",
