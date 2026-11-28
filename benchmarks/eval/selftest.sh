@@ -20,7 +20,7 @@ note() { # name ok(0/1) detail
 # Darwin only; a case that needs one is guarded with `darwin_only <id>`, which on any other
 # platform prints `SKIP <id> (darwin-only)` and returns 1. The ONE declaration of which cases
 # those are is the next line; the accounting at the bottom fails on any drift, on either platform.
-DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14s3 14t 14u 14u2 14v 14v2 14v3 14v4 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x 15y 15z1 15z2 15z3 15z4 19x2"
+DARWIN_ONLY_DECLARED="14q2 14r 14s 14s2 14s3 14t 14u 14u2 14v 14v2 14v3 14v4 15a 15b 15i 15n 15o 15p 15q 15r 15s 15t 15u 15v 15w 15x 15y 15z1 15z2 15z3 15z4 19q 19x2 21a"
 PLATFORM="$(uname)"; DO_SEEN="" DO_SKIPPED=""
 darwin_only() {
   DO_SEEN="$DO_SEEN $1"
@@ -277,6 +277,7 @@ echo '{"result":"OK","is_error":false,"total_cost_usd":0.0123,"usage":{"input_to
 python3 -I -B "$here/lib/parse_claude.py" "$tmp/c.json" "$tmp/c.out" "$tmp/c.usage"
 if [[ "$(cat "$tmp/c.out")" == OK && "$(cat "$tmp/c.usage")" == *'"tokens_in": 1103'* && "$(cat "$tmp/c.usage")" == *'"cost_usd": 0.0123'* ]]; then r=0; else r=1; fi; note "11 claude parser: result text, tokens_in = input+cache_creation+cache_read, cost" "$r" "$(cat "$tmp/c.usage" 2>&1)"
 printf '%s\n' '{"type":"thread.started"}' '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}' \
+  '{"type":"item.completed","item":{"type":"command_execution","command":"ls"}}' \
   '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}' \
   '{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":40,"output_tokens":4,"reasoning_output_tokens":2}}' >"$tmp/x.jsonl"
 python3 -I -B "$here/lib/parse_codex.py" "$tmp/x.jsonl" "$tmp/x.out" "$tmp/x.usage"
@@ -518,7 +519,7 @@ if [[ $arc -eq 0 && "$(cat "$frec/codex.hadauth")" == no && "$(grep -c '^CODEX_A
 note "14o codex: an exported CODEX_API_KEY is preferred and no auth.json is copied" $ok "rc=$arc"
 # EVAL_KEEP=1 through run.sh: the dir stays, the credential does not
 keeptmp="$tmp/keeptmp"; mkdir -p "$keeptmp"; ktask="$(mktask "$corpus" prod-review t-keep dev good)"
-env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$keeptmp" EVAL_KEEP=1 EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" \
+env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fb:$PATH" HOME="$realhome" TMPDIR="$keeptmp" EVAL_KEEP=1 EVAL_CODEX_REAL_HOME="$realcodex" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$ktask" --arm skill --host codex --rep 1 --out "$tmp/r14p.jsonl" >/dev/null 2>&1; rc=$?
 if [[ $rc -eq 0 && "$(nrows "$tmp/r14p.jsonl")" == 1 && -n "$(find "$keeptmp" -mindepth 1 -maxdepth 1 -name 'eval-cell.*' | head -1)" \
    && -z "$(find "$keeptmp" -name auth.json | head -1)" && "$(cat "$frec/codex.hadauth")" == yes ]]; then ok=0; else ok=1; fi
@@ -844,8 +845,8 @@ python3 -I -B - "$wtask/task.json" <<'PY'
 import json, sys
 t = json.load(open(sys.argv[1])); t["agent_mode"] = "workspace-write"; json.dump(t, open(sys.argv[1], "w"))
 PY
-runclaude "$good" "$tmp/r15a.jsonl"; ro_arg="$(argafter "$(find "$KT" -name claude.argv | head -1)" --permission-mode)"
-runclaude "$wtask" "$tmp/r15b.jsonl"; ww_arg="$(argafter "$(find "$KT" -name claude.argv | head -1)" --permission-mode)"
+runclaude "$good" "$tmp/r15a.jsonl" EVAL_SKIP_GRADER=1; ro_arg="$(argafter "$(find "$KT" -name claude.argv | head -1)" --permission-mode)"
+runclaude "$wtask" "$tmp/r15b.jsonl" EVAL_SKIP_GRADER=1; ww_arg="$(argafter "$(find "$KT" -name claude.argv | head -1)" --permission-mode)"
 if [[ "$ro_arg" == dontAsk && "$ww_arg" == acceptEdits && "$(rowval "$tmp/r15a.jsonl" sandbox)" == "$want_sandbox" ]]; then ok=0; else ok=1; fi
 note "15f run.sh passes the task's agent_mode through (read-only->dontAsk, workspace-write->acceptEdits), row sandbox:$want_sandbox" $ok "ro=$ro_arg ww=$ww_arg sandbox=$(rowval "$tmp/r15a.jsonl" sandbox)"
 runclaude "$good" "$tmp/r15c.jsonl" EVAL_CLAUDE_NO_SANDBOX=1
@@ -1361,16 +1362,30 @@ if [[ "$(rowval "$r" language)" == rust ]]; then ok=0; else ok=1; fi
 note "19p2 row language is copied from task.json (rust)" $ok "row: $(cut -c1-300 "$r" 2>&1)"
 # through run.sh with the FAKE hosts: the 9th adapter argument really carries the schema
 echo '{"result":"x","is_error":false,"usage":{},"structured_output":{"found":1,"findings":[]}}' >"$frec/claude.out"
+# 19q needs a GRADED claude row, which exists only where a confined cell does (macOS seatbelt); elsewhere run.sh refuses
+# to grade an unconfined agent's workdir (grader-unconfined) and 19q2 asserts that refusal instead.
+if darwin_only 19q; then
 runclaude "$jt" "$tmp/r19g.jsonl"
 if [[ "$(rowval "$tmp/r19g.jsonl" output_valid)" == true && "$(rowval "$tmp/r19g.jsonl" pass)" == true && "$(argafter "$(find "$KT" -name claude.argv | head -1)" --json-schema)" == "$compact" ]]; then ok=0; else ok=1; fi
 note "19q run.sh -> claude adapter: schema passed, structured document graded, row output_valid:true" $ok "row: $(cut -c1-300 "$tmp/r19g.jsonl" 2>&1)"
+fi
+if [[ "$PLATFORM" != Darwin ]]; then
+  runclaude "$jt" "$tmp/r19g2.jsonl"; rc19q2=$?
+  if [[ $rc19q2 -eq 0 && "$(nrows "$tmp/r19g2.jsonl")" == 1 && "$(rowval "$tmp/r19g2.jsonl" error)" == grader-unconfined && "$(rowval "$tmp/r19g2.jsonl" sandbox)" == off \
+     && "$(rowval "$tmp/r19g2.jsonl" pass)" == false && "$(rowval "$tmp/r19g2.jsonl" exit)" == -1 && -z "$(find "$KT" -name claude.argv 2>/dev/null | head -1)" ]]; then ok=0; else ok=1; fi
+  note "19q2 run.sh -> claude adapter, no confined cell (sandbox off): the row is grader-unconfined, pass:false, exit -1, the host was never invoked, run.sh exits 0" $ok "rc=$rc19q2 invoked=$(find "$KT" -name claude.argv 2>/dev/null | head -1) row: $(cut -c1-300 "$tmp/r19g2.jsonl" 2>&1)"
+fi
+# 19q3 (every platform): the schema reaches the claude adapter through run.sh whether or not the row can be graded
+runclaude "$jt" "$tmp/r19g3.jsonl" EVAL_SKIP_GRADER=1
+if [[ "$(argafter "$(find "$KT" -name claude.argv | head -1)" --json-schema)" == "$compact" && "$(rowval "$tmp/r19g3.jsonl" error)" == grader-skipped ]]; then ok=0; else ok=1; fi
+note "19q3 run.sh -> claude adapter (grader skipped): the 9th argument carries the schema as --json-schema, on every platform" $ok "row: $(cut -c1-300 "$tmp/r19g3.jsonl" 2>&1)"
 rm -f "$frec/claude.out"
 printf '%s\n' '{"found":0,"findings":[]}' >"$frec/codex.last"   # decoy: never read now
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"found\":1,\"findings\":[]}"}}' >"$frec/codex.jsonl"
-env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
+env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
   bash "$here/run.sh" --task "$jt" --arm bare --host codex --rep 1 --out "$tmp/r19h.jsonl" >/dev/null 2>&1; rc=$?
 rm -f "$frec/codex.last" "$frec/codex.jsonl"
-if [[ $rc -eq 0 && "$(rowval "$tmp/r19h.jsonl" output_valid)" == true && "$(rowval "$tmp/r19h.jsonl" pass)" == true && "$(argafter "$frec/codex.argv" --output-schema)" == "$(cd "$scorp" && pwd)/prod-review/_lib/output.schema.json" ]]; then ok=0; else ok=1; fi
+if [[ $rc -eq 0 && "$(rowval "$tmp/r19h.jsonl" output_valid)" == true && "$(argafter "$frec/codex.argv" --output-schema)" == "$(cd "$scorp" && pwd)/prod-review/_lib/output.schema.json" ]]; then ok=0; else ok=1; fi
 note "19r run.sh -> codex adapter: --output-schema is the skill's _lib/output.schema.json, the stream's document graded (BEFORE: the -o file)" $ok "rc=$rc row: $(cut -c1-300 "$tmp/r19h.jsonl" 2>&1)"
 # lint
 mktask "$tmp/l-nokind" prod-review t-nokind heldout good >/dev/null
@@ -1392,6 +1407,206 @@ REF_OUT="the reference wrote prose" mktask "$tmp/l-sbad" prod-review t-sb heldou
 lint_case "19u lint RED when the reference output is not a JSON object under a schema" "$tmp/l-sbad" 1 "did not write a JSON object"
 mktask "$tmp/l-sok" prod-review t-so heldout jsonobj >/dev/null; mkdir -p "$tmp/l-sok/prod-review/_lib"; cp "$sch" "$tmp/l-sok/prod-review/_lib/"
 lint_case "19v lint GREEN: schema present, reference writes a JSON object, kind set" "$tmp/l-sok" 0 "lint: ok"
+
+# ---- 21: second security review: the credential copy cannot be left behind, the grader never reads an agent-writable workdir ------
+# Everything below uses a FAKE codex (a dir of ours first on PATH), a FAKE caller home and a FAKE credential. Nothing touches a real
+# ~/.codex, ~/.claude* or ~/.ssh. The fake's behaviour is the content of $fx/bin/mode, read from its own install dir (the sandboxed
+# environment is sealed, and a sandboxed fake may read only its own install root).
+SC="$tmp/s21"; mkdir -p "$SC/stubrm" "$SC/ftdeny"; fx="$SC/fx"; mkdir -p "$fx/bin"
+S21CRED='{"canary":"S21-CRED-CANARY-0451"}'
+cat >"$fx/bin/codex" <<'FAKE'
+#!/usr/bin/env bash
+D="$(cd "$(dirname "$0")" && pwd)"; mode="$(cat "$D/mode" 2>/dev/null)"; cat >/dev/null
+echo x >>"$D/invoked" 2>/dev/null
+res=""
+lnk() { if ln "$1" "$2" 2>/dev/null; then res="$res ln=ok"; else res="$res ln=denied"; fi; }
+case "$mode" in
+  perms500|perms000|uchg)
+    lnk "$CODEX_HOME/auth.json" "$TMPDIR/stash.json"; lnk "$CODEX_HOME/auth.json" "$GOCACHE/stash2.json"
+    cp "$CODEX_HOME/auth.json" "$TMPDIR/copy.json" 2>/dev/null && res="$res cp=ok"
+    if [ "$mode" = uchg ]; then chflags uchg "$CODEX_HOME/auth.json" "$TMPDIR/stash.json" 2>/dev/null && res="$res uchg=ok"; fi
+    chmod 000 "$TMPDIR" "$GOCACHE" 2>/dev/null && res="$res lockdirs=ok"
+    if [ "$mode" = perms000 ]; then chmod 000 "$CODEX_HOME" && res="$res home=000"; else chmod 500 "$CODEX_HOME" && res="$res home=500"; fi ;;
+  plant-git) read -r c <"$D/canary-path"; printf '[core]\n\tfsmonitor = %s\n' "sh -c 'touch $c'" >>"$PWD/.git/config" ;;
+  orphan:*) rm -f "$D/orphan.pid"   # the escape (setsid) must be COMPLETE before this fake exits, else the adapter's group kill can win the race against the interpreter start and no process ever escapes
+    python3 -c "import os,time;os.setsid();open('$D/orphan.pid','w').write(str(os.getpid()));time.sleep(25)  # ${mode#orphan:}" &
+    for _ in $(seq 200); do [ -s "$D/orphan.pid" ] && break; sleep 0.05; done ;;
+esac
+if [ "$mode" = trailing ]; then
+  echo '{"type":"item.completed","item":{"type":"agent_message","text":"REAL"}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+  echo '{"type":"item.completed","item":{"type":"agent_message","text":"FORGED"}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":999999,"output_tokens":999999}}'
+  exit 0
+fi
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"OK'"$res"'"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'
+FAKE
+chmod +x "$fx/bin/codex"
+printf '#!/bin/sh\nexit 1\n' >"$SC/stubrm/rm"; chmod +x "$SC/stubrm/rm"
+setfx() { echo "$1" >"$fx/bin/mode"; rm -f "$fx/bin/invoked"; echo "${GCAN:-$SC/canary-plant}" >"$fx/bin/canary-path"; }
+echo "$S21CRED" >"$realcodex/auth.json"; chmod 600 "$realcodex/auth.json"
+s21find() { grep -rl -D skip S21-CRED-CANARY-0451 "$@" 2>/dev/null | sort | tr '\n' ' '; }   # files under the given trees that hold the credential
+
+# 21a (REAL sandbox-exec; the fake codex is confined by the same profile as a live one): the agent hard-links the staged credential
+# into its tmp and gocache, copies it, locks the dirs (chmod 000) and the home (500 / 000), and sets uchg. BEFORE: `rm -f` of the copy failed
+# silently and the 0600 credential stayed on disk. AFTER: the adapter resets permissions from outside, the held descriptor wipes the
+# staged inode (so every hard link is empty) and the name is gone; the agent's own COPY is another inode (the cell removal's job: 21b).
+if darwin_only 21a; then
+  for m in perms500 perms000 uchg; do
+    setfx "$m"; CXSB=1 adapter codex read-only DENYROOTS="$SC/ftdeny" PATH="$fx/bin:$fb:$PATH"; arc=$?
+    python3 -I -B "$here/lib/scrub.py" reset "$AH"; python3 -I -B "$here/lib/scrub.py" reset "$AG"
+    left="$(s21find "$AH" "$AG" "$tmp/adapter.out" "$tmp/adapter.err")"; said="$(cat "$tmp/aout.txt" 2>/dev/null)"
+    if [[ $arc -eq 0 && ! -e "$AH/auth.json" && "$said" == *ln=ok* && "$said" == *lockdirs=ok* && -e "$AH/tmp/stash.json" && ! -s "$AH/tmp/stash.json" \
+       && -e "$AG/stash2.json" && ! -s "$AG/stash2.json" && "$left" == "$AH/tmp/copy.json " ]]; then ok=0; else ok=1; fi
+    note "21a/$m sandboxed codex: chmod/uchg/hard-link attack on the staged credential: name gone, every hard link wiped through the held fd (rc $arc)" $ok "rc=$arc said=[$said] left=[$left] stash=$(wc -c <"$AH/tmp/stash.json" 2>&1)"
+  done
+fi
+
+# 21b run.sh level, portable (EVAL_NO_SANDBOX + EVAL_SKIP_GRADER: the host runs, the cell is removed): the whole cell is GONE after the run
+kxn=0
+runfx() { # runfx <mode> [env...] -> $KX (TMPDIR of the run), row in $KX.jsonl, rc in $KXRC
+  KX="$tmp/kx$((++kxn))"; mkdir -p "$KX"; setfx "$1"; shift
+  env -u CODEX_API_KEY EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" TMPDIR="$KX" EVAL_CODEX_REAL_HOME="$realcodex" \
+    EVAL_SKILLS_ROOT="$skills" "$@" bash "$here/run.sh" --task "$good" --arm bare --host codex --rep 1 --out "$KX.jsonl" >"$KX.out" 2>"$KX.err"
+  KXRC=$?
+}
+for m in perms500 perms000 uchg; do
+  if [[ $m == uchg ]] && ! command -v chflags >/dev/null 2>&1; then continue; fi
+  runfx "$m"; python3 -I -B "$here/lib/scrub.py" reset "$KX"
+  left="$(find "$KX" -mindepth 1 | head -3 | tr '\n' ' ')"
+  if [[ $KXRC -eq 0 && -z "$left" && -z "$(s21find "$KX")" && "$(rowval "$KX.jsonl" error)" != scrub-failed* && "$(nrows "$KX.jsonl")" == 1 ]]; then ok=0; else ok=1; fi
+  note "21b/$m run.sh: after a chmod/uchg/hard-link attack the cell is removed (nothing left under the temp root, no credential byte anywhere)" $ok "rc=$KXRC left=[$left] row-error=$(rowval "$KX.jsonl" error)"
+done
+
+# 21c removal FAILS (a failing `rm` first on PATH, test-only): the row says scrub-failed with the path, exit 4, a loud line, and the staged
+# inode plus every hard link to it are already EMPTY (the fd wipe does not depend on removal). The agent's own copy (copy.json) is the
+# one place the bytes survive, which is why the removal verification and the exit status exist.
+runfx perms500 PATH="$SC/stubrm:$fx/bin:$fb:$PATH"; python3 -I -B "$here/lib/scrub.py" reset "$KX"
+cell="$(find "$KX" -maxdepth 1 -name 'eval-cell.*' | head -1)"
+left="$(s21find "$KX")"
+if [[ $KXRC -eq 4 && "$(rowval "$KX.jsonl" error)" == scrub-failed:* && "$(cat "$KX.err")" == *"SCRUB FAILED"* && -n "$cell" \
+   && -e "$cell/home/auth.json" && ! -s "$cell/home/auth.json" && -e "$cell/celltmp/stash.json" && ! -s "$cell/celltmp/stash.json" \
+   && -e "$cell/gocache/stash2.json" && ! -s "$cell/gocache/stash2.json" && "$left" == "$cell/celltmp/copy.json " ]]; then ok=0; else ok=1; fi
+note "21c removal failure: row error scrub-failed:<path>, exit 4, SCRUB FAILED on stderr, hard-linked credential content already wiped" $ok "rc=$KXRC row-error=$(rowval "$KX.jsonl" error) cell=[$cell] left=[$left]"
+runfx perms500 PATH="$SC/stubrm:$fx/bin:$fb:$PATH" EVAL_KEEP=1; python3 -I -B "$here/lib/scrub.py" reset "$KX"
+# (EVAL_KEEP keeps the dirs but never the credential name)
+if [[ $KXRC -eq 0 && -z "$(find "$KX" -name auth.json | head -1)" || $KXRC -eq 4 ]]; then ok=0; else ok=1; fi
+note "21c2 EVAL_KEEP=1 never keeps the credential copy (name removed, or exit 4 when removal failed)" $ok "rc=$KXRC"
+
+# 21d the Codex stream: exactly one terminal event, nothing after it, one final answer candidate
+w() { printf '%s\n' "$@" >"$SC/st.jsonl"; }
+A='{"type":"item.completed","item":{"type":"agent_message","text":"ANSWER"}}'; B='{"type":"item.completed","item":{"type":"agent_message","text":"SECOND"}}'
+T='{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'; F='{"type":"turn.completed","usage":{"input_tokens":999999,"output_tokens":999999}}'
+C='{"type":"item.completed","item":{"type":"command_execution","command":"ls"}}'; R='{"type":"item.completed","item":{"type":"reasoning","text":"hm"}}'
+pc() { python3 -I -B "$here/lib/parse_codex.py" "$SC/st.jsonl" "$SC/st.out" "$SC/st.usage" 2>/dev/null; }
+w "$A" "$T"; pc >/dev/null; r1=$?; o1="$(cat "$SC/st.out")"
+w "$A" "$C" "$B" "$T"; pc >/dev/null; r2=$?; o2="$(cat "$SC/st.out")"
+w "$R" "$A" "$R" "$T"; pc >/dev/null; r3=$?
+w "$A" "$T" "$B" "$F"; tok="$(pc)"; r4=$?; u4="$(cat "$SC/st.usage")"; o4="$(cat "$SC/st.out")"
+w "$A" "$T" "$F"; pc >/dev/null; r5=$?
+w "$A" "$B" "$T"; tok6="$(pc)"; r6=$?
+w "$A" "$T" ""; pc >/dev/null; r7=$?
+if [[ $r1 -eq 0 && "$o1" == ANSWER && $r2 -eq 0 && "$o2" == SECOND && $r3 -eq 0 && $r4 -eq 3 && "$tok" == stream-trailing-data && "$u4" == *'"tokens_in": 0'* && -z "$o4" \
+   && $r5 -eq 3 && $r6 -eq 3 && "$tok6" == stream-trailing-data && $r7 -eq 0 ]]; then ok=0; else ok=1; fi
+note "21d parse_codex: events after turn.completed (a forged answer, a second terminal/usage) and two final answers after the last tool call are rejected (exit 3, stream-trailing-data); a tool call between answers, reasoning and a trailing blank line are fine" $ok "r=$r1,$r2,$r3,$r4,$r5,$r6,$r7 tok=[$tok] usage=$u4"
+runfx trailing; ec="$(rowval "$KX.jsonl" error)"
+if [[ $KXRC -eq 0 && "$ec" == stream-trailing-data && "$(rowval "$KX.jsonl" pass)" == false ]]; then ok=0; else ok=1; fi
+note "21d2 codex adapter + run.sh: a stream with a forged event after turn.completed gives the row error stream-trailing-data, pass:false, no forged usage" $ok "rc=$KXRC row: $(cut -c1-260 "$KX.jsonl" 2>&1)"
+
+# 21e a setsid process that holds the stdout pipe cannot keep the adapter waiting: bounded grace, error orphan-process (BEFORE: 25 s here)
+omark="EVORPHAN-$$-$RANDOM"; setfx "orphan:$omark"; rm -f "$fx/bin/orphan.pid"
+t0=$SECONDS; adapter codex read-only PATH="$fx/bin:$fb:$PATH"; arc=$?; el=$((SECONDS - t0))
+opid="$(cat "$fx/bin/orphan.pid" 2>/dev/null)"; if [[ -n "$opid" ]] && kill -0 "$opid" 2>/dev/null; then oalive=yes; kill -TERM "$opid" 2>/dev/null; else oalive=no; fi
+if [[ $arc -eq 81 && $el -le 12 && "$(cat "$tmp/adapter.err")" == *orphan-process* && "$oalive" == yes ]]; then ok=0; else ok=1; fi
+note "21e codex adapter: an escaped (setsid) process holding the stdout pipe is detected after a bounded grace (rc 81, loud orphan-process line, ${el}s not 25s)" $ok "rc=$arc elapsed=${el}s alive=$oalive err: $(head -c 200 "$tmp/adapter.err")"
+runfx "orphan:$omark"; oe="$(rowval "$KX.jsonl" error)"; opid="$(cat "$fx/bin/orphan.pid" 2>/dev/null)"; [[ -n "$opid" ]] && kill -TERM "$opid" 2>/dev/null
+if [[ "$oe" == orphan-process ]]; then ok=0; else ok=1; fi
+note "21e2 run.sh records error orphan-process for it" $ok "row-error=$oe"
+sleep 0.2; if [[ -z "$(pgrep -f "$omark" 2>/dev/null)" ]]; then ok=0; else ok=1; fi
+note "21e3 no fake orphan process of this selftest is left" $ok "pgrep: $(pgrep -f "$omark" 2>/dev/null | tr '\n' ' ')"
+
+# 21f the grader only ever reads a workdir the agent could not write
+# (1) git neutralised: a repo-local core.fsmonitor planted by the HARNESS-side setup (so the digest matches) must not run under the grader
+GCAN="$SC/fsmonitor-ran"; rm -f "$GCAN"
+gt="$(mktask "$SC/gcorp" prod-review t-gitenv dev always0)"
+printf '#!/usr/bin/env bash\ncd "$1" && git status >/dev/null 2>&1\necho "{\\"found\\":1}"; exit 0\n' >"$gt/grade.sh"
+printf '#!/usr/bin/env bash\ngit config core.fsmonitor %q\n' "sh -c 'touch $GCAN' #" >"$gt/fixture.setup.sh"
+# control: the plant works (plain git status runs it), otherwise (1) proves nothing
+ctl="$SC/ctlrepo"; mkdir -p "$ctl"; ( cd "$ctl" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 && git init -q . && git config core.fsmonitor "sh -c 'touch $GCAN' #" && echo a >f && git status >/dev/null 2>&1 ); ctlran=no; [[ -e "$GCAN" ]] && ctlran=yes; rm -f "$GCAN"
+bash "$here/run.sh" --task "$gt" --arm bare --host stub --rep 1 --out "$SC/r21f1.jsonl" >/dev/null 2>&1; rc=$?
+if [[ "$ctlran" == yes && $rc -eq 0 && ! -e "$GCAN" && "$(rowval "$SC/r21f1.jsonl" pass)" == true ]]; then ok=0; else ok=1; fi
+note "21f1 the grader's git is neutralised: a repo-local core.fsmonitor (control: it does run under plain git) never runs under run.sh's grader" $ok "control-ran=$ctlran rc=$rc canary=$([[ -e "$GCAN" ]] && echo RAN || echo absent) row: $(cut -c1-200 "$SC/r21f1.jsonl" 2>&1)"
+# (2) EVAL_NO_SANDBOX codex: the workdir is writable in every mode -> grader refused BEFORE the host starts
+rm -f "$GCAN"; : >"$SC/r21f2.jsonl"
+setfx plant-git
+env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
+  bash "$here/run.sh" --task "$gt" --arm bare --host codex --rep 1 --out "$SC/r21f2.jsonl" >/dev/null 2>"$SC/r21f2.err"; rc=$?
+if [[ $rc -eq 0 && "$(rowval "$SC/r21f2.jsonl" error)" == grader-unconfined && "$(rowval "$SC/r21f2.jsonl" pass)" == false && ! -e "$GCAN" && ! -e "$fx/bin/invoked" ]]; then ok=0; else ok=1; fi
+note "21f2 codex under EVAL_NO_SANDBOX=1, read-only task: error grader-unconfined, the host is NEVER started (no model call), grader canary absent" $ok "rc=$rc invoked=$([[ -e "$fx/bin/invoked" ]] && echo yes || echo no) row: $(cut -c1-200 "$SC/r21f2.jsonl" 2>&1)"
+# (3) the host DID run (explicit EVAL_SKIP_GRADER) and planted a git config: workdir-tampered, grader never runs
+setfx plant-git; : >"$SC/r21f3.jsonl"
+env CODEX_API_KEY=k EVAL_NO_SANDBOX=1 EVAL_SKIP_GRADER=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" EVAL_SKILLS_ROOT="$skills" \
+  bash "$here/run.sh" --task "$gt" --arm bare --host codex --rep 1 --out "$SC/r21f3.jsonl" >/dev/null 2>"$SC/r21f3.err"; rc=$?
+if [[ $rc -eq 0 && "$(rowval "$SC/r21f3.jsonl" error)" == workdir-tampered && ! -e "$GCAN" && -e "$fx/bin/invoked" ]]; then ok=0; else ok=1; fi
+note "21f3 a git config planted while the CLI ran: error workdir-tampered, grader never runs (canary absent)" $ok "rc=$rc row: $(cut -c1-200 "$SC/r21f3.jsonl" 2>&1)"
+# (4) digest surfaces, harness-side simulation through the stub host (sandbox n/a, graded): config, hooks, attributes tamper; index/worktree edits do not
+for tm in cfg hook attr; do
+  case "$tm" in
+    cfg) cat >"$SC/tamper.sh" <<EOF
+#!/usr/bin/env bash
+printf '[core]\n\tfsmonitor = %s\n' "sh -c 'touch $GCAN'" >>"\$1/.git/config"
+EOF
+    ;;
+    hook) cat >"$SC/tamper.sh" <<EOF
+#!/usr/bin/env bash
+printf '#!/bin/sh\ntouch $GCAN\n' >"\$1/.git/hooks/post-checkout"; chmod +x "\$1/.git/hooks/post-checkout"
+EOF
+    ;;
+    attr) printf '#!/usr/bin/env bash\necho "* filter=x" >"$1/.gitattributes"\n' >"$SC/tamper.sh" ;;
+  esac
+  rm -f "$GCAN"
+  env STUB_MODE=solve STUB_SOLVE_CMD="$SC/tamper.sh" bash "$here/run.sh" --task "$gt" --arm bare --host stub --rep 1 --out "$SC/r21g-$tm.jsonl" >/dev/null 2>&1; rc=$?
+  if [[ $rc -eq 0 && "$(rowval "$SC/r21g-$tm.jsonl" error)" == workdir-tampered && "$(rowval "$SC/r21g-$tm.jsonl" pass)" == false && ! -e "$GCAN" ]]; then ok=0; else ok=1; fi
+  note "21g/$tm workdir tamper ($tm) between prepare and grade: error workdir-tampered, pass:false, grader canary absent" $ok "rc=$rc row: $(cut -c1-200 "$SC/r21g-$tm.jsonl" 2>&1)"
+done
+printf '#!/usr/bin/env bash\ntouch "$1/done.txt"; echo edit >>"$1/README.md"; git -C "$1" status >/dev/null 2>&1; git -C "$1" add -A 2>/dev/null\n' >"$SC/benign.sh"
+env STUB_MODE=solve STUB_SOLVE_CMD="$SC/benign.sh" bash "$here/run.sh" --task "$good" --arm bare --host stub --rep 1 --out "$SC/r21g-ok.jsonl" >/dev/null 2>&1
+if [[ "$(rowval "$SC/r21g-ok.jsonl" pass)" == true && "$(rowval "$SC/r21g-ok.jsonl" error)" == "<absent>" ]]; then ok=0; else ok=1; fi
+note "21g/ok worktree edits and an index refresh are NOT tamper: graded, pass:true" $ok "row: $(cut -c1-200 "$SC/r21g-ok.jsonl" 2>&1)"
+
+# 21h startup sweep: a stale cell of ours (000 home, locked dirs, a credential-shaped file) is removed; a foreign dir, a fresh cell, a kept cell and a symlink are not
+SW="$tmp/sweep"; mkdir -p "$SW/target" "$SW/other-old" "$SW/eval-cell.fresh" "$SW/eval-cell.keep" "$SW/eval-cell.stale1/home/sub" "$SW/eval-cell.stale1/celltmp"
+echo FOREIGN-TARGET >"$SW/target/canary"; echo FOREIGN-OLD >"$SW/other-old/f"; : >"$SW/eval-cell.keep/.eval-keep"; echo kept >"$SW/eval-cell.keep/f"
+ln -s "$SW/target" "$SW/eval-cell.link"
+echo "$S21CRED" >"$SW/eval-cell.stale1/home/auth.json"; chmod 600 "$SW/eval-cell.stale1/home/auth.json"; echo "$S21CRED" >"$SW/eval-cell.stale1/celltmp/stash"
+chmod 000 "$SW/eval-cell.stale1/home/sub" "$SW/eval-cell.stale1/celltmp"; chmod 500 "$SW/eval-cell.stale1/home"
+touch -t 202001010000 "$SW/eval-cell.stale1" "$SW/other-old" "$SW/eval-cell.keep" "$SW/target"   # the symlink target is OLD too: only the link-vs-dir check keeps it out
+env TMPDIR="$SW" bash "$here/run.sh" --task "$good" --arm bare --host stub --rep 1 --out "$SC/r21h.jsonl" >"$SC/r21h.out" 2>"$SC/r21h.err"; rc=$?
+if [[ $rc -eq 0 && ! -e "$SW/eval-cell.stale1" && -f "$SW/other-old/f" && -f "$SW/eval-cell.keep/f" && -d "$SW/eval-cell.fresh" && -L "$SW/eval-cell.link" \
+   && "$(cat "$SW/target/canary")" == FOREIGN-TARGET && "$(cat "$SC/r21h.err")" == *"startup sweep removed stale cell $SW/eval-cell.stale1"* \
+   && -z "$(s21find "$SW")" ]]; then ok=0; else ok=1; fi
+note "21h startup sweep removes a stale own cell with a 000 home (and prints it), leaves a foreign dir, a fresh cell, a .eval-keep cell and a symlink alone" $ok "rc=$rc stale=$([[ -e "$SW/eval-cell.stale1" ]] && echo STILL-THERE || echo gone) other=$([[ -f "$SW/other-old/f" ]] && echo ok || echo REMOVED) link=$([[ -L "$SW/eval-cell.link" ]] && echo ok || echo REMOVED) err: $(head -c 200 "$SC/r21h.err")"
+
+# 21i pre-flight: the decision lives in run.sh --preflight and is taken before any host/model call
+mkdir -p "$SC/pcorp"; wpt="$(mktask "$SC/pcorp" prod-review t-pfw dev good)"
+python3 -I -B - "$wpt/task.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); t["agent_mode"] = "workspace-write"; json.dump(t, open(sys.argv[1], "w"))
+PY
+pf() { env "${@:2}" bash "$here/run.sh" --task "$1" --host "${PFHOST:-codex}" --arm bare --rep 1 --preflight >/dev/null 2>&1; echo $?; }
+pa="$(PFHOST=stub pf "$good" X=1)"; pb="$(PFHOST=stub pf "$wpt" X=1)"; pc_="$(pf "$good" EVAL_NO_SANDBOX=1)"; pd="$(PFHOST=claude pf "$good" EVAL_CLAUDE_NO_SANDBOX=1)"; pe="$(pf "$wpt" X=1)"
+pg=5; if [[ "$PLATFORM" == Darwin ]]; then pg="$(pf "$good" X=1)"; else pg=0; fi
+if [[ "$pa" == 0 && "$pb" == 5 && "$pc_" == 5 && "$pd" == 5 && "$pe" == 5 && "$pg" == 0 ]]; then ok=0; else ok=1; fi
+note "21i run.sh --preflight: graded only for read-only + (seatbelt | stub); refused (exit 5) for workspace-write and for any unsandboxed host" $ok "stub-ro=$pa stub-ww=$pb codex-nosb=$pc_ claude-nosb=$pd codex-ww=$pe codex-seatbelt-ro=$pg"
+# live.sh: skips such a cell BEFORE run.sh, so no host is invoked and no row is written; EVAL_SKIP_GRADER is refused there
+setfx normal; mkdir -p "$SC/lcorp/prod-review"; cp -R "$wpt" "$SC/lcorp/prod-review/t-pfw"
+env EVAL_LIVE=1 N=1 EVAL_HOSTS=codex EVAL_CORPUS="$SC/lcorp" EVAL_RESULTS_DIR="$SC/lres" CODEX_API_KEY=k EVAL_NO_SANDBOX=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" \
+  bash "$here/lib/live.sh" >"$SC/live.out" 2>"$SC/live.err"
+env EVAL_LIVE=1 N=1 EVAL_HOSTS=codex EVAL_CORPUS="$SC/lcorp" EVAL_RESULTS_DIR="$SC/lres2" CODEX_API_KEY=k EVAL_SKIP_GRADER=1 PATH="$fx/bin:$fb:$PATH" HOME="$realhome" \
+  bash "$here/lib/live.sh" >/dev/null 2>"$SC/live2.err"; lrc=$?
+if [[ ! -e "$fx/bin/invoked" && "$(cat "$SC/live.err")" == *"SKIP prod-review/t-pfw on codex"* && -z "$(cat "$SC/lres"/*.jsonl 2>/dev/null)" && $lrc -eq 2 && "$(cat "$SC/live2.err")" == *EVAL_SKIP_GRADER* ]]; then ok=0; else ok=1; fi
+note "21j live.sh pre-flight skips an ungradeable cell with a reason before run.sh (host invoked: 0 times, no row), and refuses EVAL_SKIP_GRADER=1" $ok "invoked=$([[ -e "$fx/bin/invoked" ]] && echo yes || echo no) live.err: $(head -c 300 "$SC/live.err")"
 
 # ---- 20: no bytecode litter outside the corpus -----------------------------------------------------
 pyc="$(find "$here" -name __pycache__ -not -path "$here/corpus/*" 2>/dev/null | head -3 | tr '\n' ' ')"

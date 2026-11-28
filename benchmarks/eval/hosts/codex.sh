@@ -39,7 +39,9 @@
 #    CODEX_API_KEY. Opt-in EVAL_CODEX_AUTH_READONLY=1 (sandboxed only) additionally makes the staged copy
 #    unwritable for the agent so Codex cannot rotate inside a cell (selftest 14v3; whether Codex starts with a
 #    read-only auth file is NOT VALIDATED without a model run, hence off by default);
-#  - the copy is deleted after the CLI exits and on every exit path, TERM/INT/HUP included. Never printed.
+#  - the copy is scrubbed after the CLI exits and on EXIT/TERM/INT/HUP (not SIGKILL: run.sh's startup sweep), by the sequence
+#    documented at scrub_auth below (permission reset, wipe through a held fd, unlink, verify; exit 80 on failure). Never printed.
+# Exit 80 = scrub failed; 81 = a process outlived the CLI holding its stdout (orphan-process); 82 = stream-trailing-data.
 # <budget-usd> is NOT enforced: codex has no spend cap; only timeout_s binds.
 set -uo pipefail
 export PYTHONDONTWRITEBYTECODE=1
@@ -49,11 +51,28 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$mode" in read-only|workspace-write) ;; *) echo "codex.sh: unknown agent_mode '$mode'" >&2; exit 2 ;; esac
 
 real="${EVAL_CODEX_REAL_HOME:-$HOME/.codex}"
-copy="$home/auth.json" auth_pass=() child="" pipe="" sbxdir=""
-scrub_auth() { { set +x; } 2>/dev/null; rm -f "$copy"; }   # the copy never outlives the CLI; nothing is ever copied back out
+copy="$home/auth.json" auth_pass=() runpid="" sbxdir="" staged=0 scrub_failed=0
+scrubpy="$here/../lib/scrub.py"
+# SCRUB SEQUENCE (the credential copy never outlives the CLI; nothing is ever copied back out): (1) close the control FIFO:
+# the holder started at staging wipes the STAGED INODE through the descriptor it kept open (zeros, ftruncate, fsync), which
+# destroys the bytes for every hard link under any name or directory permission; (2) wait (bounded) for it; (3) reset
+# permissions/immutable flags of the agent-writable home from outside (the agent may have chmod 000 / chflags uchg);
+# (4) unlink; (5) verify the name is gone, else scrub_failed (exit 80, loud stderr). run.sh then removes the whole cell.
+scrub_auth() {
+  { set +x; } 2>/dev/null
+  [[ $staged -eq 1 ]] || return 0
+  exec 9>&-
+  [[ -s "$sbxdir/holder.pid" ]] && python3 -I -B "$scrubpy" waitgone "$sbxdir/holder.pid" 5
+  python3 -I -B "$scrubpy" reset "$home"   # always first: with the home at mode 000 even `test -e` on the copy lies
+  rm -f "$copy"
+  if [[ -e "$copy" || -L "$copy" ]]; then
+    scrub_failed=1
+    echo "codex.sh: SCRUB FAILED: the credential copy is still on disk at $copy (its content was wiped through the held descriptor, the name was not removable); remove $(dirname "$home") by hand" >&2
+  fi
+  staged=0
+}
 cleanup() {
-  if [[ -n "$sbxdir" && -s "$sbxdir/pid" ]]; then child="$(cat "$sbxdir/pid")"; kill -TERM "$child" 2>/dev/null; fi
-  if [[ -n "$pipe" ]]; then wait "$pipe" 2>/dev/null; pipe=""; fi
+  if [[ -n "$runpid" ]]; then kill -TERM "$runpid" 2>/dev/null; wait "$runpid" 2>/dev/null; runpid=""; fi
   scrub_auth; [[ -n "$sbxdir" ]] && rm -rf "$sbxdir"; return 0
 }
 trap cleanup EXIT
@@ -102,23 +121,11 @@ if [[ -n "${CODEX_API_KEY:-}" ]]; then
   auth_pass=(--pass CODEX_API_KEY)
 elif [[ -e "$real/auth.json" || -L "$real/auth.json" ]]; then
   { set +x; } 2>/dev/null
-  # O_NOFOLLOW + regular-file check + a NEW file (O_EXCL) at 0600; the content is never inspected or printed
-  python3 -I -B -c 'import os,stat,sys
-src,dst=sys.argv[1:3]
-try:
-    fd=os.open(src,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-except OSError as e:
-    sys.exit("auth.json is a symlink or cannot be opened (%s): refused" % e.strerror)
-st=os.fstat(fd)
-if not stat.S_ISREG(st.st_mode) or st.st_size>(1<<20):
-    sys.exit("auth.json is not a small regular file: refused")
-data=b""
-while True:
-    c=os.read(fd,65536)
-    if not c: break
-    data+=c
-o=os.open(dst,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-os.fchmod(o,0o600); os.write(o,data); os.close(o)' "$real/auth.json" "$copy" || { scrub_auth; echo "codex.sh: cannot stage auth (credential)" >&2; exit 78; }
+  # lib/scrub.py hold: O_NOFOLLOW + regular-file check + a NEW file (O_EXCL) at 0600; the content is never inspected or
+  # printed; the staged inode's descriptor stays open in a small holder process until the scrub (see scrub_auth)
+  staged=1
+  python3 -I -B "$scrubpy" hold "$real/auth.json" "$copy" "$sbxdir/ctl" "$sbxdir/holder.pid" || { scrub_auth; echo "codex.sh: cannot stage auth (credential)" >&2; exit 78; }
+  exec 9>"$sbxdir/ctl"   # our end of the holder's control FIFO: closing it (or dying) makes the holder wipe
 else
   echo "codex.sh: no usable credential (auth)" >&2; exit 78
 fi
@@ -133,12 +140,21 @@ else
 fi
 [[ -n "$model" ]] && args+=(-m "$model")
 [[ -n "$schema" ]] && args+=(--output-schema "$schema")
-{ python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gc" --tmpdir "$celltmp" \
-  --set "CODEX_HOME=$home" ${auth_pass[@]+"${auth_pass[@]}"} -- ${sb_exec[@]+"${sb_exec[@]}"} "$codex_bin" "${args[@]}" - <"$prompt" 2>"$errf" &
-echo $! >"$sbxdir/pid"; wait $!; echo $? >"$sbxdir/rc"; } | cat >"$raw" &   # stdout through a pipe read OUTSIDE the cell (/bin/cat cannot write a file fd under the profile: EPERM)
-pipe=$!
-wait "$pipe"; rc="$(cat "$sbxdir/rc" 2>/dev/null)"; rc="${rc:-1}"
+# the CLI's stdout is read by lib/limited.py --capture OUTSIDE the cell (the CLI never holds a descriptor on a harness file);
+# once the CLI is gone the group is killed and the pipe gets ONE bounded grace: a process that escaped the group (setsid)
+# and still holds the pipe cannot keep the adapter waiting; it leaves $sbxdir/orphan (row error orphan-process).
+python3 -I -B "$here/../lib/limited.py" --capture "$raw" --orphan "$sbxdir/orphan" --stdin "$prompt" --stderr "$errf" 0 -- \
+  python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gc" --tmpdir "$celltmp" \
+  --set "CODEX_HOME=$home" ${auth_pass[@]+"${auth_pass[@]}"} -- ${sb_exec[@]+"${sb_exec[@]}"} "$codex_bin" "${args[@]}" - 9>&- &
+runpid=$!
+wait "$runpid"; rc=$?; runpid=""
 scrub_auth
 if [[ -s "$errf" ]]; then tail -n 5 "$errf" | cut -c1-200 >&2; fi
-python3 -I -B "$here/../lib/parse_codex.py" "$raw" "$out" "$usage" || { [[ $rc -eq 0 ]] && rc=3; }
+pout="$(python3 -I -B "$here/../lib/parse_codex.py" "$raw" "$out" "$usage")"; prc=$?
+if [[ $prc -ne 0 && $rc -eq 0 ]]; then rc=3; [[ "$pout" == stream-trailing-data ]] && rc=82; fi
+if [[ -e "$sbxdir/orphan" ]]; then
+  echo "codex.sh: ORPHAN PROCESS (error: orphan-process): a process of the cell outlived the CLI and still held its stdout; it may keep running, sandboxed but network-capable" >&2
+  [[ $rc -eq 0 || $rc -eq 3 || $rc -eq 82 ]] && rc=81
+fi
+[[ $scrub_failed -eq 1 ]] && rc=80
 exit "$rc"

@@ -35,6 +35,10 @@
 #     CLAUDE_CODE_TMPDIR points claude's own shell scratch dir at the per-cell TMPDIR (found by
 #     a paid probe: it otherwise writes /private/tmp/claude-<uid>, which the sandbox denies).
 #     bypassPermissions is never used.
+# Credentials in the cell: NONE are written. The token travels in the environment only (lib/runenv.py --pass, by name);
+# nothing secret is placed in the isolated home (it holds only the skill copy the harness installs and what the CLI itself
+# writes); run.sh additionally removes any .credentials.json there before the cell is deleted. Whether the CLI persists a
+# token into CLAUDE_CONFIG_DIR on its own is NOT VALIDATED without a model run; the cell removal covers it.
 # `--setting-sources ""` is NOT passed: `claude --help` only documents a
 # comma list of user|project|local, and the user source is the empty isolated home.
 set -uo pipefail
@@ -123,11 +127,19 @@ if [[ -n "$schema" ]]; then
     && [[ -n "$schema_json" ]] || { echo "claude.sh: cannot read the output schema $schema" >&2; exit 2; }
   args+=(--json-schema "$schema_json")
 fi
-python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gocache" --tmpdir "$celltmp" \
-  --set "CLAUDE_CONFIG_DIR=$home" --set "CLAUDE_CODE_TMPDIR=$celltmp" --pass "$EVAL_AUTH_VAR" -- ${sb_exec[@]+"${sb_exec[@]}"} "$claude_bin" "${args[@]}" <"$prompt" 2>"$errf" | cat >"$raw"   # stdout through a pipe read OUTSIDE the cell: /bin/cat cannot write a file fd under the profile (EPERM, found by trial)
-rc=${PIPESTATUS[0]}
+# stdout is read by lib/limited.py --capture OUTSIDE the cell (/bin/cat cannot write a file fd under the profile, and the CLI must
+# not hold a descriptor on a harness file); after the CLI is gone the pipe gets ONE bounded grace, so a setsid process that still
+# holds it cannot keep this adapter waiting: it leaves $sbxdir/orphan (row error orphan-process).
+python3 -I -B "$here/../lib/limited.py" --capture "$raw" --orphan "$sbxdir/orphan" --stdin "$prompt" --stderr "$errf" 0 -- \
+  python3 -I -B "$here/../lib/runenv.py" --cwd "$workdir" --home "$home" --gocache "$gocache" --tmpdir "$celltmp" \
+  --set "CLAUDE_CONFIG_DIR=$home" --set "CLAUDE_CODE_TMPDIR=$celltmp" --pass "$EVAL_AUTH_VAR" -- ${sb_exec[@]+"${sb_exec[@]}"} "$claude_bin" "${args[@]}"
+rc=$?
 if [[ -s "$errf" ]]; then tail -n 5 "$errf" | cut -c1-200 >&2; fi
 python3 -I -B "$here/../lib/parse_claude.py" "$raw" "$out" "$usage"
 prc=$?
 if [[ $rc -eq 0 && $prc -ne 0 ]]; then rc=$prc; fi
+if [[ -e "$sbxdir/orphan" ]]; then
+  echo "claude.sh: ORPHAN PROCESS (error: orphan-process): a process of the cell outlived the CLI and still held its stdout; it may keep running, sandboxed but network-capable" >&2
+  [[ $rc -eq 0 || $rc -eq 3 ]] && rc=81
+fi
 exit "$rc"
