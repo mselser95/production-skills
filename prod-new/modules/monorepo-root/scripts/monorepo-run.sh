@@ -7,10 +7,10 @@
 # makefile being remade can never be the thing that answers). 1) The list pass, always first: make -C <unit> -q -f <unit
 # makefile> -f <list makefile> <random name>; the module-owned list makefile, written into a private temp dir, records
 # $(MAKEFILE_LIST) in a file by a parse-time $(shell printf ...) and declares .PHONY: <random control name> with no
-# rule; the exit status of the pass is not used, and a list that is empty, or names something that does not exist as a
+# rule; the exit status of the pass is not used for the verdict (it only picks the words of the finding when no list was written), and a list that is empty, or names something that does not exist as a
 # path from the unit directory (a name with a space or a newline splits into words that do not), leaves the unit
 # unanswerable: error, fail closed (a name that does exist is accepted, for example ../common.mk, which is also what -o
-# names). The list pass is the one place where an included makefile that has a rule may be remade (a parse-time $(shell
+# names). The list file is written atomically (a name made in the private directory, then moved over the final name), so a pass that is cut at any moment leaves a complete list or none: once the list file exists make gets 0.5 s to exit by itself and is then stopped, and a pass that reached its limit with a complete list is not an error, that list is used. A pass that wrote no list is told apart in the finding: it timed out (the finding says it timed out listing the unit's makefiles, with the seconds), make could not read the Makefile (it exited non-zero, as with an error guard or a syntax error: the finding says so and gives the exit status), or the list names something that is not a path from the unit directory (the words above). A makefile that rewrites an included makefile on every parse makes make 4.3 restart again and again: the list pass then ends 0.5 s after its list exists, or at its 5 s limit with the list it already wrote, and the unit is judged as on 3.81. The list pass is the one place where an included makefile that has a rule may be remade (a parse-time $(shell
 # ...) runs there too). 2) The control question: make -C <unit> -q -f <unit makefile> -f <list makefile> -o <each listed
 # makefile> <control name>; it answers 0 only when every makefile make read has settled; non-zero or a timeout (a
 # makefile that make still wants to remake and cannot pin: an included makefile that is missing and whose rule does not
@@ -21,8 +21,7 @@
 # probe for a catch-all (a %: rule or .DEFAULT:) is asked as question 3 too, with -o. Verdict: -q 1 = present; -q 0 and
 # -q -B 1 = present (the target was only up to date), unless a file or directory named like the target sits beside the
 # Makefile and the rule is not .PHONY (the real run says up to date: idle, with a .PHONY hint); -q -B 0 = idle (nothing
-# to run even with everything out of date); an answer of 2 asks -n: 0 = present, 2 = missing. A question that times out
-# is state error (the finding says: timed out), and once one question for a unit timed out nothing more is asked for that
+# to run even with everything out of date); an answer of 2 asks -n: 0 = present, 2 = missing. A question that times out is state error (the finding says: timed out, with the limit that applied to that question), the list pass included, except a list pass that timed out after writing its complete list, which is used, and once one question for a unit timed out nothing more is asked for that
 # unit in this run: a unit costs at most 5 s for the list pass plus one timeout (5 s for the control, 20 s for another
 # question). Under -q make executes the recipe lines marked + or containing $(MAKE) of the target and of its
 # prerequisites, each recipe at most up to its first line that is neither (an upper bound: it stops at the first

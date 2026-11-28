@@ -1210,6 +1210,75 @@ m.MAKE_TIMEOUT = 1.0; m.PROBE_TIMEOUT = 1.0
 st_h = shape("hang-%s" % len(os.listdir(UD)), "%:\n\t+@sleep 5\n", ""); st_h2 = m.make_target_state(os.path.join(UD, "inc-" + [n for n in os.listdir(UD) if n.startswith("inc-hang-")][0][4:]), "check-fast")
 say(st_h == "error" and st_h2 == "error", "a unit on which the probe hangs is `error` (timed out), not a catch-all, for both targets", "states %s %s" % (st_h, st_h2))
 m.MAKE_TIMEOUT = 20.0; m.PROBE_TIMEOUT = 5.0
+# BEGIN list-pass block
+# The list pass (first question) judged on its own: (i) it times out with NO list, (ii) make cannot read the Makefile, (iii) the list
+# names something that is not a path, (b) it times out WITH a complete list (used), (c) it is not waited for once its list exists, and the
+# limit a timeout finding prints is the one that applied. GNU make 3.81 and 4.3 alike except the one case guarded by the version.
+LPR = os.path.join(TMP, "lp"); os.makedirs(LPR)
+def lproot(name, text, extra=None):
+    d = os.path.join(LPR, name); os.makedirs(os.path.join(d, "services/x"))
+    open(os.path.join(d, "repo.yaml"), "w").write("version: v2\nrepo:\n  name: demo\n  layout: monorepo\nunits:\n  - { id: svc-x, kind: service, language: go, path: services/x }\n")
+    open(os.path.join(d, "services/x/Makefile"), "w").write(text)
+    for f, body in (extra or {}).items(): open(os.path.join(d, "services/x", f), "w").write(body)
+    return d
+def lpun(root): m._rc_cache.clear(); m._timed_out.clear(); return ["%s:%d: %s %s" % f for f in m.check(root) if f[2] == "unit-target"]
+LPT = "check-fast:\n\t@echo cf\nverify:\n\t@echo v\n"
+m.MAKE_TIMEOUT = 20.0; m.PROBE_TIMEOUT = 2.0
+t0 = time.time(); out = lpun(lproot("sleep", "$(shell sleep 30)\n" + LPT)); el = time.time() - t0
+say(len(out) == 2 and all(re.search(r"timed out listing the unit's makefiles \(no list after 2 s", l) and "space or newline" not in l and "could not be listed" not in l for l in out) and el < 8,
+    "a list pass that times out with no list (a parse-time $(shell sleep 30)): error, finding says it timed out listing, with the limit, not `space or newline` (%.1fs)" % el, "\n".join(out))
+out = lpun(lproot("guard", "ifndef ENV\n$(error set ENV)\nendif\n" + LPT))
+say(len(out) == 2 and all("make could not read the unit's Makefile" in l and re.search(r"exited with status [1-9]", l) and "space or newline" not in l and "timed out" not in l for l in out),
+    "a Makefile that make cannot read (an $(error) guard): error, finding says make could not read the Makefile, with its exit status, not `space or newline`", "\n".join(out))
+out = lpun(lproot("space", "include a\\ b.mk\n" + LPT, {"a b.mk": "X=1\n"}))
+say(len(out) == 2 and all("a name with a space or newline" in l and "make could not read" not in l and "timed out" not in l for l in out),
+    "a list that names a path that does not exist (a makefile whose name has a space splits): error, the `space or newline` finding (control of the two messages above)", "\n".join(out))
+out = lpun(lproot("plain", LPT))
+say(out == [], "a plain unit under the same drivers: present, no finding (control)", "\n".join(out))
+# the fake `make`: its own modes, no relation to the one above. F2 = lhang (writes the list, then hangs) | nhang (hangs before any list) | chang (the control hangs) | qhang (a question hangs)
+FB2 = os.path.join(TMP, "fakebin2"); os.makedirs(FB2)
+open(os.path.join(FB2, "make"), "w").write(r'''#!/usr/bin/env bash
+last="${*: -1}"
+if [[ "$last" == __monorepo_control_* ]]; then [[ "${F2:-}" == chang ]] && exec sleep 30; exit 0; fi
+if [[ "${*: -3:1}" == */list.mk ]]; then
+  lm="${*: -3:1}"; echo "list" >> "$F2LOG"
+  [[ "${F2:-}" == nhang ]] && exec sleep 30
+  printf '%s\n' "${*: -5:1}" > "${lm%list.mk}list.tmp$$" && mv "${lm%list.mk}list.tmp$$" "${lm%list.mk}list.out"
+  [[ "${F2:-}" == lhang ]] && exec sleep 30
+  exit 2
+fi
+[[ "${F2:-}" == qhang && "$last" != __monorepo_probe_* ]] && exec sleep 30
+[[ "$last" == __monorepo_probe_* ]] && exit 2
+exit 1
+''')
+os.chmod(os.path.join(FB2, "make"), 0o755)
+F2LOG = os.path.join(TMP, "fake2.log"); os.environ["F2LOG"] = F2LOG
+FR2 = lproot("fake2", LPT); pathf = os.environ["PATH"]; os.environ["PATH"] = FB2 + os.pathsep + pathf
+def f2(mode):
+    open(F2LOG, "w").close(); os.environ["F2"] = mode; t = time.time(); o = lpun(FR2); return o, time.time() - t, open(F2LOG).read().split()
+m.MAKE_TIMEOUT = 4.0; m.PROBE_TIMEOUT = 1.0
+m.PROBE_TIMEOUT = 5.0; out, el, ls = f2("lhang"); m.LIST_GRACE = 100.0; m.PROBE_TIMEOUT = 1.0
+out_b, el_b, ls_b = f2("lhang"); m.LIST_GRACE = 0.5
+say(out == [] and el < 3 and ls == ["list"] and out_b == [] and 1 <= el_b < 4 and ls_b == ["list"],
+    "a list pass that wrote its list and hangs: the list is used (judged from the later questions, no finding), once the list exists it is not waited for the 5 s limit (%.1fs) and, with that grace disabled, the pass hits the 1 s limit with a complete list and the list is still used (%.1fs)" % (el, el_b),
+    "%s %s %s | %s %s" % (out, el, ls, out_b, el_b))
+out, el, ls = f2("chang")
+say(len(out) == 2 and all("did not answer in 1 s" in l for l in out), "a control that hangs: the finding prints the limit that applied, 1 s (PROBE_TIMEOUT), not the 4 s question limit", "\n".join(out))
+out, el, ls = f2("qhang")
+say(len(out) == 2 and all("did not answer in 4 s" in l for l in out), "a question that hangs: the finding prints 4 s (MAKE_TIMEOUT)", "\n".join(out))
+out, el, ls = f2("nhang")
+say(len(out) == 2 and all("timed out listing the unit's makefiles (no list after 1 s" in l for l in out), "a fake list pass that hangs before writing: the timed-out-listing finding, 1 s", "\n".join(out))
+os.environ["PATH"] = pathf; os.environ.pop("F2")
+m.MAKE_TIMEOUT = 20.0; m.PROBE_TIMEOUT = 5.0
+# 4.x only: a FORCE'd include whose recipe WRITES it makes make 4.x re-read its makefiles for up to the whole limit in the list pass; with a real verify the unit is present every time
+if "GNU Make 4" in mk_ver:
+    FW = lproot("force", "-include version.mk\nversion.mk: FORCE\n\t@echo V=1 > version.mk\nFORCE:\n.PHONY: verify check-fast FORCE\nverify:\n\t@echo ok\ncheck-fast:\n\t@echo ok\n")
+    n_ok, worst = 0, 0.0
+    for i in range(20):
+        t = time.time(); o = lpun(FW); d = time.time() - t; worst = max(worst, d); n_ok += o == []
+        if d > 6: break
+    say(n_ok == i + 1 and i + 1 == 20, "make 4.x: a FORCE'd `-include version.mk` whose recipe writes it, with a real verify: present %d of %d inspections (slowest %.1fs)" % (n_ok, i + 1, worst), "%d ok of %d, slowest %.1fs" % (n_ok, i + 1, worst))
+# END list-pass block
 # the -B question carries the unit's makefile and the makefiles it read (-o); a unit without a makefile is never asked -B
 CB3 = os.path.join(TMP, "countbin3"); os.makedirs(CB3); CLOG3 = os.path.join(TMP, "make-args3.log")
 open(os.path.join(CB3, "make"), "w").write('#!/usr/bin/env bash\necho "$*" >> "%s"\nexec "%s" "$@"\n' % (CLOG3, real_make)); os.chmod(os.path.join(CB3, "make"), 0o755)
