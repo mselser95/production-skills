@@ -3,8 +3,9 @@
 # (--unit MODULE:ID[,K=V...]). Scratch modules in a temp --modules-dir; the real service-go only for the
 # non-regression diff against the previous assembler and the wrapper. Hermetic, sequential, no network.
 # ASSEMBLE=<path> runs another copy of the assembler (mutation proofs). Exit: 0 ok - 1 a case failed - 2 no case ran.
+# --print-golden prints the frozen-digest fixture (scripts/tests/fixtures/assemble-golden-d020897.txt) from the current assembler.
 # Final line: "<N> ok, <M> failed[, K skipped]".
-# derived-from: the assemble.py header (UNIT INSTANCES, REPO INVENTORY) -- candidate, pinning: false, ttl: 2027-06-30
+# derived-from: the assemble.py header (UNIT INSTANCES, REPO INVENTORY, DECLARED UNITS) -- candidate, pinning: false, ttl: 2027-06-30
 set -uo pipefail
 umask 022
 
@@ -49,6 +50,26 @@ mk rrnone "$RS" 'repo.yaml=version: v2\nrepo: <REPO>\n'
 mk rrcomment "$RS" 'repo.yaml=# units: []\nunits: {}\nrepo: <REPO>\n'
 mk rrtwo "$RS" 'repo.yaml=units: []\nunits: []\nrepo: <REPO>\n'
 mk rrindent "$RS" 'repo.yaml=repo: <REPO>\n units: []\n'
+mkr() { mk "$1" "$RS" "repo.yaml=$2"; }   # mkr <module> <repo.yaml content>
+mkr rrdup 'repo: <REPO>\nunits: []\nunits: 1\n'
+mkr rrmap 'repo: <REPO>\nunits: []\nunits: {x: 1}\n'
+mkr rrdoc 'a: 1\n---\nunits: []\n'
+mkr rrdocb 'a: 1\n--- |\nunits: []\n'
+mkr rrquote 'k: "abc\nunits: []\n"\n'
+mkr rrflow 'k: {\nunits: []\n}\n'
+mkr rrcrlf 'repo: <REPO>\r\nunits: []\r\n'
+mkr rrbom '\xef\xbb\xbfrepo: <REPO>\nunits: []\n'
+mkr rrtab 'repo:\t<REPO>\nunits: []\n'
+mkr rrnonl 'repo: <REPO>\nunits: []'
+mkr rrbare 'a:\nunits: []\n'
+mkr rrorph '  b: 1\nunits: []\n'
+mkr rrtrail 'repo: <REPO> # note\nunits: []\n'
+mkr rranchor 'a: &x 1\nunits: []\n'
+mkr rrkey 'a: 1\na: 2\nunits: []\n'
+mkr rrchild 'a:\n  b: 1\n  b: 2\nunits: []\n'
+mkr rrblock 'a: |\n  text\nunits: []\n'
+mkr rrls 'a: 1\n# x\xe2\x80\xa8units: {z: 1}\nunits: []\n'
+mkr rrok 'version: v2\nrepo:\n  name: <REPO>\n  layout: monorepo\n\n# note: here\nq: "a: b # c"\nunits: []\n'
 
 # run <name> <rc> <stderr-grep|-> <args...>: exit class, message, and (rc != 0) nothing written, no .assemble-* left
 D=""
@@ -101,20 +122,46 @@ else fail "3: dirs_clash"; fi
 if run c4a 0 - --layout monorepo --module svc --unit svc:b --slot SERVICE=a --slot OWNER=o && has "$D/services/a/README.md" "svc a owner o" && has "$D/services/b/README.md" "svc b owner o"; then
   pass "4: --module (global slots) and --unit mixed"
 else fail "4: mixed"; fi
-base="$tmp/assemble-base.py"
-if git -C "$here" show origin/master:scripts/assemble.py >"$base" 2>/dev/null && [[ -s "$base" ]]; then
-  modes() { (cd "$1" && find . -exec ls -ld {} + | awk '{print substr($1,1,10), $NF}' | LC_ALL=C sort); }
-  same=1; why=""
-  for lay in single monorepo; do
-    python3 -I -B "$base" --modules-dir "$here/prod-new/modules" --dest "$tmp/nb-$lay" --layout "$lay" --module service-go --slot SERVICE=payments --slot OWNER=acme >/dev/null 2>&1 || { same=0; why="base failed $lay"; }
-    python3 -I -B "$asm" --modules-dir "$here/prod-new/modules" --dest "$tmp/nn-$lay" --layout "$lay" --module service-go --slot SERVICE=payments --slot OWNER=acme >/dev/null 2>&1 || { same=0; why="new failed $lay"; }
-    diff -r "$tmp/nb-$lay" "$tmp/nn-$lay" >/dev/null 2>&1 || { same=0; why="diff -r $lay"; }
-    [[ "$(modes "$tmp/nb-$lay")" == "$(modes "$tmp/nn-$lay")" ]] || { same=0; why="modes $lay"; }
-  done
-  python3 -I -B "$asm" --modules-dir "$here/prod-new/modules" --dest "$tmp/nu" --layout monorepo --unit service-go:payments --slot OWNER=acme >/dev/null 2>&1
-  diff -r "$tmp/nb-monorepo" "$tmp/nu" >/dev/null 2>&1 || { same=0; why="--unit vs --module"; }
-  [[ $same -eq 1 && -f "$tmp/nn-monorepo/services/payments/go.mod" ]] && pass "4: real service-go, single and monorepo: tree and modes identical to origin/master's assembler; --unit equals --module" || fail "4: non-regression" "$why"
-else skipped=$((skipped + 1)); echo "skip 4: origin/master:scripts/assemble.py is not available here"; fi
+cat >"$tmp/dig.py" <<'PY'
+import hashlib, os, stat, subprocess, sys
+asm, mods, mod, lay, dest = sys.argv[1:6]
+slots = ["--slot", "SERVICE=payments", "--slot", "OWNER=acme"]
+if mod == "service-python":
+    slots += ["--slot", "PACKAGE=paylib"]
+r = subprocess.run([sys.executable, "-I", "-B", asm, "--modules-dir", mods, "--dest", dest, "--layout", lay, "--module", mod] + slots,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+if r.returncode:
+    sys.exit("assemble failed for %s/%s: %s" % (mod, lay, r.stderr.decode()[:200]))
+lines, n = [], 0
+for dp, dns, fns in os.walk(dest):
+    for name in dns + fns:
+        full = os.path.join(dp, name); rel = os.path.relpath(full, dest); st = os.lstat(full)
+        if stat.S_ISDIR(st.st_mode):
+            lines.append("%s\t%o\td" % (rel, stat.S_IMODE(st.st_mode)))
+        else:
+            n += 1
+            data = os.readlink(full).encode() if stat.S_ISLNK(st.st_mode) else open(full, "rb").read()
+            lines.append("%s\t%o\t%s" % (rel, stat.S_IMODE(st.st_mode), hashlib.sha256(data).hexdigest()))
+print("%s %s %d %s" % (mod, lay, n, hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()))
+PY
+gold="$here/scripts/tests/fixtures/assemble-golden-d020897.txt"
+golden_lines() {
+  local m l
+  for m in service-go service-rust service-python; do for l in single monorepo; do
+    python3 -I -B "$tmp/dig.py" "$asm" "$here/prod-new/modules" "$m" "$l" "$tmp/g-$m-$l" || return 1
+  done; done
+}
+if [[ "${1:-}" == --print-golden ]]; then head -n 1 "$gold"; golden_lines; exit $?; fi
+
+# 4. --module and --unit mixed; --module alone equals --unit; the real modules' output is FROZEN (digests of d020897)
+if python3 -I -B "$asm" --modules-dir "$here/prod-new/modules" --dest "$tmp/nm" --layout monorepo --module service-go --slot SERVICE=payments --slot OWNER=acme >/dev/null 2>&1 \
+  && python3 -I -B "$asm" --modules-dir "$here/prod-new/modules" --dest "$tmp/nu" --layout monorepo --unit service-go:payments --slot OWNER=acme >/dev/null 2>&1 \
+  && diff -r "$tmp/nm" "$tmp/nu" >/dev/null 2>&1; then pass "4: real service-go: --unit service-go:payments equals --module"
+else fail "4: --unit vs --module on the real service-go"; fi
+got="$(golden_lines 2>&1)"; want="$(grep -v '^#' "$gold")"
+if [[ "$got" == "$want" && -n "$want" ]]; then
+  pass "4: service-go, service-rust, service-python x single/monorepo: tree, modes and contents equal the frozen digests of d020897 ($(echo "$want" | wc -l | tr -d ' ') digests)"
+else fail "4: frozen digests differ (module layout files sha256), < frozen > now" "$(diff <(echo "$want") <(echo "$got") | head -n 6 | tr '\n' '|') -- if a module changed on purpose, regenerate: bash scripts/tests/assemble-multi-unit-selftest.sh --print-golden > scripts/tests/fixtures/assemble-golden-d020897.txt"; fi
 
 # 5. root files from several instances
 run c5a 0 - --layout monorepo --unit svcm:a --unit svcm:b --slot OWNER=o && has "$D/.gitignore" $'common\na-bin\nb-bin' && pass "5: root_merge union-lines by every contributor: merged once, no repeated line" || fail "5: merge" "$(cat "$D/.gitignore" 2>/dev/null | tr '\n' '|')"
@@ -136,34 +183,108 @@ for v in .. /abs a/b ../x; do
 done
 [[ $allok -eq 1 ]] && pass "6: a per-instance slot value escaping the unit dir (.., absolute, with /): exit 2, nothing written" || fail "6: slot escape"
 run c6l 1 'couples' --layout monorepo --unit lnk:a --unit lnk:b --slot OWNER=o && pass "6: a link from one unit into another unit's directory: refused (exit 1), nothing written" || true
-run c6k 0 - --layout monorepo --unit lnkok:a --unit lnkok:b --slot OWNER=o && [[ -L "$D/services/a/ln.txt" ]] && pass "6: a link that leaves for the repo root stays allowed" || fail "6: link control"
+run c6k 1 'outside the unit directory' --layout monorepo --unit lnkok:a --unit lnkok:b --slot OWNER=o && pass "6: a link that leaves its unit for the repo root: refused (exit 1)" || true
+mk lnkin "$SL,\"placement\":{\"README.md\":\"unit\",\"ln.txt\":\"unit\"}" 'README.md=<SERVICE>\n'
+ln -s README.md "$mods/lnkin/ln.txt"
+run c6m 0 - --layout monorepo --unit lnkin:a --unit lnkin:b --slot OWNER=o && [[ -L "$D/services/a/ln.txt" && -L "$D/services/b/ln.txt" ]] && pass "6: a link inside its own unit stays allowed (control of the link cases)" || fail "6: link control"
+for t in .. ../..; do
+  tn="${t//\//}"; tn="${tn//./d}"
+  mk lnkanc "$SL,\"placement\":{\"README.md\":\"unit\",\"l\":\"unit\"}" 'README.md=<SERVICE>\n'
+  rm -f "$mods/lnkanc/l"; ln -s "$t" "$mods/lnkanc/l"
+  run "c6anc$tn" 1 'outside the unit directory' --layout monorepo --unit lnkanc:a --unit lnkanc:b --slot OWNER=o && pass "6: a unit link to an ANCESTOR ($t), which reaches the other unit through it: refused" || true
+done
+mk lnkanc "$SL,\"placement\":{\"README.md\":\"unit\",\"l\":\"unit\"}" 'README.md=<SERVICE>\n'
+rm -f "$mods/lnkanc/l"; ln -s . "$mods/lnkanc/l"
+run c6anc0 0 - --layout monorepo --unit lnkanc:a --unit lnkanc:b --slot OWNER=o && pass "6: a unit link to its own directory (.) is allowed (control of the ancestor cases)" || true
+run c6sg 0 - --layout single --unit lnkin:a --slot OWNER=o && [[ -L "$D/ln.txt" ]] && pass "6: layout single: the link rule is unchanged (the unit dir is the root)" || fail "6: single link"
 
 # 7. repo.yaml inventory
 want="$(printf '# header\nversion: v2\nrepo:\n  name: demo\n  layout: monorepo\nunits:\n  - { id: "main", kind: "database", language: "sql", path: "db" }\n  - { id: "ui", kind: "package", language: "ts", path: "packages/ui" }\n  - { id: "a", kind: "service", language: "go", path: "services/a" }\n  - { id: "b", kind: "service", language: "go", path: "services/b" }')"
 if run c7a 0 - --layout monorepo --unit svc:b --unit dbm:main --unit svc:a --unit pkgm:ui --module rr --slot REPO=demo --slot OWNER=o && has "$D/repo.yaml" "$want"; then
   pass "7: repo.yaml entries exact (id, kind, language, path), sorted by path"
 else fail "7: repo.yaml" "$(cat "${D:-/nonexistent}/repo.yaml" 2>/dev/null | tail -n 5 | tr '\n' '|')"; fi
-specials=(true null yes 123 1e3 a.b a_b 0x1f off)
-args=(); for s in "${specials[@]}"; do args+=(--unit "svc:$s"); done
-if run c7b 0 - --layout monorepo "${args[@]}" --module rr --slot REPO=demo --slot OWNER=o; then
-  sp=1; for s in "${specials[@]}"; do grep -qxF "  - { id: \"$s\", kind: \"service\", language: \"go\", path: \"services/$s\" }" "$D/repo.yaml" || sp=0; done
-  [[ $sp -eq 1 ]] && pass "7: ids true/null/yes/123/1e3/0x1f/off/a.b/a_b are emitted double-quoted" || fail "7: quoting" "$(tail -n 3 "$D/repo.yaml")"
-  if python3 -c 'import yaml' 2>/dev/null; then
-    python3 -I -B - "$D/repo.yaml" "${specials[@]}" <<'PY' && pass "7: PyYAML loads every id as a string, paths as services/<id>" || fail "7: PyYAML"
+yp=""; for c in "${PYYAML_PYTHON:-}" "$HOME/.cache/production-skills-tools/venv/bin/python3" python3; do
+  [[ -n "$c" ]] && "$c" -c 'import yaml' 2>/dev/null && { yp="$c"; break; }
+done
+specials=(true null yes 123 1e3 a.b a_b 0x1f off My.Svc)
+if python3 -I -B - "$asm" "${specials[@]}" >"$tmp/rows.txt" <<'PY'
+import importlib.util, sys
+sp = importlib.util.spec_from_file_location("asm", sys.argv[1]); m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+ents = [(s, "svc", "services/" + s, {"kind": "service", "language": "go"}) for s in sys.argv[2:]]
+rows = m.inv_rows(ents)
+print("units:"); print("\n".join(rows))
+assert m.inventory_problem(("repo: x\n" + "units:\n" + "\n".join(rows) + "\n").encode(), generated=True) is None
+PY
+then
+  sp=1; for s in "${specials[@]}"; do grep -qxF "  - { id: \"$s\", kind: \"service\", language: \"go\", path: \"services/$s\" }" "$tmp/rows.txt" || sp=0; done
+  [[ $sp -eq 1 ]] && pass "7: the writer emits ids true/null/yes/123/1e3/0x1f/off/a.b/a_b/My.Svc double-quoted, and its own line check accepts them" || fail "7: quoting" "$(tail -n 3 "$tmp/rows.txt")"
+  if [[ -n "$yp" ]]; then
+    "$yp" -I -B - "$tmp/rows.txt" "${specials[@]}" <<'PY' && pass "7: PyYAML loads every quoted id as a string, paths as services/<id>" || fail "7: PyYAML"
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 u = d["units"]
 assert sorted(x["id"] for x in u) == sorted(sys.argv[2:]) and all(type(x["id"]) is str for x in u)
-assert all(set(x) == {"id", "kind", "language", "path"} for x in u) and d["version"] == "v2"
+assert all(set(x) == {"id", "kind", "language", "path"} for x in u)
 PY
-  else skipped=$((skipped + 1)); echo "skip 7: PyYAML is not importable (line-shape assertions above stand in)"; fi
-fi
+  else skipped=$((skipped + 1)); echo "skip 7: PyYAML is not importable"; fi
+else fail "7: writer" "$(head -c 200 "$tmp/rows.txt")"; fi
 run c7c 2 'svcnk.*declares no .unit' --layout monorepo --unit svcnk:a --module rr --slot REPO=demo --slot OWNER=o && pass "7: unit files but no kind/language declared (repo.yaml present): exit 2, module named" || true
 run c7d 0 - --layout monorepo --unit svcnk:a --slot OWNER=o && pass "7: no repo.yaml contributed: no kind needed, nothing generated" || true
-run c7e 2 'exactly one line' --layout monorepo --unit svc:a --module rrnone --slot REPO=d --slot OWNER=o && pass "7: repo.yaml without a units: [] line: exit 2" || true
-run c7f 2 'exactly one line' --layout monorepo --unit svc:a --module rrcomment --slot REPO=d --slot OWNER=o && pass "7: only a comment holding units: [] (no exact line): exit 2" || true
-run c7g 2 'exactly one line' --layout monorepo --unit svc:a --module rrtwo --slot REPO=d --slot OWNER=o && pass "7: two units: [] lines: exit 2" || true
-run c7h 2 'exactly one line' --layout monorepo --unit svc:a --module rrindent --slot REPO=d --slot OWNER=o && pass "7: an indented units: [] is not column 0: exit 2" || true
+ri() { run "$1" 2 "$2" --layout monorepo --unit svc:a --module "$3" --slot REPO=d --slot OWNER=o; }   # ri <case> <stderr-grep> <repo.yaml module>
+ri c7e 'exactly one line.*found 0' rrnone && pass "7: repo.yaml without a units: [] line: exit 2" || true
+ri c7f 'line 2.*forbidden character' rrcomment && pass "7: a comment holding units: [] and a real flow units: {}: exit 2 at the flow line" || true
+ri c7g 'line 2.*`units` appears twice' rrtwo && pass "7: two units: [] lines: exit 2, line 2" || true
+ri c7h 'line 2.*forbidden character' rrindent && pass "7: an indented units: []: exit 2" || true
+# the four inputs of the review, then the rest of the allow-list (message names the line and the reason)
+ri c7r1 'line 3.*forbidden character' rrmap && pass "7: units: [] then a second units: {x: 1}: exit 2" || true
+ri c7r1b 'line 3.*`units` appears twice' rrdup && pass "7: units: [] then a second plain units: 1: exit 2 (duplicate key)" || true
+ri c7r2 'line 2.*document marker' rrdoc && pass "7: a two-document file (---): exit 2" || true
+ri c7r3 'line 2.*document marker' rrdocb && pass "7: --- | before units: []: exit 2" || true
+ri c7r4 'line 1.*not one of the allowed shapes' rrquote && pass "7: a multi-line quoted scalar holding the line: exit 2" || true
+ri c7r5 'line 1.*forbidden character' rrflow && pass "7: a multi-line flow mapping holding the line: exit 2" || true
+ri c7s1 'line 1.*carriage-return' rrcrlf && pass "7: CRLF: exit 2" || true
+ri c7s2 'line 1.*byte-order mark' rrbom && pass "7: a BOM: exit 2" || true
+ri c7s3 'line 1.*tab' rrtab && pass "7: a tab: exit 2" || true
+ri c7s4 'must end with a newline' rrnonl && pass "7: no newline at the end: exit 2" || true
+ri c7s5 'no child line' rrbare && pass "7: a mapping opener without children: exit 2" || true
+ri c7s6 'line 1.*indented line' rrorph && pass "7: a child line without an opener: exit 2" || true
+ri c7s7 'line 1.*not one of the allowed shapes' rrtrail && pass "7: a trailing comment on a scalar line: exit 2" || true
+ri c7s8 'line 1.*forbidden character' rranchor && pass "7: an anchor: exit 2" || true
+ri c7s9 'line 2.*`a` appears twice' rrkey && pass "7: a top-level key twice: exit 2" || true
+ri c7s10 'line 3.*child key .b. appears twice' rrchild && pass "7: a child key twice: exit 2" || true
+ri c7s11 'line 1.*forbidden character' rrblock && pass "7: a block scalar (a: |): exit 2" || true
+ri c7s12 'line 2.*line-break character U\+2028' rrls && pass "7: a Unicode line break inside a comment: exit 2" || true
+run c7ok 0 - --layout monorepo --unit svc:a --module rrok --slot REPO=d --slot OWNER=o && grep -qxF '  - { id: "a", kind: "service", language: "go", path: "services/a" }' "$D/repo.yaml" && grep -qxF 'q: "a: b # c"' "$D/repo.yaml" && pass "7: blank lines, comments, a quoted scalar and a nested mapping are accepted" || fail "7: allow-list control"
+# the real monorepo-root repo.yaml shape (comments, `version: v2`, a one-level `repo:` mapping)
+printf '# Inventory.\n# Schema: x\nversion: v2\nrepo:\n  name: repo-name\n  layout: monorepo\nunits: []\n' >"$tmp/real.yaml"
+if python3 -I -B - "$asm" "$tmp/real.yaml" <<'PY'
+import importlib.util, sys
+sp = importlib.util.spec_from_file_location("asm", sys.argv[1]); m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+assert m.inventory_problem(open(sys.argv[2], "rb").read()) is None
+assert m.inventory_problem(b"units: []\n") is None and m.inventory_problem(b"") is not None
+assert m.inventory_problem(b"a: 1\n") == (0, "must hold exactly one line `units: []` (found 0)")
+PY
+then pass "7: the shape of the real monorepo-root repo.yaml is accepted by the allow-list"; else fail "7: real repo.yaml shape"; fi
+# ids vs the inventory schema
+allok=1
+for badid in My.Svc 123 a_b A 9x; do
+  run "c7id$badid" 2 "unit id '$badid'.*\\^\\[a-z\\]" --layout monorepo --unit "svc:$badid" --module rr --slot REPO=d --slot OWNER=o || allok=0
+done
+[[ $allok -eq 1 ]] && pass "7: ids outside the inventory schema (My.Svc, 123, a_b, A, 9x) with an inventory in layout monorepo: exit 2, id named" || fail "7: id rule"
+run c7ids 0 - --layout single --unit svc:My.Svc --module rr --slot REPO=d --slot OWNER=o && pass "7: layout single is unchanged (no inventory, any grammar id)" || fail "7: id rule single"
+run c7idn 0 - --layout monorepo --unit svc:My.Svc --unit svcnk:true --slot OWNER=o && pass "7: without a repo.yaml any grammar id is still accepted" || fail "7: id rule without repo.yaml"
+# the self-check: a writer that emits a bad entry must be caught before the rename
+cat >"$tmp/drv2.py" <<'PY'
+import importlib.util, sys
+sp = importlib.util.spec_from_file_location("asm", sys.argv[1]); asm = importlib.util.module_from_spec(sp); sp.loader.exec_module(asm)
+asm.inv_rows = lambda ents: ["  - { id: " + '"x", kind: "k", language: "l", path: "p"' + " }  # extra"]
+sys.argv = ["assemble.py"] + sys.argv[2:]
+asm.main()
+PY
+python3 -I -B "$tmp/drv2.py" "$asm" --modules-dir "$mods" --dest "$out/c7self" --layout monorepo --unit svc:a --module rr --slot REPO=d --slot OWNER=o >/dev/null 2>"$out/c7self.err"; rc=$?
+if [[ $rc -eq 2 && ! -e "$out/c7self" ]] && ! compgen -G "$out/.assemble-*" >/dev/null && grep -q 'internal error.*own line check' "$out/c7self.err"; then
+  pass "7: a generated repo.yaml that fails the assembler's own line check: internal error, exit 2, nothing written"
+else fail "7: self-check" "rc=$rc $(head -c 200 "$out/c7self.err")"; fi
 run c7i 0 - --layout monorepo --module rr --slot REPO=demo && has "$D/repo.yaml" "$(printf '# header\nversion: v2\nrepo:\n  name: demo\n  layout: monorepo\nunits: []')" && pass "7: no unit instance: units: [] untouched" || fail "7: empty inventory"
 run c7j 0 - --layout single --unit svc:a --module rr --slot REPO=demo --slot OWNER=o && grep -qx 'units: \[\]' "$D/repo.yaml" && pass "7: layout single never generates the inventory" || fail "7: single"
 
@@ -190,6 +311,76 @@ else fail "8: SIGTERM" "rc=$rc temp dirs: $(compgen -G "$out/.assemble-*" | wc -
 if bash "$here/scripts/instantiate-template.sh" "$tmp/wrap" payments acme >/dev/null 2>"$tmp/wrap.err" && [[ -f "$tmp/wrap/go.mod" && -f "$tmp/wrap/cmd/payments/main.go" ]]; then
   pass "9: scripts/instantiate-template.sh (one invocation) still assembles service-go"
 else fail "9: wrapper" "$(head -c 200 "$tmp/wrap.err")"; fi
+
+# 10. root files inside a unit directory
+mk rootin '"placement":{"packages/ui/y":"root"}' 'packages/ui/y=x\n'
+mk rootdb '"placement":{"db/x.sql":"root"}' 'db/x.sql=x\n'
+run c10a 1 'packages/ui/y.*rootin.*pkgm\[ui\]' --layout monorepo --unit pkgm:ui --module rootin --slot OWNER=o && pass "10: another module's root file packages/ui/y inside the package unit ui: exit 1, path, module and unit named" || true
+run c10b 1 'db/x.sql.*rootdb.*dbm\[main\]' --layout monorepo --unit dbm:main --module rootdb --slot OWNER=o && pass "10: another module's root file db/x.sql inside the database unit: exit 1" || true
+run c10c 0 - --layout monorepo --unit pkgm:other --unit dbm:main --module rootin --slot OWNER=o && [[ -f "$D/packages/ui/y" ]] && pass "10: the same root file beside different units is fine (control)" || fail "10: control"
+
+# 11. messages and parsing
+run c11a 2 "bad --unit 'sv:c:a'.*':'" --layout monorepo --unit sv:c:a --slot OWNER=o && pass "11: --unit sv:c:a: exit 2, the whole argument named" || true
+run c11b 2 'module svcnk places unit files' --layout monorepo --module svcnk --module rr --slot SERVICE=a --slot OWNER=o --slot REPO=d && ! grep -q 'None' "$out/c11b.err" && pass "11: a --module instance without a unit declaration: no (unit None) in the message" || fail "11: unit None" "$(head -c 200 "$out/c11b.err")"
+mk fifom "$SL,\"placement\":{\"README.md\":\"unit\",\"pipe\":\"unit\"}" 'README.md=x\n'
+if mkfifo "$mods/fifom/pipe" 2>/dev/null; then
+  run c11c 1 'fifom\[a\].*FIFO' --layout monorepo --unit fifom:a --slot OWNER=o && pass "11: a FIFO in a module source names module[id]" || true
+  rm -f "$mods/fifom/pipe"
+else skipped=$((skipped + 1)); echo "skip 11: mkfifo is not available"; fi
+
+# 12. a path that BECOMES .git after substitution
+mk gslotu '"slots":{"SERVICE":"s"},"placement":{".g<SERVICE>/**":"unit"}' '.g<SERVICE>/hooks/pre-commit=x\n'
+mk gslotr '"slots":{"SERVICE":"s"},"placement":{".g<SERVICE>/**":"root"}' '.g<SERVICE>/hooks/pre-commit=x\n'
+mk gslotl '"slots":{"SERVICE":"s"},"placement":{".g<SERVICE>":"unit"}'
+ln -s x "$mods/gslotl/.g<SERVICE>"
+run c12a 1 'reserved' --layout monorepo --unit gslotu:it && pass "12: unit file .g<SERVICE>/hooks/pre-commit with the unit id it: refused (exit 1), nothing written" || true
+run c12b 1 'reserved' --layout monorepo --module gslotr --slot SERVICE=it && pass "12: root file .g<SERVICE>/hooks/pre-commit with SERVICE=it: refused" || true
+run c12c 1 'reserved' --layout monorepo --unit gslotl:it && pass "12: a unit LINK named .g<SERVICE> becoming .git: refused" || true
+run c12d 0 - --layout monorepo --unit gslotu:ok --module gslotr --slot SERVICE=ok && pass "12: the same scenario with a harmless value (control)" || true
+run c12e 0 - --layout monorepo --unit gslotl:ok && [[ -L "$D/services/ok/.gok" ]] && pass "12: the same link scenario with a harmless value (control)" || fail "12: link control"
+
+# 13. root_merge declared by only ONE of two contributors
+mk rm-a '"placement":{".gitignore":"root"},"root_merge":{".gitignore":"union-lines"}' '.gitignore=a\n'
+mk rm-b '"placement":{".gitignore":"root"}' '.gitignore=b\n'
+mk rm-c '"placement":{".gitignore":"root"},"root_merge":{".gitignore":"union-lines"}' '.gitignore=c\n'
+run c13a 1 'both place .gitignore' --layout monorepo --module rm-a --module rm-b && pass "13: root_merge declared by the first contributor only: exit 1" || true
+run c13b 1 'both place .gitignore' --layout monorepo --module rm-b --module rm-a && pass "13: root_merge declared by the second contributor only: exit 1" || true
+run c13c 0 - --layout monorepo --module rm-a --module rm-c && has "$D/.gitignore" $'a\nc' && pass "13: declared by both: merged (control)" || fail "13: control"
+
+# 14. a module that ships several fixed units (manifest key units)
+DU='"units":[{"id":"tokens","kind":"package","language":"ts","path":"packages/tokens"},{"id":"theme","kind":"package","language":"ts","path":"packages/theme"}]'
+dsp='"placement":{"packages/tokens/**":"root","packages/theme/**":"root"}'
+mk dsys "$dsp,$DU" 'packages/tokens/package.json=t\n' 'packages/theme/package.json=h\n'
+want="$(printf '# header\nversion: v2\nrepo:\n  name: d\n  layout: monorepo\nunits:\n  - { id: "theme", kind: "package", language: "ts", path: "packages/theme" }\n  - { id: "tokens", kind: "package", language: "ts", path: "packages/tokens" }\n  - { id: "a", kind: "service", language: "go", path: "services/a" }')"
+run c14a 0 - --layout monorepo --module dsys --module rr --unit svc:a --slot REPO=d --slot OWNER=o && [[ -f "$D/packages/tokens/package.json" ]] && has "$D/repo.yaml" "$want" \
+  && pass "14: two declared package units + a service instance: three inventory entries, sorted by path" || fail "14: declared units" "$(tail -n 4 "$D/repo.yaml" 2>/dev/null | tr '\n' '|')"
+if [[ -n "$yp" && -f "$D/repo.yaml" ]] && "$yp" -I -B - "$D/repo.yaml" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+assert [(u["id"], u["path"]) for u in d["units"]] == [("theme", "packages/theme"), ("tokens", "packages/tokens"), ("a", "services/a")]
+PY
+then pass "14: PyYAML loads the three entries"; else fail "14: PyYAML (or no interpreter with yaml)"; fi
+mk dboth "\"unit\":{\"kind\":\"service\",\"language\":\"go\"},$dsp,$DU" 'packages/tokens/package.json=t\n' 'packages/theme/package.json=h\n'
+run c14b 2 'mutually exclusive' --layout monorepo --module dboth && pass "14: unit and units together: exit 2" || true
+mk dpath "$dsp,\"units\":[{\"id\":\"tokens\",\"kind\":\"package\",\"language\":\"ts\",\"path\":\"packages/other\"}]" 'packages/tokens/package.json=t\n'
+run c14c 2 "path 'packages/other' must be 'packages/tokens'" --layout monorepo --module dpath && pass "14: a declared path that is not the kind's directory: exit 2" || true
+mk dnofile "$dsp,$DU" 'packages/tokens/package.json=t\n'
+run c14d 2 'unit theme at packages/theme, but places no file' --layout monorepo --module dnofile && pass "14: a declared unit with no file inside: exit 2" || true
+run c14e 2 'same id' --layout monorepo --module dsys --unit svc:tokens --slot OWNER=o && pass "14: --unit svc:tokens vs the declared package tokens (other directories, same id): exit 2" || true
+mk ddup "$dsp,\"units\":[{\"id\":\"tokens\",\"kind\":\"package\",\"language\":\"ts\",\"path\":\"packages/tokens\"},{\"id\":\"tokens\",\"kind\":\"app\",\"language\":\"ts\",\"path\":\"apps/tokens\"}]" 'packages/tokens/package.json=t\n' 'apps/tokens/package.json=h\n'
+run c14f 2 'same id' --layout monorepo --module ddup && pass "14: the same id twice in one manifest (two kinds): exit 2" || true
+mk rootd '"placement":{"packages/tokens/extra":"root"}' 'packages/tokens/extra=x\n'
+run c14g 1 'packages/tokens/extra.*rootd.*dsys\[tokens\]' --layout monorepo --module dsys --module rootd && pass "14: another module's root file inside a declared unit directory: exit 1" || true
+mk rootd2 '"placement":{"docs/extra":"root"}' 'docs/extra=x\n'
+run c14h 0 - --layout monorepo --module dsys --module rootd2 && pass "14: another module's root file outside the declared directories (control)" || true
+mk dslot '"slots":{"X":"x"},"placement":{"packages/<X>/**":"root"},"units":[{"id":"tokens","kind":"package","language":"ts","path":"packages/<X>"}]' 'packages/<X>/package.json=t\n'
+run c14i 2 'slot placeholder' --layout monorepo --module dslot --slot X=tokens && pass "14: a slot placeholder in a declared path: exit 2" || true
+run c14j 0 - --layout single --module dsys --module rr --slot REPO=d && grep -qx 'units: \[\]' "$D/repo.yaml" && [[ -f "$D/packages/tokens/package.json" ]] && pass "14: layout single accepts units and generates no inventory" || fail "14: single"
+mk ddb '"placement":{"db/**":"root"},"units":[{"id":"core","kind":"database","language":"sql","path":"db"}]' 'db/s.sql=x\n'
+run c14m 2 'share the unit directory' --layout monorepo --module ddb --unit dbm:main --slot OWNER=o && pass "14: a declared unit directory equal to an instance's unit directory (ids differ): exit 2" || true
+run c14n 0 - --layout monorepo --module ddb --unit svc:a --slot OWNER=o && pass "14: a declared database unit beside a service instance (control)" || fail "14: control"
+run c14k 2 'use --module dsys' --layout monorepo --unit dsys:x && pass "14: --unit on a module with declared units: exit 2" || true
+run c14l 2 'must be' --layout single --module dpath && pass "14: the path rule still validates in layout single" || true
 
 echo "$ok ok, $bad failed${skipped:+, $skipped skipped}" | sed 's/, 0 skipped//'
 [[ $((ok + bad)) -gt 0 ]] || exit 2
