@@ -908,6 +908,12 @@ def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None):
             if not is_red(present | {cid}, rules):
                 probs.append("%s is GREEN together with the FINAL landed set %s, yet ejected (%s)"
                              % (cid, landed, e["why"]))
+            if e["why"] not in ("conflict", "uncheckoutable", "empty", "unrelated", "unrepresentable-on-this-filesystem"):
+                # the stated guarantee, exactly: the tool's own record says RED with a set equal to the
+                # FINAL landed set + this member (the oracle's check above says it really is red)
+                if set(e.get("verified_red", [])) != present | {cid}:
+                    probs.append("%s: verified_red %s is not the final landed set %s plus itself"
+                                 % (cid, e.get("verified_red"), landed))
             if "red_with" in e and not set(e["red_with"]) <= present:
                 probs.append("%s red_with %s names a candidate that did not land %s" % (cid, e["red_with"], landed))
     runlog = [frozenset(l.split()) for l in open(count).read().split("\n")[:-1]]
@@ -965,7 +971,15 @@ def f_n4(js, landed, ejected):  # a reported partner must be green as a SET (nev
     return out
 
 
+def f_n4_norecover(js, landed, ejected):  # without recovery the search itself must run the member ALONE
+    out = want(["c2", "c3"], c1="red", c4="interaction")(js, landed, ejected)
+    if not ejected.get("c4", {}).get("verified_green_alone"):
+        out.append("c4 interaction without the member's own green run")
+    return out
+
+
 N4 = [({"c1"}, {"c3"}), ({"c2", "c4"}, set())]
+C6 = ["c1", "c2", "c3", "c4", "c5", "c6"]
 FIXED = [
     ("fixed-recovery", "fixed-recovery", ["c1", "c2", "c3", "c4"], [({"c1", "c3"}, set())], None),
     ("fixer-late", "fixer", ["c1", "c2", "c3", "c4"], [({"c1"}, {"c4"}), ({"c2"}, set())], want(["c1", "c3", "c4"], c2="red")),
@@ -976,11 +990,25 @@ FIXED = [
     ("n4-partner", "named", ["c1", "c2", "c3", "c4"], N4, f_n4),
     ("triple-across-halves", "named", ["c1", "c2", "c3", "c4"], [({"c1", "c2", "c3"}, set())], want(["c1", "c2", "c4"], c3="interaction")),
     ("n5-recover", "named", ["c1", "c2", "c3", "c4", "c5"], [({"c2"}, {"c5"}), ({"c3", "c4"}, set())], None),
+    # a member green with the FINAL landed set must not stay ejected (the reviewer's two formulas)
+    ("late-landing-a", "named", C6, [({"c2", "c5"}, set()), ({"c3", "c4"}, {"c6"})],
+     want(["c1", "c2", "c3", "c4", "c6"], c5="interaction")),
+    ("late-landing-b", "named", C6, [({"c4"}, {"c3"}), ({"c2", "c5"}, set()), ({"c1"}, {"c4"})], None),
+    # N=5-6 from the families pair and fixer+pair
+    ("n5-pair", "pair", ["c1", "c2", "c3", "c4", "c5"], [({"c1", "c4"}, set())], None),
+    ("n6-pairs", "pair", C6, [({"c2", "c6"}, set()), ({"c3", "c5"}, set())], None),
+    ("n5-fixer-pair", "fixer-pair", ["c1", "c2", "c3", "c4", "c5"], [({"c2"}, {"c5"}), ({"c1", "c3"}, set())], None),
+    ("n6-fixer-pairs", "fixer-pair", C6, [({"c1"}, {"c6"}), ({"c3", "c4"}, set()), ({"c2", "c5"}, set())], None),
+    ("n6-fixer-pair", "fixer-pair", C6, [({"c4"}, {"c2"}), ({"c1", "c6"}, set())], None),
+    # red iff c2 or (c4,c5 without c1) or (c1,c6 without c5): a member ejected by the interaction search
+    ("g4-interaction-ejectees", "named", C6, [({"c2"}, set()), ({"c4", "c5"}, {"c1"}), ({"c1", "c6"}, {"c5"})], None),
 ]
 for nm, kind, fids, frules, fexp in FIXED:
     scenario(nm, kind, fids, frules, True, fexp)
     if nm in ("formula6", "triple-across-halves"):
         scenario(nm, kind, fids, frules, False)
+    if nm == "n4-partner":  # reachable only with --no-recover: kills "interaction without the alone-green run"
+        scenario(nm, kind, fids, frules, False, f_n4_norecover)
 # the canary: the tool runs against RED-when-c2 rules but the test judges with other rules; the
 # oracle must report problems, else it could not fail at all
 cp = scenario("canary", "canary", ["c1", "c2", "c3"], [({"c2"}, set())], True, None, judge=[({"c3"}, set())])
@@ -2070,6 +2098,162 @@ ident_end "item 0 red" "$NC"
 REPOARG=$NC V="$V_FIX" trn --no-recover --keep n1 n2
 check "item 0: --no-recover leaves the red-alone member exactly as measured (no red_with, no retry)" eq "$(lacks "$JSON" red_with && lacks "$JSON" verified_red_alone && has "$JSON" '"runs":3,' && echo y)" y
 [ -n "$BR" ] && "$REAL_GIT" -C "$NC" branch -D "$BR" >/dev/null 2>&1
+
+# (h) delivery is all-or-nothing AS OBSERVED, for a signal at any instant: at exit either the ref does not
+# exist and nothing names it, or it exists and the branch line and the JSON name it. Deterministic cases: a
+# test hook (TRAIN_SELFTEST only) pauses right after update-ref was spawned, before it is waited for; "complete"
+# lets it finish inside the pause, "kill" delays its start so a tool that kills it would leave no ref.
+cat >"$S/deliv.py" <<'PYEOF'
+import json, os, random, shutil, signal, subprocess, sys, time
+
+G = os.environ["REAL_GIT"]
+mode = sys.argv[1]
+script, caller, ready, tmpdir, wt = sys.argv[2:7]
+names = {"TERM": 143, "INT": 130, "HUP": 129}
+
+
+def refs():
+    return subprocess.run([G, "-C", caller, "for-each-ref", "--format=%(refname:short) %(objectname)",
+                           "refs/heads/train-*"], capture_output=True, text=True).stdout.split("\n")[:-1]
+
+
+def tool(extra_env, sig, delay, anchor=None):
+    """One delivery run with a signal `delay` s after the anchor file (the start of delivery, or the
+    end of index-pack); returns the observation."""
+    for f in (ready, ready + ".indexed"):
+        if os.path.exists(f):
+            os.unlink(f)
+    mark = anchor or ready
+    env = dict(os.environ, TRAIN_SELFTEST="1", TMPDIR=tmpdir, **extra_env)
+    p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller, "--verify", "true",
+                          "--keep", "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1"], cwd=wt,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
+    if sig:
+        for _ in range(4000):
+            if os.path.exists(mark) or p.poll() is not None:
+                break
+            time.sleep(0.0005)
+        time.sleep(delay)
+        if p.poll() is None:
+            p.send_signal(getattr(signal, "SIG" + sig))
+    out, err = p.communicate(timeout=60)
+    rs = refs()
+    out = out.decode("utf-8", "replace")
+    lines = [x for x in out.split("\n") if x.startswith("integration branch: ")]
+    try:
+        js = json.loads(out.strip().split("\n")[-1])
+    except ValueError:
+        js = {}
+    named = js.get("branch", "")
+    for r in rs:
+        subprocess.run([G, "-C", caller, "update-ref", "-d", "refs/heads/" + r.split()[0]], check=True)
+    for x in os.listdir(tmpdir):
+        if x.startswith("itrain-"):
+            shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
+    return {"rc": p.returncode, "ref": len(rs), "line": len(lines),
+            "json": int(bool(named) and named in [r.split()[0] for r in rs]),
+            "same": int(bool(rs) and rs[0].split()[1] == js.get("commits", {}).get("n1")),
+            "flag": int(js.get("interrupted_after_delivery") is True),
+            "derr": int("does not exist" in js.get("delivery_error", ""))}
+
+
+def fmt(o, keys):
+    return " ".join("%s=%s" % (k, o[k]) for k in keys)
+
+
+if mode == "case":  # a hook pauses right after update-ref was spawned; the signal arrives in the pause
+    hook, sg, tmo = sys.argv[7:10]
+    extra = {"TRAIN_TEST_UPDATEREF": hook, "TRAIN_TEST_UPDATEREF_READY": ready}
+    if tmo != "-":
+        extra["TRAIN_TEST_UPDATEREF_TIMEOUT"] = tmo
+    o = tool(extra, None if sg == "none" else sg, 0)
+    print(fmt(o, ["rc", "ref", "line", "json", "same", "flag"] if sg != "none" else ["rc", "ref", "line", "json", "derr"]))
+elif mode == "early":  # a signal 0-30 ms after spawn, maybe inside CPython's own start-up
+    n, seed = int(sys.argv[7]), int(sys.argv[8])
+    rng = random.Random(seed)
+    verdicts = nojson = bad = 0
+    for i in range(n):
+        p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller, "--verify", "true",
+                              "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1"], cwd=wt,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                             env=dict(os.environ, TMPDIR=tmpdir))
+        time.sleep(0 if i == 0 else rng.uniform(0, 0.03))
+        if p.poll() is None:
+            p.send_signal(signal.SIGINT)
+        out = p.communicate(timeout=60)[0].decode("utf-8", "replace")
+        if p.returncode in (0, 1):
+            verdicts += 1
+            try:
+                json.loads(out.strip().split("\n")[-1])
+            except ValueError:
+                nojson += 1  # exit 0/1 with no JSON: NOT a verdict (CPython start-up) ...
+                bad += int(bool(out.strip()))  # ... and then stdout must be EMPTY, never a partial report
+        for x in os.listdir(tmpdir):
+            if x.startswith("itrain-"):
+                shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
+    print("runs=%d exit-0/1=%d of-which-without-json=%d without-json-but-with-output=%d" % (n, verdicts, nojson, bad))
+else:  # the sweep: signals at random instants from the start of delivery
+    n, seed, span = int(sys.argv[7]), int(sys.argv[8]), float(sys.argv[9])
+    rng = random.Random(seed)
+    both = none = viol = 0
+    rcs = {}
+    for i in range(n):
+        sg = ("TERM", "INT", "HUP")[i % 3]
+        # half of the runs land in the 6 ms after index-pack ends (where update-ref starts), half anywhere
+        # from the start of delivery, so the sweep is shown to hit BOTH outcomes
+        o = tool({"TRAIN_TEST_DELIVERY_READY": ready, "TRAIN_TEST_INDEXED_READY": ready + ".indexed"}, sg,
+                 rng.uniform(0, 0.006) if i % 2 == 0 else rng.uniform(0, span),
+                 ready + ".indexed" if i % 2 == 0 else None)
+        rcs[o["rc"]] = rcs.get(o["rc"], 0) + 1
+        if o["ref"] == 1 and o["line"] == 1 and o["json"] == 1:
+            both += 1
+        elif o["ref"] == 0 and o["line"] == 0 and o["json"] == 0:
+            none += 1
+        else:
+            viol += 1
+            sys.stderr.write("violation %d: %s\n" % (i, o))
+    print("runs=%d ref+line+json=%d no-ref+no-line+no-json=%d violations=%d" % (n, both, none, viol))
+PYEOF
+mkdir -p "$S/delivtmp"
+ident_begin "$NC"
+for sg in TERM INT HUP; do
+    case $sg in HUP) want=129 ;; INT) want=130 ;; TERM) want=143 ;; esac
+    for hk in complete kill; do
+        check "delivery: $sg while update-ref is in flight ($hk): exit $want, the branch exists, is named by the line and the JSON, equals the verified commit, says interrupted" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" "$hk" "$sg" -)" "rc=$want ref=1 line=1 json=1 same=1 flag=1"
+    done
+done
+check "delivery: an update-ref that outlives its hard timeout is exit 2, the ref is read back (absent), the JSON says so" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" kill none 0.3)" "rc=2 ref=0 line=0 json=0 derr=1"
+SWEEP_OUT=$(python3 -I -B "$S/deliv.py" sweep "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" 60 7 0.06 2>&1)
+check "delivery sweep: 60 signals, none leaves a ref without its line and JSON, or a line without a ref ($SWEEP_OUT)" has "$SWEEP_OUT" "violations=0"
+check "delivery sweep: both outcomes were hit (a ref delivered, and no ref at all)" eq "$(case $SWEEP_OUT in *"ref+line+json=0 "* | *"no-json=0 "*) echo one-sided ;; *) echo both ;; esac)" both
+ident_end "delivery signals (objects may differ)" "$NC" objects
+# the contract that makes a verdict checkable: exit 0/1 prints the JSON as the LAST stdout line; an early-killed run
+# (CPython start-up, before the script's first line) has exit 1 or -2 and empty stdout: NOT a verdict
+EARLY_OUT=$(python3 -I -B "$S/deliv.py" early "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" 12 3 2>&1)
+check "start-up: an early SIGINT never yields exit 0/1 with output but no JSON line; exit 0/1 without JSON has EMPTY stdout ($EARLY_OUT)" has "$EARLY_OUT" "without-json-but-with-output=0"
+REPOARG=$NC trn n1
+check "verdict contract: exit 0 prints the JSON as the last stdout line" eq "$RC$(printf '%s' "$OUT" | tail -n 1 | python3 -I -B -c 'import json,sys; json.loads(sys.stdin.read()); print("J")')" 0J
+REPOARG=$NC V="exit 1" trn n1
+check "verdict contract: exit 1 prints the JSON as the last stdout line" eq "$RC$(printf '%s' "$OUT" | tail -n 1 | python3 -I -B -c 'import json,sys; json.loads(sys.stdin.read()); print("J")')" 1J
+
+# (i) the private repository's state channels a verify could use to carry a result from one run to the next.
+# Each verify below is RED the first time (it leaves a mark in the shared private git directory, which it reaches
+# by climbing two levels from its worktree) and GREEN when it finds the mark: without detection a later red run lands.
+PRIV_P='P=$(cd ../.. && pwd)/repo.git'
+V_SNAP_PACK="$PRIV_P"'; [ -f $P/objects/pack/mark ] && exit 0; : >$P/objects/pack/mark; exit 1'
+V_SNAP_WT="$PRIV_P"'; [ -f $P/worktrees/mark/x ] && exit 0; mkdir -p $P/worktrees/mark && : >$P/worktrees/mark/x; exit 1'
+V_SNAP_HEAD="$PRIV_P"'; [ "$(cat $P/HEAD)" = "ref: refs/heads/mark" ] && exit 0; echo "ref: refs/heads/mark" >$P/HEAD; exit 1'
+V_SNAP_OBJ="$PRIV_P"'; H=$(echo state | git hash-object --stdin); git --git-dir=$P cat-file -e $H 2>/dev/null && exit 0; echo state | git --git-dir=$P hash-object -w --stdin >/dev/null; exit 1'
+V_SNAP_CTL='git status >/dev/null; git diff --stat HEAD >/dev/null; echo x >new.txt; git add -A; git write-tree >/dev/null; git stash create >/dev/null 2>&1; exit 0'
+for ch in "pack:objects/pack:$V_SNAP_PACK" "worktrees:worktrees:$V_SNAP_WT" "HEAD content:top-level:$V_SNAP_HEAD"; do
+    nm=${ch%%:*}; rest=${ch#*:}; want=${rest%%:*}; vs=${rest#*:}
+    REPOARG=$NC V="$vs" trn n1 n2
+    check "snapshot channel ($nm): the run is void, exit 2 naming '$want'" eq "$RC$(has "$OUT" "verify changed the private repository: $want" && echo y)" "2y"
+done
+REPOARG=$NC V="$V_SNAP_OBJ" trn n1 n2
+check "snapshot channel (loose object): documented as NOT digested; the run is not voided" eq "$RC$(has "$OUT" "verify changed the private repository" && echo y)" "1"
+REPOARG=$NC V="$V_SNAP_CTL" trn n1 n2
+check "snapshot control: git status/add/write-tree/stash create in the worktree void nothing, both land" eq "$RC$(has "$JSON" '"landed":["n1","n2"]' && echo y)" "0y"
 fi # newc
 
 # A skipped block replaces several checks on hosts where it cannot run (case-folding or

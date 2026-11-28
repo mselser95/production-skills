@@ -36,11 +36,19 @@ What this tool does to your repository:
  and stdin on /dev/null; HOME stays yours, so a verify must not keep state under HOME
  or in absolute paths (one that climbs two levels up reaches the shared private root).
  A verify must not write outside its worktree and its TMPDIR: a write into the shared
- private git directory (config, refs/ incl. refs/stash, logs/, packed-refs, info/, hooks/,
- a new top-level file) is DETECTED - the private repository is digested before and after
- each verify run and a difference voids the run (exit 2: "verify changed the private
- repository: config"), nothing lands; writes elsewhere (HOME, absolute paths) are NOT
- detected. A verify child that calls setsid survives a timeout (the tool cannot see it). SIGKILL
+ private git directory is DETECTED: the private repository is digested before and after
+ each verify run (around the verify command only; the tool writes nothing there meanwhile)
+ and a difference voids the run (exit 2: "verify changed the private repository: config"),
+ nothing lands. Digested: config, refs/ (incl. refs/stash), logs/, packed-refs, info/,
+ hooks/, objects/info/, every top-level name AND the content of every top-level file
+ (including HEAD), the names in objects/pack/, and worktrees/ (every name; the content
+ of every file except git's own per-worktree HEAD, index, ORIG_HEAD and logs/, which
+ ordinary git commands run in the worktree rewrite). NOT detected: loose objects (a
+ verify may write them legitimately: `git add`, `git write-tree`, `git stash create`);
+ an object alone changes nothing for a later run unless that run addresses it BY HASH,
+ which is a verify keeping state by design, like one that keeps it under an absolute
+ path; whatever could make an object matter (a ref, a replace ref, config, worktree
+ metadata) is digested. Writes elsewhere (HOME, absolute paths) are NOT detected. A verify child that calls setsid survives a timeout (the tool cannot see it). SIGKILL
  of the tool leaves exactly one itrain-* directory under TMPDIR and nothing in your
  repository; a later start prints a one-line notice for such directories older than a
  day (it never deletes them). A caller that is a partial clone or a shallow clone is
@@ -93,24 +101,38 @@ Algorithm (one batch per invocation):
     'red' (and carries "verified_red": [member]); a red record WITHOUT "inferred" and
     WITHOUT "red_with" is therefore a statement about the member alone. A tree never
     verified green never lands.
- 7. Recovery (default; --no-recover disables it, and then nothing is retried): every
-    member whose ejection is not a property of itself alone - 'inferred' (its own run was
-    skipped), 'interaction', or red with "red_with" - gets ONE run of (landed set +
-    member, input order), in input order, against the landed set as it grows. Green: the
-    member JOINS and that run is the verification of the new landed tree. Red: it stays
+ 7. Recovery (default; --no-recover disables it, and then nothing is retried), iterated to a
+    FIXED POINT: every member whose ejection is not a property of itself alone - 'inferred'
+    (its own run was skipped), 'interaction', or red with "red_with" - gets a run of (landed
+    set + member, input order), in input order, against the landed set as it grows. Green:
+    the member JOINS and that run is the verification of the new landed tree. Red: it stays
     ejected and its record is REPLACED by what that run measured: "red_with": [landed
     set at that moment] (or 'interaction' with "with" when the member alone is known
     green), "verified_red" the set that was run; with an empty landed set the run IS the
-    member alone. A join conflict leaves it 'conflict'. A candidate run alone and red is
-    never retried there, but see below. Cost: at most one run per retried member, counted in 'runs'.
-    After those retries, every member run ALONE and red (no conflict) also gets ONE run against the
-    final landed set (a fixer may have landed): green joins; red keeps it out with "red_with" the
-    landed set, "verified_red" the run set and "verified_red_alone": true.
+    member alone. A join conflict leaves it 'conflict'. Then every member run ALONE and red
+    (no conflict) gets a run against the landed set: green joins; red keeps it out with
+    "red_with" the landed set, "verified_red" the run set and "verified_red_alone": true.
+    If a pass landed anything, every still-ejected member is retried against the grown set
+    (a pass that lands nothing ends the loop). Each (member, landed set) pair is run at most
+    once, so the cost is at most one run per ejected member per pass and at most #ejected
+    passes, all counted in 'runs'. GUARANTEE at the end: every ejected member was verified
+    RED together with the FINAL landed set (or red alone with nothing landed, or conflict /
+    uncheckoutable): the ejected set cannot be improved by adding ONE member. It is NOT a
+    maximum green subset: order still matters (the later member is the one ejected), and a
+    pair of ejected members that is green together with the landed set is not searched for.
  8. Delivery (only with --keep, only after the final green verification): the landed
     commits are packed in the private repository (`pack-objects --revs --stdout`),
     stored in yours (`index-pack --stdin`) and the branch is created with
     `update-ref refs/heads/NAME SHA ""` (create-only: an existing name is never
-    touched). No transport, no URL handling, no hooks. If delivery fails the exit is 2,
+    touched). No transport, no URL handling, no hooks. Delivery is all-or-nothing AS OBSERVED:
+    from just before update-ref until its exit status is collected and the ref is read back,
+    SIGINT/SIGTERM/SIGHUP are blocked (update-ref runs with them blocked, in its own process
+    group, so neither a terminal Ctrl-C nor cleanup reaches it; it has a hard 10 s timeout).
+    A signal that arrives meanwhile acts afterwards: at exit either the branch does not
+    exist and nothing names it, or it exists and the branch line and the JSON name it (the
+    JSON then carries "interrupted_after_delivery": true when a signal ended the run; exit
+    128+N). A timed-out or failed update-ref is exit 2 and the message says whether the
+    branch exists (the JSON names it then). If delivery fails the exit is 2,
     the JSON says "delivery_error" with the verified "commit", and the private root is
     KEPT (its path is printed) so the result is not lost; objects already stored in
     yours stay as unreachable garbage, no ref is left.
@@ -144,6 +166,11 @@ stderr and in the JSON ("leftover"); the exit code is unchanged.
 Exit: 0 all admitted landed, 1 something ejected, 2 usage/git/delivery/unexpected error,
       3 nothing was verified, 128+N after SIGHUP/SIGINT/SIGTERM (129/130/143). The last
       stdout line is one JSON object; on an unexpected exception it carries "error".
+      Every VERDICT exit (0 or 1) prints that JSON as the LAST stdout line. Exit 1 with no
+      JSON on stdout is NOT a verdict: a caller must require the JSON. A SIGINT/SIGTERM in
+      the first milliseconds after spawn can hit CPython's own start-up, before this
+      script's first line (a traceback, rc 1 or -2, empty stdout); the script cannot fix
+      its own interpreter start-up and no wrapper is provided.
 """
 
 
@@ -181,6 +208,7 @@ IDENT_EMAIL = "train@localhost"
 SIGS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 QUIET = ("conflict", "empty", "unrelated", "unrepresentable-on-this-filesystem", "uncheckoutable")
 STALE_SECONDS = 86400
+UPDATE_REF_TIMEOUT = 10
 UNREP = "unrepresentable-on-this-filesystem"
 
 # Variables that change which repository / index / object store git uses, plus the
@@ -346,14 +374,23 @@ class Train:
         """Start a child in its OWN process group and register it before any signal can unwind
         us: a handler that fires inside Popen only records the signal (on_signal); it is acted on
         here, after the registration, so cleanup always knows every child it must kill."""
-        if hold and os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_HOLD_FILE"):
+        if hold is True and os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_HOLD_FILE"):
             # test hook: emulate a child that is still writing into the private root later
             cmd = ["sh", "-c", 'sleep 0.8; mkdir -p "$0/late" && echo x >"$0/late/f"; cd / && exec "$@"',
                    self.tmp] + list(cmd)
+        ur_mode = os.environ.get("TRAIN_TEST_UPDATEREF") if os.environ.get("TRAIN_SELFTEST") else None
+        if hold == "update-ref" and ur_mode == "kill":
+            # test hook: the child sleeps first, so a signal in the pause finds it not yet written
+            cmd = ["sh", "-c", 'sleep 0.8; exec "$@"', "sh"] + list(cmd)
         self.spawning = True
         try:
             proc = subprocess.Popen(cmd, start_new_session=True, **kw)
-            if hold and os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_HOLD_FILE"):
+            if hold == "update-ref" and ur_mode in ("complete", "kill"):
+                # test hook: pause right after spawning update-ref, before waiting for it
+                with open(os.environ["TRAIN_TEST_UPDATEREF_READY"], "w") as fh:
+                    fh.write("spawned\n")
+                time.sleep(0.3)
+            if hold is True and os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_HOLD_FILE"):
                 with open(os.environ["TRAIN_TEST_HOLD_FILE"], "w") as fh:
                     fh.write("held\n")
                 time.sleep(0.3)  # test hook: a signal in this window is deferred, never lost
@@ -411,7 +448,7 @@ class Train:
             self.cflags += ["-c", kv]
 
     def git(self, sub, *args, input=None, env=None, ok=(0,), cwd=None, caller=False,
-            stdin=None, stdout=None):
+            stdin=None, stdout=None, timeout=None):
         """Run git. Default: in the PRIVATE repository (--git-dir). cwd=DIR runs in a private
         worktree; caller=True is the one door into the caller's repository (see EPILOG)."""
         e = dict(self.genv)
@@ -437,9 +474,13 @@ class Train:
         # own process group: a signal that unwinds us kills the WHOLE group (`git worktree add`
         # runs a child that keeps writing the tree after its parent is killed)
         popen_kw = {k: v for k, v in kw.items() if k != "input"}
-        proc = self.spawn(cmd, hold=(sub == "init"), **popen_kw)
+        proc = self.spawn(cmd, hold=(True if sub == "init" else "update-ref" if sub == "update-ref" and caller == "gitdir" else False),
+                          **popen_kw)
         try:
-            out, err = proc.communicate(kw.get("input"))
+            out, err = proc.communicate(kw.get("input"), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.reap(proc)
+            raise GitFail("git %s did not finish within %ss" % (sub, timeout), sub=sub)
         except BaseException:
             self.reap(proc)
             raise
@@ -802,11 +843,15 @@ class Train:
                     if r.search(line):
                         return r.pattern
 
-    SNAP_TREES = ("config", "packed-refs", "refs", "logs", "info", "hooks")
+    SNAP_TREES = ("config", "packed-refs", "refs", "logs", "info", "hooks", "objects/info")
+    # per-worktree bookkeeping that ordinary git commands run in the worktree rewrite: names only
+    SNAP_WT_VOLATILE = ("HEAD", "index", "ORIG_HEAD", "logs")
 
     def priv_snapshot(self):
         """Digest, per component, of the private repository's state a verify could use to carry
-        a result from one run to the next. Excludes objects/ and worktrees/ (the tool's own)."""
+        a result from one run to the next. Taken around the VERIFY command only, where the tool writes
+        nothing. Loose objects are NOT digested (ordinary git commands in the worktree write them);
+        see the EPILOG."""
         import hashlib
         out = {}
         for comp in self.SNAP_TREES:
@@ -833,8 +878,41 @@ class Train:
                     h.update(fh.read())
             h.update(b"X" if os.path.lexists(base) else b"-")
             out[comp] = h.hexdigest()
-        names = sorted(n for n in os.listdir(self.priv) if n not in ("objects", "worktrees"))
-        out["top-level"] = hashlib.sha256("\0".join(names).encode("utf-8", "surrogateescape")).hexdigest()
+        h = hashlib.sha256()  # top level: every name, and the CONTENT of every regular file (HEAD...)
+        for n in sorted(os.listdir(self.priv)):
+            if n in ("objects", "worktrees"):
+                continue
+            h.update(n.encode("utf-8", "surrogateescape") + b"\0")
+            full = os.path.join(self.priv, n)
+            if os.path.isfile(full) and not os.path.islink(full):
+                try:
+                    with open(full, "rb") as fh:
+                        h.update(fh.read())
+                except OSError as e:
+                    h.update(b"E%d" % (e.errno or 0))
+            h.update(b"\0")
+        out["top-level"] = h.hexdigest()
+        h = hashlib.sha256()  # packs: the names
+        pk = os.path.join(self.priv, "objects", "pack")
+        h.update("\0".join(sorted(os.listdir(pk)) if os.path.isdir(pk) else []).encode("utf-8", "surrogateescape"))
+        out["objects/pack"] = h.hexdigest()
+        h = hashlib.sha256()  # worktree metadata: every name, content except git's own per-worktree files
+        wtd = os.path.join(self.priv, "worktrees")
+        for root, dirs, files in os.walk(wtd, followlinks=False):
+            dirs.sort()
+            for n in sorted(files + dirs):
+                full = os.path.join(root, n)
+                rel = os.path.relpath(full, wtd)
+                h.update(rel.encode("utf-8", "surrogateescape") + b"\0")
+                if (n in files and not os.path.islink(full)
+                        and rel.split(os.sep, 1)[-1].split(os.sep)[0] not in self.SNAP_WT_VOLATILE):
+                    try:
+                        with open(full, "rb") as fh:
+                            h.update(fh.read())
+                    except OSError as e:
+                        h.update(b"E%d" % (e.errno or 0))
+                h.update(b"\0")
+        out["worktrees"] = h.hexdigest()
         return out
 
     def exec_once(self, wt, ids):
@@ -1034,58 +1112,72 @@ class Train:
                 and rec.get("verified_red") == [rec["id"]])
 
     def recover(self, landed):
-        """Every member ejected for a reason that is not a property of itself alone gets ONE run as
-        (landed set + member): green joins (that run IS the verification of the new landed tree);
-        red keeps it out and its record is REPLACED by what that run measured."""
+        """Iterate to a FIXED POINT. A pass retries, against the landed set as it stands, every
+        ejected member whose label is not a property of itself alone (phase A: replace the record by
+        what the run measured), then every member run alone and red (phase B: a fixer's victim).
+        A member is retried again whenever the landed set has grown since its last retry; a green
+        trial IS the verification of the new landed tree. The loop stops when a full pass lands
+        nothing, so every retryable ejected member was last measured against the FINAL landed set.
+        Each (member, landed set) pair is run at most once (verify memoises by the exact tree), so
+        the cost is at most one run per ejected member per pass, and at most #ejected passes."""
         if self.a.no_recover:
             return landed
         order = {cid: i for i, cid in enumerate(self.a.candidates)}
-        for rec in sorted([e for e in self.ejected if self.retryable(e)], key=lambda e: order[e["id"]]):
-            cid = rec["id"]
-            trial = sorted(landed + [cid], key=lambda x: order[x])
-            self.verify(trial)
-            res = self.ran(trial)
-            for k in ("inferred", "with", "red_with", "verified_red", "verified_green_alone", "error"):
-                rec.pop(k, None)
-            if res is True:
-                landed = trial
-                self.ejected.remove(rec)
-                say("recovered: %s joins the landed set (verified green together)" % cid)
-            elif res is None:
-                rec["why"] = "conflict"
-                say("recover: %s does not join the landed set; stays ejected (conflict)" % cid)
-            else:
-                if not landed:
-                    rec["why"] = self.cache[tuple(trial)][2] or "red"
-                    rec["verified_red"] = trial
-                elif self.ran([cid]) is True:
-                    rec["why"] = "interaction"
-                    rec["with"] = list(landed)
-                    rec["verified_red"] = trial
-                    rec["verified_green_alone"] = True
+        tried = {}  # cid -> the exact trial set last measured for it
+        progressed = True
+        while progressed:
+            progressed = False
+            for rec in sorted([e for e in self.ejected if self.retryable(e)], key=lambda e: order[e["id"]]):
+                cid = rec["id"]
+                trial = sorted(landed + [cid], key=lambda x: order[x])
+                if tried.get(cid) == tuple(trial):
+                    continue
+                tried[cid] = tuple(trial)
+                self.verify(trial)
+                res = self.ran(trial)
+                for k in ("inferred", "with", "red_with", "verified_red", "verified_green_alone", "error"):
+                    rec.pop(k, None)
+                if res is True:
+                    landed = trial
+                    progressed = True
+                    self.ejected.remove(rec)
+                    say("recovered: %s joins the landed set (verified green together)" % cid)
+                elif res is None:
+                    rec["why"] = "conflict"
+                    say("recover: %s does not join the landed set; stays ejected (conflict)" % cid)
                 else:
-                    rec["why"] = "red"
+                    if not landed:
+                        rec["why"] = self.cache[tuple(trial)][2] or "red"
+                        rec["verified_red"] = trial
+                    elif self.ran([cid]) is True:
+                        rec["why"] = "interaction"
+                        rec["with"] = list(landed)
+                        rec["verified_red"] = trial
+                        rec["verified_green_alone"] = True
+                    else:
+                        rec["why"] = "red"
+                        rec["red_with"] = list(landed)
+                        rec["verified_red"] = trial
+                    say("proven: %s is red together with the landed set" % cid)
+            # a member run alone and red may be a fixer's victim (a later-landing member repairs it)
+            for rec in sorted([e for e in self.ejected if self.alone_red(e)], key=lambda e: order[e["id"]]):
+                cid = rec["id"]
+                if not landed:
+                    break
+                trial = sorted(landed + [cid], key=lambda x: order[x])
+                tried[cid] = tuple(trial)
+                self.verify(trial)
+                res = self.ran(trial)
+                if res is True:
+                    landed = trial
+                    progressed = True
+                    self.ejected.remove(rec)
+                    say("recovered: %s (red alone) joins the landed set (verified green together)" % cid)
+                elif res is False:
                     rec["red_with"] = list(landed)
                     rec["verified_red"] = trial
-                say("proven: %s is red together with the landed set" % cid)
-        # Item 0: a member run alone and red may be a fixer's victim (a later-landing member
-        # repairs it). Once each, in input order, against the landed set as it stands NOW.
-        for rec in sorted([e for e in self.ejected if self.alone_red(e)], key=lambda e: order[e["id"]]):
-            cid = rec["id"]
-            if not landed:
-                break
-            trial = sorted(landed + [cid], key=lambda x: order[x])
-            self.verify(trial)
-            res = self.ran(trial)
-            if res is True:
-                landed = trial
-                self.ejected.remove(rec)
-                say("recovered: %s (red alone) joins the landed set (verified green together)" % cid)
-            elif res is False:
-                rec["red_with"] = list(landed)
-                rec["verified_red"] = trial
-                rec["verified_red_alone"] = True
-                say("proven: %s (red alone) is also red together with the landed set" % cid)
+                    rec["verified_red_alone"] = True
+                    say("proven: %s (red alone) is also red together with the landed set" % cid)
         return landed
 
     # ---- driver ---------------------------------------------------------
@@ -1143,17 +1235,41 @@ class Train:
     def deliver(self, sha):
         """The only write to the caller: objects (index-pack --stdin), then one create-only ref."""
         branch = "train-%s-%s" % (self.uid, secrets.token_hex(4))
+        if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_DELIVERY_READY"):
+            with open(os.environ["TRAIN_TEST_DELIVERY_READY"], "w") as fh:  # test hook: delivery starts (before pack-objects)
+                fh.write("delivering\n")
         packf = os.path.join(self.tmp, "delivery.pack")
         with open(packf, "wb") as fh:
             self.git("pack-objects", "--revs", "--stdout", "-q", input="%s\n^%s\n" % (sha, self.base_sha),
                      stdout=fh)
         with open(packf, "rb") as fh:
             self.git("index-pack", "--stdin", caller="gitdir", stdin=fh)
-        self.pending = (branch, sha)  # a signal INSIDE update-ref may land after the ref exists
-        self.git("update-ref", "refs/heads/" + branch, sha, "", caller="gitdir")  # "" = must not exist
-        self.delivered = branch  # from here a signal must still name the branch
-        got = self.git("rev-parse", "--verify", "refs/heads/" + branch, caller="gitdir").stdout.strip()
-        if got != sha:
+        if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_INDEXED_READY"):
+            with open(os.environ["TRAIN_TEST_INDEXED_READY"], "w") as fh:  # test hook: index-pack just ended
+                fh.write("indexed\n")
+        # From here to the read-back no signal can act: delivery is all-or-nothing AS OBSERVED. INT/TERM/HUP
+        # are blocked (a pending one is delivered when the mask is restored, after the outcome is known);
+        # update-ref inherits the blocked mask, is not killed by cleanup, and has a hard timeout.
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))
+        err = None
+        try:
+            self.pending = (branch, sha)
+            try:
+                self.git("update-ref", "refs/heads/" + branch, sha, "", caller="gitdir",  # "" = must not exist
+                         timeout=float(os.environ.get("TRAIN_TEST_UPDATEREF_TIMEOUT") or UPDATE_REF_TIMEOUT)
+                         if os.environ.get("TRAIN_SELFTEST") else UPDATE_REF_TIMEOUT)
+            except Fatal as e:
+                err = e
+            got = self.git("rev-parse", "--verify", "-q", "refs/heads/" + branch, caller="gitdir",
+                           ok=(0, 1)).stdout.strip()
+            if got:
+                self.delivered = branch  # the ref exists: from here every exit names it
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)  # a pending signal acts HERE, outcome known
+        if err is not None:
+            raise Fatal("%s (branch refs/heads/%s %s)" % (
+                err, branch, "DOES exist" if self.delivered else "does not exist"))
+        if self.delivered != branch or got != sha:
             raise Fatal("branch %s does not point at %s" % (branch, sha[:12]))
         self.git("cat-file", "-e", sha + "^{tree}", caller="gitdir")
         return branch
@@ -1223,6 +1339,7 @@ class Train:
                     except Fatal as e:
                         failure = str(e)
                         self.keep_root = True
+                        branch = self.delivered  # "" unless the ref was read back as existing
             reds = [e for e in self.ejected if e["why"] not in QUIET]
             quiet = [e for e in self.ejected if e["why"] in QUIET]
             first_green = self.runs == 1 and not reds and landed == batch
@@ -1350,6 +1467,7 @@ def main(argv):
     try:
         return t.run()
     except SystemExit:
+        signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))  # nothing interrupts the report below
         if not t.delivered and t.pending and not t.json_done:
             try:  # the signal may have hit update-ref after the ref was created: look, never assume
                 got = t.git("rev-parse", "--verify", "-q", "refs/heads/" + t.pending[0], caller="gitdir",
@@ -1361,7 +1479,8 @@ def main(argv):
         if t.delivered and not t.json_done:  # a signal after delivery: the branch must be named
             t.json_done = True
             say("integration branch: %s (delivered before the signal arrived)" % t.delivered)
-            print(json.dumps(t.summary(t.delivered), separators=(",", ":")))
+            print(json.dumps(dict(t.summary(t.delivered), interrupted_after_delivery=True),
+                             separators=(",", ":")))
             sys.stdout.flush()
         raise
     except Fatal as e:
