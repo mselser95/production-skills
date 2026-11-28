@@ -73,13 +73,14 @@ A --dest "$tmp/u2" --layout single --module nope --slot SERVICE=x --slot OWNER=y
 A --dest "$tmp/u3" --layout nope --module service-go --slot SERVICE=x --slot OWNER=y >/dev/null 2>&1; rc=$?
 [[ $rc -eq 2 ]] && pass "unknown layout exit 2" || fail "unknown layout" "rc=$rc"
 
-# monorepo: unit under services/<SERVICE>/, root-only files at the root
+# monorepo: the service's files (CODEOWNERS, .github, AGENTS.md, scripts, go.mod, cmd) all land under
+# services/<SERVICE>/; the repository root holds none of them
 mo="$tmp/mono"
 if A --dest "$mo" --layout monorepo --module service-go --slot SERVICE=ledger --slot OWNER=acme >/dev/null 2>"$tmp/mo.err" \
-  && [[ -f "$mo/services/ledger/go.mod" && -f "$mo/services/ledger/cmd/ledger/main.go" && -f "$mo/CODEOWNERS" \
-        && -d "$mo/.github" && -f "$mo/AGENTS.md" && -d "$mo/scripts" \
-        && ! -e "$mo/go.mod" && ! -e "$mo/CODEOWNERS.x" && ! -e "$mo/services/ledger/CODEOWNERS" \
-        && ! -e "$mo/services/ledger/.github" && ! -e "$mo/cmd" ]]; then pass "monorepo placement"
+  && [[ -f "$mo/services/ledger/go.mod" && -f "$mo/services/ledger/cmd/ledger/main.go" && -f "$mo/services/ledger/CODEOWNERS" \
+        && -d "$mo/services/ledger/.github" && -f "$mo/services/ledger/AGENTS.md" && -d "$mo/services/ledger/scripts" \
+        && ! -e "$mo/go.mod" && ! -e "$mo/CODEOWNERS" && ! -e "$mo/.github" && ! -e "$mo/AGENTS.md" \
+        && ! -e "$mo/scripts" && ! -e "$mo/cmd" ]]; then pass "monorepo placement"
 else fail "monorepo placement" "$(head -c 200 "$tmp/mo.err")"; fi
 
 # determinism: same inputs twice -> identical trees and modes
@@ -427,7 +428,12 @@ vparity() { # <label> <expect ok|refuse> <svc> <owner>
 }
 long65="$(printf 'z%.0s' $(seq 1 65))"
 # end to end for a few values; the WHOLE list is compared below in ONE python process (the assembler's own check_value)
-vparity ok-a.b ok a.b 9lives
+vparity ok-a-b ok a-b 9lives
+vparity ok-owner-dot ok svc acme.io   # OWNER has no charset: a dot is accepted and substituted literally (golden p3 pins the bytes)
+# service-go's SERVICE slot narrows to lower-digits-dash: a dot is refused with exit 2, naming the slot and the charset
+vp_both refuse-svc-dot a.b 9lives
+if [[ $VA -eq 2 ]] && grep -q 'SERVICE' "$tmp/vp_refuse-svc-dot/a.err" && grep -q 'charset' "$tmp/vp_refuse-svc-dot/a.err"; then pass "value a.b for SERVICE refused (exit 2, slot and charset named)"
+else fail "value a.b for SERVICE" "VA=$VA $(head -c 160 "$tmp/vp_refuse-svc-dot/a.err")"; fi
 vparity ok-64 ok "$(printf 'z%.0s' $(seq 1 64))" acme
 vparity bad-empty refuse '' acme
 vparity bad-slash refuse 'a/b' acme

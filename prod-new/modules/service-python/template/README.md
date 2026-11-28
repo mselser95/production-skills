@@ -129,7 +129,7 @@ timeouts, a request-size limit, and connection and rate limits per client.
 
 Layout `single`: everything at the repository root. Layout `monorepo`: every file of this module is a UNIT file
 and lands under `services/<id>/` (its own `.gitignore`, `Makefile`, `production.yaml`), so two instances never
-collide and the module places nothing at the repository root. It ships no CI workflow: the repository root's `.github/workflows/` is the only directory GitHub reads, and the root-level caller that runs `make check-fast` per unit belongs to the monorepo-root module (a later step). Its manifest also places `.github/`, `AGENTS.md`, `registries/`, `.prod/`, `docs/` and `scripts/` as unit files should the template gain them.
+collide, EXCEPT the one reusable workflow `.github/workflows/python-unit.yml`, which lands at the repository root in both layouts because GitHub reads workflows only there. It is byte-identical for every unit (it names no unit), so several Python units share the one copy. The root-level caller that invokes it per unit belongs to the monorepo-root module and is a later step. Its manifest also places `.github/`, `AGENTS.md`, `registries/`, `.prod/`, `docs/` and `scripts/` as unit files should the template gain them.
 
 ## Gates
 

@@ -2,7 +2,8 @@
 # .github/workflows/ (the only place GitHub runs a workflow from, and the only place a local
 # `uses: ./.github/workflows/python-unit.yml` can reach), placed at the repository root by the
 # assembler. Single layout: the unit IS the root, so the triggers below run it unchanged.
-# Monorepo layout: the root workflow calls it with `working-directory: services/<SERVICE>`; the
+# Monorepo layout: the root workflow calls it with `working-directory` set to the unit's directory
+# under `services/`; this file never names a unit, so it is byte-identical for every unit; the
 # `paths` filters are relative to the repository root, so at a monorepo root they match nothing
 # of a service (no double trigger from here), and the root's own caller carries the prefixed
 # filters. No secrets are used or referenced.

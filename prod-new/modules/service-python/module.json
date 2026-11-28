@@ -25,6 +25,7 @@
     "language": "python"
   },
   "placement": {
+    ".github/workflows/python-unit.yml": "root",
     ".github/**": "unit",
     "CODEOWNERS": "unit",
     "AGENTS.md": "unit",

@@ -94,6 +94,18 @@ gitignore_ok() {
   return $bad
 }
 
+# github_root_ok <assembled-tree> <1|0 python unit present>: with python the root's .github is EXACTLY the one
+# reusable workflow (no other file, no other workflow); without python the root has no .github. Prints the finding.
+github_root_ok() {
+  local t="$1" haspy="$2" found
+  found="$(cd "$t" && find .github 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')"
+  if [[ "$haspy" == 1 ]]; then
+    [[ "$found" == ".github .github/workflows .github/workflows/python-unit.yml " ]] || { echo "  root .github is: ${found:-absent}"; return 1; }
+  else
+    [[ -z "$found" ]] || { echo "  root .github is: $found"; return 1; }
+  fi
+}
+
 # ---- each manifest is accepted by the assembler on its own (one case per module)
 for m in monorepo-root design-system service-go service-rust service-python db-postgres; do
   # shellcheck disable=SC2046
@@ -230,8 +242,14 @@ done
 
 # ---- per-unit files belong to the unit: nothing of a service at the repository root
 bad_root=""
-for p in AGENTS.md CODEOWNERS registries .github .prod docs/RUNBOOK.md scripts/verify-standard.sh scripts/coverage-floors.txt; do [[ -e "$S7/$p" ]] && bad_root+=" $p"; done
-[[ -z "$bad_root" ]] && pass "no service file at the repository root (AGENTS.md, CODEOWNERS, registries/, .github/, .prod/, verify-standard.sh ...)" || fail "service files at the root:$bad_root"
+for p in AGENTS.md CODEOWNERS registries .prod docs/RUNBOOK.md scripts/verify-standard.sh scripts/coverage-floors.txt; do [[ -e "$S7/$p" ]] && bad_root+=" $p"; done
+[[ -z "$bad_root" ]] && pass "no service file at the repository root (AGENTS.md, CODEOWNERS, registries/, .prod/, verify-standard.sh ...)" || fail "service files at the root:$bad_root"
+# the one exception: service-python's reusable workflow. With a python unit the root's .github holds exactly
+# .github/workflows/python-unit.yml; without one the root has no .github at all
+for t in "$S7" "$S6" "$D"; do
+  gh_msg="$(github_root_ok "$t" 1)" && pass "${t##*/}: the root .github holds exactly workflows/python-unit.yml (a python unit is present)" || fail "${t##*/}: root .github" "$gh_msg"
+done
+gh_msg="$(github_root_ok "$G" 0)" && pass "repo-go: no .github at the repository root (no python unit)" || fail "repo-go: root .github" "$gh_msg"
 miss=""
 for u in catalog catalog-worker; do for p in AGENTS.md CODEOWNERS .github/workflows/pr.yaml registries/waivers.yaml .prod/context/change-plan.yaml scripts/verify-standard.sh docs/RUNBOOK.md; do [[ -f "$S7/services/$u/$p" ]] || miss+=" $u:$p"; done; done
 for p in registries/waivers.yaml .gitignore; do [[ -f "$S7/services/billing/$p" ]] || miss+=" billing:$p"; done
@@ -500,6 +518,25 @@ fi
 mut_asm "mutation: an unknown key in the design-system manifest is exit 2" 2 "unknown key" design-system \
   'd["description"]="x"' --layout monorepo --module design-system --slot SCOPE=demo
 
+# the root-workflow rule must DEMAND the file when python is present, and refuse anything else under .github:
+# control = the unmutated copy passes; mutants = the workflow key back to "unit", then a stray workflow / stray root file
+pyargs=(--layout monorepo --module monorepo-root --unit "service-python:invoices,PACKAGE=invoices" --slot REPO=demo-repo --slot OWNER=demo-owner)
+if A "$M" --dest "$tmp/mwfc" "${pyargs[@]}" >/dev/null 2>&1 && github_root_ok "$tmp/mwfc" 1 >/dev/null; then
+  pass "control for the next mutations: the unmutated copy puts exactly python-unit.yml under the root .github"
+  : >"$tmp/mwfc/.github/workflows/other.yml"
+  github_root_ok "$tmp/mwfc" 1 >/dev/null && fail "mutation: a second root workflow is accepted" || pass "mutation: a second workflow under the root .github is RED"
+  rm "$tmp/mwfc/.github/workflows/other.yml"; : >"$tmp/mwfc/.github/CODEOWNERS"
+  github_root_ok "$tmp/mwfc" 1 >/dev/null && fail "mutation: a stray root .github file is accepted" || pass "mutation: a stray file under the root .github is RED"
+else fail "control for the root-workflow mutations" "the unmutated copy does not pass"; fi
+if jedit "$M/service-python/module.json" 'd["placement"][".github/workflows/python-unit.yml"]="unit"' \
+  && A "$M" --dest "$tmp/mwfm" "${pyargs[@]}" >/dev/null 2>&1; then
+  github_root_ok "$tmp/mwfm" 1 >/dev/null && fail "mutation: python-unit.yml placed in the unit is accepted" || pass "mutation: python-unit.yml placed in the unit leaves the root without it, RED"
+else fail "mutation: python-unit.yml placed in the unit" "the edit changed nothing or the copy does not assemble"; fi
+reset_mod service-python
+G0="$tmp/mwfg"; A "$M" --dest "$G0" --layout monorepo --module monorepo-root --unit service-go:catalog --slot REPO=demo-repo --slot OWNER=demo-owner >/dev/null 2>&1 \
+  && { mkdir -p "$G0/.github/workflows"; : >"$G0/.github/workflows/python-unit.yml"; github_root_ok "$G0" 0 >/dev/null && fail "mutation: a root .github without a python unit is accepted" || pass "mutation: a root .github with no python unit is RED"; } \
+  || fail "mutation: the go-only assembly for the no-python check did not assemble"
+
 # ---- mutation on a scratch copy of the ASSEMBLER (placed where it finds template/: $tmp/x/scripts): the single-layout
 # exemption removed (an instance's root unit directory is compared with a declared directory again) makes each
 # "service + db-postgres" assembly exit 2. The control is the UNMUTATED copy, same place, same scenario: it must assemble.
@@ -514,7 +551,7 @@ done
 if "$py" -I -B - "$tmp/x/scripts/assemble.py" <<'E'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = '            if a.layout == "single" and x["decl"] != y["decl"]:\n                continue  # single: an instance\'s unit directory is the root; declared dirs sit inside it\n'
+old = '            if a.layout == "single" and x["decl"] != y["decl"]:\n                continue\n'
 if old not in s: sys.exit(3)
 open(p, "w").write(s.replace(old, ""))
 E

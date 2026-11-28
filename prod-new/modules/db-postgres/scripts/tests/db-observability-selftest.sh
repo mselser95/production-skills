@@ -140,7 +140,7 @@ for _n in ("compose.yml", "compose.timescale.yml"):
     with open(os.path.join(os.path.dirname(overlayfile), _n), encoding="utf-8") as f:
         tree["db/" + _n] = f.read()
 # the docs and scripts the compose-command check reads (outside db/, one level up)
-for _rel in ("README.md", "scripts/db-scrape-test.sh", "scripts/db-bootstrap-test.sh"):
+for _rel in ("scripts/db-scrape-test.sh", "scripts/db-bootstrap-test.sh"):   # the module README is db/README.md, read by the walk above
     with open(os.path.join(os.path.dirname(overlayfile), "..", _rel), encoding="utf-8") as f:
         tree["db/../" + _rel] = f.read()
 
@@ -595,14 +595,14 @@ bt 'timescale file: a service extending the overlay -> BASE-EXPORTER' 'service `
 pc 'timescale file: a top-level include -> BASE-EXPORTER' 'BASE-EXPORTER: compose.timescale.yml has a top-level `include:`' "compose.timescale.yml" "$TSANCH" $'\ninclude: [other.yml]\nservices:\n'
 pc 'a compose.ci.yml (not shipped) with the fragment -> BASE-EXPORTER naming it' $'BASE-EXPORTER: compose.ci.yml defines the service `exporter`\nCOMPOSE-UNKNOWN-FILE: `compose.ci.yml`' "+compose.ci.yml" "" $'services:\n  exporter:\n    environment: {PGSSLMODE: disable}\n'
 README_CMD='docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d'
-pc "README documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "../README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
+pc "README documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
 pc "RUNBOOK (a command wrapped over two lines) documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: observability/RUNBOOK.md documents `docker compose -f compose.other.yml`' "$RB" 'compose.observability.yml up -d' 'compose.observability.yml -f compose.other.yml up -d'
 pc "a compose file's own comment documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: compose.timescale.yml documents `docker compose -f compose.other.yml`' "compose.timescale.yml" '#   docker compose -f compose.yml -f compose.timescale.yml up -d' '#   docker compose -f compose.yml -f compose.other.yml up -d'
 pc "the scrape test runs a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: scripts/db-scrape-test.sh runs `docker compose -f compose.other.yml`' "../scripts/db-scrape-test.sh" '-f "$dbdir/compose.observability.yml")' '-f "$dbdir/compose.observability.yml" -f "$dbdir/compose.other.yml")'
 # sixth review: the documented-command reader is an ALLOW-LIST of shapes (a lint since the seventh review).
 # documented-command lint cases (seventh review: the lint is not the guarantee any more, the FILE rule below is;
 # these run on the shipped tree, with no extra file, so they test the lint alone).
-dcx() { pc "$1" "$2" "../README.md" "$README_CMD" "$3"; }   # NAME WANT NEWTEXT
+dcx() { pc "$1" "$2" "README.md" "$README_CMD" "$3"; }   # NAME WANT NEWTEXT
 dcx "compose mention: --file extra.yml -> COMPOSE-DOC-FILE" $'COMPOSE-DOC-FILE: README.md:\n`--file`: a flag' 'docker compose --file extra.yml up -d'
 dcx "compose mention: --file=extra.yml -> COMPOSE-DOC-FILE" '`--file=extra.yml`: a flag' 'docker compose --file=extra.yml up -d'
 dcx "compose mention: glued -fextra.yml -> COMPOSE-DOC-FILE" '`-fextra.yml`: a flag' 'docker compose -fextra.yml up -d'
@@ -654,8 +654,8 @@ pmx "parity: compose enumeration reduced to compose.yml only (timescale fragment
     if not re.fullmatch' 'for name_ in ["compose.yml"]:
     if not re.fullmatch' -- 'BASE-EXPORTER: compose.timescale.yml defines the service `exporter`' "compose.timescale.yml" "$TSANCH" "$TSANCH"$'  exporter: {}\n'
 pmx "parity: the closed list of compose files removed" '    if name_ not in COMPOSE_CLOSED and name_ not in AUTO_MERGED:' '    if False:' -- 'COMPOSE-UNKNOWN-FILE: `compose.extra.yml`' "+compose.extra.yml" "" $'services: {}\n'
-pmx "parity: the documented-commands check removed" '        for m_ in COMPOSE_MENTION.finditer(text_):' '        for m_ in []:' -- 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "../README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
-dcxm() { pmx "$1" "$2" "$3" -- "$4" "../README.md" "$README_CMD" "$5"; }   # NAME ANCHOR REPL WANT NEWTEXT
+pmx "parity: the documented-commands check removed" '        for m_ in COMPOSE_MENTION.finditer(text_):' '        for m_ in []:' -- 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
+dcxm() { pmx "$1" "$2" "$3" -- "$4" "README.md" "$README_CMD" "$5"; }   # NAME ANCHOR REPL WANT NEWTEXT
 dcxm "parity: continuation joining removed (the wrapped command is two lines)" '        if line_.rstrip().endswith("\\"):' '        if False:' 'documents `docker compose -f extra.yml`' $'docker compose -f compose.yml -f compose.observability.yml \\\n  -f extra.yml up -d'
 dcxm "parity: the anchored shape loosened to flags right after docker compose (--profile x -f passes)" '        if u_.startswith(BAD_FLAG_PREFIX):' '        if False:' '`--profile`: a flag' 'docker compose --profile x -f compose.yml -f extra.yml up -d'
 dcxm "parity: --project-directory not refused" '"--project-directory", ' '' '`--project-directory`: a flag' 'docker compose --project-directory . up -d'
@@ -686,7 +686,7 @@ pc "file rule: a file with only a top-level include -> COMPOSE-UNKNOWN-FILE" 'CO
 pc "file rule: a non-compose YAML (groups: [...]) is GREEN" OK "+more-rules.yml" "" $'groups: [{name: x, rules: []}]\n'
 pc "file rule: an unparsable db/junk.yml -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `junk.yml`' "+junk.yml" "" $'a: [unclosed\n'
 pc "file rule: a two-document file -> COMPOSE-UNREADABLE-FILE" 'COMPOSE-UNREADABLE-FILE: `two.yml`' "+two.yml" "" $'a: 1\n---\nservices: {exporter: {}}\n'
-pc "round-7 exploit: a global-flag command in the README merging extra.yml -> RED by the file rule AND the lint" $'BASE-EXPORTER: extra.yml defines the service `exporter`\nCOMPOSE-DOC-FILE: README.md:' "../README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' 'docker --context x compose -f compose.yml -f compose.observability.yml -f extra.yml up -d'$'\x01'"$EXF"
+pc "round-7 exploit: a global-flag command in the README merging extra.yml -> RED by the file rule AND the lint" $'BASE-EXPORTER: extra.yml defines the service `exporter`\nCOMPOSE-DOC-FILE: README.md:' "README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' 'docker --context x compose -f compose.yml -f compose.observability.yml -f extra.yml up -d'$'\x01'"$EXF"
 pc "round-7 exploit: a command in db/bootstrap/NOTES.md naming a fourth file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: bootstrap/NOTES.md documents `docker compose -f extra.yml`' "+bootstrap/NOTES.md" "" $'docker compose -f compose.yml -f extra.yml up -d\n'
 # eighth review: the file rule judges EVERY file under db/ by CONTENT, not by name (compose merges any file given with -f,
 # JSON is YAML). Real parity runs on the tree with one extra file; \x03 in a case body stands for a NUL byte.
@@ -781,8 +781,8 @@ pmx "parity: the compose-shaped -> unknown file rule removed" '            if re
 pmx "parity: the non-overlay service check removed from the walk" '            judge_compose(rel_ + link_, doc_)' '            pass' -- 'BASE-EXPORTER: extra.yml defines the service `exporter`' "+extra.yml" "" "$EXF"
 pmx "parity: the unreadable-file rule removed" '        if not ok_:' '        if False:' -- 'COMPOSE-UNREADABLE-FILE: `junk.yml`' "+junk.yml" "" $'a: [unclosed\n'
 pmx "parity: the markdown scan restricted to the README and RUNBOOK (db/**/*.md not scanned)" 'DOC_SOURCES += [(r_, p_) for r_, p_ in md_seen if os.path.abspath(p_) != _rb]' 'pass' -- 'COMPOSE-DOC-FILE: bootstrap/NOTES.md documents `docker compose -f extra.yml`' "+bootstrap/NOTES.md" "" $'docker compose -f compose.yml -f extra.yml up -d\n'
-pmx "parity: a global docker flag is not a mention" '|docker(?:\s+-{1,2}[\w-]+(?:=\S+)?(?:\s+(?!compose\b|-)\S+)?)+\s+compose\b' '' -- '`--debug`: write `docker compose` with no global flags' "../README.md" "$README_CMD" 'docker --debug compose ps'
-pmx "parity: the global-flag refusal removed" '    if toks[0].lower() == "docker" and len(toks) > 1 and toks[1].startswith("-"):' '    if False:' -- '`--debug`: write `docker compose` with no global flags' "../README.md" "$README_CMD" 'docker --debug compose ps'
+pmx "parity: a global docker flag is not a mention" '|docker(?:\s+-{1,2}[\w-]+(?:=\S+)?(?:\s+(?!compose\b|-)\S+)?)+\s+compose\b' '' -- '`--debug`: write `docker compose` with no global flags' "README.md" "$README_CMD" 'docker --debug compose ps'
+pmx "parity: the global-flag refusal removed" '    if toks[0].lower() == "docker" and len(toks) > 1 and toks[1].startswith("-"):' '    if False:' -- '`--debug`: write `docker compose` with no global flags' "README.md" "$README_CMD" 'docker --debug compose ps'
 pmx "parity: the scripts' -f \"\$dbdir/...\" scan removed" $'        for f_ in re.findall(r\'-f\\s+"\\$dbdir/([^"]+)"\', read(p_)):' '        for f_ in []:' -- 'COMPOSE-DOC-FILE: scripts/db-scrape-test.sh runs `docker compose -f compose.other.yml`' "../scripts/db-scrape-test.sh" '-f "$dbdir/compose.observability.yml")' '-f "$dbdir/compose.observability.yml" -f "$dbdir/compose.other.yml")'
 
 sect "parity harness run (one python process)"
@@ -810,7 +810,7 @@ rm -f "$tmp/w/db/compose.dirlink.yml" "$tmp/w/db/compose.dangling.yml"
 # A link to a DIRECTORY is refused (os.walk does not enter it, so `-f link/extra.yml` would go unread); a link to a
 # FILE is judged by its target's content; a dangling link is refused whatever its name.
 sl="$tmp/sl"; mkdir -p "$sl/outside"
-cp -R "$dbdir" "$sl/db"; cp -R "$scripts" "$sl/scripts"; cp "$modroot/README.md" "$sl/README.md"; mkdir "$sl/db/inner-target"; printf 'hello\n' > "$sl/db/inner-target/a.txt"
+cp -R "$dbdir" "$sl/db"; cp -R "$scripts" "$sl/scripts"; mkdir "$sl/db/inner-target"; printf 'hello\n' > "$sl/db/inner-target/a.txt"
 slp() { out="$(bash "$1" --dir "$sl/db/observability" 2>&1)"; rc=$?; }
 printf 'hello\n' > "$sl/outside/ok.txt"; ln -s "$sl/outside/ok.txt" "$sl/db/ok-link"
 slp "$parity"

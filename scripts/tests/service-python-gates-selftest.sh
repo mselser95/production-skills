@@ -62,28 +62,85 @@ out="$(layout_check "$A" single)"; check "single layout: the workflow is at .git
 M="$T/mono"
 if assemble "$mods" monorepo "$M"; then out="$(layout_check "$M" monorepo)"; r=$?; else out="assemble failed"; r=1; fi
 check "monorepo layout: ONE workflow at the root's .github/workflows/ (callable with a local uses:), none under the unit" "$r" "$out"
-# the placement rule removed or turned into `unit` -> RED
-for variant in "unit" "removed"; do
-  mm="$T/mm-$variant"; mkdir -p "$mm"; cp -R "$mods/service-python" "$mm/service-python"
-  python3 -I -B - "$mm/service-python/module.json" "$variant" <<'PYEOF'
+# The workflow's own placement key (`.github/workflows/python-unit.yml` -> root) is the only thing
+# that puts it at the repository root; `.github/**` -> unit still owns anything else under the unit's
+# `.github/` (the template has no other file there today). Each variant is run on a scratch copy of the
+# module with the same assembler call as the control (variant "none": nothing changed -> must be GREEN).
+mutate_module() { # <variant> <dest modules dir>
+  mkdir -p "$2"; cp -R "$mods/service-python" "$2/service-python"
+  python3 -I -B - "$2/service-python/module.json" "$1" <<'PYEOF'
 import json
 import sys
 
 path, variant = sys.argv[1:3]
 doc = json.load(open(path, encoding="utf-8"))
+pl = doc["placement"]
+key = ".github/workflows/python-unit.yml"
 if variant == "unit":
-    doc["placement"][".github/**"] = "unit"
-else:
-    del doc["placement"][".github/**"]
+    pl[key] = "unit"
+elif variant == "removed":
+    del pl[key]
+elif variant == "both-removed":
+    del pl[key]
+    del pl[".github/**"]
+elif variant != "none":
+    raise SystemExit("unknown variant " + variant)
 json.dump(doc, open(path, "w", encoding="utf-8"), indent=2)
 PYEOF
-  if assemble "$mm" monorepo "$T/mm-out-$variant"; then out="$(layout_check "$T/mm-out-$variant" monorepo)"; r=$?; else r=1; fi
-  if [[ $r != 0 ]]; then r=0; else r=1; fi; check "placement rule for .github/** $variant (monorepo) -> RED" "$r"
-  if [[ $variant == removed ]]; then
-    if assemble "$mm" single "$T/mm-single-$variant"; then out="$(layout_check "$T/mm-single-$variant" single)"; r=$?; else r=1; fi
-    if [[ $r != 0 ]]; then r=0; else r=1; fi; check "placement rule for .github/** removed (single) -> RED" "$r"
-  fi
+}
+mutant_layout() { # <variant> <layout>: returns 0 when the layout check is RED (or the assembly refuses)
+  local v="$1" l="$2" r
+  mutate_module "$v" "$T/mm-$v-$l"
+  if assemble "$T/mm-$v-$l" "$l" "$T/mm-out-$v-$l"; then out="$(layout_check "$T/mm-out-$v-$l" "$l")"; r=$?; else r=1; fi
+  [[ $r != 0 ]]
+}
+# controls first: the same scenario, nothing mutated, must be GREEN
+for l in monorepo single; do
+  if mutant_layout none "$l"; then r=1; else r=0; fi; check "control: unmutated placement copy ($l) passes the layout check" "$r"
 done
+# old: `.github/**` -> unit (monorepo) | new: the workflow's own key -> unit
+if mutant_layout unit monorepo; then r=0; else r=1; fi; check "placement rule for the workflow -> unit (monorepo) -> RED" "$r"
+# old: `.github/**` removed (monorepo) | new: the workflow's own key removed (falls through to .github/** -> unit)
+if mutant_layout removed monorepo; then r=0; else r=1; fi; check "placement rule for the workflow removed, falls to .github/** -> unit (monorepo) -> RED" "$r"
+# old: `.github/**` removed (single) | new: both keys removed (the file is unplaced, the assembly refuses)
+if mutant_layout both-removed single; then r=0; else r=1; fi; check "placement rules for .github/** and the workflow removed (single) -> RED" "$r"
+
+# a. monorepo, one unit: no unit copy of the workflow anywhere under services/
+n="$(find "$M/services" -name 'python-unit*' 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$n" == 0 ]]; then r=0; else r=1; fi; check "monorepo, one unit: no python-unit*.yml under services/" "$r" "$n found"
+mutate_module unit "$T/mm-a"; assemble "$T/mm-a" monorepo "$T/mm-a-out" >/dev/null 2>&1
+n="$(find "$T/mm-a-out/services" -name 'python-unit*' 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$n" != 0 ]]; then r=0; else r=1; fi; check "monorepo, one unit: workflow key -> unit puts a copy under services/ -> RED" "$r"
+
+# b. monorepo, two units with different ids: one shared root workflow, each unit's Makefile in its own dir
+assemble_two() { # <modules dir> <dest>
+  python3 -I -B "$here/scripts/assemble.py" --dest "$2" --layout monorepo --modules-dir "$1" \
+    --unit service-python:ledger-svc,PACKAGE=ledger_svc --unit service-python:billing-svc,PACKAGE=billing_svc \
+    --slot OWNER=acme >"$T/assemble-two.log" 2>&1
+}
+two_check() { # <dest>
+  [[ "$(find "$1" -name 'python-unit*.yml' | wc -l | tr -d ' ')" == 1 && -f "$1/.github/workflows/python-unit.yml" \
+    && -f "$1/services/ledger-svc/Makefile" && -f "$1/services/billing-svc/Makefile" ]]
+}
+if assemble_two "$mods" "$T/two" && two_check "$T/two"; then r=0; else r=1; fi
+check "monorepo, two units: assembler exit 0, ONE workflow at the root, each unit's Makefile under its own services/<id>/" "$r" "$(tail -n 1 "$T/assemble-two.log")"
+mkdir -p "$T/mm-b"; cp -R "$mods/service-python" "$T/mm-b/service-python"
+python3 -I -B - "$T/mm-b/service-python/template/.github/workflows/python-unit.yml" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = "# working-directory: services/<SERVICE>\n" + text
+open(path, "w", encoding="utf-8").write(text)
+PYEOF
+if ! assemble_two "$T/mm-b" "$T/two-b" && grep -q 'differs between' "$T/assemble-two.log"; then r=0; else r=1; fi
+check "monorepo, two units: a slot token back in the workflow -> the assembler refuses ('differs between') -> RED" "$r"
+
+# c. the workflow holds no slot token: the assembler's placeholder is <NAME> for each declared slot
+slots="$(python3 -I -B -c 'import json,sys;print(" ".join(json.load(open(sys.argv[1]))["slots"]))' "$mods/service-python/module.json")"
+tok=0
+for sl in $slots; do grep -q "<$sl>" "$mods/service-python/template/.github/workflows/python-unit.yml" && tok=1; done
+check "the workflow file contains no slot token (<$(echo $slots | tr ' ' '|')>)" "$tok"
 
 # ---------------------------------------------------------------- targets exist, reachable
 TARGETS="check-fast verify lint fmt typecheck test test-unit test-contract test-architecture architecture test-lanes-cover lock-check audit"
