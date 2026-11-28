@@ -917,7 +917,11 @@ red link-to-dotdot-off 'or norm == ".." or norm.startswith("../")' 'or norm.star
 red broken-pipe-off '        except (OSError, ValueError):
             # a closed pipe' '        except ZeroDivisionError:
             # a closed pipe' sc_bp
-red sigquit-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGTERM", "SIGHUP")' sc_quit
+# A process that dies of an unhandled SIGQUIT makes macOS write a crash report and show a
+# "Python quit unexpectedly" dialog, so this mutant runs where that does not happen (Linux, CI).
+if [[ "$(uname -s)" == Darwin ]]; then echo "SKIPPED mutant sigquit-unhandled: an unhandled SIGQUIT raises a crash dialog on macOS"
+else red sigquit-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGTERM", "SIGHUP")' sc_quit
+fi
 red cause-wins-off '            ignore_signals()  # CAUSE-WINS: a pending signal must not replace the real failure' '            pass' sc_changed
 red commit-ignore-off '            ignore_signals()  # COMMIT-IGNORE: the tree is complete; a late signal is dropped' '            pass' sc_commit
 red unit-prefix-dir-mode-off 'dir_modes[od] = (0o755 & ~umask) | stat.S_IWUSR' 'dir_modes[od] = (0o777 & ~umask) | stat.S_IWUSR' sc_unitdir
