@@ -1,11 +1,14 @@
-//! The units ledger: one balance, an applied-set, a version counter.
+//! The units ledger: one balance, an applied-map, a version counter.
 //!
 //! Money is an integer count of minor units (`u64`). Every operation that can
 //! overflow or underflow is checked; a failed `apply` leaves the state
-//! untouched. Event application is idempotent by event id.
-use std::collections::BTreeSet;
-use std::error::Error;
-use std::fmt;
+//! untouched (validate everything, then commit). Event application is
+//! idempotent by event id: the same id with the same content is a replay, the
+//! same id with different content is a conflict.
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use core::error::Error;
+use core::fmt;
 
 /// Longest accepted event id, in bytes.
 pub const MAX_ID_LEN: usize = 64;
@@ -19,6 +22,8 @@ pub enum DomainError {
     ZeroUnits,
     /// A counter would exceed `u64::MAX`.
     Overflow,
+    /// The id was already applied with a different kind or amount.
+    IdConflict,
     /// A withdrawal larger than the balance.
     InsufficientFunds {
         /// Balance at the time of the refusal.
@@ -34,6 +39,7 @@ impl fmt::Display for DomainError {
             Self::InvalidId => write!(f, "invalid event id"),
             Self::ZeroUnits => write!(f, "units must be greater than zero"),
             Self::Overflow => write!(f, "counter overflow"),
+            Self::IdConflict => write!(f, "event id reused with different content"),
             Self::InsufficientFunds { balance, requested } => {
                 write!(
                     f,
@@ -59,7 +65,7 @@ impl EventId {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
         if ok {
-            Ok(Self(raw.to_owned()))
+            Ok(Self(raw.to_string()))
         } else {
             Err(DomainError::InvalidId)
         }
@@ -107,6 +113,11 @@ impl Event {
         Ok(Self { id, kind, units })
     }
 
+    /// The event's id.
+    pub fn id(&self) -> &EventId {
+        &self.id
+    }
+
     /// The event's direction.
     pub fn kind(&self) -> Kind {
         self.kind
@@ -127,14 +138,23 @@ pub enum Outcome {
     Duplicate,
 }
 
+/// What the ledger remembers about an applied event: enough to tell a true
+/// replay from an id reused with different content.
+pub type AppliedEvent = (Kind, u64);
+
 /// The ledger state.
+///
+/// The applied-id map grows with every distinct event and is never pruned:
+/// retention is unbounded in this in-memory example. A real store keeps ids
+/// for a bounded idempotency window (or in a unique index) and says what a
+/// replay older than the window means.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct State {
     balance: u64,
     total_in: u64,
     total_out: u64,
     version: u64,
-    applied: BTreeSet<EventId>,
+    applied: BTreeMap<EventId, AppliedEvent>,
 }
 
 impl State {
@@ -151,7 +171,7 @@ impl State {
         total_in: u64,
         total_out: u64,
         version: u64,
-        applied: BTreeSet<EventId>,
+        applied: BTreeMap<EventId, AppliedEvent>,
     ) -> Self {
         Self {
             balance,
@@ -182,22 +202,27 @@ impl State {
         self.total_out
     }
 
-    /// Ids already applied.
-    pub fn applied(&self) -> &BTreeSet<EventId> {
+    /// Ids already applied, with their kind and amount.
+    pub fn applied(&self) -> &BTreeMap<EventId, AppliedEvent> {
         &self.applied
     }
 
-    /// Ratified invariant `units_conserved`: deposits minus withdrawals is
+    /// Proposed (not yet ratified) invariant `units_conserved`: deposits minus withdrawals is
     /// the balance, and the version counts the applied ids.
     pub fn conservation_holds(&self) -> bool {
         self.total_in.checked_sub(self.total_out) == Some(self.balance)
             && u64::try_from(self.applied.len()).is_ok_and(|n| n == self.version)
     }
 
-    /// Applies `event`. Idempotent by id; atomic (an `Err` changes nothing).
+    /// Applies `event`. Idempotent by id; atomic (an `Err` changes nothing:
+    /// every check runs before the first write).
     pub fn apply(&mut self, event: &Event) -> Result<Outcome, DomainError> {
-        if self.applied.contains(&event.id) {
-            return Ok(Outcome::Duplicate);
+        if let Some(&(kind, units)) = self.applied.get(&event.id) {
+            return if kind == event.kind && units == event.units {
+                Ok(Outcome::Duplicate)
+            } else {
+                Err(DomainError::IdConflict)
+            };
         }
         let version = self.version.checked_add(1).ok_or(DomainError::Overflow)?;
         let units = event.units;
@@ -224,7 +249,8 @@ impl State {
                     .ok_or(DomainError::Overflow)?,
             ),
         };
-        self.applied.insert(event.id.clone());
+        self.applied
+            .insert(event.id.clone(), (event.kind, event.units));
         self.balance = balance;
         self.total_in = total_in;
         self.total_out = total_out;
@@ -256,6 +282,22 @@ mod tests {
         s.apply(&ev("a", Kind::Deposit, 5)).unwrap();
         assert_eq!(s.apply(&ev("a", Kind::Deposit, 5)), Ok(Outcome::Duplicate));
         assert_eq!((s.balance(), s.version()), (5, 1));
+    }
+
+    #[test]
+    fn an_id_reused_with_different_content_is_a_conflict_and_changes_nothing() {
+        let mut s = State::new();
+        s.apply(&ev("a", Kind::Deposit, 5)).unwrap();
+        let before = s.clone();
+        assert_eq!(
+            s.apply(&ev("a", Kind::Deposit, 6)),
+            Err(DomainError::IdConflict)
+        );
+        assert_eq!(
+            s.apply(&ev("a", Kind::Withdraw, 5)),
+            Err(DomainError::IdConflict)
+        );
+        assert_eq!(s, before);
     }
 
     #[test]
@@ -301,7 +343,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_restore_is_detected_not_repaired() {
-        let s = State::restore(7, 5, 0, 0, BTreeSet::new());
+        let s = State::restore(7, 5, 0, 0, BTreeMap::new());
         assert!(!s.conservation_holds());
     }
 }

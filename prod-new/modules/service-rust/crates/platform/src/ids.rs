@@ -2,7 +2,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::app::{Clock, IdGenerator};
+use svc_app::{Clock, IdGenerator};
 
 /// A process-local sequence. Ids are unique per process lifetime only, so a
 /// request without its own id is NOT idempotent across a retry.

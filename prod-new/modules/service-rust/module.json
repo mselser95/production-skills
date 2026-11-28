@@ -4,8 +4,15 @@
   "conflicts": [],
   "source": ".",
   "slots": {
-    "SERVICE": "service name; replaced literally in file contents and in paths",
-    "OWNER": "GitHub owner (user or org) of the repository; replaced literally"
+    "SERVICE": {
+      "description": "service name; replaced literally in file contents and in paths",
+      "charset": "lower-digits-dash",
+      "max_len": 40
+    },
+    "OWNER": {
+      "description": "GitHub owner (user or org) of the repository; replaced literally",
+      "max_len": 39
+    }
   },
   "unit_kind": "service",
   "placement": {
@@ -27,6 +34,11 @@
     "README.md": "unit",
     "src/**": "unit",
     "tests/**": "unit",
-    "observability/**": "unit"
-  }
+    "observability/**": "unit",
+    "Makefile": "unit",
+    "crates/**": "unit"
+  },
+  "exclude": [
+    "target/**"
+  ]
 }

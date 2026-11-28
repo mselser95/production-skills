@@ -1,9 +1,12 @@
 # Checked-in manifest of every metric series this service emits.
 #
-# Contract: tests/observability_contract.rs diffs this file against the
-# literal names passed to `counter_inc(` / `gauge_set(` in src/, in both
-# directions. A metric in code but not here fails; a metric here that no code
-# emits fails. Names start `svc_`; counters end `_total`.
+# Contract: the ONLY way code names a metric is the typed table in
+# crates/app/src/telemetry.rs (an enum per kind; a string does not compile).
+# tests/observability_contract.rs compares that table with this file in both
+# directions: name, type and label KEYS. A variant without an entry fails; an
+# entry without a variant fails; a changed type or label key fails. Names start
+# `svc_`; counters end `_total`. Label VALUES are passed in the declared key
+# order.
 #
 # Fields:
 #   name   - the series name (exactly as emitted)
@@ -24,11 +27,12 @@
   type: counter
   labels: []
   note: >
-    Ratified invariant units_conserved. Must stay 0 in production;
-    app::Ledger checks State::conservation_holds after every command and
-    increments this the instant it disagrees (and saves nothing). The
+    Proposed invariant units_conserved (a candidate: none is ratified yet, see
+    production.yaml). Must stay 0 in production;
+    app::Ledger checks State::conservation_holds before applying every command
+    and increments this the instant it disagrees (and applies nothing). The
     deliberate-violation proof is the app test
-    a_corrupt_store_fires_the_violation_counter_and_saves_nothing.
+    a_corrupt_store_fires_the_violation_counter_and_applies_nothing.
 
 - name: svc_events_total
   type: counter
@@ -53,3 +57,21 @@
   note: >
     One increment per HTTP reply. route is healthz|metrics|balance|deposit|
     withdraw|other; code is the class 2xx|4xx|5xx.
+
+- name: svc_http_head_evictions_total
+  type: counter
+  labels: []
+  note: >
+    One increment per connection that was still reading its request head and
+    was closed to admit a newcomer because the head registry was full. The
+    victim is the connection that has received the FEWEST bytes (oldest first
+    on a tie); it gets no reply. A non-zero rate means slow or stalled clients
+    are crowding the registry (a flood, or a client slower than the limits).
+
+- name: svc_telemetry_errors_total
+  type: counter
+  labels: []
+  note: >
+    Telemetry calls that were dropped instead of recorded: a wrong number of
+    label values, or a series cap hit. Must stay 0; a non-zero value is a bug
+    in the caller, not load.
