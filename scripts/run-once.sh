@@ -13,21 +13,21 @@
 # THE PROPERTY THAT MUST SURVIVE: an attested PASS exists only if that exact gate
 # command really ran, on this tree, in this run, and exited 0.
 #
-# TRUST MODEL (three sentences, repeated in scripts/evidence-record.sh). The results file
-# protects against a stale line, a line of another run, a line of another tree, a dry run, and
-# a gate renamed or weakened through its ENVIRONMENT (every gate runs under `env -i` with a fixed
-# allowlist of names, whoever calls this script and whatever Makefile did). It does NOT protect
-# against a step of the same job that writes the results file by hand or edits a tracked script
-# (the same power as editing any gate), nor against a changed PATH that substitutes a tool (PATH
-# is trusted and passed as is; pre-existing). Nothing parses the Makefile: what a gate IS is the
-# argv this script executes, and the line is written from that execution's own exit status.
+# TRUST MODEL (the same paragraph stands in run-once.sh and evidence-record.sh; a selftest pins that). A result line proves that this exact
+# argv was executed by this runner, on this tree, in this run, under the allowlisted environment, and exited with the
+# recorded status. It guards against ACCIDENTS: a stale line, a line of another run, tree, runner version or allowlist,
+# a dry run, a relabelled command, and a gate weakened because something LEAKED from the caller's environment
+# (a developer's or CI image's BASH_ENV, exported functions, aliases, SHELLOPTS, IFS, CDPATH, GLOBIGNORE, a gate switch
+# such as SKIP=1). It is an accident guard, not a tamper guard: it does NOT guard against a tracked file or a job step
+# that deliberately writes the results file or redefines the shell (the same trust as editing a gate; review catches
+# it), nor against a substituted tool on PATH (PATH is trusted and passed as is).
 #
 # HOW A LINE IS MADE TRUE
 #   * WHAT IS RECORDED IS DERIVED FROM WHAT IS EXECUTED, never supplied beside it.
 #     The command column is the exact argv this script runs, each argument quoted
 #     with `printf %q` and joined by single spaces (`canon`). There is no `--as`
 #     label: a label is a claim, and nothing compared it to what ran.
-#   * THE ENVIRONMENT IS CLEAN. The argv runs as `env -i <allowlisted NAME=value ...> argv`. The
+#   * THE ENVIRONMENT IS CLEAN. The argv runs as `/usr/bin/env -i <allowlisted NAME=value ...> argv`. The
 #     allowlist is the ALLOW array below, each name with its reason; anything else the caller or
 #     a Makefile exported (SKIP=1, BASH_ENV, ENV, CDPATH, GLOBIGNORE, SHELLOPTS, BASHOPTS, IFS,
 #     function exports, MAKEFLAGS, MAKELEVEL, a target-specific `export`) never reaches the gate.
@@ -82,8 +82,6 @@
 #   run-once.sh [--quiet] [--count] <id> -- <command...>
 #       runs once, in the clean environment; exit code = the command's. --quiet prints nothing on
 #       success and the last 20 lines on failure.
-#   run-once.sh clean-exec <command...>   exec the command in the clean environment (what
-#                                         evidence-record.sh uses to clean ITSELF); refuses a dry run
 #   run-once.sh canon <arg...>     print the canonical command string of an argv
 #   run-once.sh tree-id            print the tree identity
 #   run-once.sh count              stdin -> the suite's case count (exit 1 if none)
@@ -93,17 +91,25 @@
 #   run-once.sh counts             print `<id><TAB><command><TAB><count>` for every trusted passing line
 # It may also be sourced (evidence-record.sh does, for canon / summary / resolve): nothing runs then.
 # Exit: the command's own (run) · 0 ok (others) · 1 nothing to report · 2 refused
-set -uo pipefail
-# This shell is hygienic before it does anything: an exported function must not stand in for a
-# command used below, and glob / word-splitting state imported from the environment is reset.
-# shellcheck disable=SC2046
-unset -f $(compgen -A function) 2>/dev/null
-unset GLOBIGNORE CDPATH POSIXLY_CORRECT
-for _v in "${!GIT_@}"; do unset "$_v"; done; unset _v
-shopt -u nullglob failglob dotglob nocaseglob nocasematch globstar extglob 2>/dev/null
-set +e +f +x +v
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-cd "$(dirname "$SELF")/.." || exit 2
+# ---- end of header ----------------------------------------------------------------------------------------
+# CLEAN START: the first executable lines, identical in scripts/run-once.sh and scripts/evidence-record.sh (a selftest
+# pins that). A BASH_ENV, exported function, alias or SHELLOPTS leaked from the caller by accident is already in this
+# shell before the first line runs, so nothing below may be a command that a function or an alias can stand in for.
+# shellcheck disable=SC2188  # the redirection-only command IS the point (see its comment)
+>/dev/null"${_:$((PS4=0)):0}"  # a redirection-only command is never traced; its arithmetic offset assigns PS4=0 BEFORE any traced command, so a leaked SHELLOPTS=xtrace with PS4='$(cmd)' expands nothing
+POSIXLY_CORRECT=1  # an assignment: no command lookup. In POSIX mode the special builtins (exec, unset, set, export, eval, trap, :, .) are found BEFORE functions
+\unset -f alias unalias declare typeset compgen command builtin type echo printf shopt local  # `\` defeats alias expansion (POSIX mode expands aliases in scripts); -f drops a function named like a non-special builtin used below
+_cs_dirt=${_cs_dirt-}  # what is already known to be unclean; a sourcing script has recorded its own, never reset it here
+_cs_al=$(\alias)  # an assignment (no alias can apply); the aliases are read BEFORE they are removed
+\unalias -a  # from the next line on, no alias can stand in for a word
+_cs_fn=$(\declare -F)  # every function defined at this point (an exported one is imported before the first line)
+[[ -z "$_cs_al" ]] || _cs_dirt="$_cs_dirt alias"
+[[ -z "$_cs_fn" ]] || _cs_dirt="$_cs_dirt function"
+[[ "${IFS-x}" == $' \t\n' ]] || _cs_dirt="$_cs_dirt IFS"
+IFS=$' \t\n'
+\unset -v _cs_al _cs_fn
+# Where this file is, without a `cd` (a sourcing script has not changed directory yet, and the re-exec below needs $0 as given).
+case "${BASH_SOURCE[0]}" in /*) SELF="${BASH_SOURCE[0]}" ;; *) SELF="$PWD/${BASH_SOURCE[0]}" ;; esac
 
 RESULTS="${EVIDENCE_RESULTS:-.evidence/results.tsv}"
 # No default: an unset id disables recording and attestation (see the header).
@@ -118,7 +124,7 @@ MAX_AGE="${EVIDENCE_MAX_AGE:-3600}"
 # reason beside it. Everything else, in particular every variable that can WEAKEN a gate, is
 # dropped, and a selftest that needs such a variable for its own fake sets it itself.
 ALLOW=(
-  PATH                  # tools are found through it; TRUSTED and passed as is (a substituted tool is the same-job model)
+  PATH                  # tools are found through it; TRUSTED and passed as is (a substituted tool is outside what a result line guards)
   HOME                  # install.sh:24 (cfg default), git and pip look in it
   TMPDIR                # brand-strings.sh:58, acceptance-audit-selftest.sh:58, every mktemp
   LANG LC_ALL LC_CTYPE  # sort / grep / awk collation, so a glob and a sort read alike
@@ -142,6 +148,7 @@ ALLOW=(
   GITHUB_WORKSPACE      # checkout root; pr.yaml steps and tool wrappers resolve paths from it
   XDG_CACHE_HOME        # pip / tool cache location
 )
+ALLOW_EXTRA=()  # extra names a DIRECT run of this script keeps through its own clean start (set below); the recorder keeps none
 CENV=()
 build_env() {
   local n
@@ -155,7 +162,8 @@ contract() {
   [[ -z "$RUNNER_SHA" ]] || return 0
   # git's object hash, not sha256: one fast C binary instead of a perl start (`shasum`) per call,
   # and these two are identifiers of a contract, not secrets.
-  ENV_SIG=$(printf '%s\n' "${ALLOW[@]}" | git hash-object --stdin); ENV_SIG=${ENV_SIG:0:12}
+  local names; printf -v names '%s\n' "${ALLOW[@]}"
+  ENV_SIG=$(git hash-object --stdin <<<"${names%$'\n'}"); ENV_SIG=${ENV_SIG:0:12}
   RUNNER_SHA=$(git hash-object --no-filters -- "$SELF"); RUNNER_SHA=${RUNNER_SHA:0:16}
 }
 
@@ -198,7 +206,55 @@ make_dry_run() {
   return 1
 }
 
-sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+# clean_start ATTEMPT [ARGS...]: is THIS shell clean? It is when every exported name is on the allowlist (plus the few bash
+# always sets) AND no BASH_ENV / ENV / CDPATH / GLOBIGNORE is present AND no function or alias exists (the facts the
+# prologue collected in _cs_dirt). Clean: leave POSIX mode and return. Otherwise re-exec this very script, ONCE, under
+# `/usr/bin/env -i <allowlisted names>` and `bash -p`: env -i drops every other variable and exported function; -p makes
+# bash ignore BASH_ENV, SHELLOPTS and imported functions (and BASHOPTS on bash 5; bash 3.2 relies on env -i for that one).
+# The re-exec'd instance gets --clean-attempt=1 as an ARGUMENT and checks again; still unclean -> exit 2, never a loop.
+# A make dry run is refused HERE, while MAKEFLAGS is still visible (the allowlist drops it).
+clean_start() {
+  _cs_att=$1; shift
+  _cs_ok=" ${ALLOW[*]} ${ALLOW_EXTRA[*]-} PWD SHLVL _ OLDPWD "
+  \set -f
+  for _cs_n in $(\compgen -e); do
+    [[ "$_cs_ok" == *" $_cs_n "* ]] || _cs_dirt="$_cs_dirt export:$_cs_n"
+  done
+  \set +f
+  [[ -z "${BASH_ENV+x}${ENV+x}${CDPATH+x}${GLOBIGNORE+x}" ]] || _cs_dirt="$_cs_dirt var"
+  if make_dry_run; then
+    echo "refusing to run or write under a make dry run / question / touch (MAKEFLAGS='${MAKEFLAGS:-}' MFLAGS='${MFLAGS:-}')" >&2
+    exit 2
+  fi
+  if [[ -z "$_cs_dirt" ]]; then
+    \set +o posix
+    \unset -v POSIXLY_CORRECT _cs_dirt _cs_att _cs_ok _cs_n
+    return 0
+  fi
+  if [[ "$_cs_att" != 0 ]]; then
+    echo "refusing to run: the clean start did not give a clean shell (attempt $_cs_att; unclean:$_cs_dirt)" >&2
+    exit 2
+  fi
+  _cs_b=${BASH-}; [[ "$_cs_b" == /* && -x "$_cs_b" ]] || _cs_b=/bin/bash  # this bash, only if it is an absolute path to an executable
+  build_env
+  for _cs_n in ${ALLOW_EXTRA[@]+"${ALLOW_EXTRA[@]}"}; do if [[ -n "${!_cs_n+x}" ]]; then CENV+=("$_cs_n=${!_cs_n}"); fi; done
+  exec /usr/bin/env -i ${CENV[@]+"${CENV[@]}"} "$_cs_b" --noprofile --norc -p "$0" --clean-attempt=1 "$@"
+  exit 2
+}
+# run directly (not sourced): clean the shell BEFORE anything reads the arguments or changes directory
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  ALLOW_EXTRA=(EVIDENCE_MAX_AGE)  # run-once's own knob (the age limit of `resolve`): kept for a direct call, NEVER passed to a gate, and dropped by the recorder
+  _cs_att=0
+  if [[ "${1-}" == --clean-attempt=* ]]; then _cs_att=${1#--clean-attempt=}; \shift; fi
+  clean_start "$_cs_att" "$@"
+  cd "${SELF%/*}/.." || exit 2
+fi
+set -uo pipefail
+for _v in "${!GIT_@}"; do unset "$_v"; done; unset _v
+shopt -u nullglob failglob dotglob nocaseglob nocasematch globstar extglob 2>/dev/null
+set +e +f +x +v
+
+sha256() { local h; if command -v sha256sum >/dev/null 2>&1; then h=$(sha256sum); else h=$(shasum -a 256); fi; printf '%s' "${h%% *}"; }
 
 now_ms() { if [[ -n "${EPOCHREALTIME:-}" ]]; then local t=${EPOCHREALTIME/[.,]/}; echo "${t:0:13}"; else echo "$(date +%s)000"; fi; }
 
@@ -206,12 +262,26 @@ now_ms() { if [[ -n "${EPOCHREALTIME:-}" ]]; then local t=${EPOCHREALTIME/[.,]/}
 # diff driver in ~/.gitconfig must not decide what "the tree" is.
 g() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 XDG_CONFIG_HOME=/dev/null/none git "$@"; }
 
+# own_dirs_out TEXT: OWN_OUT = TEXT without the lines `?? .prod/evidence[/]` and `?? .evidence[/]` (this tooling's own
+# output directories), in bash: a pipeline into grep is more processes on every tree measurement.
+OWN_OUT=""
+own_dirs_out() {
+  local l o="" nl=$'\n'
+  while IFS= read -r l; do
+    case "$l" in
+      "?? .prod/evidence"|"?? .prod/evidence/"|"?? .evidence"|"?? .evidence/"|"") ;;
+      *) o+="$l$nl" ;;
+    esac
+  done <<<"$1"
+  OWN_OUT=${o%"$nl"}
+}
+
 # The tree identity. .prod/evidence and .evidence are this tooling's own output
 # directories, so their existence must not be what makes the tree dirty.
 tree_id() {
   local head st untracked h
   head=$(g rev-parse HEAD 2>/dev/null) || { echo "run-once: not a git work tree with a HEAD" >&2; return 1; }
-  st=$(g status --porcelain --untracked-files=normal 2>/dev/null | grep -vE '^\?\? (\.prod/evidence|\.evidence)/?$' || true)
+  st=$(g status --porcelain --untracked-files=normal 2>/dev/null); own_dirs_out "$st"; st=$OWN_OUT
   if [[ -z "$st" ]]; then echo "${head}+clean"; return 0; fi
   untracked=$(g ls-files -o --exclude-standard 2>/dev/null | grep -vE '^(\.prod/evidence|\.evidence)/' || true)
   h=$({ printf '%s\n' "$st"; g diff HEAD --no-ext-diff --no-textconv --binary 2>/dev/null
@@ -248,17 +318,25 @@ count_of() { local n; n=$(grep -oE '[0-9]+ (ok|case)' | tail -1 | grep -oE '^[0-
 # --no-print-directory is passed to those gates too, but it cannot be observed on
 # macOS (GNU make 3.81 never emits the lines), so a filter is kept as well.
 summary_of() {
-  local rc="$1" out ev
-  out=$(cat)
-  ev=$(printf '%s\n' "$out" \
-        | grep -vE "^make(\\[[0-9]+\\])?: (Entering|Leaving) directory" \
-        | grep -vE '^[[:space:]]*$|^[[:space:]]+' | tail -1 || true)
-  [[ -n "$ev" ]] || ev=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1 || true)
+  local rc="$1" out line ev="" last=""
+  IFS= read -r -d '' out || true
+  while IFS= read -r line; do
+    case "$line" in
+      *[![:space:]]*) last="$line" ;;
+      *) continue ;;
+    esac
+    case "$line" in
+      "make: Entering directory"*|"make: Leaving directory"*|"make["[0-9]*"]: Entering directory"*|"make["[0-9]*"]: Leaving directory"*) continue ;;
+      [[:space:]]*) continue ;;
+    esac
+    ev="$line"
+  done <<<"$out"
+  [[ -n "$ev" ]] || ev="$last"
   [[ -n "$ev" ]] || ev="(gate produced no output; verdict from exit code $rc alone)"
   printf '%s' "$ev"
 }
 
-clean_field() { printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-200; }
+clean_field() { local s="${1//[$'\t\r\n']/ }"; printf '%s' "${s:0:200}"; }
 
 # The awk every reader shares: ONE strict definition of a well-formed line. Hand-written
 # lines are the attack, so nothing is accepted by leniency: the exit code is 0 or 1..999 with
@@ -398,13 +476,13 @@ run_mode() {
   local cmd; cmd=$(canon "$@")
   build_env
 
-  local tmp t0 t1 rc tree_a="" tree_b tree cnt="" ev osha
+  local tmp t0 t1 rc tree_a="" tree_b tree cnt="" ev osha now
   tmp=$(mktemp "${TMPDIR:-/tmp}/run-once.XXXXXX") || exit 2
   if (( record )); then tree_a=$(tree_id) || { rm -f "$tmp"; exit 2; }; contract; fi
   t0=$(now_ms)
   # THE EXECUTION: the one place a gate runs, in the allowlisted environment and nowhere else.
-  if (( quiet )); then env -i ${CENV[@]+"${CENV[@]}"} "$@" >"$tmp" 2>&1; rc=$?
-  else env -i ${CENV[@]+"${CENV[@]}"} "$@" 2>&1 | tee "$tmp"; rc=${PIPESTATUS[0]}; fi
+  if (( quiet )); then /usr/bin/env -i ${CENV[@]+"${CENV[@]}"} "$@" >"$tmp" 2>&1; rc=$?
+  else /usr/bin/env -i ${CENV[@]+"${CENV[@]}"} "$@" 2>&1 | tee "$tmp"; rc=${PIPESTATUS[0]}; fi
   t1=$(now_ms)
   if (( record )); then
     tree_b=$(tree_id) || tree_b="gone"
@@ -412,30 +490,20 @@ run_mode() {
     (( want_count )) && { cnt=$(count_of <"$tmp") || cnt=""; }
     ev=$(clean_field "$(summary_of "$rc" <"$tmp")")
     osha=$(sha256 <"$tmp")
-    mkdir -p "$(dirname "$RESULTS")" || exit 2
+    case "$RESULTS" in */*) mkdir -p "${RESULTS%/*}" || exit 2 ;; esac
+    now=$(date -u '+%Y-%m-%dT%H:%M:%SZ %s')  # one process for the two time columns
     printf 'v3\t%s\t%s\t%d\t%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$cmd" "$rc" "$((t1 - t0))" "$osha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date +%s)" "$tree" "$RUN_ID" "$cnt" "$ev" "$ENV_SIG" "$RUNNER_SHA" >>"$RESULTS"
+      "$id" "$cmd" "$rc" "$((t1 - t0))" "$osha" "${now% *}" "${now#* }" "$tree" "$RUN_ID" "$cnt" "$ev" "$ENV_SIG" "$RUNNER_SHA" >>"$RESULTS"
   fi
   if (( quiet && rc != 0 )); then tail -n 20 "$tmp"; fi
   rm -f "$tmp"
   exit "$rc"
 }
 
-clean_exec() {
-  (( $# > 0 )) || { echo "run-once: clean-exec: no command" >&2; exit 2; }
-  if make_dry_run; then
-    echo "run-once: refusing to run under a make dry run / question / touch (MAKEFLAGS='${MAKEFLAGS:-}' MFLAGS='${MFLAGS:-}')" >&2
-    exit 2
-  fi
-  build_env
-  exec env -i ${CENV[@]+"${CENV[@]}"} EVIDENCE_CLEAN_ENV=1 "$@"
-}
-
 # sourced (by evidence-record.sh): the functions above are the whole point, nothing runs
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 case "${1:-}" in
-  clean-exec) shift; clean_exec "$@" ;;
   canon)   shift; canon "$@" ;;
   tree-id) tree_id ;;
   count)   count_of ;;
@@ -443,6 +511,6 @@ case "${1:-}" in
   resolve) [[ $# -eq 3 ]] || { echo "run-once: resolve <id> <cmd>" >&2; exit 2; }; resolve "$2" "$3" ;;
   resolve-set) resolve_set ;;
   counts)  counts ;;
-  -h|--help) sed -n '2,/^set -uo/p' "${BASH_SOURCE[0]}" | sed '$d' ;;
+  -h|--help) sed -n '2,/^# ---- end of header/p' "${BASH_SOURCE[0]}" | sed '$d' ;;
   *)       run_mode "$@" ;;
 esac

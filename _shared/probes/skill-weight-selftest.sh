@@ -67,8 +67,10 @@ wiring() { # wiring <dir with Makefile and .github/workflows/pr.yaml> : prints w
   # `make gates` is one line calling scripts/evidence-record.sh --run gates, which runs the `main` group
   # of its GATES: the gates line is "the recipe calls the runner" and "skill-weight is not moved out of main".
   gl="$(awk '/^gates:/{f=1;next} f&&/^[^\t]/{f=0} f' "$d/Makefile" | grep -E 'evidence-record\.sh --run gates')"
-  ids="$(grep -E '^(PRE_IDS|POST_IDS|AGG_IDS)=\(' "$d/scripts/evidence-record.sh")"
-  { [[ -n "$gl" && "$ids" != *skill-weight* ]]; } || miss="$miss gates-line"
+  # the recorder is ASKED which ids make up the main group (`--list main`), not read: a `POST_IDS+=(skill-weight)` anywhere moves it out
+  [[ -f "$d/scripts/run-once.sh" ]] || cp "$real_root/scripts/run-once.sh" "$d/scripts/run-once.sh"
+  ids="$(bash "$d/scripts/evidence-record.sh" --list main 2>/dev/null)"
+  { [[ -n "$gl" && $'\n'"$ids"$'\n' == *$'\nskill-weight\n'* ]]; } || miss="$miss gates-line"
   grep -Eq '^[[:space:]]*bash _shared/probes/skill-weight-selftest\.sh[[:space:]]*$' "$d/.github/workflows/pr.yaml" || miss="$miss ci-selftest"
   grep -Eq '^[[:space:]]*bash _shared/probes/skill-weight\.sh[[:space:]]*$' "$d/.github/workflows/pr.yaml" || miss="$miss ci-probe"
   grep -Eq '^[[:space:]]*"[A-Za-z0-9_-]+\|bash _shared/probes/skill-weight\.sh"[[:space:]]*$' "$d/scripts/evidence-record.sh" || miss="$miss evidence-gates"
@@ -83,6 +85,8 @@ m="$(wiring "$w")"; if [[ "$m" == "gates-line" ]]; then ok_ "wiring: gates: reci
 cp "$real_root/Makefile" "$w/Makefile"
 sed 's/^POST_IDS=(/POST_IDS=(skill-weight /' "$real_root/scripts/evidence-record.sh" >"$w/scripts/evidence-record.sh"
 m="$(wiring "$w")"; if [[ "$m" == "gates-line" ]]; then ok_ "wiring: skill-weight moved out of the main group (not run by --run gates) is caught"; else bad_ "wiring group" "got [$m]"; fi
+sed 's/^AGG_IDS=(.*$/&\nPOST_IDS+=(skill-weight)/' "$real_root/scripts/evidence-record.sh" >"$w/scripts/evidence-record.sh"
+m="$(wiring "$w")"; if [[ "$m" == "gates-line" ]]; then ok_ "wiring: a later POST_IDS+=(skill-weight) (invisible to a one-line grep) is caught, the recorder is asked"; else bad_ "wiring group append" "got [$m]"; fi
 cp "$real_root/scripts/evidence-record.sh" "$w/scripts/evidence-record.sh"
 grep -v 'bash _shared/probes/skill-weight.sh$' "$real_root/.github/workflows/pr.yaml" >"$w/.github/workflows/pr.yaml"
 m="$(wiring "$w")"; if [[ "$m" == "ci-probe" ]]; then ok_ "wiring: pr.yaml probe line removed is caught"; else bad_ "wiring ci probe" "got [$m]"; fi
@@ -91,7 +95,7 @@ m="$(wiring "$w")"; if [[ "$m" == "ci-selftest" ]]; then ok_ "wiring: pr.yaml se
 
 cp "$real_root/.github/workflows/pr.yaml" "$w/.github/workflows/pr.yaml"
 grep -v 'skill-weight\.sh"' "$real_root/scripts/evidence-record.sh" >"$w/scripts/evidence-record.sh"
-m="$(wiring "$w")"; if [[ "$m" == "evidence-gates" ]]; then ok_ "wiring: the GATES entry in scripts/evidence-record.sh removed is caught"; else bad_ "wiring evidence" "got [$m]"; fi
+m="$(wiring "$w")"; if [[ "$m" == "gates-line evidence-gates" ]]; then ok_ "wiring: the GATES entry in scripts/evidence-record.sh removed is caught (twice: the recorder no longer lists it in main either)"; else bad_ "wiring evidence" "got [$m]"; fi
 
 # ---- the real repo, and the core's hygiene -------------------------------------
 run_case "the real repo passes" 0 "skill-weight: ok" "$real_root"

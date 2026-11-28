@@ -1,20 +1,39 @@
 //! What the Cargo workspace cannot express by itself.
 //!
 //! Zone purity: `domain` and `app` can reach no file, socket, clock, thread or
-//! environment. Four layers, each tested, because code behind a `cfg` is never
-//! built on the bare-metal target and so never seen by the compiler there:
+//! environment, and contain no `unsafe`. The rule this file follows: it does
+//! not RECOGNISE spellings in text (four review rounds each found a new
+//! spelling that got through), it ASKS THE COMPILER, with arguments of its
+//! own: a scrubbed environment, config overrides, and a probe that proves the
+//! gate is armed (what is and is not covered is in the README's "compiler gate
+//! itself" row; the test files and the Makefile are outside any in-tree test).
 //!
-//! 1. The compiler, on a target with no `std` (`make check-nostd`, with
-//!    `--all-features`): builds exactly what is NOT conditionally compiled.
+//! 1. The compiler gate (`compile_forbidding_unsafe`): this test runs, by
+//!    itself, `cargo rustc --lib --all-features --target thumbv7em-none-eabi
+//!    --profile check -- -F unsafe_code` on `domain` and on `app`. The target
+//!    has no `std`, so any `std` item and any spelling of `extern crate std`
+//!    (`r#std` too) is E0463; `-F unsafe_code` is a forbid set on the rustc
+//!    command line, which an attribute or a `[lints]` table cannot lower
+//!    (`#![allow(unsafe_code)]` is E0453). Nothing here goes through `make` or
+//!    a variable the Makefile owns. A missing target FAILS with the install
+//!    hint; it never skips. Code behind a `cfg` is not built there, hence:
 //! 2. L1 (here): the list of source files the COMPILER read in the HOST build
 //!    of the workspace (rustc's dep-info, which names every file including
 //!    `#[path]` modules and `include!`d files) must all sit inside the crate's
-//!    own `src/`.
+//!    own `src/`. Alone it guards ownership (a pure crate's code lives in its
+//!    `src/`), not purity: the file would still be compiled by the gate.
 //! 3. L2 (here): none of those files may contain the word `cfg` (except a line
-//!    that is exactly `#[cfg(test)]`), nor `include!`-family macros.
+//!    that is exactly `#[cfg(test)]`), nor `include!`-family macros. Alone it
+//!    guards the one thing the gate cannot see: `std` behind a `cfg` that is
+//!    false on the bare-metal target.
 //! 4. L3 (here): `domain` and `app` declare no features and no optional
-//!    dependency, and nothing in the workspace enables a feature on them or
-//!    turns their default features off.
+//!    dependency, and nothing enables a feature on them or turns their default
+//!    features off. Defence in depth: the gate builds with `--all-features`, so
+//!    on its own L3 guards nothing the gate does not already.
+//!
+//! The fixtures at the end of this file run ONE attack each on a copy of the
+//! domain crate through the same functions: the layer that must catch it goes
+//! RED, every other layer stays clean, and an unattacked control passes.
 //!
 //! Why L2 refuses a word instead of parsing: without proc macros and build
 //! scripts (both refused below) the identifier `cfg` cannot be synthesised by
@@ -22,9 +41,8 @@
 //! compilation; and `#[cfg(test)]` code exists only in test builds. A comment
 //! that mentions the word is refused too (no comment stripping, on purpose).
 //!
-//! The Makefile is pinned by one exact line, so the gate cannot be disabled
-//! unnoticed (a `-` prefix, `|| true`, `.IGNORE`, a second recipe line). The
-//! two remaining rules are source scans and WEAKER: only `config.rs` reads the
+//! The Makefile is NOT pinned any more: nothing rests on its text. The
+//! remaining rules are source scans and WEAKER: only `config.rs` reads the
 //! environment, and the bearer token is compared through the constant-time
 //! helper.
 #![allow(
@@ -33,14 +51,155 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
-use std::collections::BTreeMap;
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
+/// The module directory, read at RUN time: cargo sets `CARGO_MANIFEST_DIR` for
+/// `cargo test` in the checkout it runs for, so a binary compiled in one
+/// checkout and executed by cargo for another inspects the other. The
+/// compile-time value is only the fallback for a binary run by hand (without
+/// `CARGO_MANIFEST_DIR` in its environment it inspects the tree it was
+/// compiled in).
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    root_from(std::env::var_os("CARGO_MANIFEST_DIR"))
+}
+
+/// The pure half of `root()`: a run-time value wins, `None` falls back to the
+/// compile-time one.
+fn root_from(runtime: Option<OsString>) -> PathBuf {
+    runtime.map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from)
+}
+
+/// The canonical form of a module path: the identity of a checkout, so the
+/// same checkout reached through a symlink or its real path is ONE owner.
+fn owner_id(module: &Path) -> String {
+    fs::canonicalize(module)
+        .unwrap_or_else(|_| module.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn shared_target_message(me: &str, other: &str) -> String {
+    format!(
+        "this target directory is shared with another checkout ({other}); cargo reuses build \
+         artefacts between checkouts that share a target directory, so neither checkout's \
+         result can be trusted. Give each checkout its own target directory (unset \
+         CARGO_TARGET_DIR, or point it at a per-checkout path), or run `cargo clean` if the \
+         other checkout is gone. (this checkout: {me})"
+    )
+}
+
+fn unwritable(dir: &Path, e: &std::io::Error) -> String {
+    format!(
+        "the architecture tests write their fixtures and an ownership marker under {}; make it \
+         writable or point CARGO_TARGET_DIR elsewhere ({e})",
+        dir.display()
+    )
+}
+
+/// Target-directory ownership. `marker` holds the canonical path of the module
+/// that first used the target directory. Absent: created atomically
+/// (`create_new`) with `me`. Equal: fine. Different and still on disk: an
+/// error naming both. Different and gone from disk (deleted or moved), or
+/// still EMPTY after a bounded wait (a writer that died between creating and
+/// writing it; an empty marker names nobody, so nobody can be wronged): taken
+/// over.
+fn claim_target(marker: &Path, me: &str) -> Result<(), String> {
+    claim_target_with(marker, me, &mut |_| {})
+}
+
+/// `claim_target` with a hook called after a takeover's rename and before its
+/// re-read, so a test can interleave a concurrent claimer.
+///
+/// A takeover never deletes: it writes `me` to a unique temp file beside the
+/// marker and `rename`s it over the marker (atomic), then RE-READS the marker
+/// and proceeds only if it holds `me`; a different LIVE path there is refused
+/// as usual. What remains possible: two claimers taking over the same dead
+/// owner race, the later rename wins, and the earlier claimer's re-read then
+/// sees the other's path and refuses (if live) or takes over again; both
+/// outcomes are consistent with the file's final content. A writer that is
+/// merely SLOW (not dead) for longer than the wait can still have its marker
+/// replaced; its late write goes to the replaced file.
+fn claim_target_with(
+    marker: &Path,
+    me: &str,
+    after_takeover: &mut dyn FnMut(&Path),
+) -> Result<(), String> {
+    use std::io::{ErrorKind, Write};
+    static TMP: AtomicUsize = AtomicUsize::new(0);
+    let dir = marker.parent().unwrap();
+    fs::create_dir_all(dir).map_err(|e| unwritable(dir, &e))?;
+    let mut empty_reads = 0;
+    for _ in 0..100 {
+        match File::options().write(true).create_new(true).open(marker) {
+            Ok(mut f) => {
+                f.write_all(me.as_bytes())
+                    .map_err(|e| unwritable(dir, &e))?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                let other = fs::read_to_string(marker).unwrap_or_default();
+                if other.is_empty() && empty_reads < 25 {
+                    // The winner has created the file and not written it yet.
+                    empty_reads += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                }
+                if other == me {
+                    return Ok(());
+                }
+                if !other.is_empty() && Path::new(&other).exists() {
+                    return Err(shared_target_message(me, &other));
+                }
+                // Dead owner, or a marker still empty after the wait: take over.
+                let tmp = dir.join(format!(
+                    "OWNER.{}.{}",
+                    std::process::id(),
+                    TMP.fetch_add(1, Ordering::SeqCst)
+                ));
+                fs::write(&tmp, me).map_err(|e| unwritable(dir, &e))?;
+                if let Err(e) = fs::rename(&tmp, marker) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(unwritable(dir, &e));
+                }
+                after_takeover(marker);
+                let now = fs::read_to_string(marker).unwrap_or_default();
+                if now == me {
+                    return Ok(());
+                }
+                if !now.is_empty() && Path::new(&now).exists() {
+                    return Err(shared_target_message(me, &now));
+                }
+            }
+            Err(e) => return Err(unwritable(dir, &e)),
+        }
+    }
+    Err(format!(
+        "could not settle the owner of {}",
+        marker.display()
+    ))
+}
+
+/// Called first by EVERY test (`every_test_calls_the_ownership_guard_first`
+/// pins that): in a target directory owned by another checkout every test
+/// fails, so `cargo test` cannot be green there.
+fn guard() {
+    static OWNED: OnceLock<Result<(), String>> = OnceLock::new();
+    let r = OWNED.get_or_init(|| {
+        let module = root();
+        claim_target(
+            &target_dir().join("arch-fixtures/OWNER"),
+            &owner_id(&module),
+        )
+    });
+    if let Err(m) = r {
+        panic!("{m}");
+    }
 }
 
 // ---- a minimal JSON reader, enough for `cargo metadata` (no dependency) ----
@@ -247,6 +406,7 @@ fn target_kinds() -> BTreeMap<String, Vec<String>> {
 
 #[test]
 fn the_dependency_graph_is_exactly_the_zone_rule() {
+    guard();
     let want: BTreeMap<String, Vec<String>> = [
         ("svc-domain", vec![]),
         ("svc-app", vec!["svc-domain"]),
@@ -269,6 +429,7 @@ fn the_dependency_graph_is_exactly_the_zone_rule() {
 
 #[test]
 fn every_member_inherits_the_workspace_lints() {
+    guard();
     for member in [
         "Cargo.toml",
         "crates/domain/Cargo.toml",
@@ -283,209 +444,647 @@ fn every_member_inherits_the_workspace_lints() {
 
 #[test]
 fn the_release_profile_keeps_overflow_checks_and_unwinds() {
+    guard();
     let t = squash(&fs::read_to_string(root().join("Cargo.toml")).unwrap());
     assert!(t.contains("[profile.release]"));
     assert!(t.contains("overflow-checks=true"));
     assert!(t.contains("panic=\"unwind\""));
 }
 
+// ---- the compiler gate: the test ASKS THE COMPILER, with flags no checked file can override ----
+
 /// The bare-metal target `domain` and `app` are compiled for. It has no `std`.
 const NOSTD_TARGET: &str = "thumbv7em-none-eabi";
 
-/// The ONE recipe line of `check-nostd`, byte for byte: a tab, the command, no
-/// `-`, `@-` or `+` prefix, nothing appended (`|| true`, `; true`, a
-/// continuation). Reading Makefile text is acceptable for one exact line; this
-/// is not a Makefile grammar.
-const CHECK_NOSTD_LINE: &str = "\t$(CARGO) check --locked --lib -p svc-domain -p svc-app --all-features --target thumbv7em-none-eabi";
+/// How many nested `cargo` runs the checks in this file started (counted so
+/// the README number is measured, not remembered).
+static NESTED_CARGO_RUNS: AtomicUsize = AtomicUsize::new(0);
 
-/// What is wrong with the Makefile's wiring of the no-std check, as messages.
-fn makefile_violations(mk: &str) -> Vec<String> {
-    let mut bad = Vec::new();
-    let lines: Vec<&str> = mk.lines().collect();
-    // Target definition lines: a column-0 line `names: prerequisites`.
-    let defs = |name: &str| -> Vec<(usize, &str)> {
-        lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !l.starts_with([' ', '\t', '#']))
-            .filter_map(|(i, l)| l.split_once(':').map(|(h, r)| (i, h, r)))
-            .filter(|(_, h, _)| h.split_whitespace().any(|t| t == name))
-            .map(|(i, _, r)| (i, r))
-            .collect()
-    };
-    let nostd = defs("check-nostd");
-    if nostd.len() != 1 {
-        bad.push(format!(
-            "`check-nostd` must be defined exactly once, found {}",
-            nostd.len()
-        ));
+/// Environment variables that can hand the nested compile a wrapper, another
+/// compiler or extra flags. Each is REMOVED from the nested cargo's
+/// environment, together with every `CARGO_TARGET_*_{RUSTFLAGS,LINKER,RUNNER}`.
+const SCRUBBED_ENV: [&str; 10] = [
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTC",
+    "RUSTDOC",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+];
+
+/// `rustc` as the PATH of THIS process finds it, as an absolute path. The
+/// nested cargo is given it as `RUSTC`, which (measured) beats a `build.rustc`
+/// key from any config file.
+fn resolved_rustc() -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH is not set");
+    std::env::split_paths(&path)
+        .map(|d| d.join("rustc"))
+        .find(|p| p.is_file())
+        .expect("no `rustc` on PATH")
+}
+
+/// Closes every door a cargo configuration or the environment has to the
+/// nested compile. `extra` is environment the CALLER of the test is imagined
+/// to have set (a fixture simulates it; it is applied first, then scrubbed).
+///
+/// Measured on the pinned toolchain (cargo 1.99.1):
+/// * `--config 'build.rustc-wrapper=""'` and `--config
+///   'build.rustc-workspace-wrapper=""'` are accepted and beat any config
+///   FILE (a string key: the highest source wins);
+/// * `--config 'build.rustflags=[]'` is accepted and does NOTHING: list keys
+///   from all sources are concatenated, so an empty list removes nothing.
+///   What works is the environment: a (even empty) `CARGO_ENCODED_RUSTFLAGS`
+///   is cargo's first choice and then NO `build.rustflags` or
+///   `target.*.rustflags` key from any file is read at all;
+/// * `build.rustc` from a file is beaten by `RUSTC` in the environment, and
+///   it must be an absolute path (a bare name is looked up on a PATH that an
+///   `[env]` table with `force = true` can change);
+/// * a config `[env]` table does not set cargo's own wrapper (it only
+///   decorates the processes cargo starts), and it refuses `RUSTUP_TOOLCHAIN`.
+fn harden(c: &mut Command, extra: &[(String, String)]) {
+    let mut names: BTreeSet<OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+    for (k, v) in extra {
+        c.env(k, v);
+        names.insert(OsString::from(k));
     }
-    if let Some(&(at, rest)) = nostd.first() {
-        if !rest.trim().is_empty() {
-            bad.push(format!(
-                "`check-nostd` takes no prerequisites and no `;` or `::` recipe: {rest:?}"
-            ));
+    for name in names {
+        let s = name.to_string_lossy();
+        let per_target = s.starts_with("CARGO_TARGET_")
+            && ["_RUSTFLAGS", "_LINKER", "_RUNNER"]
+                .iter()
+                .any(|suffix| s.ends_with(suffix));
+        if per_target || SCRUBBED_ENV.contains(&s.as_ref()) {
+            c.env_remove(&name);
         }
-        // The recipe: until the next column-0 line that is not blank or a comment.
-        let recipe: Vec<&str> = lines[at + 1..]
-            .iter()
-            .copied()
-            .take_while(|l| l.trim().is_empty() || l.starts_with(['\t', '#']))
-            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-            .collect();
-        if recipe != [CHECK_NOSTD_LINE] {
-            bad.push(format!(
-                "the recipe of `check-nostd` must be exactly one line, byte-equal to {CHECK_NOSTD_LINE:?}; found {recipe:?}"
-            ));
+    }
+    c.env("CARGO_ENCODED_RUSTFLAGS", "");
+    c.env("RUSTC", resolved_rustc());
+    c.args([
+        "--config",
+        "build.rustc-wrapper=\"\"",
+        "--config",
+        "build.rustc-workspace-wrapper=\"\"",
+    ]);
+}
+
+/// A Cargo workspace the zone checks run against: this module, or a fixture.
+#[derive(Clone)]
+struct Tree {
+    root: PathBuf,
+    /// `None`: Cargo's own choice (the `CARGO_TARGET_DIR` the test runs under).
+    target_dir: Option<PathBuf>,
+    /// The real tree has a lockfile that must not move; a fixture has none.
+    locked: bool,
+    /// Layer 2 (clean environment + config overrides). Only the fixture that
+    /// pins the probe turns it off.
+    scrub: bool,
+    /// Environment a fixture imagines the test's caller to have set.
+    env: Vec<(String, String)>,
+    /// The advisory lock on the fixture's case directory, held for as long as
+    /// the tree (or a clone of it) lives; released on drop, panic included.
+    _lock: Option<Arc<File>>,
+}
+
+impl Tree {
+    fn real() -> Self {
+        Self {
+            root: root(),
+            target_dir: None,
+            locked: true,
+            scrub: true,
+            env: Vec::new(),
+            _lock: None,
         }
     }
-    let prereqs = |name: &str| -> Vec<String> {
-        defs(name)
-            .iter()
-            .flat_map(|(_, r)| r.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
-            .collect()
-    };
-    if defs("check-fast").len() != 1 || !prereqs("check-fast").iter().any(|t| t == "check-nostd") {
-        bad.push("`check-fast` must be defined once with `check-nostd` as a prerequisite".into());
-    }
-    if defs("verify").len() != 1 || !prereqs("verify").iter().any(|t| t == "check-fast") {
-        bad.push("`verify` must be defined once with `check-fast` as a prerequisite".into());
-    }
-    let phony: Vec<&str> = lines
-        .iter()
-        .filter_map(|l| l.strip_prefix(".PHONY:"))
-        .flat_map(str::split_whitespace)
-        .collect();
-    if !phony.contains(&"check-nostd") {
-        bad.push("`check-nostd` must be listed in .PHONY".into());
-    }
-    // Things that turn a failing recipe into a pass, or swap the command.
-    let cargo_defs: Vec<&&str> = lines
-        .iter()
-        .filter(|l| {
-            let t = l
-                .trim_start()
-                .trim_start_matches("export ")
-                .trim_start_matches("override ");
-            t.strip_prefix("CARGO").is_some_and(|r| {
-                let r = r.trim_start();
-                ["=", "?=", ":=", "::=", "+=", "!="]
-                    .iter()
-                    .any(|op| r.starts_with(op))
-            })
-        })
-        .collect();
-    if cargo_defs != [&"CARGO ?= cargo"] {
-        bad.push(format!(
-            "`CARGO ?= cargo` must be the only CARGO assignment: {cargo_defs:?}"
-        ));
-    }
-    for l in &lines {
-        let t = l.trim_start();
-        for banned in [
-            ".IGNORE",
-            ".SILENT",
-            ".ONESHELL",
-            ".SHELLFLAGS",
-            "SHELL",
-            "MAKEFLAGS",
-            "export MAKEFLAGS",
-            "override MAKEFLAGS",
-            "include ",
-            "-include ",
-            "sinclude ",
-        ] {
-            if !l.starts_with('\t') && t.starts_with(banned) {
-                bad.push(format!("refused Makefile line (`{banned}`): {l:?}"));
+
+    /// `cargo <sub> --offline [--locked] [--target-dir ..]`, run in the tree.
+    fn cargo(&self, sub: &str) -> Command {
+        NESTED_CARGO_RUNS.fetch_add(1, Ordering::SeqCst);
+        let mut c = Command::new(cargo());
+        c.current_dir(&self.root).arg(sub).arg("--offline");
+        if self.locked {
+            c.arg("--locked");
+        }
+        if let Some(dir) = &self.target_dir {
+            c.arg("--target-dir").arg(dir);
+        }
+        if self.scrub {
+            harden(&mut c, &self.env);
+        } else {
+            for (k, v) in &self.env {
+                c.env(k, v);
             }
         }
+        c
     }
-    bad
 }
 
-#[test]
-fn the_no_std_target_check_is_wired_into_the_gate_and_the_toolchain() {
-    let mk = fs::read_to_string(root().join("Makefile")).unwrap();
-    assert_eq!(makefile_violations(&mk), Vec::<String>::new());
-    assert!(
-        NOSTD_TARGET.contains("-none"),
-        "a target with an OS has std"
-    );
-    assert!(CHECK_NOSTD_LINE.ends_with(&format!("--target {NOSTD_TARGET}")));
-    let tc = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
-    assert!(
-        squash(&tc).contains(&format!("targets=[\"{NOSTD_TARGET}\"")),
-        "rust-toolchain.toml must install {NOSTD_TARGET}"
-    );
+/// The unit of a pure crate that is compiled for the no-std target: its lib,
+/// with every feature on (code behind a declared feature is built too).
+fn nostd_unit(target: &str) -> Vec<String> {
+    ["--lib", "--all-features", "--target", target]
+        .map(str::to_owned)
+        .to_vec()
 }
 
-#[test]
-fn makefile_pin_refuses_every_way_to_ignore_the_nostd_compile() {
-    let mk = fs::read_to_string(root().join("Makefile")).unwrap();
-    let canon = format!("{CHECK_NOSTD_LINE}\n");
-    assert!(
-        mk.contains(&canon),
-        "the pinned line is not in the Makefile"
-    );
-    let with = |to: &str| mk.replacen(&canon, to, 1);
-    let cases = [
-        ("a - prefix", with(&canon.replace("\t$", "\t-$"))),
-        ("a @- prefix", with(&canon.replace("\t$", "\t@-$"))),
-        ("a + prefix", with(&canon.replace("\t$", "\t+$"))),
-        ("|| true", with(&canon.replace('\n', " || true\n"))),
-        ("; true", with(&canon.replace('\n', " ; true\n"))),
-        ("a second line", with(&format!("{canon}\ttrue\n"))),
-        (
-            "a blank then a second line",
-            with(&format!("{canon}\n\ttrue\n")),
-        ),
-        (
-            "--all-features dropped",
-            with(&canon.replace(" --all-features", "")),
-        ),
-        ("a package dropped", with(&canon.replace(" -p svc-app", ""))),
-        (
-            "a continuation",
-            with(&canon.replace('\n', " \\\n\t|| true\n")),
-        ),
-        ("a .IGNORE line", format!("{mk}\n.IGNORE: check-nostd\n")),
-        ("a .IGNORE line, no target", format!("{mk}\n.IGNORE:\n")),
-        ("MAKEFLAGS -k", format!("MAKEFLAGS += -k\n{mk}")),
-        ("MAKEFLAGS ik", format!("MAKEFLAGS = ik\n{mk}")),
-        ("SHELL replaced", format!("SHELL = /usr/bin/true\n{mk}")),
-        ("CARGO replaced", format!("{mk}\nCARGO = true\n")),
-        ("an include", format!("-include local.mk\n{mk}")),
-        ("check-nostd twice", format!("{mk}\ncheck-nostd:\n\ttrue\n")),
-        (
-            "check-nostd with a prerequisite",
-            mk.replacen("check-nostd:\n", "check-nostd: fmt\n", 1),
-        ),
-        (
-            "check-nostd not in check-fast",
-            mk.replacen("check-fast: check-nostd", "check-fast:", 1),
-        ),
-        (
-            "check-nostd not phony",
-            mk.replacen(" check-nostd ", " ", 1),
-        ),
-        (
-            "verify without check-fast",
-            mk.replacen("verify: check-fast", "verify:", 1),
-        ),
-    ];
-    for (what, text) in cases {
-        assert_ne!(text, mk, "{what}: the probe did not change the Makefile");
-        assert!(
-            !makefile_violations(&text).is_empty(),
-            "{what}: accepted\n{text}"
+/// Why a compile failed, for a person: the tail of the compiler's output, and
+/// for a missing target the one-line reason this is a FAILURE and not a skip.
+fn compiler_failure(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+    if stderr.contains("may not be installed") {
+        return format!(
+            "a compile target is not installed (rust-toolchain.toml lists it; install it as the hint below says). This check never skips, because a skipped compile proves nothing about `std`.\n{tail}"
         );
     }
-    // Comments and blank lines around the recipe are fine.
-    assert!(makefile_violations(&format!("{mk}\n# a comment\n")).is_empty());
+    tail
+}
+
+/// Compiles ONE unit of the crate at `rel` (relative to the tree) with
+/// `-F unsafe_code` on the rustc command line (`cargo rustc ... -- -F
+/// unsafe_code`). A forbid set there cannot be lowered by an attribute in the
+/// crate (`#![allow(unsafe_code)]` is error E0453) or by a `[lints]` table, so
+/// no property rests on those files being intact. `cargo rustc` passes the
+/// flag to THIS crate only, never to a dependency. `Err` carries the reason.
+fn compile_forbidding_unsafe(tree: &Tree, rel: &str, unit: &[String]) -> Result<(), String> {
+    let out = tree
+        .cargo("rustc")
+        .arg("--manifest-path")
+        .arg(tree.root.join(rel).join("Cargo.toml"))
+        .args(["--profile", "check"])
+        .args(unit)
+        .args(["--", "-F", "unsafe_code"])
+        .output()
+        .unwrap();
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(compiler_failure(&String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
+// ---- layer 1: no cargo configuration in or above the module ----
+//
+// Cargo reads `.cargo/config.toml` (or `config`) from the working directory
+// and EVERY parent directory, and `$CARGO_HOME/config.toml`. A config can name
+// a rustc wrapper, extra rustflags, another rustc. So the module refuses any
+// of those files in its own tree (target/ and .git skipped) and in the
+// directories above it up to the repository root (the nearest directory with a
+// `.git`; the filesystem root when there is none). `$CARGO_HOME` is the
+// user's own machine and is out of scope. This is detection of what can be
+// seen; layer 2 (`harden`) neutralises it for the nested compile and layer 3
+// (`armed`) probes the result, so no one layer carries the property alone.
+
+/// The only keys of `rust-toolchain.toml`'s `[toolchain]` table the module
+/// accepts. `path` (a custom toolchain directory, whose `rustc` could be
+/// anything) is not among them, and neither is any unknown key.
+const TOOLCHAIN_KEYS: [&str; 4] = ["channel", "components", "targets", "profile"];
+
+fn cargo_config_files(dir: &Path) -> Vec<PathBuf> {
+    [".cargo/config.toml", ".cargo/config"]
+        .iter()
+        .map(|rel| dir.join(rel))
+        .filter(|p| p.symlink_metadata().is_ok())
+        .collect()
+}
+
+/// A directory the module-tree scans do not enter: `.git`, a directory named
+/// `target`, and the ACTUAL target directory `skip` by path (a user may point
+/// `CARGO_TARGET_DIR` at `build/` inside the module; the fixtures under it are
+/// not the module's own files and carry their own `.cargo/config.toml`).
+/// With an external target directory the fixtures are outside the module; with
+/// the default one they are under `target/`.
+fn scan_skips(entry: &fs::DirEntry, skip: &Path) -> bool {
+    let name = entry.file_name();
+    if name == "target" || name == ".git" || !entry.file_type().unwrap().is_dir() {
+        return true;
+    }
+    let p = entry.path();
+    p == skip
+        || matches!(
+            (fs::canonicalize(&p), fs::canonicalize(skip)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
+fn configs_below(dir: &Path, skip: &Path, out: &mut Vec<PathBuf>) {
+    out.extend(cargo_config_files(dir));
+    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for e in entries {
+        if scan_skips(&e, skip) {
+            continue;
+        }
+        configs_below(&e.path(), skip, out);
+    }
+}
+
+/// The nearest directory at or above `module` that holds a `.git` (file or
+/// directory): the repository root. `/` when there is none.
+fn repository_root(module: &Path) -> PathBuf {
+    module
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
+}
+
+/// The directories a parent walk examines: the proper ancestors of `module`,
+/// nearest first, up to and INCLUDING `ceiling`. When `ceiling` is `module`
+/// itself, or is not an ancestor of it at all, nothing above the module is
+/// examined (a walk must never climb past the ceiling it was given).
+fn dirs_above_up_to<'a>(module: &'a Path, ceiling: &Path) -> Vec<&'a Path> {
+    let mut out = Vec::new();
+    for dir in module.ancestors().skip(1) {
+        out.push(dir);
+        if dir == ceiling {
+            return out;
+        }
+    }
+    Vec::new()
+}
+
+/// A release channel and nothing else: `stable`, `beta` or `nightly`, each
+/// optionally dated `-YYYY-MM-DD`, or a version `N.N` / `N.N.N`. No path
+/// separator, no leading `.` or `~`: rustup reads anything else as the name of
+/// a toolchain it may resolve to a directory.
+fn valid_channel(c: &str) -> bool {
+    let digits = |s: &str, n: Option<usize>| {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && n.is_none_or(|n| s.len() == n)
+    };
+    for name in ["stable", "beta", "nightly"] {
+        if let Some(rest) = c.strip_prefix(name) {
+            if rest.is_empty() {
+                return true;
+            }
+            let parts: Vec<&str> = rest.strip_prefix('-').unwrap_or("!").split('-').collect();
+            return parts.len() == 3
+                && digits(parts[0], Some(4))
+                && digits(parts[1], Some(2))
+                && digits(parts[2], Some(2));
+        }
+    }
+    let parts: Vec<&str> = c.split('.').collect();
+    (parts.len() == 2 || parts.len() == 3) && parts.iter().all(|p| digits(p, None))
+}
+
+/// `"x"` or the TOML literal string `'x'`, the whole of `s`, with no quote of
+/// either kind and no backslash inside.
+fn quoted(s: &str) -> Option<&str> {
+    let s = s.trim();
+    let inner = ['"', '\'']
+        .iter()
+        .find_map(|q| s.strip_prefix(*q)?.strip_suffix(*q))?;
+    (!inner.contains(['"', '\'', '\\'])).then_some(inner)
+}
+
+/// Parses the rest of an array line: quoted (`"x"` or `'x'`) strings separated by commas,
+/// optionally closed by `]`. `Some(closed)`, or `None` for anything else.
+fn array_items(mut rest: &str) -> Option<bool> {
+    loop {
+        rest = rest.trim_start_matches([' ', '\t', ',']);
+        if rest.is_empty() {
+            return Some(false);
+        }
+        if let Some(after) = rest.strip_prefix(']') {
+            return after.trim().is_empty().then_some(true);
+        }
+        let q = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+        let body = &rest[1..];
+        let end = body.find(q)?;
+        if body[..end].contains('\\') {
+            return None;
+        }
+        rest = &body[end + 1..];
+    }
+}
+
+/// Findings for the text of the module's `rust-toolchain.toml`, by allow-list:
+/// every non-empty, non-comment line is the `[toolchain]` header, a line of an
+/// open `components` / `targets` array, or an accepted `key = value` line
+/// (`TOOLCHAIN_KEYS`); a `channel` is required and must be a release channel
+/// (`valid_channel`). Anything else is a finding, never skipped.
+fn toolchain_text_violations(file: &str, text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut in_array = false;
+    let mut channel = false;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if in_array {
+            match array_items(line) {
+                Some(closed) => in_array = !closed,
+                None => found.push(format!("{file}: `{line}` is not a quoted array element")),
+            }
+            continue;
+        }
+        if line.starts_with('[') && !line.contains('=') {
+            let inner = line.strip_prefix('[').and_then(|l| l.strip_suffix(']'));
+            if inner.map(str::trim) != Some("toolchain") {
+                found.push(format!("{file}: the table {line} is not accepted"));
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            found.push(format!("{file}: the line `{line}` is not `key = value`"));
+            continue;
+        };
+        let key = key.trim().trim_matches(['"', '\'']);
+        let value = value.trim();
+        if !TOOLCHAIN_KEYS.contains(&key) {
+            found.push(format!(
+                "{file}: the key `{key}` is not accepted (accepted: {})",
+                TOOLCHAIN_KEYS.join(", ")
+            ));
+            continue;
+        }
+        match key {
+            "channel" => {
+                channel = true;
+                if !quoted(value).is_some_and(valid_channel) {
+                    found.push(format!(
+                        "{file}: channel {value} is not a release channel (stable|beta|nightly[-YYYY-MM-DD] or N.N[.N])"
+                    ));
+                }
+            }
+            "profile" => {
+                if !quoted(value).is_some_and(|p| p.bytes().all(|b| b.is_ascii_lowercase())) {
+                    found.push(format!("{file}: profile {value} is not a plain name"));
+                }
+            }
+            _ => match value.strip_prefix('[').and_then(array_items) {
+                Some(closed) => in_array = !closed,
+                None => found.push(format!("{file}: `{key} = {value}` is not a string array")),
+            },
+        }
+    }
+    if in_array {
+        found.push(format!("{file}: an array is never closed"));
+    }
+    if !channel {
+        found.push(format!("{file}: no `channel` key (it is required)"));
+    }
+    found
+}
+
+fn toolchain_files_below(dir: &Path, skip: &Path, out: &mut Vec<PathBuf>) {
+    out.extend(toolchain_files_in(dir));
+    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for e in entries {
+        if scan_skips(&e, skip) {
+            continue;
+        }
+        toolchain_files_below(&e.path(), skip, out);
+    }
+}
+
+fn toolchain_files_in(dir: &Path) -> Vec<PathBuf> {
+    ["rust-toolchain", "rust-toolchain.toml"]
+        .iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.symlink_metadata().is_ok())
+        .collect()
+}
+
+/// rustup honours a plain-text `rust-toolchain` (its one line may be a
+/// directory) and, nearest to the compile's working directory, any
+/// `rust-toolchain.toml`. The only toolchain file accepted is the module
+/// root's `rust-toolchain.toml`, and its text is checked by allow-list; every
+/// other toolchain file, in the module tree or in a directory above it up to
+/// `ceiling`, is refused by its presence.
+fn refused_toolchain_files(module: &Path, ceiling: &Path) -> Vec<String> {
+    refused_toolchain_files_skipping(module, ceiling, &target_dir())
+}
+
+fn refused_toolchain_files_skipping(module: &Path, ceiling: &Path, skip: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    toolchain_files_below(module, skip, &mut files);
+    for dir in dirs_above_up_to(module, ceiling) {
+        files.extend(toolchain_files_in(dir));
+    }
+    let allowed = module.join("rust-toolchain.toml");
+    let mut found = Vec::new();
+    for f in &files {
+        if *f != allowed {
+            found.push(format!(
+                "toolchain file {} (only the module root's rust-toolchain.toml is accepted: rustup may read this one as a toolchain directory or prefer it)",
+                f.display()
+            ));
+        }
+    }
+    if files.contains(&allowed) {
+        match fs::read_to_string(&allowed) {
+            Ok(text) => found.extend(toolchain_text_violations(
+                &allowed.display().to_string(),
+                &text,
+            )),
+            Err(e) => found.push(format!(
+                "toolchain file {} is unreadable: {e}",
+                allowed.display()
+            )),
+        }
+    }
+    found
+}
+
+/// Everything layer 1 refuses for the module at `module`, looking up as far
+/// as `ceiling` (inclusive). Each finding names the file.
+fn refused_cargo_config(module: &Path, ceiling: &Path) -> Vec<String> {
+    refused_cargo_config_skipping(module, ceiling, &target_dir())
+}
+
+fn refused_cargo_config_skipping(module: &Path, ceiling: &Path, skip: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    configs_below(module, skip, &mut files);
+    for dir in dirs_above_up_to(module, ceiling) {
+        // The user's own CARGO_HOME is their machine's, not the repository's.
+        let home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+        if home.as_deref() != Some(dir.join(".cargo").as_path()) {
+            files.extend(cargo_config_files(dir));
+        }
+    }
+    let mut found: Vec<String> = files
+        .iter()
+        .map(|f| {
+            format!(
+                "cargo configuration {} (it can name a rustc wrapper or flags)",
+                f.display()
+            )
+        })
+        .collect();
+    found.extend(refused_toolchain_files_skipping(module, ceiling, skip));
+    found
+}
+
+#[test]
+fn no_cargo_configuration_sits_in_or_above_the_module() {
+    guard();
+    let module = root();
+    let found = refused_cargo_config(&module, &repository_root(&module));
+    assert!(
+        found.is_empty(),
+        "the compiler gate needs a module with no cargo configuration between it and the repository root:\n{}",
+        found.join("\n")
+    );
+}
+
+// ---- layer 3: the gate is armed, probed directly ----
+
+const PROBE_UNSAFE_HOST: &str = "pub fn probe() -> i32 {\n    unsafe { 1 }\n}\n";
+const PROBE_UNSAFE_NOSTD: &str = "#![no_std]\npub fn probe() -> i32 {\n    unsafe { 1 }\n}\n";
+const PROBE_STD_NOSTD: &str = "#![no_std]\nextern crate std;\n";
+
+/// Compiles three tiny probe crates exactly the way the gate compiles a zone
+/// (same cargo, same flags, same environment handling, same config overrides,
+/// working directory INSIDE the tree so the same config search path applies)
+/// and requires each to FAIL for the reason the gate relies on. Whatever lowers
+/// the unsafe lint, or lets `std` in, for a zone lowers it for the probe too,
+/// so this does not depend on knowing the mechanism. `Err` when one compiles.
+fn armed(tree: &Tree) -> Result<(), String> {
+    let scratch = Scratch::new();
+    let dir = scratch.path().join("probe");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    let probe_tree = Tree {
+        root: tree.root.clone(),
+        target_dir: Some(scratch.path().join("build")),
+        locked: false,
+        scrub: tree.scrub,
+        env: tree.env.clone(),
+        _lock: None,
+    };
+    let mut verdict = Ok(());
+    for (what, source, target, reason) in [
+        (
+            "`unsafe` on the host",
+            PROBE_UNSAFE_HOST,
+            None,
+            "`unsafe` block",
+        ),
+        (
+            "`unsafe` on the no-std target",
+            PROBE_UNSAFE_NOSTD,
+            Some(NOSTD_TARGET),
+            "`unsafe` block",
+        ),
+        (
+            "`extern crate std` on the no-std target",
+            PROBE_STD_NOSTD,
+            Some(NOSTD_TARGET),
+            "E0463",
+        ),
+    ] {
+        fs::write(dir.join("src/lib.rs"), source).unwrap();
+        let mut c = probe_tree.cargo("rustc");
+        c.arg("--manifest-path")
+            .arg(dir.join("Cargo.toml"))
+            .args(["--profile", "check", "--lib"]);
+        if let Some(t) = target {
+            c.args(["--target", t]);
+        }
+        let out = c.args(["--", "-F", "unsafe_code"]).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() {
+            verdict = Err(format!(
+                "the compiler gate is not armed (wrapper/config?): the probe with {what} COMPILED"
+            ));
+        } else if !stderr.contains(reason) {
+            verdict = Err(format!(
+                "the compiler gate probe with {what} failed for another reason (expected {reason}):\n{}",
+                compiler_failure(&stderr)
+            ));
+        }
+        if verdict.is_err() {
+            break;
+        }
+    }
+    verdict
+}
+
+/// Layer 3 on the real tree, once per test binary. Every test that trusts a
+/// green compile calls this first.
+fn assert_armed() {
+    static ARMED: OnceLock<Result<(), String>> = OnceLock::new();
+    if let Err(why) = ARMED.get_or_init(|| armed(&Tree::real())) {
+        panic!("{why}");
+    }
+}
+
+#[test]
+fn the_compiler_refuses_std_and_unsafe_code_in_domain_and_app() {
+    guard();
+    // Run by THIS test, with its own arguments: not through `make`, not through
+    // a variable a Makefile owns. Whatever else is edited, a `std` item, any
+    // spelling of `extern crate std`, or an `unsafe` token is an error here.
+    assert_armed();
+    let tree = Tree::real();
+    for rel in ["crates/domain", "crates/app"] {
+        if let Err(why) = compile_forbidding_unsafe(&tree, rel, &nostd_unit(NOSTD_TARGET)) {
+            panic!("{rel} does not compile for {NOSTD_TARGET} with -F unsafe_code:\n{why}");
+        }
+    }
+}
+
+#[test]
+fn unsafe_code_is_forbidden_from_the_command_line_in_the_other_zones_too() {
+    guard();
+    assert_armed();
+    let tree = Tree::real();
+    for (rel, unit) in [
+        ("crates/adapter", "--lib"),
+        ("crates/platform", "--lib"),
+        (".", "--bin=svc"),
+    ] {
+        if let Err(why) = compile_forbidding_unsafe(&tree, rel, &[unit.to_owned()]) {
+            panic!("{rel} does not compile with -F unsafe_code:\n{why}");
+        }
+    }
+}
+
+/// A valid no-std target that is NOT installed in the toolchain under test.
+fn a_target_that_is_not_installed() -> &'static str {
+    let out = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned()))
+        .args(["--print", "sysroot"])
+        .current_dir(root())
+        .output()
+        .unwrap();
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    [
+        "thumbv6m-none-eabi",
+        "thumbv7m-none-eabi",
+        "thumbv8m.main-none-eabi",
+        "thumbv7em-none-eabihf",
+    ]
+    .into_iter()
+    .find(|t| !sysroot.join("lib/rustlib").join(t).exists())
+    .expect("every candidate target is installed: add another name to this list")
+}
+
+#[test]
+fn a_missing_no_std_target_fails_with_the_install_hint_and_never_skips() {
+    guard();
+    let target = a_target_that_is_not_installed();
+    let why = compile_forbidding_unsafe(&Tree::real(), "crates/domain", &nostd_unit(target))
+        .expect_err("a compile for a target that is not installed must fail, not skip");
+    assert!(why.contains("never skips"), "{why}");
+    assert!(why.contains("rustup target add"), "{why}");
 }
 
 #[test]
 fn domain_and_app_have_no_build_script_proc_macro_or_extra_dependency() {
+    guard();
     let kinds = target_kinds();
     for krate in ["svc-domain", "svc-app"] {
         let k = &kinds[krate];
@@ -535,6 +1134,7 @@ fn src_files(crate_dir: &str) -> Vec<PathBuf> {
 
 #[test]
 fn early_message_domain_and_app_name_no_std_items() {
+    guard();
     for krate in ["crates/domain", "crates/app"] {
         let lib = squash(&fs::read_to_string(root().join(krate).join("src/lib.rs")).unwrap());
         assert!(lib.contains("#![no_std]"), "{krate}: #![no_std] missing");
@@ -543,7 +1143,7 @@ fn early_message_domain_and_app_name_no_std_items() {
             // Test-only code (after the `#[cfg(test)]` line) may use std.
             let prod = full.split("\n#[cfg(test)]\n").next().unwrap_or("");
             let s = squash(prod);
-            // Only a hint; `make check-nostd` is what refuses std.
+            // Only a hint; the no-std compile in this file is what refuses std.
             assert!(!s.contains("std::"), "{}: names `std::`", f.display());
             assert!(
                 !s.contains("externcratestd"),
@@ -556,6 +1156,7 @@ fn early_message_domain_and_app_name_no_std_items() {
 
 #[test]
 fn only_config_rs_reads_the_environment() {
+    guard();
     let allowed = root().join("crates/platform/src/config.rs");
     let mut files: Vec<PathBuf> = ["domain", "app", "adapter", "platform"]
         .iter()
@@ -581,6 +1182,7 @@ fn only_config_rs_reads_the_environment() {
 
 #[test]
 fn the_token_is_compared_through_the_constant_time_helper_only() {
+    guard();
     let http = squash(&fs::read_to_string(root().join("crates/adapter/src/http.rs")).unwrap());
     assert!(
         http.contains("ct_eq(token.as_bytes(),self.opts.auth_token.as_bytes())"),
@@ -623,7 +1225,8 @@ fn dep_info_paths(text: &str, base: &Path) -> Vec<PathBuf> {
 
 /// The host build of the workspace, as `cargo check --workspace --lib`: the
 /// same feature unification `make check-fast` gets, so a feature that
-/// `adapter` switches on in `app` is in effect here. Run ONCE per test binary.
+/// `adapter` switches on in `app` is in effect here. The real tree is built
+/// ONCE per test binary (`host_build`); a fixture tree is built by its case.
 ///
 /// Why this way: the compiler's own artifact message names the unit's output
 /// file (`lib<crate>-<hash>.rmeta`), and rustc writes `<crate>-<hash>.d` next
@@ -632,62 +1235,60 @@ fn dep_info_paths(text: &str, base: &Path) -> Vec<PathBuf> {
 fn host_build() -> &'static BTreeMap<String, HostUnit> {
     static BUILD: OnceLock<BTreeMap<String, HostUnit>> = OnceLock::new();
     BUILD.get_or_init(|| {
-        let out = Command::new(cargo())
-            .args([
-                "check",
-                "--locked",
-                "--offline",
-                "--workspace",
-                "--lib",
-                "--message-format=json",
-            ])
-            .current_dir(root())
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "the host build failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut units = BTreeMap::new();
-        for line in stdout
-            .lines()
-            .filter(|l| l.contains("\"compiler-artifact\""))
-        {
-            let msg = P(line.as_bytes(), 0).value();
-            let target = field(&msg, "target");
-            let name = text(field(target, "name"));
-            if (name != "svc_domain" && name != "svc_app")
-                || !strings(field(target, "kind")).iter().any(|k| k == "lib")
-            {
-                continue;
-            }
-            let files = strings(field(&msg, "filenames"));
-            let rmeta = PathBuf::from(files.first().expect("an artifact with no file"));
-            let stem = rmeta.file_stem().unwrap().to_string_lossy().into_owned();
-            let dep_info =
-                rmeta.with_file_name(format!("{}.d", stem.strip_prefix("lib").unwrap_or(&stem)));
-            let raw = fs::read_to_string(&dep_info)
-                .unwrap_or_else(|e| panic!("no dep-info at {}: {e}", dep_info.display()));
-            let sources = dep_info_paths(&raw, &root())
-                .into_iter()
-                .map(|p| {
-                    fs::canonicalize(&p)
-                        .unwrap_or_else(|e| panic!("{} is not readable: {e}", p.display()))
-                })
-                .collect();
-            units.insert(
-                name.to_owned(),
-                HostUnit {
-                    features: strings(field(&msg, "features")),
-                    sources,
-                },
-            );
-        }
+        let units = host_units(&Tree::real());
         assert_eq!(units.len(), 2, "the build did not report domain and app");
         units
     })
+}
+
+fn host_units(tree: &Tree) -> BTreeMap<String, HostUnit> {
+    let out = tree
+        .cargo("check")
+        .args(["--workspace", "--lib", "--message-format=json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the host build failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut units = BTreeMap::new();
+    for line in stdout
+        .lines()
+        .filter(|l| l.contains("\"compiler-artifact\""))
+    {
+        let msg = P(line.as_bytes(), 0).value();
+        let target = field(&msg, "target");
+        let name = text(field(target, "name"));
+        if (name != "svc_domain" && name != "svc_app")
+            || !strings(field(target, "kind")).iter().any(|k| k == "lib")
+        {
+            continue;
+        }
+        let files = strings(field(&msg, "filenames"));
+        let rmeta = PathBuf::from(files.first().expect("an artifact with no file"));
+        let stem = rmeta.file_stem().unwrap().to_string_lossy().into_owned();
+        let dep_info =
+            rmeta.with_file_name(format!("{}.d", stem.strip_prefix("lib").unwrap_or(&stem)));
+        let raw = fs::read_to_string(&dep_info)
+            .unwrap_or_else(|e| panic!("no dep-info at {}: {e}", dep_info.display()));
+        let sources = dep_info_paths(&raw, &tree.root)
+            .into_iter()
+            .map(|p| {
+                fs::canonicalize(&p)
+                    .unwrap_or_else(|e| panic!("{} is not readable: {e}", p.display()))
+            })
+            .collect();
+        units.insert(
+            name.to_owned(),
+            HostUnit {
+                features: strings(field(&msg, "features")),
+                sources,
+            },
+        );
+    }
+    units
 }
 
 const PURE_CRATES: [(&str, &str, &str); 2] = [
@@ -700,27 +1301,44 @@ fn outside<'a>(files: &'a [PathBuf], src: &Path) -> Vec<&'a PathBuf> {
     files.iter().filter(|f| !f.starts_with(src)).collect()
 }
 
+/// L1: the files the compiler read for a pure crate must all be inside the
+/// crate's own `src/`, as messages. `crates` = (lib name, package, dir).
+fn l1_violations(
+    tree: &Tree,
+    units: &BTreeMap<String, HostUnit>,
+    crates: &[(&str, &str, &str)],
+) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (lib, _, dir) in crates {
+        let unit = &units[*lib];
+        let src = fs::canonicalize(tree.root.join(dir).join("src")).unwrap();
+        if !unit.sources.iter().any(|f| f.ends_with("src/lib.rs")) {
+            bad.push(format!(
+                "{lib}: the dep-info does not list src/lib.rs: {:?}",
+                unit.sources
+            ));
+        }
+        let outside = outside(&unit.sources, &src);
+        if !outside.is_empty() {
+            bad.push(format!(
+                "{lib}: the compiler read files outside {}: a `#[path]`, `include!` or `[lib] path` reaches out of `src`: {outside:?}",
+                src.display()
+            ));
+        }
+    }
+    bad
+}
+
 #[test]
 fn l1_the_compiler_read_only_files_inside_the_src_of_domain_and_app() {
-    for (lib, _, dir) in PURE_CRATES {
-        let unit = &host_build()[lib];
-        let src = fs::canonicalize(root().join(dir).join("src")).unwrap();
-        assert!(
-            unit.sources.iter().any(|f| f.ends_with("src/lib.rs")),
-            "{lib}: the dep-info does not list lib.rs: {:?}",
-            unit.sources
-        );
-        let bad = outside(&unit.sources, &src);
-        assert!(
-            bad.is_empty(),
-            "{lib}: the compiler read files outside {}: a `#[path]` or `include!` reaches out of `src`: {bad:?}",
-            src.display()
-        );
-    }
+    guard();
+    let bad = l1_violations(&Tree::real(), host_build(), &PURE_CRATES);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 #[test]
 fn l1_a_file_outside_src_is_named() {
+    guard();
     let src = Path::new("/w/crates/domain/src");
     let files: Vec<PathBuf> = ["/w/crates/domain/src/lib.rs", "/w/crates/domain/host/io.rs"]
         .into_iter()
@@ -793,11 +1411,11 @@ fn conditional_compilation_violations(file: &str, src: &str) -> Vec<String> {
     bad
 }
 
-#[test]
-fn l2_no_conditional_compilation_and_no_file_inclusion_in_the_files_the_compiler_read() {
+/// L2 over every file the compiler read for the pure crates, as messages.
+fn l2_violations(units: &BTreeMap<String, HostUnit>, crates: &[(&str, &str, &str)]) -> Vec<String> {
     let mut bad = Vec::new();
-    for (lib, _, _) in PURE_CRATES {
-        for f in &host_build()[lib].sources {
+    for (lib, _, _) in crates {
+        for f in &units[*lib].sources {
             let src = fs::read_to_string(f).unwrap();
             bad.extend(conditional_compilation_violations(
                 &f.display().to_string(),
@@ -805,11 +1423,19 @@ fn l2_no_conditional_compilation_and_no_file_inclusion_in_the_files_the_compiler
             ));
         }
     }
+    bad
+}
+
+#[test]
+fn l2_no_conditional_compilation_and_no_file_inclusion_in_the_files_the_compiler_read() {
+    guard();
+    let bad = l2_violations(host_build(), &PURE_CRATES);
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 #[test]
 fn l2_scanner_refuses_every_spelling_and_allows_only_the_test_line() {
+    guard();
     let refused = [
         "#[cfg(debug_assertions)]\nfn a() {}",
         "#[cfg(unix)]\nfn a() {}",
@@ -915,6 +1541,7 @@ fn feature_violations(meta: &Json, built: &BTreeMap<String, Vec<String>>) -> Vec
 
 #[test]
 fn l3_domain_and_app_have_no_features_and_nobody_switches_one_on() {
+    guard();
     let built: BTreeMap<String, Vec<String>> = PURE_CRATES
         .iter()
         .map(|(lib, pkg, _)| ((*pkg).to_owned(), host_build()[*lib].features.clone()))
@@ -924,6 +1551,7 @@ fn l3_domain_and_app_have_no_features_and_nobody_switches_one_on() {
 
 #[test]
 fn l3_checker_refuses_a_feature_an_optional_dependency_and_a_dependent_that_switches_one() {
+    guard();
     let meta = |domain_features: &str, app_deps: &str, adapter_dep: &str| {
         let json = format!(
             r#"{{"packages":[
@@ -973,4 +1601,1153 @@ fn l3_checker_refuses_a_feature_an_optional_dependency_and_a_dependent_that_swit
         !feature_violations(&meta("{}", &clean_app, &clean_adapter), &built).is_empty(),
         "a feature enabled in the host build: accepted"
     );
+}
+
+// ---- fixtures: ONE attack on a copy of the domain crate, through the same checks ----
+//
+// Each case copies `crates/domain` into a tiny workspace of its own, applies
+// one attack and runs the SAME functions the real tree is checked with
+// (`compile_forbidding_unsafe`, `host_units`, `l1_violations`,
+// `l2_violations`). A case names which layers must go red and requires every
+// other layer it runs to stay clean, so removing a layer (or loosening it:
+// `src/` -> the crate dir) turns the case RED, and the control stays green.
+
+const FIXTURE_WORKSPACE: &str = r#"[workspace]
+resolver = "2"
+members = ["crates/domain"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.99"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+"#;
+
+const FIXTURE_CRATES: [(&str, &str, &str); 1] = [("svc_domain", "svc-domain", "crates/domain")];
+
+/// The target directory the test runs under, as cargo itself reports it
+/// (`cargo metadata`'s `target_directory`: `CARGO_TARGET_DIR` resolved against
+/// the module, which is cargo's working directory for a test, and
+/// `build.target-dir` from a cargo config). Residual: a relative
+/// `CARGO_TARGET_DIR` is resolved by the INVOKING cargo against ITS working
+/// directory, which a test cannot see; run `cargo test` from the module root.
+fn target_dir() -> PathBuf {
+    PathBuf::from(text(field(metadata(), "target_directory")))
+}
+
+fn fixture_target() -> PathBuf {
+    target_dir().join("arch-fixtures")
+}
+
+/// A short, stable hex key of a module directory (FNV-1a over the canonical
+/// path): the same checkout always gets the same key, so nested builds are
+/// reused between runs; two checkouts get two keys, even when they share one
+/// `CARGO_TARGET_DIR`.
+fn fixture_key(manifest_dir: &Path) -> String {
+    let canon = fs::canonicalize(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in canon.as_os_str().as_encoded_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:012x}", h & 0xffff_ffff_ffff)
+}
+
+fn fixture_root_for(fixtures: &Path, manifest_dir: &Path) -> PathBuf {
+    fixtures.join(fixture_key(manifest_dir))
+}
+
+/// Where fixture SOURCE trees live: `<target dir>/arch-fixtures/<key>/`, per
+/// checkout, under the target directory (so `cargo clean` removes them and
+/// nothing of the tests is left under `TMPDIR`), at a fixed path (so nested
+/// builds are reused). Left behind on purpose; each case rewrites its own
+/// directory at its start. The module-tree scans skip the target directory by
+/// path, so the real module never sees a fixture's `.cargo/config.toml`, and
+/// the parent walks stop at their ceiling, so a fixture never sees the real
+/// module's `rust-toolchain.toml`.
+fn fixture_work() -> PathBuf {
+    let dir = fixture_root_for(&fixture_target(), &root());
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Takes the exclusive advisory lock of one fixture case (`<kind>/<name>.lock`
+/// in the fixture root), then returns a freshly emptied case directory and the
+/// lock. A second process (or thread) on the same case blocks until the first
+/// drops the lock (the file closes on drop, panic included). Different cases
+/// do not wait for each other; cargo's own build lock serialises the builds.
+fn locked_case_dir(kind: &str, name: &str) -> (PathBuf, Arc<File>) {
+    let parent = fixture_work().join(kind);
+    fs::create_dir_all(&parent).unwrap();
+    let lock = File::options()
+        .create(true)
+        .append(true)
+        .open(parent.join(format!("{name}.lock")))
+        .unwrap();
+    lock.lock().unwrap();
+    let dir = parent.join(name);
+    let _ = fs::remove_dir_all(&dir);
+    (dir, Arc::new(lock))
+}
+
+/// The nested build directory of one case, beside the case directory and
+/// covered by the same lock. Never shared between cases: cargo's unit hash uses
+/// workspace-relative paths, so two fixture workspaces built into one target
+/// directory (two checkouts, two cases, two processes) can see each other's
+/// "fresh" fingerprint and skip compiling the attacked source. Kept between
+/// runs, so a warm run reuses it.
+fn case_build_dir(case_dir: &Path) -> PathBuf {
+    let name = case_dir.file_name().unwrap().to_string_lossy();
+    case_dir.with_file_name(format!("{name}.build"))
+}
+
+/// A throw-away directory, unique per process, call and instant, under the
+/// fixture root; removed on drop, panic included.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = fixture_work().join("scratch").join(format!(
+            "{}-{}-{nanos:x}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap() {
+        let p = e.unwrap().path();
+        let dest = to.join(p.file_name().unwrap());
+        if p.is_dir() {
+            copy_dir(&p, &dest);
+        } else {
+            fs::copy(&p, &dest).unwrap();
+        }
+    }
+}
+
+/// Replaces `from` with `to` in `file`, which must change.
+fn edit(file: &Path, from: &str, to: &str) {
+    let t = fs::read_to_string(file).unwrap();
+    assert!(t.contains(from), "{}: {from:?} not found", file.display());
+    fs::write(file, t.replacen(from, to, 1)).unwrap();
+}
+
+fn append(file: &Path, text: &str) {
+    let mut t = fs::read_to_string(file).unwrap();
+    t.push_str(text);
+    fs::write(file, t).unwrap();
+}
+
+/// A fixture workspace with a copy of the real domain crate; `attack` gets the
+/// crate directory. The path is fixed per case (so builds are reused).
+fn fixture(case: &str, attack: fn(&Path)) -> Tree {
+    let (dir, lock) = locked_case_dir("work", case);
+    let krate = dir.join("crates/domain");
+    copy_dir(&root().join("crates/domain/src"), &krate.join("src"));
+    fs::copy(
+        root().join("crates/domain/Cargo.toml"),
+        krate.join("Cargo.toml"),
+    )
+    .unwrap();
+    fs::write(dir.join("Cargo.toml"), FIXTURE_WORKSPACE).unwrap();
+    attack(&krate);
+    Tree {
+        target_dir: Some(case_build_dir(&dir)),
+        root: dir,
+        locked: false,
+        scrub: true,
+        env: Vec::new(),
+        _lock: Some(lock),
+    }
+}
+
+const UNSAFE_GETPID: &str =
+    "\nextern \"C\" {\n    fn getpid() -> i32;\n}\n\n/// Not pure.\npub fn pid() -> i32 {\n    unsafe { getpid() }\n}\n";
+
+/// The reviewer's attack: the lints table commented out, the forbid attribute
+/// deleted, and an `unsafe` call into libc.
+fn attack_unsafe_with_lints_commented_out(krate: &Path) {
+    edit(
+        &krate.join("Cargo.toml"),
+        "[lints]\nworkspace = true",
+        "# [lints] workspace = true",
+    );
+    edit(&krate.join("src/lib.rs"), "#![forbid(unsafe_code)]\n", "");
+    append(&krate.join("src/lib.rs"), UNSAFE_GETPID);
+}
+
+/// The stronger attacker: the crate itself ALLOWS the lint.
+fn attack_unsafe_with_allow_attribute(krate: &Path) {
+    edit(
+        &krate.join("src/lib.rs"),
+        "#![forbid(unsafe_code)]",
+        "#![allow(unsafe_code)]",
+    );
+    append(&krate.join("src/lib.rs"), UNSAFE_GETPID);
+}
+
+fn attack_extern_crate_raw_std(krate: &Path) {
+    append(&krate.join("src/lib.rs"), "\nextern crate r#std as host;\n");
+}
+
+/// `std` behind a `cfg` that is false on the bare-metal target: the no-std
+/// compile never sees it, only L2 does.
+fn attack_std_behind_a_cfg(krate: &Path) {
+    append(
+        &krate.join("src/lib.rs"),
+        "\n#[cfg(not(target_os = \"none\"))]\nmod host_only {\n    extern crate std;\n    /// Not pure.\n    pub fn args() -> usize {\n        std::env::args().count()\n    }\n}\n",
+    );
+}
+
+/// A `#[path]` attribute split across lines (the L2 line scan cannot see it)
+/// naming a pure file that sits in the crate directory but OUTSIDE `src/`.
+fn attack_multiline_path_outside_src(krate: &Path) {
+    fs::create_dir_all(krate.join("host")).unwrap();
+    fs::write(
+        krate.join("host/io.rs"),
+        "//! Outside src.\npub fn f() {}\n",
+    )
+    .unwrap();
+    append(
+        &krate.join("src/lib.rs"),
+        "\n#[path\n    = \"../host/io.rs\"]\nmod io;\n",
+    );
+}
+
+/// `[lib] path` pointing out of `src/`.
+fn attack_lib_path_outside_src(krate: &Path) {
+    fs::create_dir_all(krate.join("host")).unwrap();
+    fs::write(krate.join("host/lib.rs"), "//! Outside src.\n#![no_std]\n").unwrap();
+    append(
+        &krate.join("Cargo.toml"),
+        "\n[lib]\npath = \"host/lib.rs\"\n",
+    );
+}
+
+/// `std` behind a DECLARED feature: only `--all-features` makes the no-std
+/// compile build it.
+fn attack_std_behind_a_declared_feature(krate: &Path) {
+    append(&krate.join("Cargo.toml"), "\n[features]\nstd = []\n");
+    append(
+        &krate.join("src/lib.rs"),
+        "\n#[cfg(feature = \"std\")]\nextern crate std;\n",
+    );
+}
+
+fn no_attack(_: &Path) {}
+
+/// (case, attack, run the no-std compile, run the host build + L1 + L2, layers that must be red)
+type FixtureCase = (&'static str, fn(&Path), bool, bool, &'static [&'static str]);
+
+#[test]
+fn every_attack_on_a_copy_of_domain_turns_its_layer_red_and_the_control_stays_green() {
+    guard();
+    let cases: [FixtureCase; 8] = [
+        ("control", no_attack, true, true, &[]),
+        (
+            "unsafe_lints_commented_out",
+            attack_unsafe_with_lints_commented_out,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "unsafe_allow_attribute",
+            attack_unsafe_with_allow_attribute,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "extern_crate_raw_std",
+            attack_extern_crate_raw_std,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "std_behind_a_declared_feature",
+            attack_std_behind_a_declared_feature,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "std_behind_a_cfg",
+            attack_std_behind_a_cfg,
+            true,
+            true,
+            &["l2"],
+        ),
+        (
+            "multiline_path_outside_src",
+            attack_multiline_path_outside_src,
+            false,
+            true,
+            &["l1"],
+        ),
+        (
+            "lib_path_outside_src",
+            attack_lib_path_outside_src,
+            false,
+            true,
+            &["l1"],
+        ),
+    ];
+    for (name, attack, run_compiler, run_host, red) in cases {
+        let tree = fixture(name, attack);
+        let mut layers: Vec<(&str, Vec<String>)> = Vec::new();
+        if run_compiler {
+            let r = compile_forbidding_unsafe(&tree, "crates/domain", &nostd_unit(NOSTD_TARGET));
+            layers.push(("compiler", r.err().into_iter().collect()));
+        }
+        if run_host {
+            let units = host_units(&tree);
+            layers.push(("l1", l1_violations(&tree, &units, &FIXTURE_CRATES)));
+            layers.push(("l2", l2_violations(&units, &FIXTURE_CRATES)));
+        }
+        for (layer, found) in &layers {
+            assert_eq!(
+                !found.is_empty(),
+                red.contains(layer),
+                "{name}: layer {layer} should be {} but found {found:?}",
+                if red.contains(layer) { "RED" } else { "clean" }
+            );
+        }
+        for want in red {
+            assert!(
+                layers.iter().any(|(l, _)| l == want),
+                "{name}: layer {want} was not run"
+            );
+        }
+    }
+}
+
+// ---- fixtures: cargo configuration and environment attacks on the compiler gate ----
+//
+// The reviewer's attack: a `.cargo/config.toml` naming a rustc wrapper that
+// appends `--cap-lints allow` (which lowers even a forbid), so the unsafe call
+// in domain compiled. Each case below copies the domain crate with an `unsafe`
+// call into a scratch tree (the source's forbid attribute and the lints table
+// untouched), puts the attack where it names, and asks the layers separately:
+// layer 1 (`refused_cargo_config`), the gate compile itself (layer 2 lives in
+// `Tree::cargo`), and layer 3 (`armed`). The cases share one target directory
+// (each copy has its own path, so no build is ever reused between cases; a
+// target directory also caches cargo's probe of the compiler, which is most of
+// a nested run's cost). A MUTANT run of these cases must use a fresh
+// `CARGO_TARGET_DIR`: cargo's fingerprints ignore a wrapper.
+
+/// Appends `--cap-lints allow` to every compile (but not to the `-vV` and
+/// `--print` probes cargo makes first): the reviewer's wrapper.
+const WRAP_SH: &str = "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -vV|--print*) exec \"$@\";; esac; done\nexec \"$@\" --cap-lints allow\n";
+
+const REVIEWER_CONFIG: &str = "[build]\nrustc-wrapper = \"tools/wrap.sh\"\n\n[env]\nRUSTC_WRAPPER = { value = \"tools/wrap.sh\", relative = true }\n";
+
+/// What a case expects: (layer 1 refuses, the gate compile goes red, `armed`
+/// answers: `None` = not asked).
+type Expect = (bool, bool, Option<bool>);
+
+struct ConfigCase {
+    name: &'static str,
+    /// Put `files` in a PARENT directory of the module copy instead of in it.
+    parent: bool,
+    /// (path relative to the directory above, content, executable). `{ROOT}`
+    /// in a content is the module copy's absolute path, `{RUSTC}` the real rustc.
+    files: Vec<(&'static str, String, bool)>,
+    /// Environment the caller is imagined to have set.
+    env: Vec<(&'static str, String)>,
+    /// The domain copy calls into libc inside `unsafe` (every case but the control).
+    unsafe_source: bool,
+    /// Compile the host build of the crate instead of the no-std one (a
+    /// `--cap-lints` in rustflags makes cargo's own probe of the bare-metal
+    /// target fail, so rustflags attacks only get through on the host).
+    host: bool,
+    /// Layer 2 on (the real setting) or off (the probe-pin fixture).
+    scrub: bool,
+    expect: Expect,
+}
+
+fn config_fixture(case: &ConfigCase) -> (Tree, PathBuf) {
+    let (base, lock) = locked_case_dir("config-work", case.name);
+    let module = if case.parent {
+        base.join("mod")
+    } else {
+        base.clone()
+    };
+    let krate = module.join("crates/domain");
+    copy_dir(&root().join("crates/domain/src"), &krate.join("src"));
+    fs::copy(
+        root().join("crates/domain/Cargo.toml"),
+        krate.join("Cargo.toml"),
+    )
+    .unwrap();
+    fs::write(module.join("Cargo.toml"), FIXTURE_WORKSPACE).unwrap();
+    if case.unsafe_source {
+        append(&krate.join("src/lib.rs"), UNSAFE_GETPID);
+    }
+    let fill = |s: &str| {
+        s.replace("{ROOT}", &module.display().to_string())
+            .replace("{RUSTC}", &resolved_rustc().display().to_string())
+    };
+    for (rel, content, exec) in &case.files {
+        let f = base.join(rel);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(&f, fill(content)).unwrap();
+        if *exec {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let tree = Tree {
+        root: module.clone(),
+        target_dir: Some(case_build_dir(&base)),
+        locked: false,
+        scrub: case.scrub,
+        env: case
+            .env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), fill(v)))
+            .collect(),
+        _lock: Some(lock),
+    };
+    (tree, base)
+}
+
+fn config_cases() -> Vec<ConfigCase> {
+    let wrap = |dir: &'static str| (dir, WRAP_SH.to_owned(), true);
+    // A wrapper that is a compiler stand-in, for `build.rustc` / `RUSTC`.
+    let shim = (
+        "tools/rustc-shim.sh",
+        "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -vV|--print*) exec {RUSTC} \"$@\";; esac; done\nexec {RUSTC} \"$@\" --cap-lints allow\n".to_owned(),
+        true,
+    );
+    let attack_env = |name: &'static str, key: &'static str, value: &str| ConfigCase {
+        name,
+        parent: false,
+        files: vec![wrap("tools/wrap.sh"), shim.clone()],
+        env: vec![(key, value.to_owned())],
+        unsafe_source: true,
+        host: false,
+        scrub: true,
+        expect: (false, true, None),
+    };
+    let host_only = |c: ConfigCase| ConfigCase { host: true, ..c };
+    vec![
+        ConfigCase {
+            name: "control",
+            parent: false,
+            files: vec![],
+            env: vec![],
+            unsafe_source: false,
+ host: false,
+            scrub: true,
+            expect: (false, false, None),
+        },
+        // The reviewer's two files in the module root.
+        ConfigCase {
+            name: "reviewer_attack_in_the_module_root",
+            parent: false,
+            files: vec![
+                (".cargo/config.toml", REVIEWER_CONFIG.to_owned(), false),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, Some(true)),
+        },
+        // The same config in the PARENT directory (a scaffolded repository's root).
+        ConfigCase {
+            name: "reviewer_attack_in_a_parent_directory",
+            parent: true,
+            files: vec![
+                (".cargo/config.toml", REVIEWER_CONFIG.to_owned(), false),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        ConfigCase {
+            name: "parent_workspace_wrapper",
+            parent: true,
+            files: vec![
+                (
+                    ".cargo/config.toml",
+                    "[build]\nrustc-workspace-wrapper = \"tools/wrap.sh\"\n".to_owned(),
+                    false,
+                ),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        ConfigCase {
+            name: "parent_rustflags",
+            parent: true,
+            files: vec![(
+                ".cargo/config.toml",
+                format!(
+                    "[build]\nrustflags = [\"--cap-lints=allow\"]\n\n[target.{NOSTD_TARGET}]\nrustflags = [\"--cap-lints=allow\"]\n"
+                ),
+                false,
+            )],
+            env: vec![],
+            unsafe_source: true,
+            host: true,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        ConfigCase {
+            name: "parent_rustc",
+            parent: true,
+            files: vec![
+                (".cargo/config.toml", "[build]\nrustc = \"{ROOT}/../tools/rustc-shim.sh\"\n".to_owned(), false),
+                shim.clone(),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        // The test's own environment.
+        attack_env("env_rustc_wrapper", "RUSTC_WRAPPER", "{ROOT}/tools/wrap.sh"),
+        attack_env("env_rustc_workspace_wrapper", "RUSTC_WORKSPACE_WRAPPER", "{ROOT}/tools/wrap.sh"),
+        attack_env("env_rustc", "RUSTC", "{ROOT}/tools/rustc-shim.sh"),
+        host_only(attack_env("env_rustflags", "RUSTFLAGS", "--cap-lints=allow")),
+        host_only(attack_env(
+            "env_encoded_rustflags",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "--cap-lints=allow",
+        )),
+        attack_env(
+            "env_target_rustflags",
+            "CARGO_TARGET_THUMBV7EM_NONE_EABI_RUSTFLAGS",
+            "--cap-lints=allow",
+        ),
+        // Layer 2 OFF: the attack gets through the compile, and only the probe
+        // (layer 3) says so. This case pins the probe.
+        ConfigCase {
+            name: "probe_pin_layer_2_off",
+            parent: false,
+            files: vec![
+                (".cargo/config.toml", REVIEWER_CONFIG.to_owned(), false),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: false,
+            expect: (true, false, Some(false)),
+        },
+    ]
+}
+
+#[test]
+fn the_compiler_gate_is_armed_and_no_cargo_configuration_can_lower_it() {
+    guard();
+    for case in config_cases() {
+        let (tree, base) = config_fixture(&case);
+        let (want_refused, want_red, want_armed) = case.expect;
+        let name = case.name;
+        let ceiling = base.clone();
+        let refused = refused_cargo_config(&tree.root, &ceiling);
+        assert_eq!(
+            !refused.is_empty(),
+            want_refused,
+            "{name}: layer 1 should {} but found {refused:?}",
+            if want_refused { "refuse" } else { "stay clean" }
+        );
+        if want_refused && !case.files.is_empty() {
+            assert!(
+                refused.iter().any(|r| r.contains("config.toml")),
+                "{name}: layer 1 must name the file: {refused:?}"
+            );
+        }
+        let unit = if case.host {
+            vec!["--lib".to_owned()]
+        } else {
+            nostd_unit(NOSTD_TARGET)
+        };
+        let gate = compile_forbidding_unsafe(&tree, "crates/domain", &unit);
+        match (&gate, want_red) {
+            (Err(why), true) => assert!(
+                why.contains("`unsafe` block"),
+                "{name}: the gate failed, but not on the unsafe block:\n{why}"
+            ),
+            (Ok(()), false) => {}
+            (got, _) => panic!(
+                "{name}: gate compile red = {} but expected {want_red}: {got:?}",
+                got.is_err()
+            ),
+        }
+        if let Some(want) = want_armed {
+            let verdict = armed(&tree);
+            assert_eq!(
+                verdict.is_ok(),
+                want,
+                "{name}: armed() answered {verdict:?}"
+            );
+            if !want {
+                assert!(
+                    verdict.err().unwrap_or_default().contains("is not armed"),
+                    "{name}: the message must say the gate is not armed"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
+#[test]
+fn rust_toolchain_files_may_only_carry_channel_components_targets_and_profile() {
+    guard();
+    let real = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
+    assert_eq!(
+        toolchain_text_violations("rust-toolchain.toml", &real),
+        Vec::<String>::new()
+    );
+    let path_key = "[toolchain]\nchannel = \"1.99.1\"\npath = \"/opt/custom\"\n";
+    let quoted = "[toolchain]\n\"path\" = \"/opt/custom\"\n";
+    let dotted = "toolchain.path = \"/opt/custom\"\n";
+    let other_table = "[toolchain]\nchannel = \"1.99.1\"\n[overrides]\nx = 1\n";
+    let after_array = "[toolchain]\ntargets = [\n  \"a=b\",\n]\npath = \"/x\"\n";
+    for (what, text) in [
+        ("path", path_key),
+        ("quoted path", quoted),
+        ("dotted path", dotted),
+        ("another table", other_table),
+        ("path after a multi-line array", after_array),
+    ] {
+        assert!(
+            !toolchain_text_violations("rust-toolchain.toml", text).is_empty(),
+            "{what}: accepted"
+        );
+    }
+    let fine = "[toolchain]\nchannel = \"1.99.1\" # pinned\ncomponents = [\"clippy\"]\nprofile = \"minimal\"\ntargets = [\n  \"a=b\",\n]\n";
+    assert!(toolchain_text_violations("rust-toolchain.toml", fine).is_empty());
+    // TOML literal (single-quoted) strings are the same value; `[ toolchain ]` too.
+    let literal = "[ toolchain ]\nchannel = '1.99.1'\ncomponents = ['clippy', \"rustfmt\"]\nprofile = 'minimal'\ntargets = [\n  'a=b',\n]\n";
+    assert!(toolchain_text_violations("rust-toolchain.toml", literal).is_empty());
+    // Mixed or unbalanced quotes, a quote inside, and a BOM stay refused.
+    for bad in [
+        "[toolchain]\nchannel = '1.99.1\"\n",
+        "[toolchain]\nchannel = 'a\"b'\n",
+        "[toolchain]\nchannel = '1.99.1'\ncomponents = ['x\"]\n",
+        "\u{feff}[toolchain]\nchannel = \"1.99.1\"\n",
+    ] {
+        assert!(
+            !toolchain_text_violations("rust-toolchain.toml", bad).is_empty(),
+            "{bad:?}"
+        );
+    }
+}
+
+/// Builds `rel` files under a scratch dir and returns the findings for the
+/// module at `<scratch>/mod` with the repository root at `<scratch>`.
+fn toolchain_case(name: &str, files: &[(&str, &str)]) -> Vec<String> {
+    let (base, _lock) = locked_case_dir("toolchain-work", name);
+    fs::create_dir_all(base.join("mod/crates/domain")).unwrap();
+    for (rel, content) in files {
+        let f = base.join(rel);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(&f, content).unwrap();
+    }
+    let found = refused_toolchain_files(&base.join("mod"), &base);
+    let _ = fs::remove_dir_all(&base);
+    found
+}
+
+/// Pure pin of the parent walks' bound (no cargo): files above the ceiling are
+/// never reported, a file between the module and the ceiling is, and with the
+/// ceiling at the module itself nothing above is examined. This is also what
+/// keeps the gate green whatever `CARGO_TARGET_DIR` is: a fixture's walk can
+/// never climb into the real module.
+#[test]
+fn the_parent_walks_stop_at_the_ceiling() {
+    guard();
+    let unique = Scratch::new();
+    let scratch = unique.path().join("walk-bound");
+    let top = scratch.join("root");
+    let module = top.join("a/module");
+    fs::create_dir_all(top.join(".git")).unwrap();
+    fs::create_dir_all(&module).unwrap();
+    fs::create_dir_all(scratch.join(".cargo")).unwrap();
+    fs::write(
+        scratch.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )
+    .unwrap();
+    fs::write(scratch.join(".cargo/config.toml"), "[build]\n").unwrap();
+    fs::write(top.join("rust-toolchain"), "1.99.1\n").unwrap();
+    fs::write(
+        module.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )
+    .unwrap();
+
+    let found = refused_cargo_config(&module, &top);
+    assert_eq!(
+        found.len(),
+        1,
+        "only the legacy file below the ceiling: {found:?}"
+    );
+    assert!(found[0].contains("root/rust-toolchain "), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|f| !f.contains("walk-bound/rust-toolchain.toml")
+                && !f.contains("walk-bound/.cargo")),
+        "nothing above the ceiling may be reported: {found:?}"
+    );
+    let dirs = dirs_above_up_to(&module, &top);
+    assert_eq!(dirs, vec![top.join("a"), top.clone()]);
+
+    // The ceiling is the module itself: nothing above is examined.
+    assert!(dirs_above_up_to(&module, &module).is_empty());
+    assert!(refused_toolchain_files(&module, &module).is_empty());
+    assert!(refused_cargo_config(&module, &module).is_empty());
+    // A ceiling that is not an ancestor at all: nothing above is examined.
+    assert!(dirs_above_up_to(&module, &scratch.join("elsewhere")).is_empty());
+    assert!(refused_cargo_config(&module, &scratch.join("elsewhere")).is_empty());
+}
+
+/// Pure pin of the fixture key: one checkout, one root (stable between runs,
+/// so nested builds are reused); two checkouts, two roots, even under one
+/// shared target directory.
+#[test]
+fn fixture_roots_are_per_checkout_and_stable() {
+    guard();
+    let unique = Scratch::new();
+    let (a, b) = (unique.path().join("a/mod"), unique.path().join("b/mod"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let shared = unique.path().join("shared-target/arch-fixtures");
+    assert_eq!(
+        fixture_root_for(&shared, &a),
+        fixture_root_for(&shared, &a.join("../mod"))
+    );
+    assert_ne!(fixture_root_for(&shared, &a), fixture_root_for(&shared, &b));
+    assert!(fixture_root_for(&shared, &a).starts_with(&shared));
+    let key = fixture_key(&a);
+    assert_eq!(key.len(), 12);
+    assert!(key.bytes().all(|c| c.is_ascii_hexdigit()));
+}
+
+/// The fixture lock excludes a second holder of the same case and nobody
+/// else, and a drop (a panic unwinds through it too) releases it. The names
+/// are unique per call and the test removes only the files it created: the
+/// `lock-pin` directory is shared with concurrent runs and is never removed.
+#[test]
+fn a_fixture_case_is_held_by_one_run_at_a_time() {
+    guard();
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = format!(
+        "lock-pin-{}-{}-{nanos:x}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
+    let other_name = format!("{name}-other");
+    let (dir, held) = locked_case_dir("lock-pin", &name);
+    let lock_file = dir.with_extension("lock");
+    let other = File::options().append(true).open(&lock_file).unwrap();
+    assert!(
+        matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)),
+        "a second holder of the same case got the lock"
+    );
+    let (other_dir, elsewhere) = locked_case_dir("lock-pin", &other_name);
+    drop(elsewhere);
+    drop(held);
+    // A concurrent test's fork can hold a copy of the descriptor until its
+    // exec, so the release is awaited for a bounded time, not assumed.
+    let released = (0..250).any(|_| {
+        other.try_lock().is_ok() || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            false
+        }
+    });
+    let _ = fs::remove_file(&lock_file);
+    let _ = fs::remove_file(other_dir.with_extension("lock"));
+    assert!(released, "the lock was not released on drop");
+}
+
+/// A `Scratch` directory is gone after its guard drops, also when the owner
+/// panics (the unwind runs the drop).
+#[test]
+fn a_scratch_directory_is_removed_when_its_guard_drops_also_on_panic() {
+    guard();
+    let plain = Scratch::new();
+    let p = plain.path().to_path_buf();
+    assert!(p.is_dir());
+    drop(plain);
+    assert!(!p.exists(), "a dropped Scratch left {}", p.display());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = std::thread::spawn(move || {
+        let s = Scratch::new();
+        tx.send(s.path().to_path_buf()).unwrap();
+        fs::write(s.path().join("f"), "x").unwrap();
+        panic!("the owner panics while the guard is alive");
+    });
+    let q = rx.recv().unwrap();
+    assert!(t.join().is_err(), "the thread was meant to panic");
+    assert!(!q.exists(), "a panicked Scratch left {}", q.display());
+}
+
+/// The ownership rules of a target directory, on a scratch marker.
+#[test]
+fn the_target_marker_refuses_a_live_foreign_owner_and_takes_over_a_dead_one() {
+    guard();
+    let sc = Scratch::new();
+    let marker = sc.path().join("t/arch-fixtures/OWNER");
+    let live_a = sc.path().join("a");
+    let live_b = sc.path().join("b");
+    fs::create_dir_all(&live_a).unwrap();
+    fs::create_dir_all(&live_b).unwrap();
+    let (a, b) = (owner_id(&live_a), owner_id(&live_b));
+    claim_target(&marker, &a).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), a);
+    claim_target(&marker, &a).unwrap();
+    let err = claim_target(&marker, &b).unwrap_err();
+    assert!(err.contains(&a) && err.contains(&b), "{err}");
+    assert!(err.contains("this target directory is shared with another checkout"));
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        a,
+        "a refusal must not take over"
+    );
+    fs::remove_dir_all(&live_a).unwrap();
+    claim_target(&marker, &b).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), b);
+    assert!(
+        claim_target(&marker, &a).is_err(),
+        "a dead checkout cannot displace a live owner"
+    );
+}
+
+/// An EMPTY marker (a writer died between creating and writing it) names
+/// nobody: it is taken over, silently.
+#[test]
+fn an_empty_target_marker_is_taken_over() {
+    guard();
+    let sc = Scratch::new();
+    let marker = sc.path().join("t/arch-fixtures/OWNER");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+    let me = owner_id(sc.path());
+    claim_target(&marker, &me).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), me);
+    let leftovers = fs::read_dir(marker.parent().unwrap()).unwrap().count();
+    assert_eq!(leftovers, 1, "a takeover left a temp file behind");
+}
+
+/// A read-only target directory fails with a message naming the path and what
+/// the tests need, not a bare `Permission denied`.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_target_directory_names_the_path() {
+    guard();
+    use std::os::unix::fs::PermissionsExt;
+    let sc = Scratch::new();
+    let ro = sc.path().join("ro");
+    fs::create_dir_all(&ro).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = ro.join("probe");
+    let writable_anyway = fs::write(&probe, "x").is_ok(); // running as root
+    let r = claim_target(&ro.join("OWNER"), "me");
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
+    if writable_anyway {
+        return;
+    }
+    let err = r.unwrap_err();
+    assert!(err.contains(&ro.display().to_string()), "{err}");
+    assert!(
+        err.contains("make it writable or point CARGO_TARGET_DIR elsewhere"),
+        "{err}"
+    );
+}
+
+/// A takeover re-reads the marker: if a concurrent claimer overwrote it with a
+/// LIVE foreign path between our rename and our re-read, we refuse.
+#[test]
+fn a_takeover_rereads_the_marker_and_refuses_a_live_overwrite() {
+    guard();
+    let sc = Scratch::new();
+    let marker = sc.path().join("t/OWNER");
+    let live = sc.path().join("live");
+    fs::create_dir_all(&live).unwrap();
+    let live = owner_id(&live);
+    let dead = sc.path().join("dead").to_string_lossy().into_owned();
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    // Control: nobody interferes, the takeover of a dead owner succeeds.
+    fs::write(&marker, &dead).unwrap();
+    claim_target_with(&marker, "me", &mut |_| {}).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "me");
+    // The interleaving: a live foreign path lands before the re-read.
+    fs::write(&marker, &dead).unwrap();
+    let err = claim_target_with(&marker, "me", &mut |m| fs::write(m, &live).unwrap()).unwrap_err();
+    assert!(err.contains(&live), "{err}");
+    assert_eq!(fs::read_to_string(&marker).unwrap(), live);
+}
+
+/// `root()` reads the run-time `CARGO_MANIFEST_DIR`: a run-time value wins
+/// over the compile-time one, `None` falls back; and `root()` is that call.
+#[test]
+fn root_prefers_the_runtime_manifest_dir() {
+    guard();
+    let runtime = PathBuf::from("/runtime/checkout");
+    assert_eq!(root_from(Some(runtime.clone().into())), runtime);
+    assert_eq!(root_from(None), PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let src = fs::read_to_string(root().join("tests/architecture.rs")).unwrap();
+    let body = &src[src.find("fn root() -> PathBuf {").unwrap()..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    assert!(
+        body.contains("root_from(std::env::var_os(\"CARGO_MANIFEST_DIR\"))"),
+        "{body}"
+    );
+}
+
+/// One checkout reached through a symlink and through its real path is ONE
+/// owner (the marker stores the canonical path).
+#[cfg(unix)]
+#[test]
+fn a_checkout_through_a_symlink_is_the_same_owner() {
+    guard();
+    let sc = Scratch::new();
+    let real = sc.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let link = sc.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(owner_id(&real), owner_id(&link));
+    let marker = sc.path().join("t/OWNER");
+    claim_target(&marker, &owner_id(&real)).unwrap();
+    claim_target(&marker, &owner_id(&link)).unwrap();
+}
+
+/// Every `#[test]` in this file starts with `guard();`, so in a target
+/// directory owned by another checkout every test fails.
+#[test]
+fn every_test_calls_the_ownership_guard_first() {
+    guard();
+    let src = fs::read_to_string(root().join("tests/architecture.rs")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut tests = 0;
+    for (i, l) in lines.iter().enumerate() {
+        if *l == "#[test]" {
+            let mut j = i + 1;
+            while !lines[j].starts_with("fn ") {
+                j += 1;
+            }
+            tests += 1;
+            assert!(
+                lines[j + 1].trim() == "guard();",
+                "test `{}` does not call guard() first",
+                lines[j]
+            );
+        }
+    }
+    assert!(tests > 25, "found only {tests} tests");
+}
+
+/// The module-tree scans skip the ACTUAL target directory by path: a
+/// `CARGO_TARGET_DIR` named `build/` inside the module holds fixtures with
+/// their own `.cargo/config.toml` and toolchain files, which are not the
+/// module's. The same files anywhere else in the module are still refused.
+#[test]
+fn the_module_scans_skip_the_actual_target_directory_by_path() {
+    guard();
+    let unique = Scratch::new();
+    let module = unique.path().join("module");
+    let build = module.join("build");
+    for dir in [
+        build.join("arch-fixtures/k/.cargo"),
+        module.join("src/.cargo"),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), "[build]\n").unwrap();
+    }
+    fs::write(build.join("arch-fixtures/k/rust-toolchain"), "1.99.1\n").unwrap();
+    fs::write(
+        module.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )
+    .unwrap();
+
+    let found = refused_cargo_config_skipping(&module, &module, &build);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("src/.cargo"), "{found:?}");
+    assert!(
+        !found.iter().any(|f| f.contains("module/build")),
+        "{found:?}"
+    );
+    // Control: with the skip pointing elsewhere the fixtures are reported.
+    let all = refused_cargo_config_skipping(&module, &module, &module.join("elsewhere"));
+    assert!(
+        all.iter().any(|f| f.contains("build/arch-fixtures")),
+        "{all:?}"
+    );
+    assert!(
+        all.iter()
+            .any(|f| f.contains("build/arch-fixtures/k/rust-toolchain")),
+        "{all:?}"
+    );
+}
+
+#[test]
+fn only_the_module_roots_rust_toolchain_toml_is_accepted_and_it_names_a_release_channel() {
+    guard();
+    let real = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
+    let green: [(&str, Vec<(&str, &str)>); 2] = [
+        ("shipped", vec![("mod/rust-toolchain.toml", &real)]),
+        (
+            "multiline_components",
+            vec![(
+                "mod/rust-toolchain.toml",
+                "[toolchain]\nchannel = \"nightly-2026-01-02\"\ncomponents = [\n  \"clippy\",\n  \"rustfmt\"\n]\n",
+            )],
+        ),
+    ];
+    for (name, files) in green {
+        let found = toolchain_case(name, &files);
+        assert!(found.is_empty(), "{name}: refused {found:?}");
+    }
+    let good = "[toolchain]\nchannel = \"1.99.1\"\n";
+    let with = |channel: &str| format!("[toolchain]\nchannel = \"{channel}\"\n");
+    type RedCase<'a> = (&'a str, Vec<(&'a str, String)>, &'a str);
+    let red: Vec<RedCase> = vec![
+        (
+            "legacy_root",
+            vec![("mod/rust-toolchain", "stable\n".into())],
+            "mod/rust-toolchain",
+        ),
+        (
+            "legacy_path",
+            vec![("mod/rust-toolchain", "/opt/custom\n".into())],
+            "mod/rust-toolchain",
+        ),
+        (
+            "legacy_parent",
+            vec![("rust-toolchain", "stable\n".into())],
+            "rust-toolchain",
+        ),
+        (
+            "legacy_beside_toml",
+            vec![
+                ("mod/rust-toolchain", "stable\n".into()),
+                ("mod/rust-toolchain.toml", good.into()),
+            ],
+            "mod/rust-toolchain",
+        ),
+        (
+            "toml_in_subdir",
+            vec![
+                ("mod/rust-toolchain.toml", good.into()),
+                ("mod/crates/domain/rust-toolchain.toml", good.into()),
+            ],
+            "crates/domain/rust-toolchain.toml",
+        ),
+        (
+            "toml_in_parent",
+            vec![
+                ("mod/rust-toolchain.toml", good.into()),
+                ("rust-toolchain.toml", good.into()),
+            ],
+            "rust-toolchain.toml",
+        ),
+        (
+            "path_key",
+            vec![("mod/rust-toolchain.toml", format!("{good}path = \"x\"\n"))],
+            "path",
+        ),
+        (
+            "channel_dot_slash",
+            vec![("mod/rust-toolchain.toml", with("./tc"))],
+            "channel",
+        ),
+        (
+            "channel_absolute",
+            vec![("mod/rust-toolchain.toml", with("/abs"))],
+            "channel",
+        ),
+        (
+            "channel_tilde",
+            vec![("mod/rust-toolchain.toml", with("~/x"))],
+            "channel",
+        ),
+        (
+            "channel_dotdot",
+            vec![("mod/rust-toolchain.toml", with("stable/../x"))],
+            "channel",
+        ),
+        (
+            "channel_backslash",
+            vec![("mod/rust-toolchain.toml", with("stable\\\\x"))],
+            "channel",
+        ),
+        (
+            "bare_line",
+            vec![("mod/rust-toolchain.toml", format!("{good}./tc\n"))],
+            "./tc",
+        ),
+        (
+            "other_table",
+            vec![("mod/rust-toolchain.toml", format!("{good}[other]\n"))],
+            "[other]",
+        ),
+        (
+            "no_channel",
+            vec![(
+                "mod/rust-toolchain.toml",
+                "[toolchain]\nprofile = \"minimal\"\n".into(),
+            )],
+            "channel",
+        ),
+        (
+            "bare_line_in_array",
+            vec![(
+                "mod/rust-toolchain.toml",
+                format!("{good}components = [\n  ./tc\n]\n"),
+            )],
+            "./tc",
+        ),
+    ];
+    for (name, files, names) in red {
+        let files: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let found = toolchain_case(name, &files);
+        assert!(!found.is_empty(), "{name}: accepted");
+        assert!(
+            found.iter().any(|f| f.contains(names)),
+            "{name}: the finding must name `{names}`: {found:?}"
+        );
+    }
 }

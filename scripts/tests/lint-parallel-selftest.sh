@@ -33,7 +33,7 @@ SELF="$here/${BASH_SOURCE[0]##*/}"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-unset LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM FAKE_SPAWN XDG_CONFIG_HOME
+unset LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM FAKE_EXIT_ON_TERM FAKE_SPAWN XDG_CONFIG_HOME
 SD="SCRIPT""DIR" # the directory-relative source-path keyword, for the real fixtures
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/lp.XXXXXX") || exit 2
@@ -95,6 +95,7 @@ for a in "$@"; do f=$a; done
 sev=$3
 printf '%s\n' "$f" >> "$FILES_LOG"
 [ -z "${FAKE_IGNORE_TERM:-}" ] || trap '' TERM
+[ -z "${FAKE_EXIT_ON_TERM:-}" ] || trap 'exit 0' TERM
 if [ -n "${FAKE_SPAWN:-}" ]; then case $f in *b.sh*) trap '' TERM; sleep "$FAKE_SPAWN" & sleep "$FAKE_SPAWN" ;; esac; fi
 [ -z "${FAKE_NAP:-}" ] || sleep "$FAKE_NAP"
 if [ -n "${FAKE_HANG_ON:-}" ]; then case $f in *"$FAKE_HANG_ON"*) exec sleep "$FAKE_HANG" ;; esac; fi
@@ -117,7 +118,7 @@ FAKE
     ( cd "$T/tmpl" && git init -q . && git add -A && git commit -qm init )
   fi
   rm -rf -- "$R"; cp -R "$T/tmpl" "$R"
-  unset FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM FAKE_SPAWN LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS LIM
+  unset FAKE_DIRTY FAKE_RC FAKE_RC_ON FAKE_KILL FAKE_NAP FAKE_HANG FAKE_HANG_ON FAKE_IGNORE_TERM FAKE_EXIT_ON_TERM FAKE_SPAWN LINT_JOBS LINT_SEVERITY LINT_FILE_TIMEOUT SHELLCHECK_OPTS LIM
   export LINT_JOBS=2
 }
 fail() { FAILS="$FAILS $1;"; }
@@ -464,6 +465,21 @@ t_watchdog_outcome_is_deterministic_at_the_boundary() {
   expect accounted_for 20 $((clean + to))
   sleep 1.1 # the napping fakes the watchdog TERMed finish their own `sleep 1`
 }
+t_watchdog_claims_before_it_signals_and_is_reaped_without_term() {
+  # the two competing paths, in the order that used to be able to lose, with no timing involved:
+  # (1) a shellcheck that EXITS 0 THE MOMENT IT IS SIGNALLED: the watchdog must already own the verdict
+  #     (claim before signal), so the file is `timeout`, never a clean pass over a killed run;
+  # (2) a caller that IGNORES TERM and a file that finishes first: the watchdog and its sleep are reaped
+  #     with KILL, so the run returns at once and nothing is left (no wait for the watchdog's own sleep)
+  local tm=$((10000 + $$ % 50000)) t0=$SECONDS
+  FAKE_NAP=30.0611 FAKE_EXIT_ON_TERM=1 LINT_FILE_TIMEOUT=1 LIM=15 lc; expect killed_run_rc 2 "$RC"
+  grep -q 'timeout: ' "$C/err" || fail "no timeout line: $(cat "$C/err")"
+  grep -q 'TOOL ERROR' "$C/err" && fail "the timeout surfaced as a tool error: $(cat "$C/err")"
+  [ $((SECONDS - t0)) -lt 12 ] || fail "took $((SECONDS - t0)) s for a 1 s timeout"
+  guarded 6 env PATH="$C/bin:$ORIG_PATH" LINT_FILE_TIMEOUT=$tm "$BASH_BIN" -c 'trap "" TERM; exec "$1" "$2"' x "$BASH_BIN" "$subject"
+  expect term_ignored_rc 0 "$RC"
+  if pgrep -f "$C/sl $tm" > /dev/null; then fail "a watchdog sleep outlived the run: $(pgrep -fl "$C/sl $tm" | cut -c1-90 | tr '\n' '|')"; fi
+}
 t_no_watchdog_sleep_is_left_after_a_normal_run() {
   local tm=$((10000 + $$ % 50000)) # a marker no other process of this machine sleeps for
   LIM=10 LINT_FILE_TIMEOUT=$tm lc; expect rc 0 "$RC"
@@ -581,7 +597,7 @@ t_skips_are_counted_separately_from_ok() {
   case $out in *"SKIPPED real_lib_change_flips_verdict: real shellcheck is not installed"*) ;; *) fail "no skip line with a reason: $out" ;; esac
 }
 
-CASES="cold_lints_each_real_file_once_and_remembers_nothing identical_real_files_get_two_invocations findings_printed_under_the_real_path one_file_per_call_with_x untracked_sh_is_not_linted zero_tracked_sh_is_exit_2 shellcheck_missing_is_exit_2 exit_2_is_tool_error_and_beats_findings output_is_identical_for_one_and_four_jobs odd_filenames unreadable_file_is_exit_2 symlink_to_tracked_script_is_one_invocation nine_links_and_two_real_identical_files_are_two_invocations symlink_chain relative_and_absolute_link_inside_the_repo link_target_outside_the_repo_is_exit_2 dangling_link_is_exit_2 link_to_a_directory_is_exit_2 link_to_an_untracked_in_repo_file_is_linted_with_a_note link_named_sh_whose_target_is_not links_in_any_creation_order_give_the_same_output link_target_with_newline_or_tab_is_exit_2 hang_guard_kills_the_whole_group hang_guard_ignores_foreign_processes reap_kills_term_immune_helpers leak_check_sees_a_helper_without_the_root_in_its_command_line timeout_kills_the_whole_group_of_the_shellcheck link_loop_is_exit_2_promptly links_resolve_physically_not_logically term_removes_the_temp_dir signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file watchdog_outcome_is_deterministic_at_the_boundary no_watchdog_sleep_is_left_after_a_normal_run real_lib_change_flips_verdict real_looser_than_the_old_recipe real_directory_relative_source_path_variants real_link_in_another_directory_is_checked_as_its_real_path real_abbreviated_rcfile_option_is_honoured skip_logic_runs_the_case_when_the_probe_supports_it skips_are_counted_separately_from_ok"
+CASES="cold_lints_each_real_file_once_and_remembers_nothing identical_real_files_get_two_invocations findings_printed_under_the_real_path one_file_per_call_with_x untracked_sh_is_not_linted zero_tracked_sh_is_exit_2 shellcheck_missing_is_exit_2 exit_2_is_tool_error_and_beats_findings output_is_identical_for_one_and_four_jobs odd_filenames unreadable_file_is_exit_2 symlink_to_tracked_script_is_one_invocation nine_links_and_two_real_identical_files_are_two_invocations symlink_chain relative_and_absolute_link_inside_the_repo link_target_outside_the_repo_is_exit_2 dangling_link_is_exit_2 link_to_a_directory_is_exit_2 link_to_an_untracked_in_repo_file_is_linted_with_a_note link_named_sh_whose_target_is_not links_in_any_creation_order_give_the_same_output link_target_with_newline_or_tab_is_exit_2 hang_guard_kills_the_whole_group hang_guard_ignores_foreign_processes reap_kills_term_immune_helpers leak_check_sees_a_helper_without_the_root_in_its_command_line timeout_kills_the_whole_group_of_the_shellcheck link_loop_is_exit_2_promptly links_resolve_physically_not_logically term_removes_the_temp_dir signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace file_timeout_is_a_tool_error watchdog_kills_a_term_ignoring_file watchdog_outcome_is_deterministic_at_the_boundary watchdog_claims_before_it_signals_and_is_reaped_without_term no_watchdog_sleep_is_left_after_a_normal_run real_lib_change_flips_verdict real_looser_than_the_old_recipe real_directory_relative_source_path_variants real_link_in_another_directory_is_checked_as_its_real_path real_abbreviated_rcfile_option_is_honoured skip_logic_runs_the_case_when_the_probe_supports_it skips_are_counted_separately_from_ok"
 
 one_case() {
   local n=$1 want="" lk
@@ -634,6 +650,8 @@ real-path-newline-tab-check-removed@@nlcheck=    :@@link_target_with_newline_or_
 loop-cap-removed@@hopcap=    :@@link_loop_is_exit_2_promptly
 physical-resolution-made-logical@@physical=    d=$(cd -- "$d" 2> /dev/null && pwd) || { RERR="x"; return 1; }@@links_resolve_physically_not_logically
 watchdog-not-reaped@@wdreap=:@@no_watchdog_sleep_is_left_after_a_normal_run
+watchdog-claims-after-it-signals@@wdclaim=  :##wdkill=  mkdir "$T/to.$1" 2>/dev/null || exit 0; kill -KILL -- "-$sc" 2>/dev/null@@watchdog_claims_before_it_signals_and_is_reaped_without_term
+watchdog-reaped-with-term-not-kill@@wdreap=  if [ "$won" = 1 ]; then kill -TERM "$wd" 2>/dev/null; fi@@watchdog_claims_before_it_signals_and_is_reaped_without_term
 group-kill-replaced-by-killing-xargs-only@@termkill=    kill -TERM "$xpid" 2> /dev/null##killesc=    :@@signals_kill_the_group_fast term_ignoring_shellcheck_is_killed_after_the_grace
 output-sort-removed@@sortmap=cp "$T/map" "$T/map.sorted"@@symlink_to_tracked_script_is_one_invocation links_in_any_creation_order_give_the_same_output
 untracked-files-linted@@gitls=find . -name '*.sh' -not -path './.git/*' -print0 > "$T/files0"@@untracked_sh_is_not_linted

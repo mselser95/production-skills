@@ -1,0 +1,55 @@
+# exporter-allowlist.txt - the ONLY things the exporter may be started with.
+#
+# ONE file, read by BOTH parity-check.sh (the overlay as shipped) and db-scrape-test.sh
+# (the RUNNING container, from `docker inspect`), so the two cannot drift. Everything
+# not listed is refused, including a flag or variable nobody has heard of yet: the
+# exporter has several ways to carry a connection (--datasource.uri, --datasource.uri-file,
+# DATA_SOURCE_URI_FILE, DATA_SOURCE_NAME, libpq PG* variables, a --config.file with
+# auth_modules) and a deny-list of them loses the day a new one ships.
+#
+# Format: `<kind> <value>  # why`. Kinds:
+#   arg         one exact element of the container command (a flag with its value, as one string)
+#   env         `NAME=VALUE`: the EXACT pair the overlay or exporter.env may define (names AND
+#               values: a value such as `${H:-db}` is substituted by compose from the host
+#               environment or a `.env`, so an unpinned value re-points the connection)
+#   image-env   a variable NAME the image itself bakes in (the running container only)
+#   entrypoint  the image's entrypoint (the overlay may not override it)
+#   mount       `<source> <destination>`: `volume:<name>` or `secret:<name>` mounted at an
+#               absolute path inside the container; the set must match EXACTLY, pair by pair
+#   secret-file `<name> <file>`: the top-level secret of compose.yml behind a `secret:` mount
+#
+# No value here is a slot: module.json declares none and exporter.env is shipped as a literal
+# (host db:5432, database app, role app_monitor). A scaffold that must vary one of them edits
+# THIS file and exporter.env together; parity-check.sh compares them as whole strings.
+# Self-check (ALLOWLIST): no `$` in an env value, no LD_* variable, no entrypoint other than
+# /bin/postgres_exporter, none of the connection-carrying names.
+#
+# Image-env, entrypoint and mount were OBSERVED on real v0.21.1 containers in the third review
+# of this module (2026-11-28): the running container carried 4 variables (the image's PATH and
+# the three env lines below), 2 mounts (the /tls volume and the password secret) and the
+# entrypoint /bin/postgres_exporter, and the allow-list accepted all of them. A mismatch
+# prints the real destination or name in db-scrape-test.sh; correct the entry deliberately,
+# never by widening it blindly.
+
+arg --web.listen-address=:9187                     # the port the healthcheck and the scrape use
+arg --collector.stat_statements                    # pg_stat_statements metrics (required)
+arg --collector.stat_statements.limit=100          # bounds the series count
+arg --collector.stat_checkpointer                  # PG 17+ checkpoint counters (required)
+arg --collector.database_wraparound                # xid wraparound alert (required)
+arg --collector.long_running_transactions          # long transaction alert (required)
+arg --no-collector.process_idle                    # off on purpose: extra series
+arg --no-collector.xlog_location                   # off on purpose: no consumer
+arg --no-collector.stat_wal_receiver               # off on purpose: no consumer
+
+env DATA_SOURCE_URI=db:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt  # host/db and the TLS parameters, no password
+env DATA_SOURCE_USER=app_monitor                   # the least-privilege role
+env DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password  # the password as a FILE under /run/secrets
+
+image-env PATH                                     # baked into every image
+
+entrypoint /bin/postgres_exporter                  # the image's own
+
+mount volume:dbtls /tls                            # the server certificate, read-only (verify-full trust anchor)
+mount secret:db_monitor_password /run/secrets/db_monitor_password  # the monitor password file (compose secret)
+
+secret-file db_monitor_password ${DB_SECRETS_DIR:-./secrets}/db_monitor_password  # the monitor's file, never the superuser's

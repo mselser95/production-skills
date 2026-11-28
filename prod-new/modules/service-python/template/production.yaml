@@ -100,8 +100,9 @@ data_lifecycle:
 
 # Both targets exist in this directory's Makefile and run real commands. There is no
 # `advisory` gate: this module ships no advisory (candidate) lane, so none is claimed.
-# Fuller gates (import-linter, pip-audit, coverage thresholds, mutation testing) are a
-# later change and are not claimed here.
+# `make verify` includes a dependency audit (`uv audit` through gates/audit.py, network, fails
+# closed, expiring waivers). Fuller gates (import-linter, coverage thresholds, mutation testing)
+# are a later change and are not claimed here.
 gates:
   cheap: "make check-fast"
   presubmit: "make verify"

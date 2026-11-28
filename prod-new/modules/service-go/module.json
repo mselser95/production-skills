@@ -4,19 +4,26 @@
   "conflicts": [],
   "source": "../../template",
   "slots": {
-    "SERVICE": "service name; replaced literally in file contents and in paths (cmd/<SERVICE>)",
+    "SERVICE": {
+      "description": "service name; replaced literally in file contents and in paths (cmd/<SERVICE>)",
+      "charset": "lower-digits-dash"
+    },
     "OWNER": "GitHub owner (user or org) of the repository; replaced literally"
   },
   "unit_kind": "service",
+  "unit": {
+    "kind": "service",
+    "language": "go"
+  },
   "placement": {
-    ".github/**": "root",
-    "CODEOWNERS": "root",
-    "AGENTS.md": "root",
-    ".gitignore": "root",
-    "registries/**": "root",
-    ".prod/**": "root",
-    "docs/**": "root",
-    "scripts/**": "root",
+    ".github/**": "unit",
+    "CODEOWNERS": "unit",
+    "AGENTS.md": "unit",
+    ".gitignore": "unit",
+    "registries/**": "unit",
+    ".prod/**": "unit",
+    "docs/**": "unit",
+    "scripts/**": "unit",
     "production.yaml": "unit",
     "go.mod": "unit",
     "go.sum": "unit",

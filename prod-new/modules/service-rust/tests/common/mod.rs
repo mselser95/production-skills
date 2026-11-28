@@ -8,6 +8,38 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+/// The module directory, read at RUN time (cargo sets `CARGO_MANIFEST_DIR` for
+/// the checkout it runs a test for, which can differ from the one that
+/// compiled the binary); the compile-time value is only the fallback.
+pub fn manifest_dir() -> std::path::PathBuf {
+    manifest_dir_from(std::env::var_os("CARGO_MANIFEST_DIR"))
+}
+
+/// The pure half of `manifest_dir()`: a run-time value wins, `None` falls
+/// back to the compile-time one.
+pub fn manifest_dir_from(runtime: Option<std::ffi::OsString>) -> std::path::PathBuf {
+    runtime.map_or_else(
+        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        std::path::PathBuf::from,
+    )
+}
+
+/// Runs in every test binary that includes `common` (hardening, http_e2e,
+/// http_limits, process).
+#[test]
+fn manifest_dir_prefers_the_runtime_value() {
+    let runtime = std::path::PathBuf::from("/runtime/checkout");
+    assert_eq!(manifest_dir_from(Some(runtime.clone().into())), runtime);
+    assert_eq!(
+        manifest_dir_from(None),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    );
+    let src = include_str!("mod.rs");
+    let body = &src[src.find("pub fn manifest_dir() ->").unwrap()..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    assert!(body.contains("manifest_dir_from(std::env::var_os(\"CARGO_MANIFEST_DIR\"))"));
+}
+
 use svc_adapter::http::{Monitor, Options, Server};
 use svc_adapter::memory::MemoryStore;
 use svc_app::{Clock, EventStore, IdGenerator, Ledger, MetricsSource, Telemetry};

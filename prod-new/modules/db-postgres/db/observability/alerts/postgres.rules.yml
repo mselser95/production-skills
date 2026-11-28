@@ -1,0 +1,158 @@
+# Prometheus alert rules for the database. One alert per signal in
+# required-metrics.txt that pages or warns; the others are dashboard-only.
+# Thresholds marked TUNABLE are starting points, not facts about any deployment.
+# Every alert: severity, summary, description, runbook (a section of ../RUNBOOK.md),
+# and at least one firing and one non-firing case in postgres.rules.test.yml.
+# parity-check.sh enforces all of that and that no expression uses a metric the
+# contract does not list.
+groups:
+  - name: postgres
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is not reachable by its exporter"
+          description: "pg_up has been 0 for 1m on {{ $labels.instance }}: the exporter cannot log in or the server is down."
+          runbook: "db/observability/RUNBOOK.md#postgresdown"
+
+      - alert: PostgresExporterAbsent
+        # pg_up == 0 cannot fire when the exporter itself is dead: its series is then
+        # ABSENT, not 0. absent() returns 1 exactly when no pg_up series exists.
+        # TUNABLE (like the two thresholds below): the expression has NO job matcher, because
+        # this module ships no Prometheus scrape config and the job label is the operator's
+        # choice. In a Prometheus that scrapes more than one postgres_exporter, another
+        # exporter's pg_up hides a dead one: scope it, e.g. absent(pg_up{job="<your job>"}).
+        expr: absent(pg_up)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The postgres_exporter is not being scraped"
+          description: "No pg_up series for 5m: the exporter is down or Prometheus cannot reach it, so every other database alert is blind."
+          runbook: "db/observability/RUNBOOK.md#postgresexporterabsent"
+
+      - alert: PostgresExporterCollectorFailing
+        expr: pg_scrape_collector_success == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A postgres_exporter collector is failing"
+          description: "Collector {{ $labels.collector }} has failed every scrape for 5m on {{ $labels.instance }}; its metrics are dropped, so alerts that depend on them are blind."
+          runbook: "db/observability/RUNBOOK.md#postgresexportercollectorfailing"
+
+      - alert: PostgresTooManyConnections
+        expr: sum by (instance) (pg_stat_database_numbackends) / max by (instance) (pg_settings_max_connections) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 80% of max_connections in use"
+          description: "{{ $value | humanizePercentage }} of max_connections are in use on {{ $labels.instance }} for 5m."
+          runbook: "db/observability/RUNBOOK.md#postgrestoomanyconnections"
+
+      - alert: PostgresReplicationLagHigh
+        expr: pg_replication_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A replica is more than 30s behind"
+          description: "Replication lag is {{ $value }}s on {{ $labels.instance }} for 5m."
+          runbook: "db/observability/RUNBOOK.md#postgresreplicationlaghigh"
+
+      - alert: PostgresXidWraparoundApproaching
+        # 4e8 is twice the default autovacuum_freeze_max_age (200M): autovacuum has
+        # failed to freeze for a long time. The hard limit is about 2.1e9.
+        expr: max by (instance, datname) (pg_database_wraparound_age_datfrozenxid_seconds) > 4e8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transaction id age is past twice autovacuum_freeze_max_age"
+          description: "Database {{ $labels.datname }} on {{ $labels.instance }} has an oldest unfrozen xid of age {{ $value | humanize }}."
+          runbook: "db/observability/RUNBOOK.md#postgresxidwraparoundapproaching"
+
+      - alert: PostgresXidWraparoundCritical
+        expr: max by (instance, datname) (pg_database_wraparound_age_datfrozenxid_seconds) > 1e9
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Transaction id wraparound is close"
+          description: "Database {{ $labels.datname }} on {{ $labels.instance }} has an oldest unfrozen xid of age {{ $value | humanize }}; PostgreSQL stops accepting writes near 2.1e9."
+          runbook: "db/observability/RUNBOOK.md#postgresxidwraparoundcritical"
+
+      - alert: PostgresDeadTuplesHigh
+        # The 10000 floor keeps a tiny table with two dead rows from paging.
+        expr: |
+          (pg_stat_user_tables_n_dead_tup > 10000)
+            / on (instance, datname, schemaname, relname)
+          (pg_stat_user_tables_n_live_tup + pg_stat_user_tables_n_dead_tup) > 0.2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of a table is dead tuples"
+          description: "{{ $labels.schemaname }}.{{ $labels.relname }} on {{ $labels.instance }} is {{ $value | humanizePercentage }} dead tuples for 30m: autovacuum is not keeping up."
+          runbook: "db/observability/RUNBOOK.md#postgresdeadtupleshigh"
+
+      - alert: PostgresLongRunningTransaction
+        expr: pg_long_running_transactions_oldest_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A transaction has been open for more than 5 minutes"
+          description: "The oldest open transaction on {{ $labels.instance }} is {{ $value }}s old; it holds back vacuum and may hold locks."
+          runbook: "db/observability/RUNBOOK.md#postgreslongrunningtransaction"
+
+      - alert: PostgresDeadlocks
+        expr: increase(pg_stat_database_deadlocks[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deadlocks detected"
+          description: "{{ $value }} deadlock(s) in database {{ $labels.datname }} on {{ $labels.instance }} in the last 15m."
+          runbook: "db/observability/RUNBOOK.md#postgresdeadlocks"
+
+      - alert: PostgresCheckpointsRequested
+        # Forced checkpoints dominating scheduled ones means max_wal_size is too small
+        # for the write rate. An idle server divides 0 by 0 = NaN, and NaN > 0.5 is false.
+        expr: |
+          rate(pg_stat_checkpointer_num_requested_total[15m])
+            / (rate(pg_stat_checkpointer_num_timed_total[15m]) + rate(pg_stat_checkpointer_num_requested_total[15m])) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Most checkpoints are forced by WAL volume"
+          description: "{{ $value | humanizePercentage }} of checkpoints on {{ $labels.instance }} were requested, not scheduled."
+          runbook: "db/observability/RUNBOOK.md#postgrescheckpointsrequested"
+
+      - alert: PostgresTempFilesSustained
+        # TUNABLE: the 1e4 B/s (about 10 KB/s) floor keeps trickles from alerting; see the
+        # runbook section for how to choose it.
+        expr: rate(pg_stat_database_temp_bytes[15m]) > 1e4
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Queries are spilling to temporary files"
+          description: "Database {{ $labels.datname }} on {{ $labels.instance }} wrote temp files for 15m ({{ $value | humanize }}B/s)."
+          runbook: "db/observability/RUNBOOK.md#postgrestempfilessustained"
+
+      - alert: PostgresWalDirectoryLarge
+        # TUNABLE: 4e9 sits above the default max_wal_size of 1GB with room for a slot
+        # that holds WAL; set it from the volume (see the runbook section).
+        expr: pg_wal_size_bytes > 4e9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The WAL directory is larger than 4 GB"
+          description: "pg_wal on {{ $labels.instance }} is {{ $value | humanize1024 }}B: a stuck replication slot, a failing archive command or a very long checkpoint interval."
+          runbook: "db/observability/RUNBOOK.md#postgreswaldirectorylarge"

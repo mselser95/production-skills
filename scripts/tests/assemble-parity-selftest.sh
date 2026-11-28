@@ -73,13 +73,14 @@ A --dest "$tmp/u2" --layout single --module nope --slot SERVICE=x --slot OWNER=y
 A --dest "$tmp/u3" --layout nope --module service-go --slot SERVICE=x --slot OWNER=y >/dev/null 2>&1; rc=$?
 [[ $rc -eq 2 ]] && pass "unknown layout exit 2" || fail "unknown layout" "rc=$rc"
 
-# monorepo: unit under services/<SERVICE>/, root-only files at the root
+# monorepo: the service's files (CODEOWNERS, .github, AGENTS.md, scripts, go.mod, cmd) all land under
+# services/<SERVICE>/; the repository root holds none of them
 mo="$tmp/mono"
 if A --dest "$mo" --layout monorepo --module service-go --slot SERVICE=ledger --slot OWNER=acme >/dev/null 2>"$tmp/mo.err" \
-  && [[ -f "$mo/services/ledger/go.mod" && -f "$mo/services/ledger/cmd/ledger/main.go" && -f "$mo/CODEOWNERS" \
-        && -d "$mo/.github" && -f "$mo/AGENTS.md" && -d "$mo/scripts" \
-        && ! -e "$mo/go.mod" && ! -e "$mo/CODEOWNERS.x" && ! -e "$mo/services/ledger/CODEOWNERS" \
-        && ! -e "$mo/services/ledger/.github" && ! -e "$mo/cmd" ]]; then pass "monorepo placement"
+  && [[ -f "$mo/services/ledger/go.mod" && -f "$mo/services/ledger/cmd/ledger/main.go" && -f "$mo/services/ledger/CODEOWNERS" \
+        && -d "$mo/services/ledger/.github" && -f "$mo/services/ledger/AGENTS.md" && -d "$mo/services/ledger/scripts" \
+        && ! -e "$mo/go.mod" && ! -e "$mo/CODEOWNERS" && ! -e "$mo/.github" && ! -e "$mo/AGENTS.md" \
+        && ! -e "$mo/scripts" && ! -e "$mo/cmd" ]]; then pass "monorepo placement"
 else fail "monorepo placement" "$(head -c 200 "$tmp/mo.err")"; fi
 
 # determinism: same inputs twice -> identical trees and modes
@@ -427,7 +428,12 @@ vparity() { # <label> <expect ok|refuse> <svc> <owner>
 }
 long65="$(printf 'z%.0s' $(seq 1 65))"
 # end to end for a few values; the WHOLE list is compared below in ONE python process (the assembler's own check_value)
-vparity ok-a.b ok a.b 9lives
+vparity ok-a-b ok a-b 9lives
+vparity ok-owner-dot ok svc acme.io   # OWNER has no charset: a dot is accepted and substituted literally (golden p3 pins the bytes)
+# service-go's SERVICE slot narrows to lower-digits-dash: a dot is refused with exit 2, naming the slot and the charset
+vp_both refuse-svc-dot a.b 9lives
+if [[ $VA -eq 2 ]] && grep -q 'SERVICE' "$tmp/vp_refuse-svc-dot/a.err" && grep -q 'charset' "$tmp/vp_refuse-svc-dot/a.err"; then pass "value a.b for SERVICE refused (exit 2, slot and charset named)"
+else fail "value a.b for SERVICE" "VA=$VA $(head -c 160 "$tmp/vp_refuse-svc-dot/a.err")"; fi
 vparity ok-64 ok "$(printf 'z%.0s' $(seq 1 64))" acme
 vparity bad-empty refuse '' acme
 vparity bad-slash refuse 'a/b' acme
@@ -525,17 +531,30 @@ mbad src-symlink "{\"id\":\"bm\",\"source\":\"lnk\",$P}" "outside the module"
 printf '%s\n' "{\"id\":\"bm\",\"source\":\"inside/../inside\",$P}" >"$sm/bm/module.json"; run bm_ok single bm --
 [[ $rc -eq 0 && -f "$tmp/bm_ok/deep/q" ]] && pass "source: a subdirectory of the module (via inside/../inside) is accepted" || fail "source subdir" "rc=$rc $(head -c 160 "$tmp/bm_ok.err")"
 
-# ---- W1: link targets are validated by their OUTPUT location, the target is never substituted
+# ---- W1: a link is judged by where it LANDS (its output location), its target text is never rewritten.
+# Rule (monorepo): a link whose output lies in a unit directory must target inside that same unit;
+# a link at the root must not target inside (or contain) a unit; a target leaving the repository is refused first.
 mkmod lk '{"id":"lk","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"unit"}}'; mkdir -p "$sm/lk/f"; ln -s ../../x "$sm/lk/f/L"
 run lk1 monorepo lk -- SERVICE=svc
-if [[ $rc -eq 0 && "$(readlink "$tmp/lk1/services/svc/L")" == ../../x ]]; then pass "link ../../x placed under services/svc stays inside dest: accepted, target not substituted"
-else fail "output-based link (inside)" "rc=$rc $(head -c 160 "$tmp/lk1.err")"; fi
+[[ $rc -eq 1 ]] && grep -q 'link: services/svc/L -> ../../x (module lk): the target x is outside the unit directory services/svc; a link of a unit must stay inside its own unit' "$tmp/lk1.err" && [[ ! -e "$tmp/lk1" ]] && pass "link ../../x under services/svc stays in the repo but leaves its unit: refused with the unit message" || fail "unit link (leaves unit)" "rc=$rc $(head -c 200 "$tmp/lk1.err")"
+rm "$sm/lk/f/L"; mkdir -p "$sm/lk/f/sub"; ln -s ../x "$sm/lk/f/sub/L"
+run lk1b monorepo lk -- SERVICE=svc
+if [[ $rc -eq 0 && "$(readlink "$tmp/lk1b/services/svc/sub/L")" == ../x ]]; then pass "link sub/L -> ../x lands at services/svc/sub/L, targets services/svc/x: inside its unit, accepted, target text kept"
+else fail "output-based link (inside unit)" "rc=$rc $(head -c 160 "$tmp/lk1b.err")"; fi
+rm "$sm/lk/f/sub/L"; rmdir "$sm/lk/f/sub"; ln -s ../../x "$sm/lk/f/L"
 rm "$sm/lk/f/L"; ln -s ../../../x "$sm/lk/f/L"
 run lk2 monorepo lk -- SERVICE=svc
 [[ $rc -eq 1 ]] && grep -q 'link: services/svc/L -> ../../../x' "$tmp/lk2.err" && [[ ! -e "$tmp/lk2" ]] && pass "link leaving dest from its OUTPUT location refused" || fail "output-based link (escape)" "rc=$rc $(head -c 160 "$tmp/lk2.err")"
 mkdir -p "$sm/lk/f/d"; rm "$sm/lk/f/L"; ln -s ../../x "$sm/lk/f/d/L"
 run lk3 single lk -- SERVICE=svc
 [[ $rc -eq 1 ]] && grep -q 'link: d/L' "$tmp/lk3.err" && pass "link d/L -> ../../x leaves dest in layout single: refused" || fail "link depth" "rc=$rc"
+rm "$sm/lk/f/d/L"; rmdir "$sm/lk/f/d"; echo y >"$sm/lk/f/y"
+mkmod lkr '{"id":"lkr","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/lkr/f"; ln -s services/svc/y "$sm/lkr/f/R"
+run lk4 monorepo lk lkr -- SERVICE=svc
+[[ $rc -eq 1 ]] && grep -q 'link: R -> services/svc/y (module lkr): a root link whose target services/svc/y lies inside or contains the unit directory services/svc' "$tmp/lk4.err" && pass "root link into a unit directory refused (a root link may not couple the root to a unit)" || fail "root link into unit" "rc=$rc $(head -c 200 "$tmp/lk4.err")"
+rm "$sm/lkr/f/R"; echo z >"$sm/lkr/f/z"; ln -s z "$sm/lkr/f/R"
+run lk5 monorepo lk lkr -- SERVICE=svc
+[[ $rc -eq 0 && "$(readlink "$tmp/lk5/R")" == z ]] && pass "root link to a root file accepted" || fail "root link inside root" "rc=$rc $(head -c 200 "$tmp/lk5.err")"
 
 # ---- W2: case / normalisation collisions are refused on every platform
 mkmod cfd '{"id":"cfd","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"root"}}'; mkdir -p "$sm/cfd/f"; echo one >"$sm/cfd/f/a.md"; echo two >"$sm/cfd/f/<SERVICE>.md"
@@ -732,7 +751,7 @@ sc_wexcl()  { local o; o="$(USE="$1" direct excl)"; [[ "$o" == REFUSED* ]]; }
 sc_sigterm(){ local d="$tmp/sg_m" r; rm -rf "$d"; mkdir -p "$d"; (ulimit -c 0; python3 -I -B "$tmp/direct.py" "$1" sig:SIGTERM "$d/dest" "$sm" >/dev/null 2>"$d/err"); r=$?
   [[ $r -eq 143 && "$(cat "$d/err")" == "assemble: interrupted -- nothing written" && "$(ls -A "$d")" == err ]]; }
 mkmod lc2x '{"id":"lc2x","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/lc2x/f"; ln -s /outside "$sm/lc2x/f/d2"
-mkmod lkm '{"id":"lkm","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"unit"}}'; mkdir -p "$sm/lkm/f"; ln -s ../../x "$sm/lkm/f/L"
+mkmod lkm '{"id":"lkm","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"unit"}}'; mkdir -p "$sm/lkm/f"; mkdir -p "$sm/lkm/f/sub"; ln -s ../x "$sm/lkm/f/sub/L"
 mkmod sx '{"id":"sx","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/sx/f"; echo z >"$sm/sx/f/z"; chmod 4755 "$sm/sx/f/z"
 mkdir -p "$sm/bm/f"; echo x >"$sm/bm/f/a"
 red grammar-search 'VALUE_RX.fullmatch(v) is None' 'VALUE_RX.search(v) is None' sc_match
@@ -749,8 +768,8 @@ red strict-ignores-untracked '        stray = git_list(src, env, True)
         if stray:' '        stray = git_list(src, env, True)
         if False:' sc_strict
 red length-cap-off '    if len(v) > MAX_VALUE:' '    if False:' sc_cap
-red charset-off '            if k in slots and not charset_ok(cs, slots[k]):' '            if False:' sc_cset
-red max-len-off '            if k in slots and len(slots[k]) > n:' '            if False:' sc_mlen
+red charset-off '            if k in sl and not charset_ok(cs, sl[k]):' '            if False:' sc_cset
+red max-len-off '            if k in sl and len(sl[k]) > n:' '            if False:' sc_mlen
 red dupkeys-off '        if k in d:' '        if False:' sc_dup
 red source-rule-off '        if not (real_src == real_mod or' '        if False and not (real_src == real_mod or' sc_src
 red literal-slash-off '            if "/" in v["literal"] or "\0" in v["literal"]:' '            if False:' sc_litslash
@@ -917,7 +936,11 @@ red link-to-dotdot-off 'or norm == ".." or norm.startswith("../")' 'or norm.star
 red broken-pipe-off '        except (OSError, ValueError):
             # a closed pipe' '        except ZeroDivisionError:
             # a closed pipe' sc_bp
-red sigquit-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGTERM", "SIGHUP")' sc_quit
+# A process that dies of an unhandled SIGQUIT makes macOS write a crash report and show a
+# "Python quit unexpectedly" dialog, so this mutant runs where that does not happen (Linux, CI).
+if [[ "$(uname -s)" == Darwin ]]; then echo "SKIPPED mutant sigquit-unhandled: an unhandled SIGQUIT raises a crash dialog on macOS"
+else red sigquit-unhandled '("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")' '("SIGINT", "SIGTERM", "SIGHUP")' sc_quit
+fi
 red cause-wins-off '            ignore_signals()  # CAUSE-WINS: a pending signal must not replace the real failure' '            pass' sc_changed
 red commit-ignore-off '            ignore_signals()  # COMMIT-IGNORE: the tree is complete; a late signal is dropped' '            pass' sc_commit
 red unit-prefix-dir-mode-off 'dir_modes[od] = (0o755 & ~umask) | stat.S_IWUSR' 'dir_modes[od] = (0o777 & ~umask) | stat.S_IWUSR' sc_unitdir

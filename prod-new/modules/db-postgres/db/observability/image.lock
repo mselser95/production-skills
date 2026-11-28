@@ -1,0 +1,32 @@
+# db/observability/image.lock - the pinned images the monitoring overlay uses.
+#
+# Same line format as ../image.lock (`key = value`, `#` comments), but a SEPARATE
+# file: the database pair in ../image.lock is a tested pair and its gate
+# (scripts/db-pin-check.sh) knows nothing about an exporter. The overlay
+# ../compose.observability.yml must carry exactly these references; parity-check.sh
+# compares them. Never `latest`; never a tag without the INDEX digest.
+#
+# WHERE THE VALUES CAME FROM (checked 2026-11-28 against the registry's HTTP API,
+# no Docker): the tag -> index digest mapping of
+#   quay.io/prometheuscommunity/postgres-exporter  v0.21.1  (tag pushed 2026-11-18)
+#   quay.io/prometheus/prometheus                  v3.16.0  (tag pushed 2026-11-05)
+# Reproduce:
+#   docker buildx imagetools inspect quay.io/prometheuscommunity/postgres-exporter:v0.21.1
+#   docker buildx imagetools inspect quay.io/prometheus/prometheus:v3.16.0
+# NOT verified here (needs a container): that the exporter image runs as the
+# non-root user the overlay sets, that its busybox base has `wget` (the overlay's
+# healthcheck), and the exact metric names it emits. scripts/db-scrape-test.sh
+# is the test of all three; run it after every bump.
+
+verified_utc = 2026-11-28
+
+exporter.image = quay.io/prometheuscommunity/postgres-exporter
+exporter.tag = v0.21.1
+exporter.digest = sha256:a88794758ad461c75f3825b51cde4bde730bdff04b3b24d00efe14217e41f615
+exporter.digest.linux/amd64 = sha256:d6a144f7fd357b637371d96879b46682329353bb9e0b5d494a73d71631a60612
+exporter.digest.linux/arm64 = sha256:00fa392f5398824ec48a9f4996822fb0961ba1861fa2f8e3b7efdd777d3809d7
+
+# promtool only: `promtool test rules` runs in this image (entrypoint overridden).
+prometheus.image = quay.io/prometheus/prometheus
+prometheus.tag = v3.16.0
+prometheus.digest = sha256:9332054523223e2ddc18d8101799d54a4a8d823b030c53216f063a6c117773cd

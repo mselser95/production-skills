@@ -1,0 +1,126 @@
+# python-unit.yml -- CI for this Python unit: the ONE copy of the workflow. It lives at
+# .github/workflows/ (the only place GitHub runs a workflow from, and the only place a local
+# `uses: ./.github/workflows/python-unit.yml` can reach), placed at the repository root by the
+# assembler. Single layout: the unit IS the root, so the triggers below run it unchanged.
+# Monorepo layout: the root workflow calls it with `working-directory` set to the unit's directory
+# under `services/`; this file never names a unit, so it is byte-identical for every unit; the
+# `paths` filters are relative to the repository root, so at a monorepo root they match nothing
+# of a service (no double trigger from here), and the root's own caller carries the prefixed
+# filters. No secrets are used or referenced.
+name: python-unit
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "gates/**"
+      - "observability/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
+      - "Makefile"
+      - "unit.mk"
+      - "ci/**"
+      - ".github/workflows/python-unit.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "gates/**"
+      - "observability/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
+      - "Makefile"
+      - "unit.mk"
+      - "ci/**"
+      - ".github/workflows/python-unit.yml"
+  schedule:
+    # Nightly: new advisories appear without any code change.
+    - cron: "17 3 * * *"
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "directory of the unit relative to the repository root"
+        type: string
+        default: "."
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per unit and per this workflow: two units calling it in one run never cancel each other, and a
+  # caller whose own group is `${{ github.workflow }}-${{ github.ref }}` can never collide with it.
+  group: python-unit/${{ inputs.working-directory || '.' }}/${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-fast:
+    # Required check: the cheap presubmit.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: install uv (hash-pinned)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uv-venv"
+          "$RUNNER_TEMP/uv-venv/bin/pip" install --disable-pip-version-check --require-hashes --only-binary=:all: -r ci/uv-requirements.txt
+          echo "$RUNNER_TEMP/uv-venv/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles(format('{0}/uv.lock', inputs.working-directory || '.')) }}
+      - run: make check-fast
+
+  verify:
+    # Everything gated: check-fast + lock consistency + dependency audit (network, fails
+    # closed) + the property tests in the derandomised profile.
+    if: github.event_name != 'schedule'
+    needs: check-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: install uv (hash-pinned)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uv-venv"
+          "$RUNNER_TEMP/uv-venv/bin/pip" install --disable-pip-version-check --require-hashes --only-binary=:all: -r ci/uv-requirements.txt
+          echo "$RUNNER_TEMP/uv-venv/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles(format('{0}/uv.lock', inputs.working-directory || '.')) }}
+      - run: make verify
+
+  nightly:
+    # Scheduled: the audit alone against today's advisory database. Mutation testing is not
+    # wired (no mutation tool is in the locked set yet; see README, "Gates").
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: install uv (hash-pinned)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uv-venv"
+          "$RUNNER_TEMP/uv-venv/bin/pip" install --disable-pip-version-check --require-hashes --only-binary=:all: -r ci/uv-requirements.txt
+          echo "$RUNNER_TEMP/uv-venv/bin" >> "$GITHUB_PATH"
+      - run: make audit

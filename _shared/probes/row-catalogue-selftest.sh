@@ -149,7 +149,17 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 # which runs the `main` group of GATES. So "make gates runs row-catalogue" is now "GATES lists it AND it is
 # in the main group", i.e. not in PRE_IDS / POST_IDS / AGG_IDS (those are run at other times).
 er_lists_gate() { local t; t=$(sed -n '/^GATES=(/,/^)/p' "$1" | grep -vE '^[[:space:]]*#'); grep -qE '"row-catalogue\|bash [^"]*row-catalogue\.sh"' <<<"$t"; }
-er_main_gate() { local g; g=$(grep -E '^(PRE_IDS|POST_IDS|AGG_IDS)=\(' "$1"); er_lists_gate "$1" && [[ "$g" != *row-catalogue* ]]; }
+# er_main_gate FILE: is row-catalogue in the main group, AS THE RECORDER ITSELF RESOLVES IT (`--list main`, the function
+# `--run gates` uses)? Asked of the recorder, never of its text: a `POST_IDS+=(...)` anywhere moves a gate out of `make gates`.
+er_main_gate() {
+  local f="$1" d ids
+  if [[ "$f" != "$ROOT/scripts/evidence-record.sh" ]]; then
+    d=$(mktemp -d "$T/er.XXXXXX") && mkdir -p "$d/scripts" && cp "$f" "$d/scripts/evidence-record.sh" && cp "$ROOT/scripts/run-once.sh" "$d/scripts/run-once.sh" || return 1
+    f="$d/scripts/evidence-record.sh"
+  fi
+  ids=$(bash "$f" --list main 2>/dev/null) || return 1  # captured, not piped into grep -q: SIGPIPE would fail a pipefail pipeline
+  grep -qx 'row-catalogue' <<<"$ids"
+}
 mk_calls_runner() { local t; t=$(sed -n '/^gates:/,/^$/p' "$1" | grep -vE '^[[:space:]]*#'); grep -qE 'evidence-record\.sh --run gates' <<<"$t"; }
 if mk_calls_runner "$ROOT/Makefile"; then pass "wiring: Makefile gates: recipe calls the runner (--run gates)"
 else fail "wiring: Makefile gates: recipe does not call evidence-record.sh --run gates"; fi
@@ -161,9 +171,12 @@ else fail "wiring: row-catalogue is not in the main group of GATES"; fi
 grep -v 'evidence-record' "$ROOT/Makefile" > "$T/Makefile.mut"
 grep -v 'row-catalogue' "$ROOT/scripts/evidence-record.sh" > "$T/er.mut"
 sed 's/^POST_IDS=(/POST_IDS=(row-catalogue /' "$ROOT/scripts/evidence-record.sh" > "$T/er.post"
+sed 's/^AGG_IDS=(.*$/&\nPOST_IDS+=(row-catalogue)/' "$ROOT/scripts/evidence-record.sh" > "$T/er.append"
 if mk_calls_runner "$T/Makefile.mut"; then fail "mutation wiring-makefile: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-makefile: RED (Makefile copy that does not call the runner is refused)"; fi
 if er_lists_gate "$T/er.mut"; then fail "mutation wiring-gates-array: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-gates-array: RED (GATES copy without the entry is refused)"; fi
 if er_main_gate "$T/er.post"; then fail "mutation wiring-group: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-group: RED (row-catalogue moved out of the main group is refused)"; fi
+if er_main_gate "$T/er.append"; then fail "mutation wiring-group-append: NOT caught"; else ok=$((ok+1)); echo "ok   mutation wiring-group-append: RED (a later POST_IDS+=(row-catalogue) moves it out of main and the recorder says so)"; fi
+cmp -s "$T/er.append" "$ROOT/scripts/evidence-record.sh" && fail "mutation wiring-group-append: the sed did not change the recorder (ERROR)"
 
 # 14. mutations: a scratch copy of the gate with ONE check removed must be caught
 mutant() { # <name> <sed-expr> <case-dir-prepared-by-caller> <want-rc-of-original> <substring>

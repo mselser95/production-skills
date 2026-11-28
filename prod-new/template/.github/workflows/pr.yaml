@@ -256,6 +256,8 @@ jobs:
           bash scripts/retry.sh go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - name: Verify this group of the production standard
         run: bash scripts/verify-standard.sh --group "${{ matrix.group }}" --out "$RUNNER_TEMP/verify-standard/${{ matrix.group }}.json"
+        env:
+          PROD_UNIT_ROOT: ${{ github.workspace }}
       # always(): a RED group must still upload its results, so its findings
       # are on record next to the failed leg.
       - name: Upload this group's results
@@ -297,6 +299,8 @@ jobs:
           path: ${{ runner.temp }}/verify-standard
       - name: Merge the groups and decide
         run: bash scripts/verify-standard.sh --merge "$RUNNER_TEMP"/verify-standard/*.json
+        env:
+          PROD_UNIT_ROOT: ${{ github.workspace }}
 
   # Real build-provenance attestation via GitHub's own OIDC-based action --
   # no stored signing key, no external service, a genuine SLSA-style

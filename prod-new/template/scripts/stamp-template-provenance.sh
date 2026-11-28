@@ -12,7 +12,8 @@
 # out of it rots invisibly, which is the failure this exists to end. When you
 # vendor something new, add it here in the same commit.
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 2
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
+cd "${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" || exit 2
 
 VENDORED=(
   scripts/verify-standard.sh

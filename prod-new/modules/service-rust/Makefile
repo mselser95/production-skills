@@ -5,18 +5,21 @@ CARGO ?= cargo
 
 .PHONY: check-fast check-nostd verify fmt
 
-# Zone purity, enforced by the COMPILER: domain and app are built for a
-# bare-metal target that has no `std`, so no file, socket, clock, thread or
-# environment access can compile there, however it is spelled. `--all-features`
-# is a second layer (the crates declare none; tests/architecture.rs pins that).
-# The target is installed by rust-toolchain.toml (`targets`); the recipe is
-# pinned by tests/architecture.rs as ONE exact line, so it cannot be turned
-# into a no-op (a `-` prefix, `|| true`, `.IGNORE`) without a RED test.
+# Zone purity, by the COMPILER, as a convenience for a fast local loop: domain
+# and app are built for a bare-metal target that has no `std` (so no file,
+# socket, clock, thread or environment access compiles there, however it is
+# spelled), with `-F unsafe_code` forced on the rustc command line (an
+# attribute or a `[lints]` table cannot lower it). Nothing rests on this
+# recipe: tests/architecture.rs runs the same compile itself, so editing this
+# file cannot turn the property off, and `check-fast` does not call it. The target is installed by
+# rust-toolchain.toml (`targets`).
 check-nostd:
-	$(CARGO) check --locked --lib -p svc-domain -p svc-app --all-features --target thumbv7em-none-eabi
+	$(CARGO) rustc --locked --profile check --manifest-path crates/domain/Cargo.toml --lib --all-features --target thumbv7em-none-eabi -- -F unsafe_code
+	$(CARGO) rustc --locked --profile check --manifest-path crates/app/Cargo.toml --lib --all-features --target thumbv7em-none-eabi -- -F unsafe_code
 
-# Cheap gate: format, lints (warnings are errors), zone purity, the whole test suite.
-check-fast: check-nostd
+# Cheap gate: format, lints (warnings are errors), the whole test suite, which
+# includes the zone-purity compile (tests/architecture.rs, not `check-nostd`).
+check-fast:
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --locked --all-targets -- -D warnings
 	$(CARGO) test --workspace --locked
