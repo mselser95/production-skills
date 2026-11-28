@@ -15,11 +15,14 @@ Each unit has exactly `id`, `kind`, `language`, `path`; `id` and `path` are uniq
 
 | kind | language | path | the root delegates through |
 |------|----------|------|----------------------------|
-| service | go, rust, python | `services/<name>` | the unit's `Makefile` (`check-fast` and `verify` are required) |
-| app | ts | `apps/<name>` | `package.json` scripts (`test` required; `check-fast`, `verify` optional) |
+| service | go, rust, python | `services/<name>` | the unit's `Makefile` (`check-fast` and `verify` are mandatory, `test` optional) |
+| app | ts | `apps/<name>` | `package.json` scripts (`test` mandatory; `check-fast`, `verify` optional) |
 | package | ts | `packages/<name>` | the same |
-| database | sql | `db` | the unit's `Makefile`, whichever of the targets it defines (none required) |
+| database | sql | `db` | the unit's `Makefile`, whichever of the targets it defines (none mandatory) |
 
 The field names follow the root `production.yaml` v2 `units:` stanza (`id`, `database`), so that
-stanza can be generated from this file. A unit target the unit does not define is reported as
-`skip` by the Makefile and, for the required ones above, refused by the settings check.
+stanza can be generated from this file. A unit lacks a target when `make -C <unit> -n <target>` fails or prints
+no command (service, database), or `package.json` has no such script (app, package): an optional one is a
+`skip` line in the runner; a mandatory one above is refused by the settings check (`unit-target`) and FAILs the
+runner before any unit runs. A target that exists but does nothing (`verify: ; true`) cannot be judged by a tool.
+A directory `db/` must be listed (kind `database`) like `apps/*`, `packages/*` and `services/*`.
