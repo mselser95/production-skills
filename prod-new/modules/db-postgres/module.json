@@ -5,13 +5,16 @@
   "source": ".",
   "slots": {},
   "unit_kind": "database",
-  "unit": {
-    "kind": "database",
-    "language": "sql"
-  },
   "placement": {
     "db/**": "root",
-    "scripts/**": "root",
-    "README.md": "unit"
-  }
+    "scripts/**": "root"
+  },
+  "units": [
+    {
+      "id": "db",
+      "kind": "database",
+      "language": "sql",
+      "path": "db"
+    }
+  ]
 }

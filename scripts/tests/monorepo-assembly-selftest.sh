@@ -3,10 +3,12 @@
 # module, with the real manifests and no corrected copies: each manifest alone, the seven-unit assembly
 # (root, design-system, go x2, rust, python, db-postgres) with its generated repo.yaml, per-unit file ownership,
 # the settings check, the unit list of check-fast, .gitignore anchoring, the db-postgres gate in the tree, the
-# catalog invariant and the lockfile's frozen check, single layout unchanged, and one RED mutation per guarded
-# thing. Two cases pin a KNOWN GAP (design-system packages are not listed in repo.yaml; the lockfile is
-# scope-specific) and turn RED the day it is fixed, so they get updated then.
-# Hermetic, sequential, no network, no Docker. Needs python3 with PyYAML (PYTHON=<interpreter> to choose
+# catalog invariant, the GENERATED lockfile (`make lock` under two scopes, then the frozen check), single layout
+# unchanged (and "one service + database" in single layout), and one RED mutation per guarded thing, each with
+# a green control. No known gap is pinned: the design-system packages are declared units, so repo.yaml lists
+# them and the root settings check is GREEN on the seven-unit tree with no manual edit.
+# Sequential, no Docker; the network is used by ONE section only (make lock needs the npm registry; that section prints a
+# SKIP, never an ok, when pnpm is absent or the registry unreachable). Needs python3 with PyYAML (PYTHON=<interpreter> to choose
 # one; first of python3, python3.14, python3.13, python3.12 that imports yaml). Final line:
 # `<N> ok, <M> failed[, K skipped]`. Exit: 0 all ok - 1 a case failed - 2 cannot run.
 set -uo pipefail
@@ -40,15 +42,13 @@ expect() {
   else pass "$name"; fi
 }
 SL=(--slot REPO=demo-repo --slot SCOPE=demo --slot SERVICE=catalog --slot PACKAGE=catalog --slot OWNER=demo-owner)
-SL=(--slot REPO=demo-repo --slot SCOPE=demo --slot SERVICE=catalog --slot PACKAGE=catalog --slot OWNER=demo-owner)
 SLG=(--slot REPO=demo-repo --slot SCOPE=demo --slot SERVICE=catalog --slot OWNER=demo-owner) # no PACKAGE: no python module
 # The seven-unit monorepo: root + design-system + go, rust, python + a SECOND instance of service-go + db-postgres.
-# SCOPE is the design-system module's own literal (ds-scope): the committed pnpm-lock.yaml names @ds-scope/*.
 U7=(--module monorepo-root --module design-system --unit service-go:catalog --unit service-rust:billing
-    --unit "service-python:invoices,PACKAGE=invoices" --unit service-go:catalog-worker --unit db-postgres:db
-    --slot REPO=demo-repo --slot SCOPE=ds-scope --slot OWNER=demo-owner)
+    --unit "service-python:invoices,PACKAGE=invoices" --unit service-go:catalog-worker --module db-postgres
+    --slot REPO=demo-repo --slot SCOPE=demo --slot OWNER=demo-owner)
 U6=(--module monorepo-root --unit service-go:catalog --unit service-rust:billing
-    --unit "service-python:invoices,PACKAGE=invoices" --unit service-go:catalog-worker --unit db-postgres:db
+    --unit "service-python:invoices,PACKAGE=invoices" --unit service-go:catalog-worker --module db-postgres
     --slot REPO=demo-repo --slot OWNER=demo-owner) # the same without design-system
 slots_for() { # the slots one module declares (an unknown or undeclared slot is exit 2)
   case "$1" in
@@ -95,13 +95,11 @@ gitignore_ok() {
 }
 
 # ---- each manifest is accepted by the assembler on its own (one case per module)
-for m in monorepo-root design-system service-go service-rust service-python; do
+for m in monorepo-root design-system service-go service-rust service-python db-postgres; do
   # shellcheck disable=SC2046
   expect "manifest of $m is accepted alone (layout monorepo)" 0 "slots remaining: 0" \
     A "$mods" --dest "$tmp/alone-$m" --layout monorepo --module "$m" $(slots_for "$m")
 done
-expect "manifest of db-postgres is accepted alone (layout monorepo, --unit)" 0 "slots remaining: 0" \
-  A "$mods" --dest "$tmp/alone-db" --layout monorepo --unit db-postgres:db
 
 # ---- single layout still works for each service module alone, and no file moved: in layout single root
 # and unit are both the repository root, so the real manifest equals the same manifest with every
@@ -133,6 +131,17 @@ for m in service-go service-rust service-python; do
 done
 [[ $have_base -eq 1 ]] || skip "single layout equals the tree at $SBASE" "git history does not contain $SBASE (shallow clone or no git); the all-root equivalence above still ran"
 
+# ---- db-postgres in layout single: its README lives at db/README.md in both layouts (never a root README.md that
+# would collide with a service's), and its gate runs in the assembled tree. NOT covered: "one service + database"
+# in layout single: the assembler refuses it (a declared unit at db/ nested in the root unit directory of a
+# service, exit 2), see the hand-back; no case here pretends otherwise.
+expect "single layout: db-postgres alone assembles and generates no inventory" 0 "layout single" \
+  A "$mods" --dest "$tmp/single-db" --layout single --module db-postgres
+[[ ! -e "$tmp/single-db/repo.yaml" && -f "$tmp/single-db/db/README.md" && ! -e "$tmp/single-db/README.md" ]] \
+  && pass "single layout: db-postgres lands db/README.md and has no root README.md and no repo.yaml" || fail "single layout: db-postgres alone has a root README.md or a repo.yaml, or lacks db/README.md"
+expect "single layout: db-postgres alone: db-pin-check.sh passes in the assembled tree" 0 "^OK db-pin-check" \
+  env PATH="$(dirname "$(command -v "$py")"):$PATH" bash "$tmp/single-db/scripts/db-pin-check.sh" "$tmp/single-db/db/image.lock" --compose "$tmp/single-db/db/compose.yml" "$tmp/single-db/db/compose.timescale.yml"
+
 # ---- the assembly: monorepo-root + design-system + a service, real manifests, no corrected copies
 D="$tmp/repo"
 expect "assemble monorepo-root + design-system + service-python" 0 "slots remaining: 0" \
@@ -151,19 +160,14 @@ expect "the same without design-system exits 0" 0 "slots remaining: 0" \
 
 for t in "$D" "$G"; do
   n="${t##*/}"
-  # pnpm-lock.yaml names @ds-scope/* (the lockfile is monorepo-root's, which does not know the scope slot)
-  if grep -rIlE --exclude=pnpm-lock.yaml '<(REPO|SERVICE|PACKAGE|OWNER|SCOPE)>|repo-name|ds-scope' "$t" >/dev/null; then fail "$n: slot placeholders or literals left"; else pass "$n: no slot placeholder or literal left"; fi
+  if grep -rIlE '<(REPO|SERVICE|PACKAGE|OWNER|SCOPE)>|repo-name|ds-scope' "$t" >/dev/null; then fail "$n: slot placeholders or literals left"; else pass "$n: no slot placeholder or literal left"; fi
   [[ -f "$t/packages/tokens/package.json" && -f "$t/packages/theme/package.json" && ! -e "$t/services/catalog/packages" ]] \
     && pass "$n: design-system packages are at packages/, none under services/" || fail "$n: design-system packages misplaced"
   [[ -f "$t/services/catalog/Makefile" && ! -e "$t/services/catalog/package.json" ]] \
     && pass "$n: the service is under services/catalog" || fail "$n: service not under services/catalog"
 done
-if grep -rIlE '<(REPO|SERVICE|PACKAGE|OWNER|SCOPE)>|repo-name' "$S7" "$S6" >/dev/null; then fail "seven/six-unit trees: slot placeholders or literals left"; else pass "seven/six-unit trees: no slot placeholder or literal left (ds-scope is the real scope there)"; fi
-# KNOWN GAP, pinned: the lockfile is a monorepo-root file and monorepo-root does not know the design-system's
-# SCOPE slot, so under any other scope the lockfile still names @ds-scope/* and --frozen-lockfile refuses.
-grep -q '@ds-scope/' "$D/pnpm-lock.yaml" && pass "known gap pinned: with SCOPE=demo the lockfile still names @ds-scope/* (frozen install only works for SCOPE=ds-scope)" \
-  || fail "the lockfile no longer carries the ds-scope literal: the known gap is fixed, update this case and the frozen-install case"
-"$py" - "$D" "$G" "$S7" <<'E' && pass "one root package.json with packageManager, one pnpm-workspace.yaml, exactly one lockfile (the root pnpm-lock.yaml), all at the root" || fail "root files: see above"
+if grep -rIlE '<(REPO|SERVICE|PACKAGE|OWNER|SCOPE)>|repo-name|ds-scope' "$S7" "$S6" >/dev/null; then fail "seven/six-unit trees: slot placeholders or literals left"; else pass "seven/six-unit trees: no slot placeholder or literal left"; fi
+"$py" - "$D" "$G" "$S7" <<'E' && pass "one root package.json with packageManager, one pnpm-workspace.yaml, no lockfile shipped (it is generated by make lock), all at the root" || fail "root files: see above"
 import os, sys, json
 bad = []
 for root in sys.argv[1:]:
@@ -175,7 +179,7 @@ for root in sys.argv[1:]:
     pms = [p for p in found["package.json"] if "packageManager" in json.load(open(os.path.join(root, p)))]
     if pms != ["package.json"]: bad.append("%s: packageManager in %s" % (root, pms))
     if found["pnpm-workspace.yaml"] != ["pnpm-workspace.yaml"]: bad.append("%s: workspace files %s" % (root, found["pnpm-workspace.yaml"]))
-    if found["pnpm-lock.yaml"] != ["pnpm-lock.yaml"]: bad.append("%s: lockfiles %s" % (root, found["pnpm-lock.yaml"]))
+    if found["pnpm-lock.yaml"] != []: bad.append("%s: lockfiles %s" % (root, found["pnpm-lock.yaml"]))
     if found["tsconfig.base.json"] != ["tsconfig.base.json"]: bad.append("%s: tsconfig.base.json %s" % (root, found["tsconfig.base.json"]))
 for b in bad: print("  " + b)
 sys.exit(1 if bad else 0)
@@ -214,11 +218,12 @@ for b in bad[:20]: print("  " + b)
 sys.exit(1 if bad else 0)
 E
 
-# ---- repo.yaml written by the assembler: the five instances that place unit files (design-system places none)
-"$py" - "$S7/repo.yaml" <<'E' && pass "repo.yaml lists exactly the assembled units (id, kind, language, path)" || fail "repo.yaml units differ"
+# ---- repo.yaml written by the assembler: the services (instances), the database and the two packages (declared units)
+inv_ok() { "$py" - "$1" <<'E'
 import sys, yaml
 got = sorted((u["id"], u["kind"], u["language"], u["path"]) for u in yaml.safe_load(open(sys.argv[1]))["units"])
-want = sorted([("db", "database", "sql", "db"), ("billing", "service", "rust", "services/billing"),
+want = sorted([("db", "database", "sql", "db"), ("tokens", "package", "ts", "packages/tokens"),
+               ("theme", "package", "ts", "packages/theme"), ("billing", "service", "rust", "services/billing"),
                ("invoices", "service", "python", "services/invoices"), ("catalog", "service", "go", "services/catalog"),
                ("catalog-worker", "service", "go", "services/catalog-worker")])
 for g in got:
@@ -227,42 +232,25 @@ for w in want:
     if w not in got: print("  missing", w)
 sys.exit(0 if got == want else 1)
 E
-
-# ---- the root module's settings check on the assembled trees. No manual edit anywhere: the assembler wrote
-# the entries. KNOWN GAP, pinned: the design-system module is ONE instance with two packages and no unit
-# files, so repo.yaml cannot list packages/tokens and packages/theme and the check reports exactly those two
-# unit-unlisted findings and nothing else. Without the design-system the check is GREEN.
-expect "settings check GREEN on the six-unit assembly (no design-system), no manual edit" 0 "^OK monorepo-settings-check" check "$S6"
-for t in "$S7" "$D"; do
-  out="$(PYTHON="$py" check "$t" 2>&1)"
-  rest="$(grep -v 'unit-unlisted packages/\(theme\|tokens\) is not a unit\|^FAIL monorepo-settings-check' <<<"$out")"
-  n="$(grep -c 'unit-unlisted packages/' <<<"$out")"
-  if [[ "$n" -eq 2 && -z "$rest" ]]; then
-    pass "known gap pinned (${t##*/}): the design-system packages are the ONLY unit-unlisted findings, nothing else is RED"
-  else fail "settings check on ${t##*/}: only the two package unit-unlisted findings were expected (the gap may be fixed: update this case)" "$(head -c 300 <<<"$out")"; fi
-  [[ "$out" == *non-catalog-dep* ]] && fail "non-catalog-dep on design-system packages" || pass "non-catalog-dep is GREEN on the design-system packages (${t##*/})"
-done
-fill() { "$py" - "$1/repo.yaml" <<'E'
-import sys
-p = sys.argv[1]
-t = open(p).read()
-t += """  - { id: demo-tokens, kind: package, language: ts, path: packages/tokens }
-  - { id: demo-theme, kind: package, language: ts, path: packages/theme }
-"""
-open(p, "w").write(t)
-E
 }
-c="$tmp/s7-filled"; cp -R "$S7" "$c"; fill "$c"
-expect "settings check GREEN on the seven-unit assembly once the two packages are listed by hand" 0 "^OK monorepo-settings-check" check "$c"
+inv_ok "$S7/repo.yaml" && pass "repo.yaml lists exactly seven units: db, tokens, theme, billing, invoices, catalog, catalog-worker (id, kind, language, path)" || fail "repo.yaml units differ"
+
+# ---- the root module's settings check on the assembled trees: no manual edit anywhere, the assembler wrote
+# every entry (the design-system packages are declared units)
+for t in "$S7" "$S6" "$D" "$G"; do
+  expect "settings check GREEN on the assembled tree ${t##*/}, no manual edit" 0 "^OK monorepo-settings-check" check "$t"
+done
 
 # ---- make -n check-fast at the root, and the unit list it runs (no toolchain is started)
-expect "root make -n check-fast runs the unit runner" 0 "monorepo-run.sh check-fast" make -n -C "$S7" check-fast
+out="$(make --no-print-directory -n -C "$S7" check-fast 2>&1)"   # GNU make 4 prints Entering/Leaving directory with -C
+[[ "$(grep -n . <<<"$out" | sed -n 1p | cut -d: -f2-)" == "bash scripts/monorepo-settings-check.sh" && "$(grep -n . <<<"$out" | sed -n 2p | cut -d: -f2-)" == "bash scripts/monorepo-run.sh check-fast" ]] \
+  && pass "root make -n check-fast shows the settings check first, then the unit runner" || fail "root make -n check-fast order" "$out"
 units="$("$py" -B "$S7/scripts/monorepo_check.py" units "$S7" check-fast 2>&1)"
-"$py" - "$units" <<'E' && pass "check-fast will run in exactly billing, catalog, catalog-worker, invoices; db has none" || fail "check-fast unit list wrong: $units"
+"$py" - "$units" <<'E' && pass "check-fast covers exactly the four services (billing, catalog, catalog-worker, invoices); db, tokens, theme have none; seven units listed" || fail "check-fast unit list wrong: $units"
 import sys
 rows = [l.split("\t") for l in sys.argv[1].splitlines() if l]
 has = sorted(r[0] for r in rows if r[3] == "1")
-sys.exit(0 if has == ["billing", "catalog", "catalog-worker", "invoices"] and {r[0] for r in rows} == {"db", "billing", "invoices", "catalog", "catalog-worker"} else 1)
+sys.exit(0 if has == ["billing", "catalog", "catalog-worker", "invoices"] and {r[0] for r in rows} == {"db", "theme", "tokens", "billing", "invoices", "catalog", "catalog-worker"} else 1)
 E
 
 # ---- .gitignore: the service's anchored patterns follow the service into services/<id>/
@@ -272,8 +260,8 @@ else skip ".gitignore check-ignore cases" "git is not installed"; fi
 
 # ---- db-postgres in the assembled tree: its files, and its hermetic gate resolves its own paths there
 miss=""
-for p in db/image.lock db/compose.yml db/README.md scripts/db-pin-check.sh scripts/db_pin_compose.py scripts/tests/db-pin-check-selftest.sh; do [[ -f "$S7/$p" ]] || miss+=" $p"; done
-[[ -z "$miss" && ! -e "$S7/db/db" ]] && pass "db-postgres lands at db/ (README as the unit file) and scripts/" || fail "db-postgres files misplaced:$miss"
+for p in db/image.lock db/compose.yml db/README.md db/bootstrap/README.md scripts/db-pin-check.sh scripts/db_pin_compose.py scripts/tests/db-pin-check-selftest.sh; do [[ -f "$S7/$p" ]] || miss+=" $p"; done
+[[ -z "$miss" && ! -e "$S7/db/db" && ! -e "$S7/README.md" ]] && pass "db-postgres lands at db/ (its README is db/README.md, none at the repository root) and scripts/" || fail "db-postgres files misplaced:$miss"
 expect "db-postgres: db-pin-check.sh runs in the assembled tree (no Docker) and finds db/image.lock" 0 "^OK db-pin-check" \
   env PATH="$(dirname "$(command -v "$py")"):$PATH" bash "$S7/scripts/db-pin-check.sh" "$S7/db/image.lock" --compose "$S7/db/compose.yml" "$S7/db/compose.timescale.yml"
 expect "db-postgres: db-pin-check.sh finds its default lock ($here/../db/image.lock)" 0 "^OK db-pin-check" \
@@ -295,106 +283,173 @@ for k in sorted(names):
     if not re.fullmatch(r"\d+\.\d+\.\d+", str(cat.get(k))): bad.append("catalog %s=%r is not an exact version" % (k, cat.get(k)))
 for k in cat:
     if k not in names: bad.append("catalog entry %s is used by no package" % k)
-# the lockfile records the same catalog versions
-lock = yaml.safe_load(open(root + "/pnpm-lock.yaml"))["catalogs"]["default"]
-for k, v in cat.items():
-    if lock.get(k, {}).get("specifier") != str(v): bad.append("lockfile catalog %s=%s != %s" % (k, lock.get(k), v))
 for b in bad: print("  " + b)
 sys.exit(1 if bad or not names else 0)
 E
 
-# ---- pnpm: the committed root lockfile is in sync with the assembled workspace. `--lockfile-only` makes the
-# frozen check need no package store, so it is hermetic and takes 0.3 s; the full `--frozen-lockfile --offline`
-# install needs a populated store (done by hand, see the hand-back).
-frozen() { bash -c 'cd "$1" && pnpm install --frozen-lockfile --lockfile-only --ignore-scripts --offline' _ "$1"; }
-if ! command -v pnpm >/dev/null 2>&1; then
-  skip "pnpm install --frozen-lockfile (lockfile in sync)" "pnpm is not installed"
+# ---- the lockfile is GENERATED (never shipped): `make lock` writes it, `make lock-check` (frozen, lockfile-only,
+# offline) passes right after, under two different scopes; the registry is needed for `make lock` only
+tools_ok=1
+if ! command -v pnpm >/dev/null 2>&1; then tools_ok=0; reason="pnpm is not installed"
+elif ! command -v curl >/dev/null 2>&1 || ! curl -sS -m 5 -o /dev/null https://registry.npmjs.org/ 2>/dev/null; then tools_ok=0; reason="the npm registry is unreachable"; fi
+# pnpm_env: a private HOME, store and caches, so nothing of the user's pnpm state is read or written
+pnpm_env() { env HOME="$tmp/home" npm_config_store_dir="$tmp/home/store" XDG_CACHE_HOME="$tmp/home/cache" XDG_DATA_HOME="$tmp/home/data" \
+  XDG_STATE_HOME="$tmp/home/state" npm_config_update_notifier=false "$@"; }
+mklock() { pnpm_env make -C "$1" lock; }
+lockchk() { pnpm_env make -C "$1" lock-check; }
+expect "root Makefile: make -n lock runs pnpm install --lockfile-only --ignore-scripts" 0 "pnpm install --lockfile-only --ignore-scripts" make -n -C "$S7" lock
+expect "root Makefile: make -n lock-check runs the frozen, lockfile-only, offline install" 0 "pnpm install --frozen-lockfile --lockfile-only --ignore-scripts --offline" make -n -C "$S7" lock-check
+if [[ $tools_ok -eq 0 ]]; then
+  skip "make lock under two scopes, then make lock-check (not reported ok)" "$reason"
 else
-  expect "pnpm install --frozen-lockfile --lockfile-only --ignore-scripts --offline on a fresh seven-unit assembly" 0 "" frozen "$S7"
-  S7b="$tmp/seven-b"
-  A "$mods" --dest "$S7b" --layout monorepo --module monorepo-root --module design-system --unit service-go:payments --unit service-go:payments-worker --unit "service-python:risk,PACKAGE=risk" \
-    --slot REPO=other-repo --slot SCOPE=ds-scope --slot OWNER=demo-owner >/dev/null 2>&1
-  expect "the lockfile does not depend on the service ids (a second assembly with other ids)" 0 "" frozen "$S7b"
+  SA="$tmp/scope-a"; SB="$tmp/scope-b"
+  mkws() { A "$mods" --dest "$1" --layout monorepo --module monorepo-root --module design-system --unit service-go:catalog \
+    --slot REPO=demo-repo --slot SCOPE="$2" --slot OWNER=demo-owner >/dev/null 2>&1; }
+  mkws "$SA" acme; mkws "$SB" other
+  expect "make lock-check on a fresh assembly (no lockfile yet) is RED" 2 "" lockchk "$SA"
+  expect "make lock generates the lockfile under scope acme" 0 "" mklock "$SA"
+  expect "make lock generates the lockfile under scope other" 0 "" mklock "$SB"
+  grep -q '@acme/tokens' "$SA/pnpm-lock.yaml" && grep -q '@other/tokens' "$SB/pnpm-lock.yaml" && ! grep -q '@acme/' "$SB/pnpm-lock.yaml" \
+    && pass "each generated lockfile names its own scope (@acme/*, @other/*), none the other's" || fail "generated lockfile scope names"
+  expect "make lock-check (frozen, offline) passes right after make lock, scope acme" 0 "" lockchk "$SA"
+  expect "make lock-check (frozen, offline) passes right after make lock, scope other" 0 "" lockchk "$SB"
+  expect "the settings check stays GREEN once the lockfile is generated" 0 "^OK monorepo-settings-check" check "$SA"
+  c="$tmp/m14"; cp -R "$SA" "$c"
+  sed -i.b 's|^  vitest: .*|  vitest: 5.1.0|' "$c/pnpm-workspace.yaml"; rm "$c/pnpm-workspace.yaml.b"
+  expect "mutation: a catalog version changed without regenerating the lockfile makes make lock-check RED (control: scope acme above is GREEN)" 2 "" lockchk "$c"
+  c="$tmp/m15"; cp -R "$SA" "$c"; cp "$SB/pnpm-lock.yaml" "$c/pnpm-lock.yaml"
+  expect "mutation: another scope's lockfile in the tree makes make lock-check RED (control: scope acme above is GREEN)" 2 "" lockchk "$c"
 fi
 
-# ---- mutations on scratch copies of the modules: each must turn the assembly (or the check) RED
+# ---- mutations on scratch copies of the modules: each one is RED, and each has a GREEN control (the same
+# scenario on the unmutated copy, placed the same way) that runs first and must pass
 M="$tmp/x/modules"; mkdir -p "$M" "$tmp/x"
 cp -R "$here/prod-new/template" "$tmp/x/template"
 for m in monorepo-root design-system service-go service-rust service-python db-postgres; do cp -R "$mods/$m" "$M/$m"; done
-jedit() { "$py" -c 'import json,sys;p=sys.argv[1];d=json.load(open(p));exec(sys.argv[2]);json.dump(d,open(p,"w"),indent=2)' "$1" "$2"; }
+# jedit <manifest> <python statements>: edits the parsed manifest (d) and may touch files (dd = module dir);
+# fails when the edit changed neither the manifest nor... the statements raise or leave d unchanged AND no file
+jedit() { "$py" -c '
+import copy, json, os, sys
+p = sys.argv[1]; dd = os.path.dirname(p); d = json.load(open(p)); o = copy.deepcopy(d)
+before = sorted(os.listdir(dd))
+exec(sys.argv[2])
+if d == o and sorted(os.listdir(dd)) == before: sys.exit(3)
+json.dump(d, open(p, "w"), indent=2)' "$1" "$2"; }
 reset_mod() { rm -rf "${M:?}/$1"; cp -R "$mods/$1" "$M/$1"; }
+mi=0
+# mut_asm <name> <rc> <pattern> <module> <edit> <assembler args...>: control, edit, expect, reset
+mut_asm() {
+  local name="$1" want="$2" pat="$3" mod="$4" edit="$5"; shift 5; mi=$((mi + 1))
+  if A "$M" --dest "$tmp/ctl$mi" "$@" >/dev/null 2>&1; then pass "control for the next mutation: the unmutated copy assembles (exit 0)"
+  else fail "control for: $name" "the unmutated scratch copy does not assemble"; fi
+  if jedit "$M/$mod/module.json" "$edit"; then expect "$name" "$want" "$pat" A "$M" --dest "$tmp/mut$mi" "$@"
+  else fail "$name" "the edit changed nothing"; fi
+  reset_mod "$mod"
+}
+MROOT=(--layout monorepo --module monorepo-root --slot REPO=demo-repo)
 
-jedit "$M/design-system/module.json" 'd["placement"]["packages/**"]="unit"'
-expect "mutation: design-system placement back to unit is refused (it would land under services/)" 2 "SERVICE slot" \
-  A "$M" --dest "$tmp/m1" --layout monorepo --module monorepo-root --module design-system --module service-python "${SL[@]}"
-reset_mod design-system
+mut_asm "mutation: design-system placement back to unit is refused (it would land under services/)" 2 "SERVICE slot" design-system \
+  'd["placement"]["packages/**"]="unit"' --layout monorepo --module monorepo-root --module design-system --module service-python "${SL[@]}"
 
-printf '{"name": "design-system-workspace", "private": true}\n' > "$M/design-system/package.json"
-jedit "$M/design-system/module.json" 'd["placement"]["package.json"]="root"'
-expect "mutation: design-system root package.json not excluded collides with the root module's" 1 "package.json" \
-  A "$M" --dest "$tmp/m2" --layout monorepo --module monorepo-root --module design-system --module service-python "${SL[@]}"
+mut_asm "mutation: design-system root package.json not excluded collides with the root module's" 1 "package.json" design-system \
+  'open(dd + "/package.json", "w").write("{\"name\": \"design-system-workspace\", \"private\": true}\n"); d["placement"]["package.json"]="root"' \
+  --layout monorepo --module monorepo-root --module design-system --module service-python "${SL[@]}"
+
+mut_asm "mutation: a declared design-system unit path changed (packages/tok is not packages/tokens) is exit 2" 2 "packages/tok" design-system \
+  'd["units"][0]["path"]="packages/tok"' --layout monorepo "${U7[@]}"
+
+# the design-system units removed: it assembles, but the root settings check is RED (the control is the GREEN S7 above)
+jedit "$M/design-system/module.json" 'del d["units"]' && A "$M" --dest "$tmp/mu" --layout monorepo "${U7[@]}" >/dev/null 2>&1
+[[ -d "$tmp/mu" ]] && expect "mutation: units removed from the design-system manifest: the settings check on the assembled tree is RED (unit-unlisted)" 1 "unit-unlisted packages/(theme|tokens)" check "$tmp/mu" \
+  || fail "mutation: design-system without units should still assemble"
 reset_mod design-system
 
 c="$tmp/m3"; cp -R "$D" "$c"
 sed -i.b 's|"typescript": "catalog:"|"typescript": "7.0.2"|' "$c/packages/tokens/package.json"; rm "$c/packages/tokens/package.json.b"
-expect "mutation: a dependency back to an exact version makes the settings check RED" 1 "non-catalog-dep .*7\.0\.2" check "$c"
+expect "mutation: a dependency back to an exact version makes the settings check RED (control: the unmutated tree is GREEN above)" 1 "non-catalog-dep .*7\.0\.2" check "$c"
 
-jedit "$M/service-python/module.json" 'del d["unit"]'
-expect "mutation: the unit key removed from service-python is refused (unit files, repo.yaml present)" 2 "declares no .unit." \
-  A "$M" --dest "$tmp/m6" --layout monorepo "${U7[@]}"
-reset_mod service-python
+c="$tmp/m4"; cp -R "$D" "$c"
+sed -i.b 's|"private": true,|"private": true, "devEngines": {"runtime": {"name": "node"}},|' "$c/packages/tokens/package.json"; rm "$c/packages/tokens/package.json.b"
+grep -q devEngines "$c/packages/tokens/package.json" && expect "mutation: a workspace package.json gaining devEngines makes the settings check RED (control: the unmutated tree is GREEN above)" 1 "devEngines" check "$c" \
+  || fail "mutation devEngines: the edit changed nothing"
+
+mut_asm "mutation: the unit key removed from service-python is refused (unit files, repo.yaml present)" 2 "declares no .unit." service-python \
+  'del d["unit"]' --layout monorepo "${U7[@]}"
 
 expect "the unmutated service-go refuses the id Orders (charset lower-digits-dash)" 2 "" \
   A "$mods" --dest "$tmp/m7ok" --layout monorepo --module monorepo-root --unit service-go:Orders --slot REPO=demo-repo --slot OWNER=demo-owner
-jedit "$M/service-go/module.json" 'd["slots"]["SERVICE"]="service name"'
-if A "$M" --dest "$tmp/m7" --layout monorepo --module monorepo-root --unit service-go:Orders --slot REPO=demo-repo --slot OWNER=demo-owner >/dev/null 2>&1; then
-  expect "mutation: with no charset the id Orders is accepted and the settings check in the assembled tree is RED" 1 "Orders" check "$tmp/m7"
-else fail "mutation: service-go without charset should accept the id Orders"; fi
+jedit "$M/service-go/module.json" 'del d["slots"]["SERVICE"]["charset"]' \
+  && expect "mutation: with the charset removed the id Orders is STILL refused (second guard: the inventory id grammar, exit 2)" 2 "does not match" \
+    A "$M" --dest "$tmp/m7" --layout monorepo --module monorepo-root --unit service-go:Orders --slot REPO=demo-repo --slot OWNER=demo-owner \
+  || fail "mutation: the charset edit changed nothing"
 reset_mod service-go
 
-jedit "$M/service-go/module.json" 'd["placement"]["AGENTS.md"]="root"'
-expect "mutation: a slot-dependent service-go file (AGENTS.md) back at root collides between two instances" 1 "AGENTS.md" \
-  A "$M" --dest "$tmp/m8" --layout monorepo --module monorepo-root --unit service-go:catalog --unit service-go:catalog-worker --slot REPO=demo-repo --slot OWNER=demo-owner
-reset_mod service-go
+mut_asm "mutation: a slot-dependent service-go file (AGENTS.md) back at root collides between two instances" 1 "AGENTS.md" service-go \
+  'd["placement"]["AGENTS.md"]="root"' "${MROOT[@]}" --slot OWNER=demo-owner --unit service-go:catalog --unit service-go:catalog-worker
 
-jedit "$M/service-go/module.json" 'd["placement"]["registries/**"]="root"'
-jedit "$M/service-rust/module.json" 'd["placement"]["registries/**"]="root"'
-expect "mutation: the registries of service-go and service-rust back at root collide" 1 "registries/" \
-  A "$M" --dest "$tmp/m9" --layout monorepo --module monorepo-root --unit service-go:catalog --unit service-rust:billing --slot REPO=demo-repo --slot OWNER=demo-owner
+A "$M" --dest "$tmp/ctlreg" "${MROOT[@]}" --slot OWNER=demo-owner --unit service-go:catalog --unit service-rust:billing >/dev/null 2>&1 \
+  && pass "control for the next mutation: the unmutated copies of service-go and service-rust assemble (exit 0)" || fail "control for the registries mutation"
+jedit "$M/service-rust/module.json" 'd["placement"]["registries/**"]="root"' && jedit "$M/service-go/module.json" 'd["placement"]["registries/**"]="root"' \
+  && expect "mutation: the registries of service-go and service-rust back at root collide" 1 "registries/" \
+    A "$M" --dest "$tmp/mreg" "${MROOT[@]}" --slot OWNER=demo-owner --unit service-go:catalog --unit service-rust:billing || fail "registries mutation: the edit changed nothing"
 reset_mod service-go; reset_mod service-rust
 
 jedit "$M/service-go/module.json" 'd["placement"][".gitignore"]="root"; d["root_merge"]={".gitignore":"union-lines"}'
 if A "$M" --dest "$tmp/m10" --layout monorepo "${U6[@]}" >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  gitignore_ok "$S6" >/dev/null 2>&1 && pass "control for the next mutation: the unmutated six-unit tree passes the anchored .gitignore check" || fail "control for the .gitignore mutation"
   out="$(gitignore_ok "$tmp/m10" 2>&1)" && fail "mutation: .gitignore back to root+merge should break the anchored patterns" \
     || { [[ "$out" == *"is not ignored"* ]] && pass "mutation: .gitignore back to root+merge leaves services/<id>/ unignored (check-ignore RED)" || fail "mutation .gitignore: unexpected output" "$out"; }
 elif command -v git >/dev/null 2>&1; then fail "mutation: .gitignore root+merge assembly should still assemble"
 else skip "mutation: .gitignore back to root+merge" "git is not installed"; fi
 reset_mod service-go
 
-printf '{\n  "id": "db-postgres",\n  "summary": "x",\n  "contributes": [],\n  "requires": [],\n  "liabilities": []\n}\n' > "$M/db-postgres/module.json"
-expect "mutation: db-postgres manifest back to the old descriptive format is exit 2" 2 "" \
-  A "$M" --dest "$tmp/m11" --layout monorepo --module monorepo-root --unit db-postgres:db --slot REPO=demo-repo
+mut_asm "mutation: db-postgres manifest with an unknown key is exit 2" 2 "unknown key" db-postgres \
+  'd["summary"]="x"' "${MROOT[@]}" --module db-postgres
+
+mut_asm "mutation: a db-postgres declared unit of kind service (path db is not services/db) is exit 2" 2 "db" db-postgres \
+  'd["units"][0]["kind"]="service"' "${MROOT[@]}" --module db-postgres
+
+# the README back at the module root: in layout single it lands at the repository root (where a service's README.md
+# would collide with it) instead of db/README.md; the unmutated copy lands db/README.md only (control, same args)
+A "$M" --dest "$tmp/ctlrd" --layout single --module db-postgres >/dev/null 2>&1 && [[ -f "$tmp/ctlrd/db/README.md" && ! -e "$tmp/ctlrd/README.md" ]] \
+  && pass "control for the next mutation: the unmutated db-postgres lands db/README.md and no root README.md" || fail "control for the README mutation"
+jedit "$M/db-postgres/module.json" 'os.rename(dd + "/db/README.md", dd + "/README.md"); d["placement"]["README.md"]="root"' \
+  && A "$M" --dest "$tmp/mrd" --layout single --module db-postgres >/dev/null 2>&1
+[[ -f "$tmp/mrd/README.md" && ! -e "$tmp/mrd/db/README.md" ]] && pass "mutation: db-postgres README back at the module root lands a root README.md (the service collision), RED against the case above" \
+  || fail "mutation: the README at the module root should land at the repository root"
 reset_mod db-postgres
 
-jedit "$M/db-postgres/module.json" 'd["unit"]["kind"]="service"'
-expect "mutation: db-postgres unit kind service is refused (no SERVICE slot, would land under services/)" 2 "SERVICE slot" \
-  A "$M" --dest "$tmp/m12" --layout monorepo --module monorepo-root --unit db-postgres:db --slot REPO=demo-repo
+# db `units` removed: it assembles, but repo.yaml lacks db (the same comparison as the case above is RED)
+jedit "$M/db-postgres/module.json" 'del d["units"]' && A "$M" --dest "$tmp/mdb" --layout monorepo "${U7[@]}" >/dev/null 2>&1
+if [[ -f "$tmp/mdb/repo.yaml" ]]; then inv_ok "$tmp/mdb/repo.yaml" >/dev/null 2>&1 && fail "mutation: db units removed should drop db from repo.yaml" \
+  || pass "mutation: units removed from the db-postgres manifest: repo.yaml no longer lists db (inventory comparison RED)"
+else fail "mutation: db-postgres without units should still assemble"; fi
 reset_mod db-postgres
 
-jedit "$M/monorepo-root/module.json" 'del d["placement"]["pnpm-lock.yaml"]'
-expect "mutation: the lockfile placement removed leaves an unplaced file (assembly refused)" 1 "pnpm-lock.yaml" \
-  A "$M" --dest "$tmp/m13" --layout monorepo "${U7[@]}"
+mut_asm "mutation: a root file of the root module inside another unit's directory (services/catalog/) is refused" 1 "root file inside the unit directory" monorepo-root \
+  'os.makedirs(dd + "/services/catalog"); open(dd + "/services/catalog/x.txt", "w").write("x\n"); d["placement"]["services/**"]="root"' \
+  --layout monorepo "${U7[@]}"
+
+# the lock target removed from the root Makefile: make lock has no rule (the control is the make -n lock case above)
+sed -i.b -e '/^lock:/,/^$/d' -e 's/ lock lock-check$/ lock-check/' "$M/monorepo-root/Makefile"; rm "$M/monorepo-root/Makefile.b"
+if A "$M" --dest "$tmp/mlock" --layout monorepo "${U7[@]}" >/dev/null 2>&1; then
+  expect "mutation: the lock target removed from the root Makefile makes make lock fail" 2 "No rule to make target" make -n -C "$tmp/mlock" lock
+else fail "mutation: root Makefile without lock should assemble"; fi
 reset_mod monorepo-root
 
-if command -v pnpm >/dev/null 2>&1; then
-  c="$tmp/m14"; cp -R "$S7" "$c"
-  sed -i.b 's|^  vitest: .*|  vitest: 5.1.0|' "$c/pnpm-workspace.yaml"; rm "$c/pnpm-workspace.yaml.b"
-  expect "mutation: a catalog version changed without regenerating the lockfile makes the frozen install RED" 1 "" frozen "$c"
-else skip "mutation: catalog version changed without the lockfile" "pnpm is not installed"; fi
+if [[ $tools_ok -eq 1 ]]; then
+  # the lockfile placement restored: a lockfile generated under scope acme ships in monorepo-root, and an
+  # assembly under scope other fails the frozen check (the control: the scope acme assembly passes it, above)
+  cp "$SA/pnpm-lock.yaml" "$M/monorepo-root/pnpm-lock.yaml"
+  jedit "$M/monorepo-root/module.json" 'd["placement"]["pnpm-lock.yaml"]="root"'
+  A "$M" --dest "$tmp/mshipped" --layout monorepo --module monorepo-root --module design-system --slot REPO=demo-repo --slot SCOPE=other >/dev/null 2>&1
+  [[ -f "$tmp/mshipped/pnpm-lock.yaml" ]] && expect "mutation: the lockfile placement restored: a shipped acme lockfile fails the frozen check under scope other" 2 "" lockchk "$tmp/mshipped" \
+    || fail "mutation: the shipped-lockfile assembly did not produce a lockfile"
+  reset_mod monorepo-root
+fi
 
-jedit "$M/design-system/module.json" 'd["description"]="x"'
-expect "mutation: an unknown key in the design-system manifest is exit 2" 2 "unknown key" \
-  A "$M" --dest "$tmp/m5" --layout monorepo --module design-system --slot SCOPE=demo
+mut_asm "mutation: an unknown key in the design-system manifest is exit 2" 2 "unknown key" design-system \
+  'd["description"]="x"' --layout monorepo --module design-system --slot SCOPE=demo
 
 summary="$ok ok, $bad failed"; [[ $skipped -gt 0 ]] && summary+=", $skipped skipped"; echo "$summary"
 [[ $bad -eq 0 ]]

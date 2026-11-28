@@ -15,5 +15,19 @@
   },
   "exclude": [
     "README.md"
+  ],
+  "units": [
+    {
+      "id": "tokens",
+      "kind": "package",
+      "language": "ts",
+      "path": "packages/tokens"
+    },
+    {
+      "id": "theme",
+      "kind": "package",
+      "language": "ts",
+      "path": "packages/theme"
+    }
   ]
 }

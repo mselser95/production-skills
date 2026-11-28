@@ -110,7 +110,16 @@ to `repo.yaml`. Nothing else in this module changes. The unit brings its own `Ma
 
 ## The lockfile
 
-`pnpm-lock.yaml` is placed at the root (one file, generated with `pnpm install --lockfile-only --ignore-scripts` from the assembled monorepo-root + design-system workspace; importers are `packages/*`, so service ids do not matter). Catalog versions are at least 7 days old when it is generated. It names `@ds-scope/*`, so it matches only `--slot SCOPE=ds-scope`.
+No `pnpm-lock.yaml` is shipped: a lockfile names the design system's scope (`@<scope>/tokens`), so a
+pre-generated one would be wrong for every scope but one. The lockfile is GENERATED, once, when a
+repository is scaffolded: run `make lock` (`pnpm install --lockfile-only --ignore-scripts`; needs the registry;
+catalog versions are at least 7 days old at that moment) and commit the result. `make lock-check`
+(`pnpm install --frozen-lockfile --lockfile-only --ignore-scripts --offline`) fails when the lockfile is missing
+or no longer matches the workspace manifests; measured, it needs neither network nor a package store (a cold
+cache is enough), because a frozen install resolves nothing. It is a separate target, NOT a prerequisite of
+`verify`: a fresh scaffold has no lockfile until `make lock`, and a repository of Go, Rust or Python units may
+have no pnpm. The settings check refuses any lockfile other than the root one (`second-lockfile`); it does
+not yet report a missing root lockfile in a workspace with JS packages (see the repository's open list).
 
 ## Not here
 

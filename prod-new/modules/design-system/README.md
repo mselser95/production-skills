@@ -15,14 +15,12 @@ It is no longer a standalone workspace: assemble it with monorepo-root (`--layou
 --module design-system`), then in the assembled repo `pnpm install`, `pnpm -r typecheck`, `pnpm -r test`,
 `pnpm -r build` (or the same per package). Requires Node >=24 <27 and pnpm 10.34.3 (pinned there).
 
-The root `pnpm-lock.yaml` is monorepo-root's file, generated from this module's two packages (the importers) with
-`pnpm install --lockfile-only --ignore-scripts`; it names `@ds-scope/tokens`, so it is in sync only for the scope
-`ds-scope` (a different `--slot SCOPE=` leaves the lockfile naming `@ds-scope/*`: `pnpm install --frozen-lockfile`
-refuses until the lockfile is regenerated; known gap, see the assembly selftest). It does not depend on any service id.
-The module is ONE instance with two packages and places no unit file, so the assembler writes no `repo.yaml` entry for
-`packages/tokens` and `packages/theme`: the root settings check reports them `unit-unlisted` until they are listed.
+The root `pnpm-lock.yaml` is not shipped (it would name one scope): in a monorepo, run `make lock` at the root after assembly
+(monorepo-root's README, "The lockfile"). The manifest DECLARES the two packages as units (`units`: ids `tokens` and `theme`,
+kind `package`, language `ts`), so with monorepo-root the generated `repo.yaml` lists both and the root settings check has
+no `unit-unlisted` finding.
 
-Manifest summary: id `design-system`, unit kind package, lands at `packages/tokens` and `packages/theme`; this README is not placed.
+Manifest summary: id `design-system`, declared units `tokens` and `theme` (kind package), lands at `packages/tokens` and `packages/theme`; this README is not placed.
 
 ## Token layers (`packages/tokens/src/json`)
 

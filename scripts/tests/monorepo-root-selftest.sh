@@ -49,20 +49,8 @@ cp -R "$modsrc" "$S/monorepo-root"
 for m in design-system service-python; do
   mkdir -p "$S/$m"; (cd "$mods/$m" && tar --exclude node_modules --exclude dist --exclude __pycache__ --exclude .venv -cf - .) | (cd "$S/$m" && tar xf -)
 done
-# The design-system module as it must be once it sits under this root (follow-up for its owner): it does not
-# place the root files this module owns, and its packages take versions from the catalog.
-# Its manifest also carries keys assemble.py does not know (description, lands_at, notes, a slot `example`), lacks `source` and has a README.md that nothing places, places packages/** as `unit` (which lands under services/<SERVICE>): fixed here.
-jedit "$S/design-system/module.json" 'd["exclude"]=["package.json","pnpm-workspace.yaml","pnpm-lock.yaml","tsconfig.base.json",".npmrc",".gitignore","README.md"]
-for k in ("description","lands_at","notes"): d.pop(k,None)
-d["source"]="."
-d["placement"]["packages/**"]="root"
-d["slots"]["SCOPE"].pop("example",None)'
-for p in tokens theme; do
-  jedit "$S/design-system/packages/$p/package.json" '
-for f in ("dependencies","devDependencies"):
-    for k,v in list(d.get(f,{}).items()):
-        if v!="workspace:*": d[f][k]="catalog:"'
-done
+# The design-system module is the REAL one (its manifest excludes the root files this module owns and declares its two
+# packages as units); no corrected copy.
 
 A() { "$py" -I -B "$asm" --modules-dir "$S" "$@"; }
 D="$tmp/repo"
@@ -91,17 +79,7 @@ A --dest "$tmp/ig" --layout monorepo --module monorepo-root --module ign --slot 
   && grep -qx 'node_modules/' "$tmp/ig/.gitignore" && grep -qx 'extra-ignored/' "$tmp/ig/.gitignore" \
   && pass ".gitignore merges with a contributor that declares root_merge" || fail ".gitignore merge"
 
-# ---- repo.yaml is filled the way a human (or later the assembler) fills it: one entry per unit
-"$py" - "$D/repo.yaml" <<'E'
-import sys
-p = sys.argv[1]
-t = open(p).read().replace("units: []\n", """units:
-  - { id: svc-orders, kind: service, language: python, path: services/orders }
-  - { id: pkg-tokens, kind: package, language: ts, path: packages/tokens }
-  - { id: pkg-theme, kind: package, language: ts, path: packages/theme }
-""")
-open(p, "w").write(t)
-E
+# ---- repo.yaml is written by the assembler: one entry per unit (service orders, packages tokens and theme)
 expect "settings check passes on the assembled clean tree" 0 "^OK monorepo-settings-check" check "$D"
 expect "repo.yaml validates" 0 "" bash -c '"$0" -B "$1/scripts/monorepo_check.py" validate "$1/repo.yaml"' "$py" "$D"
 alone="$tmp/alone"; A --dest "$alone" --layout monorepo --module monorepo-root --slot REPO=demo-repo >/dev/null 2>&1
@@ -153,9 +131,9 @@ expect "a minimumReleaseAge below the floor is RED" 1 "root-settings minimumRele
 c="$(fresh set3)"; sed -i.b '/^onlyBuiltDependencies/d' "$c/pnpm-workspace.yaml"; rm "$c/pnpm-workspace.yaml.b"
 expect "dropping the install-script allowlist is RED" 1 "root-settings onlyBuiltDependencies" check "$c"
 
-c="$(fresh unit1)"; sed -i.b '/pkg-theme/d' "$c/repo.yaml"; rm "$c/repo.yaml.b"
+c="$(fresh unit1)"; sed -i.b '/id: "theme"/d' "$c/repo.yaml"; rm "$c/repo.yaml.b"
 expect "a directory under packages/ missing from repo.yaml is RED" 1 "unit-unlisted packages/theme" check "$c"
-c="$(fresh unit2)"; sed -i.b '/svc-orders/d' "$c/repo.yaml"; rm "$c/repo.yaml.b"
+c="$(fresh unit2)"; sed -i.b '/id: "orders"/d' "$c/repo.yaml"; rm "$c/repo.yaml.b"
 expect "a directory under services/ missing from repo.yaml is RED" 1 "unit-unlisted services/orders" check "$c"
 c="$(fresh unit3)"; printf '  - { id: svc-ghost, kind: service, language: go, path: services/ghost }\n' >> "$c/repo.yaml"
 n="$(lineno "$c/repo.yaml" 'svc-ghost')"
