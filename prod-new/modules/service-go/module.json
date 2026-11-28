@@ -31,5 +31,8 @@
     "regressions/**": "unit",
     "benchmarks/**": "unit",
     "observability/**": "unit"
+  },
+  "root_merge": {
+    ".gitignore": "union-lines"
   }
 }
