@@ -16,7 +16,7 @@
 #   FAILFAST=1          stop at the first FAIL line (a mutation proof needs one RED line)
 #   SHOWOUT=1           after each FAIL line print the last train run's output (debugging)
 #   SECTIONS=a,b        run only these sections (base h oracle table allcfg callers sigmid sweep
-#                       iso rm state unrel fs); unset = all. Mutation proofs use it.
+#                       iso rm state unrel fs newc); unset = all. Mutation proofs use it.
 #   ORC_N=n             generated oracle scenarios (default 8, candidates <= 4)
 #   TRAIN_ORACLE_FULL=1 the full sweep: 60 oracle scenarios of up to 6 candidates, the whole
 #                       model table, 20 random signals, a 40k-file signal case. CI's NIGHTLY
@@ -748,7 +748,12 @@ check "recovery: a truly red inferred member is PROVEN red, not landed" has "$JS
 check "recovery: proven line" has "$OUT" "proven: x4"
 check "recovery: the proven record has no inferred flag" lacks "$JSON" inferred
 check "recovery: proven red WITH the landed set names it" has "$JSON" '"red_with":["g2","g3"]'
-check "recovery: 7 + 1 runs" has "$JSON" '"runs":8,'
+# item 0: x1 (red ALONE) is also retried once against the final landed set [g2,g3]: red -> a ninth run
+check "recovery: 7 + 1 + 1 (the red-alone member's one retry) runs" has "$JSON" '"runs":9,'
+check "recovery: the red-alone member stays ejected as red" has "$JSON" '"id":"x1","why":"red"'
+check "recovery: x1 record carries red_with" has "$JSON" '"red_with":["g2","g3"]'
+check "recovery: x1 record carries verified_red (the set the retry ran)" has "$JSON" '"verified_red":["x1","g2","g3"]'
+check "recovery: x1 record carries verified_red_alone" has "$JSON" '"verified_red_alone":true'
 finish "recovery proven"
 
 fi # base (second half)
@@ -783,7 +788,7 @@ subprocess.run([G, "-C", repo, "fast-import", "--quiet"], input="".join(stream),
 vsh = os.path.join(scratch, "orc-verify.sh")
 with open(vsh, "w") as fh:
     fh.write('''#!/bin/sh
-echo x >>"$ORC_COUNT"
+ls c[0-9]*.txt 2>/dev/null | tr '\n' ' ' | sed 's/[.]txt//g' >>"$ORC_COUNT"; echo >>"$ORC_COUNT"
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   hit=1
@@ -804,53 +809,34 @@ def is_red(present, rules):  # the TEST's own predicate, a pure function of the 
     return any(pos <= present and not (neg & present) for pos, neg in rules)
 
 
-KINDS = ["single", "pair", "triple", "fixer", "red", "green", "mixed", "single", "pair", "fixer"]
+KINDS = ["single", "pair", "triple", "fixer", "red", "green", "mixed", "fixer-pair", "fixer-poison", "fixer"]
 count = os.path.join(scratch, "orc-count")
 rules_file = os.path.join(scratch, "orc-rules")
-for seed in [-1] + list(range(nseeds)):
-    r = random.Random(seed)
-    n = r.randint(2, nmax)
-    ids = ["c%d" % i for i in r.sample(range(1, 7), n)]
-    kind = KINDS[seed % len(KINDS)]
-    if kind == "triple" and n < 3:
-        kind = "pair"
-    rules = []
-    if seed == -1:
-        # fixed: c1+c3 are red TOGETHER; the skip rule ejects c4 'inferred' although it is green with
-        # the landed set, so the recovery pass must join it (and a recorded red_with must be re-verified)
-        ids, kind, rules = ["c1", "c2", "c3", "c4"], "fixed-recovery", [({"c1", "c3"}, set())]
-    elif kind == "single":
-        rules = [({x}, set()) for x in r.sample(ids, r.randint(1, min(2, n)))]
-    elif kind == "pair":
-        a, b = r.sample(ids, 2)
-        rules = [({a, b}, set())]
-    elif kind == "triple":
-        rules = [(set(r.sample(ids, 3)), set())]
-    elif kind == "fixer":
-        a, b = r.sample(ids, 2)
-        rules = [({a}, {b})]
-    elif kind == "red":
-        rules = [(set(), set())]
-    elif kind == "mixed":
-        a, b, c = (r.sample(ids, 3) + ids)[:3] if n >= 3 else (ids[0], ids[1], ids[1])
-        rules = [({a}, set()), ({b, c}, set())] if b != c else [({a}, set())]
+
+
+def scenario(name, kind, ids, rules, recover=True, expect=None, judge=None):
+    """judge: the rules the TEST's predicate uses when they differ from the verify's (the canary);
+    then the problems are returned instead of recorded."""
+    vrules, rules = rules, (judge if judge is not None else rules)
     with open(rules_file, "w") as fh:
+        rules_w, rules = rules, vrules
         for pos, neg in rules:
             fh.write("*\n" if not pos and not neg else
                      " ".join(["+" + x + ".txt" for x in sorted(pos)] + ["-" + x + ".txt" for x in sorted(neg)]) + "\n")
+    rules = rules_w
     open(count, "w").close()
     env = dict(os.environ, ORC_RULES=rules_file, ORC_COUNT=count)
     p = subprocess.run([sys.executable, "-I", "-B", script, "--base", "main", "--repo", repo,
                         "--verify", "sh " + vsh, "--max-batch", "8", "--keep",
-                        "--log-dir", os.path.join(scratch, "orc-logs")] + ids,
+                        "--log-dir", os.path.join(scratch, "orc-logs")] + ([] if recover else ["--no-recover"]) + ids,
                        capture_output=True, text=True, env=env)
     probs = []
-    name = "oracle seed %d %s %s" % (seed, kind, ",".join(ids))
+    name = "oracle %s %s %s%s" % (name, kind, ",".join(ids), "" if recover else " --no-recover")
     try:
         js = json.loads(p.stdout.strip().split("\n")[-1])
     except ValueError:
         res(name, ["no JSON summary (exit %d): %s" % (p.returncode, p.stderr[-200:])])
-        continue
+        return None
     landed = js["landed"]
     ejected = {e["id"]: e for e in js["ejected"]}
     deferred = [d["id"] for d in js["deferred"]]
@@ -862,7 +848,7 @@ for seed in [-1] + list(range(nseeds)):
     if sorted(allids) != sorted(ids):
         probs.append("not exactly one category each: %s vs %s" % (allids, ids))
     present = set(landed)
-    if landed and is_red(present, rules):
+    if landed and is_red(present, rules):  # (i)
         probs.append("landed set %s is RED by the test's predicate" % landed)
     br = js["branch"]
     if landed:
@@ -882,20 +868,46 @@ for seed in [-1] + list(range(nseeds)):
         git("update-ref", "-d", "refs/heads/" + br)
     elif br:
         probs.append("a branch without landed members")
-    for cid, e in ejected.items():
+    for cid, e in ejected.items():  # (ii) every label literally true, by the TEST's predicate
+        S = list(e.get("red_with", e.get("with", [])))
         if e["why"] == "red" and not e.get("inferred") and "red_with" not in e and not is_red({cid}, rules):
-            probs.append("%s ejected 'red' (proven) but is green alone" % cid)
-        if not is_red({cid}, rules) and not is_red(present | {cid}, rules):
-            probs.append("%s is green alone AND green with the landed set, yet ejected (%s)" % (cid, e["why"]))
-        if e.get("inferred"):
-            probs.append("%s still ejected inferred after the recovery pass" % cid)
-        if "red_with" in e:  # the claim "red together with the landed set" is re-verified by the TEST
-            if not is_red(set(e["red_with"]) | {cid}, rules):
-                probs.append("%s carries red_with %s but that set is GREEN by the test's predicate" % (cid, e["red_with"]))
-            if not set(e["red_with"]) <= present:
+            probs.append("%s ejected 'red' (alone) but is green alone" % cid)
+        if "red_with" in e and not is_red(set(S) | {cid}, rules):
+            probs.append("%s carries red_with %s but that set is GREEN" % (cid, S))
+        if e["why"] == "interaction":
+            if is_red({cid}, rules):
+                probs.append("%s is 'interaction' but red alone" % cid)
+            if not is_red(set(e["with"]) | {cid}, rules):
+                probs.append("%s interaction with %s but that set is GREEN" % (cid, e["with"]))
+            if not e.get("verified_green_alone"):
+                probs.append("%s interaction without verified_green_alone" % cid)
+        if e.get("verified_green_alone") and is_red({cid}, rules):
+            probs.append("%s verified_green_alone but red alone" % cid)
+        if e.get("verified_red_alone") and not is_red({cid}, rules):
+            probs.append("%s verified_red_alone but green alone" % cid)
+        for vs in ([e["verified_red"]] if "verified_red" in e else []):
+            if not is_red(set(vs), rules):
+                probs.append("%s verified_red %s is GREEN" % (cid, vs))
+        if e.get("inferred") and cid not in e.get("verified_red", [cid]):
+            probs.append("%s inferred record names a set without it" % cid)
+        if recover:  # (iii): after recovery nothing recoverable stays out, red-alone members included
+            if e.get("inferred"):
+                probs.append("%s still ejected inferred after the recovery pass" % cid)
+            if not is_red(present | {cid}, rules):
+                probs.append("%s is GREEN together with the FINAL landed set %s, yet ejected (%s)"
+                             % (cid, landed, e["why"]))
+            if "red_with" in e and not set(e["red_with"]) <= present:
                 probs.append("%s red_with %s names a candidate that did not land %s" % (cid, e["red_with"], landed))
-    executed = sum(1 for _ in open(count))
-    if js["runs"] != executed:
+    runlog = [frozenset(l.split()) for l in open(count).read().split("\n")[:-1]]
+    executed = len(runlog)
+    for cid, e in ejected.items():  # (v) every set a label rests on was really RUN (the test's own log)
+        if e.get("verified_green_alone") and frozenset([cid]) not in runlog:
+            probs.append("%s verified_green_alone but [%s] was never run" % (cid, cid))
+        if e["why"] == "red" and not e.get("inferred") and "red_with" not in e and frozenset([cid]) not in runlog:
+            probs.append("%s 'red' (alone) but [%s] was never run" % (cid, cid))
+        if "verified_red" in e and frozenset(e["verified_red"]) not in runlog and e["why"] != "conflict":
+            probs.append("%s verified_red %s was never run" % (cid, e["verified_red"]))
+    if js["runs"] != executed:  # (iv)
         probs.append("runs=%d but the verify command executed %d times" % (js["runs"], executed))
     want_rc = 3 if executed == 0 else (1 if ejected else 0)
     if p.returncode != want_rc:
@@ -904,7 +916,95 @@ for seed in [-1] + list(range(nseeds)):
         probs.append("all-green must land everything in one run")
     if kind == "red" and landed:
         probs.append("always-red landed something")
+    if expect:
+        probs += expect(js, landed, ejected)
+    if judge is not None:
+        return probs
     res(name, probs)
+    return js
+
+
+def want(landed_want, **why):
+    """expect=: exact landed list and, per id, the reason it must be ejected for."""
+    def f(js, landed, ejected):
+        out = []
+        if landed != landed_want:
+            out.append("landed %s, wanted %s" % (landed, landed_want))
+        for k, v in why.items():
+            if k not in ejected or ejected[k]["why"] != v:
+                out.append("%s: %s, wanted %s" % (k, ejected.get(k, {}).get("why"), v))
+        return out
+    return f
+
+
+def f_formula6(js, landed, ejected):
+    out = want(["c1", "c2", "c3"], c4="interaction", c5="red", c6="red")(js, landed, ejected)
+    if "c4" in ejected and "c3" not in ejected["c4"].get("with", []):
+        out.append("c4 interaction with %s, which lacks c3" % ejected["c4"].get("with"))
+    return out
+
+
+def f_n4(js, landed, ejected):  # a reported partner must be green as a SET (never one red alone)
+    out = []
+    for cid, e in ejected.items():
+        S = e.get("with", [])
+        if S and is_red(set(S), N4):
+            out.append("%s reported with %s, a set that is itself red" % (cid, S))
+    return out
+
+
+N4 = [({"c1"}, {"c3"}), ({"c2", "c4"}, set())]
+FIXED = [
+    ("fixed-recovery", "fixed-recovery", ["c1", "c2", "c3", "c4"], [({"c1", "c3"}, set())], None),
+    ("fixer-late", "fixer", ["c1", "c2", "c3", "c4"], [({"c1"}, {"c4"}), ({"c2"}, set())], want(["c1", "c3", "c4"], c2="red")),
+    ("fixer-pair", "fixer-pair", ["c1", "c2", "c3", "c4", "c5"], [({"c1"}, {"c5"}), ({"c3", "c4"}, set())], None),
+    ("fixer-poison", "fixer-poison", ["c1", "c2", "c3", "c4"], [({"c1"}, {"c4"}), ({"c2"}, set())], None),
+    ("formula6", "named", ["c1", "c2", "c3", "c4", "c5", "c6"],
+     [({"c1"}, {"c3"}), ({"c3", "c4"}, set()), ({"c5"}, set()), ({"c6"}, set())], f_formula6),
+    ("n4-partner", "named", ["c1", "c2", "c3", "c4"], N4, f_n4),
+    ("triple-across-halves", "named", ["c1", "c2", "c3", "c4"], [({"c1", "c2", "c3"}, set())], want(["c1", "c2", "c4"], c3="interaction")),
+    ("n5-recover", "named", ["c1", "c2", "c3", "c4", "c5"], [({"c2"}, {"c5"}), ({"c3", "c4"}, set())], None),
+]
+for nm, kind, fids, frules, fexp in FIXED:
+    scenario(nm, kind, fids, frules, True, fexp)
+    if nm in ("formula6", "triple-across-halves"):
+        scenario(nm, kind, fids, frules, False)
+# the canary: the tool runs against RED-when-c2 rules but the test judges with other rules; the
+# oracle must report problems, else it could not fail at all
+cp = scenario("canary", "canary", ["c1", "c2", "c3"], [({"c2"}, set())], True, None, judge=[({"c3"}, set())])
+res("oracle canary: a wrong predicate is DETECTED (%d problems)" % len(cp), [] if cp else ["the oracle found nothing wrong"])
+for seed in range(nseeds):
+    r = random.Random(seed)
+    n = r.randint(2, nmax)
+    ids = ["c%d" % i for i in r.sample(range(1, 7), n)]
+    kind = KINDS[seed % len(KINDS)]
+    if kind in ("triple", "fixer-pair") and n < 4 or kind == "triple" and n < 3:
+        kind = "pair"
+    if kind == "fixer-poison" and n < 3:
+        kind = "fixer"
+    rules = []
+    if kind == "single":
+        rules = [({x}, set()) for x in r.sample(ids, r.randint(1, min(2, n)))]
+    elif kind == "pair":
+        a, b = r.sample(ids, 2)
+        rules = [({a, b}, set())]
+    elif kind == "triple":
+        rules = [(set(r.sample(ids, 3)), set())]
+    elif kind == "fixer":
+        a, b = r.sample(ids, 2)
+        rules = [({a}, {b})]
+    elif kind == "fixer-pair":
+        a, b, c, d = r.sample(ids, 4)
+        rules = [({a}, {b}), ({c, d}, set())]
+    elif kind == "fixer-poison":
+        a, b, c = r.sample(ids, 3)
+        rules = [({a}, {b}), ({c}, set())]
+    elif kind == "red":
+        rules = [(set(), set())]
+    elif kind == "mixed":
+        a, b, c = (r.sample(ids, 3) + ids)[:3] if n >= 3 else (ids[0], ids[1], ids[1])
+        rules = [({a}, set()), ({b, c}, set())] if b != c else [({a}, set())]
+    scenario("seed %d" % seed, kind, ids, rules, seed % 4 != 3)
 
 # the state-file reader, in process: every malformed shape is ignored with ONE warning
 spec = importlib.util.spec_from_file_location("it", script)
@@ -927,7 +1027,7 @@ for content, want, warn in [
         ([] if got == want else ["got %r" % got]) + ([] if len(lines) == warn else ["warnings %r" % lines]))
 print("\n".join(results))
 EOF
-if [ -n "${TRAIN_ORACLE_FULL:-}" ]; then ORC_DEF=60 ORC_MAX=6; else ORC_DEF=8 ORC_MAX=4; fi
+if [ -n "${TRAIN_ORACLE_FULL:-}" ]; then ORC_DEF=60 ORC_MAX=6; else ORC_DEF=0 ORC_MAX=4; fi
 ORC_N=${ORC_N:-$ORC_DEF}
 ORC=$(cd "$S" && python3 -I -B "$S/oracle.py" "$SCRIPT" "$S" "$ORC_N" "$ORC_MAX" 2>&1)
 while IFS= read -r ol; do
@@ -936,7 +1036,7 @@ while IFS= read -r ol; do
     *) bad "${ol:0:300}" ;;
     esac
 done <<<"$ORC"
-check "oracle: ran the fixed scenario, $ORC_N generated ones and the state cases" test "$(count_of "$ORC" PASS)" -ge "$((ORC_N + 17))"
+check "oracle: ran the 9 fixed scenarios, $ORC_N generated ones and the state cases" test "$(count_of "$ORC" PASS)" -ge "$((ORC_N + 27))"
 
 fi # oracle
 if sec table; then
@@ -1026,7 +1126,7 @@ fi # table
 # file outside every repository; whatever the caller's config says, that log must stay empty.
 # ============================================================================================
 NEW=
-for sname in allcfg callers sigmid sweep iso rm state unrel fs; do sec "$sname" && NEW=1; done
+for sname in allcfg callers sigmid sweep iso rm state unrel fs newc; do sec "$sname" && NEW=1; done
 if [ -n "$NEW" ]; then
 cat >"$S/helper.py" <<'PYEOF'
 import hashlib, json, os, random, signal, subprocess, sys, time
@@ -1110,19 +1210,27 @@ def main():
         env.pop("SPY_OFF", None)
         env["TMPDIR"] = tmpdir
 
+        ready = os.path.join(tmpdir, "..", "sweep-ready")
+
         def tool(delay, sig):
             t0 = time.time()
+            if os.path.exists(ready):
+                os.unlink(ready)
+            env["TRAIN_SELFTEST"] = "1"
+            env["TRAIN_TEST_READY_FILE"] = ready
             p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", caller,
                                   "--verify", verify, "--keep", "--log-dir", logdir] + cands,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
             sent = False
+            early = False
             if delay is not None:
                 time.sleep(delay)
                 if p.poll() is None:
+                    early = not os.path.exists(ready)  # the handlers are not installed yet
                     p.send_signal(sig)
                     sent = True
             out = p.communicate(timeout=60)[0].decode("utf-8", "replace")
-            return p.returncode, sent, time.time() - t0, out
+            return p.returncode, (sent, early), time.time() - t0, out
 
         def drop_branches():
             for ln in git(caller, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/train-*").split("\n"):
@@ -1140,11 +1248,15 @@ def main():
             delay = rng.uniform(0, 1.15 * dur)
             before = snap([caller])
             refs0 = git(caller, "for-each-ref")
-            rc, sent, _, out = tool(delay, sig)
+            rc, (sent, early), _, out = tool(delay, sig)
             after = snap([caller])
             probs = []
-            if rc not in (0, 1, names[sig]):
-                probs.append("exit %d after signal %s" % (rc, sig.name))
+            # BEFORE the ready file exists the interpreter may still be starting: 128+n (handler) OR death
+            # by the signal (rc == -n, the shell reports 128+n for both). AFTER ready: 128+n, or the
+            # documented outcome of a run that finished first (0 / 1).
+            ok_rc = (names[sig], -int(sig)) if early else (0, 1, names[sig])
+            if rc not in ok_rc:
+                probs.append("exit %d after signal %s (%s ready)" % (rc, sig.name, "before" if early else "after"))
             if sent and rc == names[sig]:
                 hits += 1
             left = [x for x in os.listdir(tmpdir) if x.startswith("itrain-")]
@@ -1460,7 +1572,11 @@ for where in '../leak' '$TMPDIR/leak'; do
     trn --keep x2 g1
     check "isolation ($LK): the red candidate stays ejected (its OWN run saw no leaked file)" has "$JSON" '"id":"x2","why":"red"'
     check "isolation ($LK): the innocent candidate landed" has "$JSON" '"landed":["g1"]'
-    check "isolation ($LK): no false red_with anywhere" lacks "$JSON" red_with
+    # item 0: x2 (red alone) is retried once with the landed g1: its OWN record says red_with [g1] AND
+    # verified_red_alone; a leaked file would have made that retry green and landed x2
+    check "isolation ($LK): the red-alone member's red_with is the honest one" has "$JSON" '"red_with":["g1"]'
+    check "isolation ($LK): and it stays red alone" has "$JSON" '"verified_red_alone":true'
+    check "isolation ($LK): exactly one red_with in the report" eq "$(count_of "$JSON" red_with)" 1
     finish "isolation ($LK)"
 done
 unset V
@@ -1702,5 +1818,206 @@ done <<<"$SWO"
 check "sweep: the planted-program log is EMPTY after $NSW random signals" plog_empty
 fi
 
-echo "integration-train selftest: $PASS ok, $FAIL failed$([ "$SKIP" -gt 0 ] && echo ", $SKIP skipped"), $((SECONDS - T0)) s"
+if sec newc; then
+# ---- the later tool changes: a private-repo snapshot per run, uncheckoutable content, flags,
+# escaping, signals around delivery, item 0 (scratch repository NC, nothing planted) ----------
+NC=$S/nc
+GID='GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@x GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x'
+"$REAL_GIT" init -q -b main "$NC"
+{
+    printf 'commit refs/heads/main\nmark :1\ncommitter t <t@x> 1700000000 +0000\ndata <<EOF\nbase\nEOF\n'
+    fi_file b.txt base
+    for n in 1 2 3; do fi_commit "n$n" "add n$n" :1 "n$n.txt=file $n"; done
+    fi_commit po "poison" :1 "po.txt=POISON"
+    # d1/d2 both add a path with ESC, a newline and a tab (they overlap: the second is deferred)
+    fi_commit d1 "esc one" :1 '"e\033x\ny\tz.txt"=1'
+    fi_commit d2 "esc two" :1 '"e\033x\ny\tz.txt"=2'
+} >"$S/nc.stream"
+"$REAL_GIT" -C "$NC" fast-import --quiet <"$S/nc.stream"
+"$REAL_GIT" -C "$NC" reset -q --hard
+NCB=$("$REAL_GIT" -C "$NC" rev-parse main)
+NCBLOB=$("$REAL_GIT" -C "$NC" rev-parse main:b.txt)
+nc_commit() { # branch, tree entries (mktree lines)
+    local t c
+    t=$(printf '%b' "$2" | "$REAL_GIT" -C "$NC" mktree) || return 1
+    c=$("$REAL_GIT" -C "$NC" -c user.name=t -c user.email=t@x commit-tree "$t" -p "$NCB" -m "$1") || return 1
+    "$REAL_GIT" -C "$NC" update-ref "refs/heads/$1" "$c"
+}
+HI=$(echo hi | "$REAL_GIT" -C "$NC" hash-object -w --stdin)
+SYM=$(printf '.gitmodules' | "$REAL_GIT" -C "$NC" hash-object -w --stdin)
+GMOD=$(printf '[submodule "x"]\n\tpath = x\n\turl = ../x\n\tupdate = !echo hostile\n' | "$REAL_GIT" -C "$NC" hash-object -w --stdin)
+ENCA=$(printf '*.dat working-tree-encoding=UTF-16\n' | "$REAL_GIT" -C "$NC" hash-object -w --stdin)
+ENCB=$(printf 'caf\303\251 \377\376 broken\n' | "$REAL_GIT" -C "$NC" hash-object -w --stdin)
+nc_commit dotgit "100644 blob $HI\t.git\n100644 blob $NCBLOB\tb.txt\n" # git refuses to check a .git entry out
+nc_commit symgm "120000 blob $SYM\t.gitmodules\n100644 blob $NCBLOB\tb.txt\n" # a symlinked .gitmodules
+nc_commit hostgm "100644 blob $GMOD\t.gitmodules\n100644 blob $NCBLOB\tb.txt\n" # update = !cmd
+nc_commit enc "100644 blob $ENCA\t.gitattributes\n100644 blob $ENCB\tz.dat\n100644 blob $NCBLOB\tb.txt\n"
+no_ctl() { ! printf '%s' "$1" | LC_ALL=C tr -d '\n' | LC_ALL=C grep -q '[[:cntrl:]]'; }
+NCV='if grep -rq POISON . ; then echo FAIL poison; exit 1; fi; echo ok'
+
+# (a) a verify that keeps state in the SHARED private repository voids the run: exit 2, nothing lands
+for variant in config stash gitdir; do
+    case $variant in
+    config) VV='git config x.y z; echo ok' ;;
+    stash) VV='echo dirty >>n1.txt; env '"$GID"' git stash -q; echo ok' ;;
+    gitdir) VV='echo x >"$(git rev-parse --git-common-dir)/zz-state"; echo ok' ;;
+    esac
+    ident_begin "$NC"
+    REPOARG=$NC V="$VV" trn --keep n1 n2
+    check "snapshot ($variant): exit 2" eq "$RC" 2
+    check "snapshot ($variant): the message names a change of the private repository" has "$OUT" "private repository"
+    check "snapshot ($variant): nothing landed, nothing delivered" lacks "$OUT" '"landed":["'
+    BR=
+    ident_end "snapshot ($variant)" "$NC"
+    check "snapshot ($variant): no itrain-* left" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
+done
+ident_begin "$NC"
+REPOARG=$NC V='echo x >inside.txt; mkdir -p "$TMPDIR/own"; echo y >"$TMPDIR/own/f"; echo ok' trn --keep n1 n2
+check "snapshot control: a verify writing only inside its worktree and TMPDIR is fine" has "$JSON" '"landed":["n1","n2"]'
+ident_end "snapshot control" "$NC"
+
+# (b) content git itself refuses to check out: that candidate is ejected 'uncheckoutable', the rest land
+for bc in dotgit symgm; do
+    ident_begin "$NC"
+    REPOARG=$NC V="$NCV" trn --keep n1 "$bc" n2
+    check "uncheckoutable ($bc): exit 1, the others landed" eq "$RC$(has "$JSON" '"landed":["n1","n2"]' && echo y)" "1y"
+    check "uncheckoutable ($bc): ejected with that reason and git's first error line" has "$JSON" '"id":"'"$bc"'","why":"uncheckoutable"'
+    check "uncheckoutable ($bc): the error field is one line without a raw control byte" has "$JSON" '"error":"'
+    check "uncheckoutable ($bc): the console output carries no raw control byte" no_ctl "$OUT"
+    ident_end "uncheckoutable ($bc)" "$NC"
+    check "uncheckoutable ($bc): no itrain-* left" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
+done
+# the two inputs the first draft also claimed: measured, git does NOT fail for them, so they are
+# ordinary candidates (the claim was dead and is gone from the tool)
+ident_begin "$NC"
+REPOARG=$NC V="$NCV" trn --keep hostgm n1
+check "a .gitmodules with update = !cmd is NOT uncheckoutable (git checks it out): it lands" has "$JSON" '"landed":["hostgm","n1"]'
+ident_end "hostile .gitmodules" "$NC"
+ident_begin "$NC"
+REPOARG=$NC V="$NCV" trn --keep n1 enc n2
+ident_end "working-tree-encoding that does not convert" "$NC"
+# measured: git does not fail for it either (it prints errors and exits 0 and the worktree is clean), so the
+# candidate is verified and landed like any other; there is no 'uncheckoutable' path for it
+check "unconvertible working-tree-encoding: git does not fail, the candidate is verified and lands (exit 0)" eq "$RC$(has "$JSON" '"landed":["n1","enc","n2"]' && echo y)" "0y"
+
+# (c) a verify that leaves BSD file flags (macOS) must not keep the private root alive
+if [ "$(uname)" = Darwin ] && command -v chflags >/dev/null 2>&1; then
+    ident_begin "$NC"
+    REPOARG=$NC V='echo x >fl; chflags uchg fl; mkdir fd; echo y >fd/g; chflags uchg fd/g fd; echo ok' trn --keep n1 n2
+    check "chflags uchg on a file and a directory: the run is green" has "$JSON" '"landed":["n1","n2"]'
+    check "chflags uchg: the private root is still removed" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
+    check "chflags uchg: no leftover field" lacks "$JSON" leftover
+    ident_end "chflags uchg" "$NC"
+    # a leftover that truly cannot be removed: an ACL that denies deleting a directory's children
+    # (the remover clears modes and flags, not ACLs). The exit code stays what it was.
+    REPOARG=$NC V='mkdir lk; echo x >lk/f; chmod +a "everyone deny delete,delete_child" lk; echo ok' trn n1 n2
+    LEFT=$(cd "$S/tmp" && printf '%s ' itrain-*)
+    if [ -d "$S/tmp/${LEFT%% *}" ] && [ "${LEFT#itrain-}" != "$LEFT" ]; then
+        check "unremovable root: exit code unchanged (0, all landed)" eq "$RC" 0
+        check "unremovable root: the JSON names it in leftover" has "$JSON" '"leftover":"'"$S"'/tmp/itrain-'
+        check "unremovable root: ONE stderr line says so" eq "$(count_of "$OUT" 'could not remove the private root')" 1
+        chmod -RN "$S/tmp/${LEFT%% *}" 2>/dev/null
+        chmod -R u+rwx "$S/tmp/${LEFT%% *}" 2>/dev/null
+        rm -rf -- "$S/tmp/${LEFT%% *}"
+    else
+        skip "unremovable root (this host's ACLs did not block the remover)"
+    fi
+else
+    skip "chflags / unremovable-root cases (macOS only: no BSD file flags or ACLs here)"
+fi
+
+# (d) console escaping: a path with ESC, a newline and a tab shows up in a human-readable line
+ident_begin "$NC"
+REPOARG=$NC V="$NCV" trn --keep d1 d2
+check "escaping: the console output carries no raw control byte" no_ctl "$OUT"
+EXP=$'overlaps d1 on e\033x\ny\tz.txt'
+check "escaping: the JSON still parses and carries the exact path" python3 -I -c '
+import json, sys
+d = json.loads(sys.argv[1])
+sys.exit(0 if d["deferred"][0]["why"] == sys.argv[2] else 1)' "$JSON" "$EXP"
+ident_end "escaping" "$NC"
+
+# (e) a signal right after the delivered ref exists: stdout still names the branch and carries valid JSON
+mkdir -p "$S/afterref"
+cat >"$S/afterref/git" <<'XEOF'
+#!/bin/bash
+"$REAL_GIT" "$@"
+rc=$?
+case " $* " in *" update-ref refs/heads/train-"*) kill -TERM "$PPID" ;; esac
+exit $rc
+XEOF
+chmod +x "$S/afterref/git"
+ident_begin "$NC"
+SIGOK=1 WRAPDIR=$S/afterref REPOARG=$NC V=true trn --keep n1 n2
+check "signal after delivery: exit 143" eq "$RC" 143
+check "signal after delivery: the branch line is printed" has "$OUT" "integration branch: train-"
+check "signal after delivery: the last stdout line is valid JSON naming the branch" python3 -I -c '
+import json, sys
+d = json.loads(sys.argv[1].rsplit("\n", 1)[-1])
+sys.exit(0 if d["branch"].startswith("train-") and d["landed"] == ["n1", "n2"] else 1)' "$OUT"
+check "signal after delivery: the delivered branch exists and the caller's objects are connected" bash -c "'$REAL_GIT' -C '$NC' rev-parse -q --verify refs/heads/$BR >/dev/null && '$REAL_GIT' -C '$NC' fsck --connectivity-only >/dev/null 2>&1"
+check "signal after delivery: no itrain-* left" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
+ident_end "signal after delivery" "$NC" objects
+
+# (f) EARLY signals, deterministic: the tool pauses right after its handlers are installed and writes the
+# ready file first; a signal sent once it exists must end in a NORMAL exit 128+n (handler), never death by
+# the signal (the shell's $? hides that difference, so a python driver reads the real returncode)
+cat >"$S/early.py" <<'PYEOF'
+import os, signal, subprocess, sys, time
+
+script, repo, ready, sig, want, wt = sys.argv[1:7]
+env = dict(os.environ, TRAIN_SELFTEST="1", TRAIN_TEST_PAUSE_AFTER_HANDLERS="0.5", TRAIN_TEST_READY_FILE=ready)
+p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", repo, "--verify", "true",
+                      "--log-dir", os.path.join(os.path.dirname(ready), "logs"), "n1", "n2"], cwd=wt,
+                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
+for _ in range(100):
+    if os.path.exists(ready):
+        break
+    time.sleep(0.05)
+else:
+    p.kill()
+    print("no ready file")
+    sys.exit(0)
+p.send_signal(getattr(signal, "SIG" + sig))
+try:
+    rc = p.wait(timeout=20)
+except subprocess.TimeoutExpired:
+    p.kill()
+    rc = "hang"
+print("ok" if rc == int(want) else "rc %s, wanted a normal exit %s" % (rc, want))
+PYEOF
+for sg in HUP TERM INT; do
+    case $sg in HUP) want=129 ;; TERM) want=143 ;; INT) want=130 ;; esac
+    rm -f "$S/ready"
+    ident_begin "$NC"
+    check "early $sg: a normal exit $want (handler installed before the ready file)" eq "$(python3 -I -B "$S/early.py" "$SCRIPT" "$NC" "$S/ready" "$sg" "$want" "$WT")" ok
+    check "early $sg: no itrain-* created" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
+    BR=
+    ident_end "early $sg" "$NC"
+done
+
+# (g) item 0: a member red ALONE is retried once against the final landed set
+V_FIX='if grep -rq POISON . ; then echo FAIL poison; exit 1; fi; if [ -f n1.txt ] && [ ! -f n3.txt ]; then echo FAIL n1 needs n3; exit 1; fi; echo ok'
+ident_begin "$NC"
+REPOARG=$NC V="$V_FIX" trn --keep n1 po n3
+check "item 0 (fixed by a later member): n1 lands in recovery with n3" has "$JSON" '"landed":["n1","n3"]'
+check "item 0: the fixer's victim is no longer ejected" lacks "$JSON" '"id":"n1"'
+check "item 0: the poison stays out red, red_with the landed set, still red alone" has "$JSON" '"red_with":["n1","n3"]'
+check "item 0: verified_red_alone on the poison record" has "$JSON" '"verified_red_alone":true'
+check "item 0: runs as counted (6: all, [n1,po], [n1], [po], [n3], [n1,n3]; the retry of po runs [n1,po,n3] = run 1, cached)" has "$JSON" '"runs":6,'
+ident_end "item 0 fixed" "$NC"
+ident_begin "$NC"
+REPOARG=$NC V="$V_FIX" trn --keep n1 n2
+check "item 0 (stays red): n2 lands, n1 stays ejected" has "$JSON" '"landed":["n2"]'
+check "item 0 (stays red): n1 carries red_with [n2] and verified_red_alone" eq "$(has "$JSON" '"id":"n1","why":"red"' && has "$JSON" '"red_with":["n2"]' && has "$JSON" '"verified_red_alone":true' && echo y)" y
+ident_end "item 0 red" "$NC"
+REPOARG=$NC V="$V_FIX" trn --no-recover --keep n1 n2
+check "item 0: --no-recover leaves the red-alone member exactly as measured (no red_with, no retry)" eq "$(lacks "$JSON" red_with && lacks "$JSON" verified_red_alone && has "$JSON" '"runs":3,' && echo y)" y
+[ -n "$BR" ] && "$REAL_GIT" -C "$NC" branch -D "$BR" >/dev/null 2>&1
+fi # newc
+
+# A skipped block replaces several checks on hosts where it cannot run (case-folding or
+# Unicode-normalising filesystem, sha256 git, root user, no chflags): the ok count therefore
+# differs by host, and every skip is named above and counted here.
+echo "integration-train selftest: $PASS ok, $FAIL failed, $SKIP skipped, $((SECONDS - T0)) s"
 [ "$FAIL" -eq 0 ]
