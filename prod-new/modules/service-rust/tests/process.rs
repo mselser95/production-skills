@@ -272,6 +272,14 @@ fn a_second_signal_exits_at_once_with_code_4() {
     probe.read_to_string(&mut out).unwrap();
     let t = Instant::now();
     svc.sigterm();
+    // Wait until the FIRST signal is observably handled (the listener is
+    // closed, which the server does only after the handler set `stop`) before
+    // sending the second. Standard signals do not queue: two sent while the
+    // first is still pending are delivered as ONE, the handler never sees the
+    // second and the process drains instead of exiting 4 (the flake this
+    // replaces: back-to-back `kill`s lost the second one under load).
+    within(Duration::from_secs(5), || refused(svc.addr))
+        .expect("the first signal must close the listener");
     svc.sigterm();
     let status = svc.exit();
     assert_eq!(status.code(), Some(4), "second signal: forced exit");

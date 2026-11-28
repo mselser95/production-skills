@@ -7,11 +7,13 @@ CARGO ?= cargo
 
 # Zone purity, enforced by the COMPILER: domain and app are built for a
 # bare-metal target that has no `std`, so no file, socket, clock, thread or
-# environment access can compile there, however it is spelled. The target is
-# installed by rust-toolchain.toml (`targets`); tests/architecture.rs pins that
-# this recipe and that file keep naming it.
+# environment access can compile there, however it is spelled. `--all-features`
+# is a second layer (the crates declare none; tests/architecture.rs pins that).
+# The target is installed by rust-toolchain.toml (`targets`); the recipe is
+# pinned by tests/architecture.rs as ONE exact line, so it cannot be turned
+# into a no-op (a `-` prefix, `|| true`, `.IGNORE`) without a RED test.
 check-nostd:
-	$(CARGO) check --locked --lib -p svc-domain -p svc-app --target thumbv7em-none-eabi
+	$(CARGO) check --locked --lib -p svc-domain -p svc-app --all-features --target thumbv7em-none-eabi
 
 # Cheap gate: format, lints (warnings are errors), zone purity, the whole test suite.
 check-fast: check-nostd

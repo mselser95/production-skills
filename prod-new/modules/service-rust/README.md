@@ -18,15 +18,21 @@ src/main.rs      all four                               composition root (packag
 
 | enforced by | what |
 |---|---|
-| the compiler, on a target with no `std` | `make check-nostd` compiles `domain` and `app` for `thumbv7em-none-eabi`, which has no `std`: no file, socket, clock, thread or environment access can compile there, and `extern crate std` in ANY spelling (block comment, macro, `include!`, a missing `#![no_std]`) is error E0463. It runs inside `make check-fast` and `make verify`; `rust-toolchain.toml` installs the target (`targets`), so a `rustup`-driven `cargo` fetches it. `#![forbid(unsafe_code)]` is a workspace lint on every crate: an `unsafe extern` block or an `unsafe` call to a foreign function is a compile error (probed on `domain`). |
+| the compiler, on a target with no `std` | `make check-nostd` compiles `domain` and `app` for `thumbv7em-none-eabi` (no `std`) with `--all-features`: no file, socket, clock, thread or environment access can compile there, and `extern crate std` in ANY spelling is error E0463. It runs inside `make check-fast` and `make verify`; `rust-toolchain.toml` installs the target. It builds only what is NOT conditionally compiled, which is why the next four rows exist. `#![forbid(unsafe_code)]` is a workspace lint on every crate. |
 | the compiler, through Cargo | A zone names only the crates its `Cargo.toml` lists, so `app` cannot name `adapter`, and `adapter` and `platform` cannot see each other. |
-| a test | `tests/architecture.rs` pins the exact dependency lists from `cargo metadata` (add `platform` to `domain` and it goes RED); that `domain` and `app` have only `lib`/`test` targets (no build script, no proc-macro: those run host code at build time and compile fine for any target); that the Makefile's `check-nostd` names exactly those two crates and the target, that `check-fast` runs it, and that `rust-toolchain.toml` installs the target; and that the release profile keeps overflow checks and unwinding. |
-| a source scan (weaker) | an early, friendly message that `domain`/`app` name no `std::` item (the compiler check above is the enforcement; the scan strips only `//` comments and is evadable); only `crates/platform/src/config.rs` reads the environment; the token is compared through `ct_eq`. |
+| a test, L1: which files exist | `tests/architecture.rs` runs `cargo check --workspace --lib --message-format=json` ONCE (the host build, with the same feature unification as `make check-fast`), takes each pure crate's output file from the compiler's own artifact message, reads the dep-info rustc wrote beside it (every source file it read, `#[path]` modules and `include!`d files included) and requires every one to be inside that crate's `src/`. |
+| a test, L2: no conditional compilation | every file L1 lists is REFUSED (not parsed) if it contains the word `cfg` anywhere, comments included, unless the whole line is exactly `#[cfg(test)]`; also `include!`, `include_str!`, `include_bytes!` and `#[path = ...]`. Without proc macros and build scripts (both refused) `macro_rules!` cannot synthesise the identifier `cfg`, so a source with no such token has no conditional compilation; `#[cfg(test)]` code exists only in test builds. |
+| a test, L3: no features | `cargo metadata`: `domain` and `app` declare an empty `features` map and no optional dependency; no package enables a feature on them or sets `default-features = false`; the host build enabled none on them. |
+| a test | the exact dependency lists (add `platform` to `domain` and it is RED); `domain` and `app` have only `lib`/`test` targets (no build script, no proc-macro); the Makefile recipe of `check-nostd` is ONE line, byte-equal to the canonical command (a `-` or `@-` prefix, `\|\| true`, a second line, a changed `CARGO` are RED), `check-fast` lists `check-nostd` as a prerequisite, and `.IGNORE`, `SHELL`, `MAKEFLAGS`, `include` lines are refused; `rust-toolchain.toml` installs the target; the release profile keeps overflow checks and unwinding. |
+| a source scan (weaker) | an early message that `domain`/`app` name no `std::` item outside their `#[cfg(test)]` tail; only `crates/platform/src/config.rs` reads the environment; the token is compared through `ct_eq`. |
 
 Not enforced: the purity of `adapter`, `platform` and `main` (they are the I/O
-zones), and build-time code in any crate other than `domain` and `app`. CI
-images need the `thumbv7em-none-eabi` rust-std component: `rustup target add`
-or the toolchain file's `targets`.
+zones); test-only code (`#[cfg(test)]` may use `std` and files); the
+environment of the person running `make` (a `CARGO=true make` or a `MAKEFLAGS`
+in the shell is outside the file); the host build is the DEFAULT target, so
+code that exists only on another operating system is not read (L2 refuses the
+`cfg` that would select it). CI images need the `thumbv7em-none-eabi`
+rust-std component: `rustup target add` or the toolchain file's `targets`.
 
 `Cargo.lock` is committed; `rust-toolchain.toml` pins the toolchain;
 `[workspace.lints]` carries the lint table every member inherits.
@@ -64,14 +70,18 @@ with that table in both directions: name, type and label keys
 * Requests have a deadline fixed at accept (head 2 s, whole request 10 s,
   both configurable); expiry answers 408.
 * Eviction policy: at most 48 connections may be reading a head. When the
-  registry is full a newcomer evicts the connection that has received the
-  FEWEST bytes (the oldest on a tie); the victim is closed with no reply and
-  `svc_http_head_evictions_total` counts it. So a flood of idle connections
-  evicts itself and a slow client that is sending outlives it. It is NOT
-  protected outright: a client that has sent less than every other head is the
-  victim, and at a sustained rate of R new connections per second a head that
-  sends nothing for longer than about 48/R seconds is evicted. An alert on that
-  counter is the signal.
+  registry is full a newcomer evicts the OLDEST connection still reading its
+  head (closed with no reply, `svc_http_head_evictions_total` counts it). A
+  flood of reconnecting clients that send one byte therefore cannot keep
+  normal one-packet requests out (`tests/hardening.rs` floods with 32
+  reconnecting 1-byte clients and requires at least 40 of 50 normal requests
+  answered; measured 50/50); every stalled connection is closed by the head
+  deadline. Policies that rank by progress ("fewest bytes first") were
+  measured and starve normal clients (4/200 and 6/200 answered under 96
+  flooders), because a flooder that has sent one byte outranks every newcomer.
+  KNOWN COST: a legitimately slow head can be evicted when the table is full
+  (at R new connections per second, a head older than about 48/R seconds). An
+  alert on the counter is the signal.
 * The accept loop polls every 1 ms (`stop` is a bare flag, so a blocking
   `accept` could not be woken without unsafe or a second poller); a burst
   beyond the kernel backlog (128) arriving inside one poll can still lose SYNs.
@@ -108,6 +118,9 @@ code 4, abandoning whatever was in flight.
 * State is process memory; a restart starts empty.
 * The applied-id set is never pruned (retention is unbounded here); a real
   store keeps ids for a bounded idempotency window or in a unique index.
+* No CI is generated by this module: `make check-nostd` (zone purity) runs
+  in `make check-fast` locally, but nothing in a generated repository runs
+  it on a pull request until the repository's workflow calls `make check-fast`.
 * `make verify` equals `make check-fast` today. cargo-deny, coverage and
   mutation testing are a later change.
 * The release profile keeps `panic = "unwind"`: a panicking connection thread

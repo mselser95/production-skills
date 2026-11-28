@@ -10,14 +10,13 @@
 //!   body) within `request_deadline`; every read waits at most what is left,
 //!   and expiry answers 408 and closes.
 //! * Connections still reading their head sit in a bounded registry
-//!   (`max_head_conns`). When it is full, the connection that has made the
-//!   LEAST progress (fewest bytes received; the oldest on a tie) is evicted
-//!   (its socket is shut down, no reply) to admit the newcomer, and
-//!   `svc_http_head_evictions_total` counts it. A flood of stalled
-//!   connections can never keep a fast `/healthz` out: the idle ones evict
-//!   each other first, and a client that is merely slow but sending outlives
-//!   them. It is NOT protected outright: if every other head has sent more
-//!   bytes than it has, it is the victim.
+//!   (`max_head_conns`). When it is full, the OLDEST connection still reading
+//!   its head is evicted (its socket is shut down, no reply) to admit the
+//!   newcomer, and `svc_http_head_evictions_total` counts it. A flood of
+//!   reconnecting stalled clients therefore cannot keep a normal one-packet
+//!   request out: a newcomer is only evicted after 48 newer heads arrived
+//!   before its thread read it. Known cost: a legitimately slow head can be
+//!   evicted when the table is full.
 //! * At shutdown the listener closes first, then every connection that has
 //!   not sent a single request byte is closed and is not counted as
 //!   abandoned. The accept loop polls (1 ms) because `stop` is a bare flag.
@@ -343,13 +342,12 @@ impl Registration {
         if let Ok(clone) = stream.try_clone() {
             let mut heads = deps.heads.lock().unwrap_or_else(PoisonError::into_inner);
             while heads.len() >= deps.opts.max_head_conns.max(1) {
-                // Least progress first (fewest bytes), the oldest on a tie.
-                let victim = heads
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, e)| (e.bytes.load(Ordering::SeqCst), e.id))
-                    .map(|(i, _)| i);
-                let Some(old) = victim.and_then(|i| heads.remove(i)) else {
+                // Oldest first: the registry is in arrival order, so the
+                // front is the longest-waiting head. A "fewest bytes first"
+                // order was measured and starves normal clients under a
+                // reconnect flood (a flooder that sends one byte always
+                // outranks a newcomer that has sent none yet).
+                let Some(old) = heads.pop_front() else {
                     break;
                 };
                 old.evicted.store(true, Ordering::SeqCst);

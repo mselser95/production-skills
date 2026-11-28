@@ -43,7 +43,11 @@ fn units_must_be_zero_or_canonical_and_a_field_may_not_repeat() {
 #[test]
 fn a_content_length_that_would_wrap_is_a_400() {
     let server = start(options());
-    for digits in ["18446744073709551621", "1844674407370955162100000"] {
+    for digits in [
+        "1000000000",
+        "18446744073709551621",
+        "1844674407370955162100000",
+    ] {
         let req = format!(
             "POST /deposit HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {digits}\r\n\r\nunits=1"
         );
@@ -76,33 +80,101 @@ fn only_optional_whitespace_around_the_header_value_is_ignored() {
     server.finish();
 }
 
+/// Flooders that keep reconnecting and sending ONE byte, while normal clients
+/// send a complete request in one packet.
+const FLOODERS: usize = 32;
+/// Sockets each flooder keeps open at once: 32 x 4 = 128 > the 48 head slots,
+/// so the registry is full the whole time and must evict.
+const HELD_PER_FLOODER: usize = 4;
+const NORMAL_REQUESTS: usize = 50;
+/// Measured on the oldest-first policy (10 runs): every run answered all 50.
+/// The "fewest bytes first" policy this replaced answered 4/200 and 6/200
+/// under 96 flooders. 40 of 50 leaves a wide margin on both sides.
+const MIN_NORMAL_OK: usize = 40;
+
+/// One healthz request, one packet, a short deadline: true on a 200.
+fn healthz_ok(addr: std::net::SocketAddr) -> bool {
+    let Ok(mut s) = TcpStream::connect(addr) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
+    if s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    parse(&String::from_utf8_lossy(&out)).map(|r| r.0) == Some(200)
+}
+
 #[test]
-fn a_slow_but_sending_client_outlives_newer_idle_connections() {
+fn a_reconnect_flood_of_one_byte_clients_does_not_starve_normal_requests() {
     let _one_at_a_time = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let mut o = options();
-    o.head_deadline = Duration::from_secs(5);
-    o.request_deadline = Duration::from_secs(6);
+    o.head_deadline = Duration::from_secs(1);
+    o.request_deadline = Duration::from_secs(2);
     let server = start(o);
     let addr = server.addr;
 
-    let mut legit = TcpStream::connect(addr).unwrap();
-    legit
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\n")
-        .unwrap();
-    // Sixty newer connections that never send a byte, spread over ~1.5 s: more
-    // than the 48 head slots, so the registry must evict many of them.
-    let mut idle = Vec::new();
-    for _ in 0..60 {
-        idle.push(TcpStream::connect(addr).unwrap());
-        thread::sleep(Duration::from_millis(25));
+    let go = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flooders: Vec<_> = (0..FLOODERS)
+        .map(|_| {
+            let go = go.clone();
+            thread::spawn(move || {
+                let mut held: std::collections::VecDeque<TcpStream> = Default::default();
+                while go.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok(mut s) = TcpStream::connect(addr) {
+                        let _ = s.write_all(b"G");
+                        held.push_back(s);
+                        if held.len() > HELD_PER_FLOODER {
+                            held.pop_front();
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+                held // still stalled: the server must cut each of them
+            })
+        })
+        .collect();
+    thread::sleep(Duration::from_millis(300)); // let the registry fill
+    let ok = (0..NORMAL_REQUESTS)
+        .filter(|_| {
+            let r = healthz_ok(addr);
+            thread::sleep(Duration::from_millis(20));
+            r
+        })
+        .count();
+    go.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut stalled: Vec<TcpStream> = flooders
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    eprintln!("flood: {ok}/{NORMAL_REQUESTS} normal requests answered");
+    assert!(
+        ok >= MIN_NORMAL_OK,
+        "only {ok}/{NORMAL_REQUESTS} normal requests answered under the flood"
+    );
+
+    // Every stalled connection is closed by the server (evicted, or cut by the
+    // 1 s head deadline with a 408) well before the request deadline.
+    let t = Instant::now();
+    for s in &mut stalled {
+        let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut out = Vec::new();
+        let _ = s.read_to_end(&mut out);
     }
-    legit.write_all(b"\r\n").unwrap();
-    legit
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut out = String::new();
-    let _ = legit.read_to_string(&mut out);
-    assert_eq!(parse(&out).map(|r| r.0), Some(200), "legit client: {out:?}");
+    assert!(
+        t.elapsed() < Duration::from_millis(2500),
+        "stalled connections outlived the head deadline: {:?}",
+        t.elapsed()
+    );
+    assert!(
+        within(Duration::from_secs(2), || server.monitor.live_connections()
+            == 0)
+        .is_some(),
+        "connections are still live after every client was cut"
+    );
 
     let (_, scrape) = call(addr, "GET", "/metrics", "");
     let evictions: u64 = scrape
@@ -111,7 +183,7 @@ fn a_slow_but_sending_client_outlives_newer_idle_connections() {
         .and_then(|v| v.trim().parse().ok())
         .expect("the eviction counter must be exported");
     assert!(evictions >= 12, "evictions: {evictions}\n{scrape}");
-    drop(idle);
+    drop(stalled);
     server.finish();
 }
 
