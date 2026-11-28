@@ -328,7 +328,8 @@ jobs:
   # reports; with no database change it says so on one line and ends green.
   db:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # parity + two bootstrap runs + two scrape runs + a cold pull of two images.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -354,6 +355,26 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "db: skipped: no database change"
           fi
+
+      # `make db-test` starts with parity-check.sh, which parses YAML.
+      - name: python + PyYAML (parity-check.sh parses YAML)
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          python3 -m pip install --quiet 'PyYAML==6.0.2'
+          python3 -c "import yaml; print('PyYAML', yaml.__version__)"
+
+      # A cold pull (exporter ~20 MB, Prometheus ~100 MB+) must not count against the scrape
+      # test's 45 s start cap. The digests come from the same lock the overlay is checked against.
+      - name: pre-pull the observability images
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          lock=prod-new/modules/db-postgres/db/observability/image.lock
+          for k in exporter prometheus; do
+            image=$(sed -n "s/^$k\.image = //p" "$lock")
+            digest=$(sed -n "s/^$k\.digest = //p" "$lock")
+            if [ -z "$image" ] || [ -z "$digest" ]; then echo "db: no $k image in $lock" >&2; exit 1; fi
+            docker pull --quiet "$image@$digest"
+          done
 
       - name: db-postgres bootstrap test (plain, then timescale)
         if: steps.changed.outputs.run == 'true'
