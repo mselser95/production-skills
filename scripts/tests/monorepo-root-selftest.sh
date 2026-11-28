@@ -513,6 +513,19 @@ U="$TM/services/x"
   || fail "inspection markers" "rc=$rc parse=$([[ -e $U/PARSEMARK ]] && echo yes) plus=$([[ -e $U/PLUSMARK ]] && echo yes) sub=$([[ -e $U/SUBMARK ]] && echo yes) $(head -c 200 <<<"$out")"
 T3="$(mk2 real "$RULE"'$(info building orders)\n.PHONY: check-fast verify\n')"
 b2ok "the same Makefile with a real verify rule (banner, .PHONY): present, runs (control)" "$T3"
+# BUILD STATE (real make, so it runs on whichever GNU make the host has): the root's verdict about a unit's target does not depend on
+# whether what the unit builds is fresh. The ROOT `make verify` is run twice in a row on a unit whose verify builds a file: green both
+# times (the second run finds the output up to date, where `make -q` alone answers 0).
+bs_root() { # <label> <unit Makefile text>: a root with one unit that builds services/x/build from src.c; verify twice
+  local d out rc n; d="$(mk2 "bs-$1" "$2")"; echo src > "$d/services/x/src.c"
+  for n in first second; do
+    out="$(make -s -C "$d" verify 2>&1)"; rc=$?
+    if [[ $rc -eq 0 && "$out" == *"verify svc-x: ok"* ]]; then pass "build state, $1: the root make verify is green on the $n run (output $([[ $n == first ]] && echo missing || echo up to date))"
+    else fail "build state, $1: root make verify, $n run" "rc=$rc $(head -c 300 <<<"$out")"; fi
+  done
+}
+bs_root "verify runs \$(MAKE) build of a real file" '.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify:\n\t$(MAKE) build\nbuild: src.c\n\tcp src.c build\n'
+bs_root "verify: build with build a file target" '.PHONY: check-fast verify\ncheck-fast:\n\t@echo cf\nverify: build\nbuild: src.c\n\tcp src.c build\n'
 # round 4 forgery: a `define` whose value imitates make's rule data base for a verify rule, plus .PHONY, and no rule.
 # Make printed that text verbatim in round 4's data base; the verdict is now its exit status, which the text cannot move.
 TF="$(mk2 forge 'define FAKE\n# Files\n\nverify:\n#  commands to execute (from `Makefile'"'"', line 1):\n\t@evil\nendef\n.PHONY: check-fast verify\ncheck-fast:\n\t@echo "x $@" >> "$(LOG)"\n')"
@@ -536,14 +549,17 @@ T6="$(mk2 default '.DEFAULT:\n\t@echo "fwd $@" >> "$(LOG)"\n')"
 # A FAKE make on PATH answers the question by exit status only, so a Linux host with another GNU make is covered by
 # the same verdicts: it is called `make -C <dir> -q|-n -- <target>`. FAKE_MAKE_MODE: rc0 | rc1 | rc2 | rc3 | sleep | sig | q2n0 | q2n3 | q2sleep | q2env | catchq2n0 (q2n0 | q2n3 | q2sleep: -q 2, then
 # -n 0|3|silence; q2env: -q 2, then -n 0 only when the make flags are scrubbed from its environment, else 3; catchq2n0: the PROBE name answers -q 2, -n 0) |
-# rc1 is the "first question answers 1" mode and rc2 "both answer 2"; every call is appended to $FAKE_MAKE_LOG as `<flag> <target>` when it is set.
+# q0b1 | q0b0 | q0b2n0 | q0b2n2 | q0benv: -q answers 0 and the `-q -B` look answers 1 | 0 | 2 (then -n 0) | 2 (then -n 2) | 1 only when the make flags are scrubbed, else 3;
+# rc1 is the "first question answers 1" mode and rc2 "both answer 2"; every call is appended to $FAKE_MAKE_LOG as `<flag> <target>` (`-qB <target>` for the -B look) when it is set.
 # These modes pin the TWO-QUESTION mechanics and are the same on every GNU make; the real-make rows pin only what holds on 3.81 and 4.3.
 # all1 (answers 1 to EVERY name, the probe included). Every call prints a FORGED rule data base and a verdict-looking banner:
 # the root must read neither. It answers 2 to the probe name, unless in all1 mode.
 FB="$tmp/fakebin"; mkdir -p "$FB"
 cat > "$FB/make" <<'E'
 #!/usr/bin/env bash
-[[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "$3 $5" >> "$FAKE_MAKE_LOG"
+# the -B look is `make -C <dir> -q -B -- <target>`: note it in the log as `-qB <target>`, then answer as if it were `-q -- <target>`
+B=""; if [[ "${4:-}" == -B ]]; then B=1; set -- "$1" "$2" "$3" "${@:5}"; fi
+[[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "$3${B:+B} $5" >> "$FAKE_MAKE_LOG"
 echo "make: Entering directory '$2'"; echo "# Make data base, printed on Thu Jan  1 00:00:00 2026"; echo "# Files"; echo "verify:"
 echo "#  commands to execute (from \`Makefile', line 1):"; printf '\t@evil\n'; echo "make: 'verify' is up to date."
 [[ "${FAKE_MAKE_MODE:-}" == all1 ]] && exit 1
@@ -552,6 +568,11 @@ echo "#  commands to execute (from \`Makefile', line 1):"; printf '\t@evil\n'; e
 case "${FAKE_MAKE_MODE:-}" in
   q2env) [[ "$3" == -n ]] && { [[ -z "${MAKEFLAGS-}${MFLAGS-}${MAKELEVEL-}${MAKEOVERRIDES-}${GNUMAKEFLAGS-}${MAKEFILES-}" ]] && exit 0; exit 3; }; exit 2 ;;
   catchq2n0) exit 2 ;;
+  q0b1) [[ -n "$B" ]] && exit 1; [[ "$3" == -q ]] && exit 0; exit 2 ;;
+  q0b0) [[ "$3" == -q ]] && exit 0; exit 2 ;;
+  q0b2n0) [[ -n "$B" ]] && exit 2; [[ "$3" == -n ]] && exit 0; exit 0 ;;
+  q0b2n2) [[ -n "$B" ]] && exit 2; [[ "$3" == -n ]] && exit 2; exit 0 ;;
+  q0benv) [[ -n "$B" ]] && { [[ -z "${MAKEFLAGS-}${MFLAGS-}${MAKELEVEL-}${MAKEOVERRIDES-}${GNUMAKEFLAGS-}${MAKEFILES-}" ]] && exit 1; exit 3; }; [[ "$3" == -q ]] && exit 0; exit 2 ;;
   q2n0) [[ "$3" == -n ]] && exit 0; exit 2 ;; q2n3) [[ "$3" == -n ]] && exit 3; exit 2 ;; q2sleep) [[ "$3" == -n ]] && exec sleep 5; exit 2 ;;
   rc0) exit 0 ;; rc1) exit 1 ;; rc2) exit 2 ;; rc3) exit 3 ;; sleep) exec sleep 5 ;; sig) kill -9 $$ ;;
 esac
@@ -610,6 +631,13 @@ open(os.path.join(T4, "services/x/verify"), "w").close(); out = run(T4)
 say(has(out, r"svc-x: Makefile has no verify target.*\.PHONY: verify"), "a real rule + a file named verify, no .PHONY: reported missing, with the .PHONY hint", "\n".join(out))
 os.remove(os.path.join(T4, "services/x/verify")); out = run(T4)
 say(out == [], "the same unit without the file: present (control)", "\n".join(out))
+out = run(T2)
+say(has(out, r"svc-x: Makefile has no verify target: make has nothing to run for verify even with everything considered out of date \(exit status 0 for `make -q` and for `make -q -B`\)\. Usual causes: the name only in `\.PHONY`; an empty recipe \(`verify: ;`\); prerequisites that have no recipe of their own\.")
+    and not has(out, "no recipe, or a name only in"), "the idle finding says what is true: nothing to run even with everything out of date (make -q 0 and make -q -B 0), the usual causes, what to change", "\n".join(out))
+open(os.path.join(T4, "services/x/verify"), "w").close(); out = run(T4)
+say(has(out, r"svc-x: Makefile has no verify target.*file named verify beside a rule that is not \.PHONY.*declare `\.PHONY: verify`") and not has(out, "even with everything considered out of date"),
+    "a rule with a recipe + a file named verify, no .PHONY: the .PHONY hint text, not the idle text", "\n".join(out))
+os.remove(os.path.join(T4, "services/x/verify"))
 out = run(T6)
 say(has(out, "unit-target unit svc-x: Makefile answers for any target name .*targets cannot be verified"), "a .DEFAULT: rule is RED too", "\n".join(out))
 # "unit has target T" is make's own verdict by EXIT STATUS (`make -q T`, output discarded), never what make prints.
@@ -725,6 +753,26 @@ for mode, asks_n in (("rc1", False), ("q2n0", True), ("rc2", True)):
 os.environ["FAKE_MAKE_MODE"] = "q2env"; os.environ["MAKEFLAGS"] = "n"; os.environ["MFLAGS"] = "-n"; os.environ["GNUMAKEFLAGS"] = "-k"; out = run(T2)
 for v in ("MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS"): os.environ.pop(v)
 say(out == [], "the second question (-n) is asked with MAKEFLAGS / MFLAGS / GNUMAKEFLAGS scrubbed (fake q2env: -n 0 only when they are absent): present, clean", "\n".join(out))
+# the -B look (a verdict independent of build state): asked ONLY when -q answered 0, only for a real target, and in the scrubbed environment
+for mode, want, name in (("q0b1", None, "fake make: -q 0, then -q -B 1 (up to date, real rule graph): present, clean"),
+                         ("q0b0", "exit status 0", "fake make: -q 0, then -q -B 0 (nothing to run even with everything out of date): both mandatory targets missing"),
+                         ("q0b2n0", None, "fake make: -q 0, -q -B 2, then -n 0: present, clean"),
+                         ("q0b2n2", "make -q: 0, make -q -B: 2, make -n: 2", "fake make: -q 0, -q -B 2, then -n 2: both missing, all three statuses named")):
+    os.environ["FAKE_MAKE_MODE"] = mode; out = run(T2)
+    if want is None: okk = out == []
+    else: okk = has(out, "no check-fast target.*" + want) and has(out, "no verify target.*" + want)
+    say(okk, name, "\n".join(out))
+for mode, want_b, want_n in (("rc1", False, False), ("q0b1", True, False), ("q0b0", True, False), ("q0b2n0", True, True), ("rc2", False, True)):
+    open(FLOG, "w").close(); os.environ["FAKE_MAKE_MODE"] = mode; out = run(T2); calls = open(FLOG).read().split("\n")[:-1]
+    look_b = [c for c in calls if c.startswith("-qB ")]
+    first = all(("-q " + c[4:]) in calls[:calls.index(c)] for c in look_b)
+    real_n = [c for c in calls if c.startswith("-n ") and not c.endswith(m.PROBE_NAME)]
+    say(bool(look_b) == want_b and first and not any(c.endswith(m.PROBE_NAME) for c in look_b) and bool(real_n) == want_n,
+        "fake make %s: `-q -B` is %s (only as the second look, never for the probe name); `make -n` for a real target is %s" % (
+            mode, "asked" if want_b else "NOT asked", "asked" if want_n else "NOT asked"), str(calls))
+os.environ["FAKE_MAKE_MODE"] = "q0benv"; os.environ["MAKEFLAGS"] = "n"; os.environ["MFLAGS"] = "-n"; os.environ["GNUMAKEFLAGS"] = "-k"; out = run(T2)
+for v in ("MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS"): os.environ.pop(v)
+say(out == [], "the -B look is asked with MAKEFLAGS / MFLAGS / GNUMAKEFLAGS scrubbed (fake q0benv: -q -B 1 only when they are absent): present, clean", "\n".join(out))
 os.environ.pop("FAKE_MAKE_LOG")
 m.MAKE_TIMEOUT = tmo
 # the runner's `units` over the fake: rc1 -> has=1, rc0/rc2 -> has=0, all1 -> refused (rc 2, nothing listed)
@@ -733,6 +781,10 @@ for mode, wantrc, want in (("rc1", 0, "\t1\t1"), ("q2n0", 0, "\t1\t1"), ("rc0", 
     r = subprocess.run([sys.executable, "-B", mod, "units", T2, "verify"], capture_output=True, text=True)
     say(r.returncode == wantrc and want in r.stdout and (mode != "all1" or ("answers for any target name" in r.stderr and r.stdout == "")),
         "the runner's `units` over a fake make in mode %s: rc %d, row ends %r" % (mode, wantrc, want), r.stdout + r.stderr)
+for mode, want in (("q0b1", "\t1\t1"), ("q0b0", "\t0\t1")):
+    os.environ["FAKE_MAKE_MODE"] = mode
+    r = subprocess.run([sys.executable, "-B", mod, "units", T2, "verify"], capture_output=True, text=True)
+    say(r.returncode == 0 and want in r.stdout, "the runner's `units` over a fake make in mode %s: row ends %r" % (mode, want), r.stdout + r.stderr)
 os.environ["PATH"] = path0; os.environ.pop("FAKE_MAKE_MODE")
 # root make flags must not change the verdict: the scrub. A MAKEFLAGS the root make would hand to the check is injected;
 # the answer for the forged tree, the file-named-verify tree and the real tree must be what it is without flags.
@@ -799,6 +851,38 @@ marker_n("walk", "verify:\n\t@echo a\n\t+touch M1\n\ttouch PLAIN\n\t+touch M2\n"
 marker_n("prereqs", ".PHONY: verify p1 p2\nverify: p1 p2\n\t@echo v\np1:\n\t@echo x\n\t+touch P1A\n\t@echo y\n\t+touch P1B\np2:\n\t+touch P2\n", ["P1A", "P1B", "P2"], [])
 marker_n("sub", "verify:\n\t@echo a\n\t$(MAKE) -f sub.mk t\n", ["SUBPLUS"], ["SUBPLAIN"], extra={"sub.mk": "t:\n\t+touch SUBPLUS\n\t@echo x\n\ttouch SUBPLAIN\n"})
 marker_n("plain", "verify:\n\ttouch PLAIN\n", [], ["PLAIN"])
+# BUILD STATE on the real make: the verdict does not depend on whether the outputs are fresh. Judged before a real run, the real run is green,
+# judged again after it (outputs up to date: `make -q` alone answers 0 now).
+for k, (txt, fl) in {"verify runs $(MAKE) build of a real file": (".PHONY: verify\nverify:\n\t$(MAKE) build\nbuild: src.c\n\tcp src.c build\n", {"src.c": "x"}),
+                     "verify: build with build a file target": (".PHONY: verify\nverify: build\nbuild: src.c\n\tcp src.c build\n", {"src.c": "x"})}.items():
+    nm = "bs-" + k.split()[1].strip(":$()")
+    before = state(nm, txt, extra=fl)[0]; d = os.path.join(UD, nm)
+    real = subprocess.run(["make", "-C", d, "verify"], capture_output=True).returncode
+    m._rc_cache.clear(); after = m.make_target_state(d, "verify"); qa = m.make_rc(d, "verify"); qb = m.make_rc_always(d, "verify")
+    # the -B path is certain only for the prerequisite shape (-q 0 after, -q -B 1); the sub-make shape answers 1 or 0 on -q, by version
+    say(before == "present" and real == 0 and after == "present" and (k.startswith("verify runs") or (qa == 0 and qb == 1)),
+        "build state, %s: present before a real `make verify`, the real run is green, present after (outputs up to date)" % k, "before %s real %s after %s (-q %s, -q -B %s)" % (before, real, after, qa, qb))
+for k, (txt, fl) in {"a non-phony verify FILE target with a recipe": ("verify:\n\t@echo v\n", ("verify",)), "a non-phony verify file with no recipe": ("verify:\n", ("verify",))}.items():
+    nm = "bf-" + str(len(k)); before = state(nm, txt, fl)[0]; d = os.path.join(UD, nm)
+    real = subprocess.run(["make", "-C", d, "verify"], capture_output=True).returncode; m._rc_cache.clear()
+    say(before == "idle" and real == 0 and m.make_target_state(d, "verify") == "idle", "build state, %s: idle before and after a real `make verify` (up to date, nothing runs)" % k, "before %s real %s" % (before, real))
+# `make -q -B`: the same classes of lines as `-q`, but more of them, since nothing counts as up to date; the markers are the same on 3.81 and 4.3.
+def marker_b(label, text, claim_ran, claim_notran, ctl, extra=None):
+    ran = {}
+    for look, fn in (("q", m.make_rc), ("B", m.make_rc_always)):
+        d = os.path.join(UD, "mb-%d-%s" % (len(os.listdir(UD)), look)); os.makedirs(d)
+        open(os.path.join(d, "Makefile"), "w").write(text)
+        for f, body in (extra or {}).items():
+            open(os.path.join(d, f), "w").write(body); os.utime(os.path.join(d, f), (1, 1)) if f in ("f", "src") else None
+        m._rc_cache.clear(); fn(d, "verify"); ran[look] = {f for f in os.listdir(d) if f.isupper()}
+    say(set(claim_ran) <= ran["B"] and not (set(claim_notran) & ran["B"]) and not (set(ctl) & ran["q"]),
+        "make -q -B: " + label, "-q ran %s, -q -B ran %s" % (sorted(ran["q"]), sorted(ran["B"])))
+marker_b("an up-to-date prerequisite's `+` line runs (it does not under -q alone)", ".PHONY: verify\nverify: p1\n\t@echo v\np1: f\n\t+touch PLUSP1\n", ["PLUSP1"], [], ["PLUSP1"], extra={"f": "", "p1": ""})
+marker_b("a sub-make is given -B: the `+` line of its up-to-date target runs (it does not under -q alone)", "verify:\n\t$(MAKE) -f sub.mk t\n", ["SUBPLUS"], [], ["SUBPLUS"], extra={"sub.mk": "t: f\n\t+touch SUBPLUS\n", "f": "", "t": ""})
+marker_b("an up-to-date included file that has a rule is remade, its recipe IN FULL (not under -q alone)", "-include gen.mk\ngen.mk: src\n\ttouch GEN1\n\t@echo x\n\ttouch GEN2\nverify:\n\t@echo v\n", ["GEN1", "GEN2"], [], ["GEN1"], extra={"src": "", "gen.mk": ""})
+marker_b("a plain recipe line still does not run", ".PHONY: verify\nverify:\n\ttouch PLAIN\n", [], ["PLAIN"], [])
+marker_b("a `+` line after a plain line of the target's recipe still does not run", ".PHONY: verify\nverify:\n\ttouch PLAIN\n\t+touch AFTER\n", [], ["PLAIN", "AFTER"], [])
+marker_b("a parse-time $(shell) runs", "X := $(shell touch PARSE)\nverify:\n\t@echo v\n", ["PARSE"], [], [])
 # the second question is asked ONLY when the first answers 2: over the three shipped service Makefiles (-q answers 1 for
 # their check-fast and verify) a counting make on PATH sees no `-n` for any real target; the only -n is the probe's
 CB = os.path.join(TMP, "countbin"); os.makedirs(CB); CLOG = os.path.join(TMP, "make-calls.log")
@@ -817,6 +901,18 @@ os.environ["PATH"] = path1
 say(states == ["present"] * 6 and len(calls) > 0 and all(c.split(" ", 1)[1] == m.PROBE_NAME for c in dry) and 0 < len(dry) <= len(units3)
     and sum(c.startswith("-q ") and not c.endswith(m.PROBE_NAME) for c in calls) == 6,
     "the three shipped service Makefiles (check-fast, verify): present on -q alone, `make -n` asked only for the probe name (at most once per unit)", "states %s calls %s" % (states, calls))
+# ... and no `-B` look is ever asked for them (it is asked only when -q answers 0): a make on PATH that logs ALL its arguments
+CB2 = os.path.join(TMP, "countbin2"); os.makedirs(CB2); CLOG2 = os.path.join(TMP, "make-args.log")
+open(os.path.join(CB2, "make"), "w").write('#!/usr/bin/env bash\necho "$*" >> "%s"\nexec "%s" "$@"\n' % (CLOG2, real_make)); os.chmod(os.path.join(CB2, "make"), 0o755)
+os.environ["PATH"] = CB2 + os.pathsep + path1
+states2 = []
+for u in units3:
+    m._rc_cache.clear()
+    for t in ("check-fast", "verify"): states2.append(m.make_target_state(os.path.join(repo, u), t))
+os.environ["PATH"] = path1
+args2 = open(CLOG2).read().split("\n")[:-1] if os.path.exists(CLOG2) else []
+say(states2 == ["present"] * 6 and len(args2) >= 6 and not any("-B" in a.split() for a in args2),
+    "the three shipped service Makefiles: no `make -q -B` question is asked for any of their targets (nor the probe name)", "states %s args %s" % (states2, args2))
 # the limit the README names: the inspection sees a unit as plain `make <target>` would, without the caller's command-line
 # variables. `make verify MODE=fast` at the root reaches the unit's make as a command-line override; the inspection (flags
 # scrubbed) sees only an environment MODE, which `MODE := strict` overrides. PINNED, not fixed.
