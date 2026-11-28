@@ -154,9 +154,13 @@ fn a_newcomer_is_not_evicted_by_older_stalled_heads_when_the_head_table_is_full(
 
     // The evictions are the table's work and are counted.
     let (_, scrape) = call(addr, "GET", "/metrics", "");
+    // Every round added one newer head to a table that was already full, so
+    // each round evicted at least one: the floor is the first phase's plus one
+    // per round, derived from the constants (not a literal).
+    let floor = MIN_EVICTIONS + u64::try_from(ROUNDS).unwrap();
     assert!(
-        evictions(&scrape) >= MIN_EVICTIONS,
-        "evictions: {}",
+        evictions(&scrape) >= floor,
+        "evictions: {} (every one of {ROUNDS} rounds must have evicted: at least {floor})",
         evictions(&scrape)
     );
     drop(stalled);
@@ -195,4 +199,53 @@ fn connections_that_sent_nothing_are_closed_at_shutdown_and_not_abandoned() {
         t.elapsed()
     );
     drop(idle);
+}
+
+/// A cheap in-tree pin on the zone-purity test: deleting `tests/architecture.rs`
+/// (or renaming one of its gate tests) would otherwise leave `make check-fast`
+/// green with fewer tests. Every `implemented:` row of `production.yaml`
+/// ("<file> <test fn>") must name a file that exists and defines that test, and
+/// the architecture file must still define the compiler-gate tests by name.
+/// Scope: this raises the cost of dropping the gate from deleting one file to
+/// editing two files that review must watch; it is NOT a proof, because an
+/// edit that touches both (or the Makefile) is outside what an in-tree test
+/// can see.
+#[test]
+fn the_tests_that_production_yaml_cites_exist_and_the_architecture_gate_is_present() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let yaml = std::fs::read_to_string(root.join("production.yaml")).unwrap();
+    let rows: Vec<(String, String)> = yaml
+        .lines()
+        .skip_while(|l| l.trim_end() != "implemented:")
+        .skip(1)
+        .take_while(|l| l.starts_with(' '))
+        .filter_map(|l| {
+            let mut words = l.split_whitespace().skip(1);
+            Some((words.next()?.to_owned(), words.next()?.to_owned()))
+        })
+        .collect();
+    assert!(
+        rows.iter().any(|(f, _)| f == "tests/architecture.rs"),
+        "production.yaml no longer cites tests/architecture.rs: {rows:?}"
+    );
+    for (file, name) in &rows {
+        let text = std::fs::read_to_string(root.join(file))
+            .unwrap_or_else(|e| panic!("production.yaml cites {file}, which cannot be read: {e}"));
+        assert!(
+            text.contains(&format!("fn {name}(")),
+            "production.yaml cites {file} {name}, which is not defined there"
+        );
+    }
+    let architecture = std::fs::read_to_string(root.join("tests/architecture.rs")).unwrap();
+    for name in [
+        "the_compiler_refuses_std_and_unsafe_code_in_domain_and_app",
+        "unsafe_code_is_forbidden_from_the_command_line_in_the_other_zones_too",
+        "the_compiler_gate_is_armed_and_no_cargo_configuration_can_lower_it",
+        "no_cargo_configuration_sits_in_or_above_the_module",
+    ] {
+        assert!(
+            architecture.contains(&format!("fn {name}(")),
+            "tests/architecture.rs lost the gate test {name}"
+        );
+    }
 }

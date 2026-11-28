@@ -4,7 +4,9 @@
 //! environment, and contain no `unsafe`. The rule this file follows: it does
 //! not RECOGNISE spellings in text (four review rounds each found a new
 //! spelling that got through), it ASKS THE COMPILER, with arguments of its
-//! own that no checked file can override.
+//! own: a scrubbed environment, config overrides, and a probe that proves the
+//! gate is armed (what is and is not covered is in the README's "compiler gate
+//! itself" row; the test files and the Makefile are outside any in-tree test).
 //!
 //! 1. The compiler gate (`compile_forbidding_unsafe`): this test runs, by
 //!    itself, `cargo rustc --lib --all-features --target thumbv7em-none-eabi
@@ -49,10 +51,12 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 fn root() -> PathBuf {
@@ -310,13 +314,94 @@ fn the_release_profile_keeps_overflow_checks_and_unwinds() {
 /// The bare-metal target `domain` and `app` are compiled for. It has no `std`.
 const NOSTD_TARGET: &str = "thumbv7em-none-eabi";
 
+/// How many nested `cargo` runs the checks in this file started (counted so
+/// the README number is measured, not remembered).
+static NESTED_CARGO_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// Environment variables that can hand the nested compile a wrapper, another
+/// compiler or extra flags. Each is REMOVED from the nested cargo's
+/// environment, together with every `CARGO_TARGET_*_{RUSTFLAGS,LINKER,RUNNER}`.
+const SCRUBBED_ENV: [&str; 10] = [
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTC",
+    "RUSTDOC",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+];
+
+/// `rustc` as the PATH of THIS process finds it, as an absolute path. The
+/// nested cargo is given it as `RUSTC`, which (measured) beats a `build.rustc`
+/// key from any config file.
+fn resolved_rustc() -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH is not set");
+    std::env::split_paths(&path)
+        .map(|d| d.join("rustc"))
+        .find(|p| p.is_file())
+        .expect("no `rustc` on PATH")
+}
+
+/// Closes every door a cargo configuration or the environment has to the
+/// nested compile. `extra` is environment the CALLER of the test is imagined
+/// to have set (a fixture simulates it; it is applied first, then scrubbed).
+///
+/// Measured on the pinned toolchain (cargo 1.99.1):
+/// * `--config 'build.rustc-wrapper=""'` and `--config
+///   'build.rustc-workspace-wrapper=""'` are accepted and beat any config
+///   FILE (a string key: the highest source wins);
+/// * `--config 'build.rustflags=[]'` is accepted and does NOTHING: list keys
+///   from all sources are concatenated, so an empty list removes nothing.
+///   What works is the environment: a (even empty) `CARGO_ENCODED_RUSTFLAGS`
+///   is cargo's first choice and then NO `build.rustflags` or
+///   `target.*.rustflags` key from any file is read at all;
+/// * `build.rustc` from a file is beaten by `RUSTC` in the environment, and
+///   it must be an absolute path (a bare name is looked up on a PATH that an
+///   `[env]` table with `force = true` can change);
+/// * a config `[env]` table does not set cargo's own wrapper (it only
+///   decorates the processes cargo starts), and it refuses `RUSTUP_TOOLCHAIN`.
+fn harden(c: &mut Command, extra: &[(String, String)]) {
+    let mut names: BTreeSet<OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+    for (k, v) in extra {
+        c.env(k, v);
+        names.insert(OsString::from(k));
+    }
+    for name in names {
+        let s = name.to_string_lossy();
+        let per_target = s.starts_with("CARGO_TARGET_")
+            && ["_RUSTFLAGS", "_LINKER", "_RUNNER"]
+                .iter()
+                .any(|suffix| s.ends_with(suffix));
+        if per_target || SCRUBBED_ENV.contains(&s.as_ref()) {
+            c.env_remove(&name);
+        }
+    }
+    c.env("CARGO_ENCODED_RUSTFLAGS", "");
+    c.env("RUSTC", resolved_rustc());
+    c.args([
+        "--config",
+        "build.rustc-wrapper=\"\"",
+        "--config",
+        "build.rustc-workspace-wrapper=\"\"",
+    ]);
+}
+
 /// A Cargo workspace the zone checks run against: this module, or a fixture.
+#[derive(Clone)]
 struct Tree {
     root: PathBuf,
     /// `None`: Cargo's own choice (the `CARGO_TARGET_DIR` the test runs under).
     target_dir: Option<PathBuf>,
     /// The real tree has a lockfile that must not move; a fixture has none.
     locked: bool,
+    /// Layer 2 (clean environment + config overrides). Only the fixture that
+    /// pins the probe turns it off.
+    scrub: bool,
+    /// Environment a fixture imagines the test's caller to have set.
+    env: Vec<(String, String)>,
 }
 
 impl Tree {
@@ -325,11 +410,14 @@ impl Tree {
             root: root(),
             target_dir: None,
             locked: true,
+            scrub: true,
+            env: Vec::new(),
         }
     }
 
     /// `cargo <sub> --offline [--locked] [--target-dir ..]`, run in the tree.
     fn cargo(&self, sub: &str) -> Command {
+        NESTED_CARGO_RUNS.fetch_add(1, Ordering::SeqCst);
         let mut c = Command::new(cargo());
         c.current_dir(&self.root).arg(sub).arg("--offline");
         if self.locked {
@@ -337,6 +425,13 @@ impl Tree {
         }
         if let Some(dir) = &self.target_dir {
             c.arg("--target-dir").arg(dir);
+        }
+        if self.scrub {
+            harden(&mut c, &self.env);
+        } else {
+            for (k, v) in &self.env {
+                c.env(k, v);
+            }
         }
         c
     }
@@ -386,11 +481,229 @@ fn compile_forbidding_unsafe(tree: &Tree, rel: &str, unit: &[String]) -> Result<
     }
 }
 
+// ---- layer 1: no cargo configuration in or above the module ----
+//
+// Cargo reads `.cargo/config.toml` (or `config`) from the working directory
+// and EVERY parent directory, and `$CARGO_HOME/config.toml`. A config can name
+// a rustc wrapper, extra rustflags, another rustc. So the module refuses any
+// of those files in its own tree (target/ and .git skipped) and in the
+// directories above it up to the repository root (the nearest directory with a
+// `.git`; the filesystem root when there is none). `$CARGO_HOME` is the
+// user's own machine and is out of scope. This is detection of what can be
+// seen; layer 2 (`harden`) neutralises it for the nested compile and layer 3
+// (`armed`) probes the result, so no one layer carries the property alone.
+
+/// The only keys of `rust-toolchain.toml`'s `[toolchain]` table the module
+/// accepts. `path` (a custom toolchain directory, whose `rustc` could be
+/// anything) is not among them, and neither is any unknown key.
+const TOOLCHAIN_KEYS: [&str; 4] = ["channel", "components", "targets", "profile"];
+
+fn cargo_config_files(dir: &Path) -> Vec<PathBuf> {
+    [".cargo/config.toml", ".cargo/config"]
+        .iter()
+        .map(|rel| dir.join(rel))
+        .filter(|p| p.symlink_metadata().is_ok())
+        .collect()
+}
+
+fn configs_below(dir: &Path, out: &mut Vec<PathBuf>) {
+    out.extend(cargo_config_files(dir));
+    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for e in entries {
+        let name = e.file_name();
+        if name == "target" || name == ".git" || !e.file_type().unwrap().is_dir() {
+            continue;
+        }
+        configs_below(&e.path(), out);
+    }
+}
+
+/// The nearest directory at or above `module` that holds a `.git` (file or
+/// directory): the repository root. `/` when there is none.
+fn repository_root(module: &Path) -> PathBuf {
+    module
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
+}
+
+/// `Err`-style findings for a `rust-toolchain(.toml)` text: a table other than
+/// `[toolchain]`, or a key outside `TOOLCHAIN_KEYS`.
+fn toolchain_text_violations(file: &str, text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut in_array = false;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if in_array {
+            in_array = !line.contains(']');
+            continue;
+        }
+        if line.starts_with('[') {
+            if line != "[toolchain]" {
+                found.push(format!("{file}: the table {line} is not accepted"));
+            }
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().trim_matches(['"', '\'']);
+            if !TOOLCHAIN_KEYS.contains(&key) {
+                found.push(format!(
+                    "{file}: the key `{key}` is not accepted (accepted: {})",
+                    TOOLCHAIN_KEYS.join(", ")
+                ));
+            }
+            in_array = value.contains('[') && !value.contains(']');
+        }
+    }
+    found
+}
+
+/// Everything layer 1 refuses for the module at `module`, looking up as far
+/// as `ceiling` (inclusive). Each finding names the file.
+fn refused_cargo_config(module: &Path, ceiling: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    configs_below(module, &mut files);
+    for dir in module.ancestors().skip(1) {
+        // The user's own CARGO_HOME is their machine's, not the repository's.
+        let home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+        if home.as_deref() != Some(dir.join(".cargo").as_path()) {
+            files.extend(cargo_config_files(dir));
+        }
+        if dir == ceiling {
+            break;
+        }
+    }
+    let mut found: Vec<String> = files
+        .iter()
+        .map(|f| {
+            format!(
+                "cargo configuration {} (it can name a rustc wrapper or flags)",
+                f.display()
+            )
+        })
+        .collect();
+    for name in ["rust-toolchain.toml", "rust-toolchain"] {
+        if let Ok(text) = fs::read_to_string(module.join(name)) {
+            found.extend(toolchain_text_violations(name, &text));
+        }
+    }
+    found
+}
+
+#[test]
+fn no_cargo_configuration_sits_in_or_above_the_module() {
+    let module = root();
+    let found = refused_cargo_config(&module, &repository_root(&module));
+    assert!(
+        found.is_empty(),
+        "the compiler gate needs a module with no cargo configuration between it and the repository root:\n{}",
+        found.join("\n")
+    );
+}
+
+// ---- layer 3: the gate is armed, probed directly ----
+
+const PROBE_UNSAFE_HOST: &str = "pub fn probe() -> i32 {\n    unsafe { 1 }\n}\n";
+const PROBE_UNSAFE_NOSTD: &str = "#![no_std]\npub fn probe() -> i32 {\n    unsafe { 1 }\n}\n";
+const PROBE_STD_NOSTD: &str = "#![no_std]\nextern crate std;\n";
+
+/// Compiles three tiny probe crates exactly the way the gate compiles a zone
+/// (same cargo, same flags, same environment handling, same config overrides,
+/// working directory INSIDE the tree so the same config search path applies)
+/// and requires each to FAIL for the reason the gate relies on. Whatever lowers
+/// the unsafe lint, or lets `std` in, for a zone lowers it for the probe too,
+/// so this does not depend on knowing the mechanism. `Err` when one compiles.
+fn armed(tree: &Tree) -> Result<(), String> {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "svc-arch-probe-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    let probe_tree = Tree {
+        root: tree.root.clone(),
+        target_dir: Some(fixture_target().join("probe-build")),
+        locked: false,
+        scrub: tree.scrub,
+        env: tree.env.clone(),
+    };
+    let mut verdict = Ok(());
+    for (what, source, target, reason) in [
+        (
+            "`unsafe` on the host",
+            PROBE_UNSAFE_HOST,
+            None,
+            "`unsafe` block",
+        ),
+        (
+            "`unsafe` on the no-std target",
+            PROBE_UNSAFE_NOSTD,
+            Some(NOSTD_TARGET),
+            "`unsafe` block",
+        ),
+        (
+            "`extern crate std` on the no-std target",
+            PROBE_STD_NOSTD,
+            Some(NOSTD_TARGET),
+            "E0463",
+        ),
+    ] {
+        fs::write(dir.join("src/lib.rs"), source).unwrap();
+        let mut c = probe_tree.cargo("rustc");
+        c.arg("--manifest-path")
+            .arg(dir.join("Cargo.toml"))
+            .args(["--profile", "check", "--lib"]);
+        if let Some(t) = target {
+            c.args(["--target", t]);
+        }
+        let out = c.args(["--", "-F", "unsafe_code"]).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() {
+            verdict = Err(format!(
+                "the compiler gate is not armed (wrapper/config?): the probe with {what} COMPILED"
+            ));
+        } else if !stderr.contains(reason) {
+            verdict = Err(format!(
+                "the compiler gate probe with {what} failed for another reason (expected {reason}):\n{}",
+                compiler_failure(&stderr)
+            ));
+        }
+        if verdict.is_err() {
+            break;
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+    verdict
+}
+
+/// Layer 3 on the real tree, once per test binary. Every test that trusts a
+/// green compile calls this first.
+fn assert_armed() {
+    static ARMED: OnceLock<Result<(), String>> = OnceLock::new();
+    if let Err(why) = ARMED.get_or_init(|| armed(&Tree::real())) {
+        panic!("{why}");
+    }
+}
+
 #[test]
 fn the_compiler_refuses_std_and_unsafe_code_in_domain_and_app() {
     // Run by THIS test, with its own arguments: not through `make`, not through
     // a variable a Makefile owns. Whatever else is edited, a `std` item, any
     // spelling of `extern crate std`, or an `unsafe` token is an error here.
+    assert_armed();
     let tree = Tree::real();
     for rel in ["crates/domain", "crates/app"] {
         if let Err(why) = compile_forbidding_unsafe(&tree, rel, &nostd_unit(NOSTD_TARGET)) {
@@ -401,6 +714,7 @@ fn the_compiler_refuses_std_and_unsafe_code_in_domain_and_app() {
 
 #[test]
 fn unsafe_code_is_forbidden_from_the_command_line_in_the_other_zones_too() {
+    assert_armed();
     let tree = Tree::real();
     for (rel, unit) in [
         ("crates/adapter", "--lib"),
@@ -1026,6 +1340,8 @@ fn fixture(case: &str, attack: fn(&Path)) -> Tree {
         root: dir,
         target_dir: Some(fixture_target().join("build")),
         locked: false,
+        scrub: true,
+        env: Vec::new(),
     }
 }
 
@@ -1188,4 +1504,314 @@ fn every_attack_on_a_copy_of_domain_turns_its_layer_red_and_the_control_stays_gr
             );
         }
     }
+}
+
+// ---- fixtures: cargo configuration and environment attacks on the compiler gate ----
+//
+// The reviewer's attack: a `.cargo/config.toml` naming a rustc wrapper that
+// appends `--cap-lints allow` (which lowers even a forbid), so the unsafe call
+// in domain compiled. Each case below copies the domain crate with an `unsafe`
+// call into a scratch tree (the source's forbid attribute and the lints table
+// untouched), puts the attack where it names, and asks the layers separately:
+// layer 1 (`refused_cargo_config`), the gate compile itself (layer 2 lives in
+// `Tree::cargo`), and layer 3 (`armed`). The cases share one target directory
+// (each copy has its own path, so no build is ever reused between cases; a
+// target directory also caches cargo's probe of the compiler, which is most of
+// a nested run's cost). A MUTANT run of these cases must use a fresh
+// `CARGO_TARGET_DIR`: cargo's fingerprints ignore a wrapper.
+
+/// Appends `--cap-lints allow` to every compile (but not to the `-vV` and
+/// `--print` probes cargo makes first): the reviewer's wrapper.
+const WRAP_SH: &str = "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -vV|--print*) exec \"$@\";; esac; done\nexec \"$@\" --cap-lints allow\n";
+
+const REVIEWER_CONFIG: &str = "[build]\nrustc-wrapper = \"tools/wrap.sh\"\n\n[env]\nRUSTC_WRAPPER = { value = \"tools/wrap.sh\", relative = true }\n";
+
+/// What a case expects: (layer 1 refuses, the gate compile goes red, `armed`
+/// answers: `None` = not asked).
+type Expect = (bool, bool, Option<bool>);
+
+struct ConfigCase {
+    name: &'static str,
+    /// Put `files` in a PARENT directory of the module copy instead of in it.
+    parent: bool,
+    /// (path relative to the directory above, content, executable). `{ROOT}`
+    /// in a content is the module copy's absolute path, `{RUSTC}` the real rustc.
+    files: Vec<(&'static str, String, bool)>,
+    /// Environment the caller is imagined to have set.
+    env: Vec<(&'static str, String)>,
+    /// The domain copy calls into libc inside `unsafe` (every case but the control).
+    unsafe_source: bool,
+    /// Compile the host build of the crate instead of the no-std one (a
+    /// `--cap-lints` in rustflags makes cargo's own probe of the bare-metal
+    /// target fail, so rustflags attacks only get through on the host).
+    host: bool,
+    /// Layer 2 on (the real setting) or off (the probe-pin fixture).
+    scrub: bool,
+    expect: Expect,
+}
+
+fn config_fixture(case: &ConfigCase) -> (Tree, PathBuf) {
+    let base = fixture_target().join("config-work").join(case.name);
+    let _ = fs::remove_dir_all(&base);
+    let module = if case.parent {
+        base.join("mod")
+    } else {
+        base.clone()
+    };
+    let krate = module.join("crates/domain");
+    copy_dir(&root().join("crates/domain/src"), &krate.join("src"));
+    fs::copy(
+        root().join("crates/domain/Cargo.toml"),
+        krate.join("Cargo.toml"),
+    )
+    .unwrap();
+    fs::write(module.join("Cargo.toml"), FIXTURE_WORKSPACE).unwrap();
+    if case.unsafe_source {
+        append(&krate.join("src/lib.rs"), UNSAFE_GETPID);
+    }
+    let fill = |s: &str| {
+        s.replace("{ROOT}", &module.display().to_string())
+            .replace("{RUSTC}", &resolved_rustc().display().to_string())
+    };
+    for (rel, content, exec) in &case.files {
+        let f = base.join(rel);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(&f, fill(content)).unwrap();
+        if *exec {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let tree = Tree {
+        root: module.clone(),
+        target_dir: Some(fixture_target().join("config-build")),
+        locked: false,
+        scrub: case.scrub,
+        env: case
+            .env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), fill(v)))
+            .collect(),
+    };
+    (tree, base)
+}
+
+fn config_cases() -> Vec<ConfigCase> {
+    let wrap = |dir: &'static str| (dir, WRAP_SH.to_owned(), true);
+    // A wrapper that is a compiler stand-in, for `build.rustc` / `RUSTC`.
+    let shim = (
+        "tools/rustc-shim.sh",
+        "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -vV|--print*) exec {RUSTC} \"$@\";; esac; done\nexec {RUSTC} \"$@\" --cap-lints allow\n".to_owned(),
+        true,
+    );
+    let attack_env = |name: &'static str, key: &'static str, value: &str| ConfigCase {
+        name,
+        parent: false,
+        files: vec![wrap("tools/wrap.sh"), shim.clone()],
+        env: vec![(key, value.to_owned())],
+        unsafe_source: true,
+        host: false,
+        scrub: true,
+        expect: (false, true, None),
+    };
+    let host_only = |c: ConfigCase| ConfigCase { host: true, ..c };
+    vec![
+        ConfigCase {
+            name: "control",
+            parent: false,
+            files: vec![],
+            env: vec![],
+            unsafe_source: false,
+ host: false,
+            scrub: true,
+            expect: (false, false, None),
+        },
+        // The reviewer's two files in the module root.
+        ConfigCase {
+            name: "reviewer_attack_in_the_module_root",
+            parent: false,
+            files: vec![
+                (".cargo/config.toml", REVIEWER_CONFIG.to_owned(), false),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, Some(true)),
+        },
+        // The same config in the PARENT directory (a scaffolded repository's root).
+        ConfigCase {
+            name: "reviewer_attack_in_a_parent_directory",
+            parent: true,
+            files: vec![
+                (".cargo/config.toml", REVIEWER_CONFIG.to_owned(), false),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        ConfigCase {
+            name: "parent_workspace_wrapper",
+            parent: true,
+            files: vec![
+                (
+                    ".cargo/config.toml",
+                    "[build]\nrustc-workspace-wrapper = \"tools/wrap.sh\"\n".to_owned(),
+                    false,
+                ),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        ConfigCase {
+            name: "parent_rustflags",
+            parent: true,
+            files: vec![(
+                ".cargo/config.toml",
+                format!(
+                    "[build]\nrustflags = [\"--cap-lints=allow\"]\n\n[target.{NOSTD_TARGET}]\nrustflags = [\"--cap-lints=allow\"]\n"
+                ),
+                false,
+            )],
+            env: vec![],
+            unsafe_source: true,
+            host: true,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        ConfigCase {
+            name: "parent_rustc",
+            parent: true,
+            files: vec![
+                (".cargo/config.toml", "[build]\nrustc = \"{ROOT}/../tools/rustc-shim.sh\"\n".to_owned(), false),
+                shim.clone(),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: true,
+            expect: (true, true, None),
+        },
+        // The test's own environment.
+        attack_env("env_rustc_wrapper", "RUSTC_WRAPPER", "{ROOT}/tools/wrap.sh"),
+        attack_env("env_rustc_workspace_wrapper", "RUSTC_WORKSPACE_WRAPPER", "{ROOT}/tools/wrap.sh"),
+        attack_env("env_rustc", "RUSTC", "{ROOT}/tools/rustc-shim.sh"),
+        host_only(attack_env("env_rustflags", "RUSTFLAGS", "--cap-lints=allow")),
+        host_only(attack_env(
+            "env_encoded_rustflags",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "--cap-lints=allow",
+        )),
+        attack_env(
+            "env_target_rustflags",
+            "CARGO_TARGET_THUMBV7EM_NONE_EABI_RUSTFLAGS",
+            "--cap-lints=allow",
+        ),
+        // Layer 2 OFF: the attack gets through the compile, and only the probe
+        // (layer 3) says so. This case pins the probe.
+        ConfigCase {
+            name: "probe_pin_layer_2_off",
+            parent: false,
+            files: vec![
+                (".cargo/config.toml", REVIEWER_CONFIG.to_owned(), false),
+                wrap("tools/wrap.sh"),
+            ],
+            env: vec![],
+            unsafe_source: true,
+ host: false,
+            scrub: false,
+            expect: (true, false, Some(false)),
+        },
+    ]
+}
+
+#[test]
+fn the_compiler_gate_is_armed_and_no_cargo_configuration_can_lower_it() {
+    for case in config_cases() {
+        let (tree, base) = config_fixture(&case);
+        let (want_refused, want_red, want_armed) = case.expect;
+        let name = case.name;
+        let ceiling = base.clone();
+        let refused = refused_cargo_config(&tree.root, &ceiling);
+        assert_eq!(
+            !refused.is_empty(),
+            want_refused,
+            "{name}: layer 1 should {} but found {refused:?}",
+            if want_refused { "refuse" } else { "stay clean" }
+        );
+        if want_refused && !case.files.is_empty() {
+            assert!(
+                refused.iter().any(|r| r.contains("config.toml")),
+                "{name}: layer 1 must name the file: {refused:?}"
+            );
+        }
+        let unit = if case.host {
+            vec!["--lib".to_owned()]
+        } else {
+            nostd_unit(NOSTD_TARGET)
+        };
+        let gate = compile_forbidding_unsafe(&tree, "crates/domain", &unit);
+        match (&gate, want_red) {
+            (Err(why), true) => assert!(
+                why.contains("`unsafe` block"),
+                "{name}: the gate failed, but not on the unsafe block:\n{why}"
+            ),
+            (Ok(()), false) => {}
+            (got, _) => panic!(
+                "{name}: gate compile red = {} but expected {want_red}: {got:?}",
+                got.is_err()
+            ),
+        }
+        if let Some(want) = want_armed {
+            let verdict = armed(&tree);
+            assert_eq!(
+                verdict.is_ok(),
+                want,
+                "{name}: armed() answered {verdict:?}"
+            );
+            if !want {
+                assert!(
+                    verdict.err().unwrap_or_default().contains("is not armed"),
+                    "{name}: the message must say the gate is not armed"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
+#[test]
+fn rust_toolchain_files_may_only_carry_channel_components_targets_and_profile() {
+    let real = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
+    assert_eq!(
+        toolchain_text_violations("rust-toolchain.toml", &real),
+        Vec::<String>::new()
+    );
+    let path_key = "[toolchain]\nchannel = \"1.99.1\"\npath = \"/opt/custom\"\n";
+    let quoted = "[toolchain]\n\"path\" = \"/opt/custom\"\n";
+    let dotted = "toolchain.path = \"/opt/custom\"\n";
+    let other_table = "[toolchain]\nchannel = \"1.99.1\"\n[overrides]\nx = 1\n";
+    let after_array = "[toolchain]\ntargets = [\n  \"a=b\",\n]\npath = \"/x\"\n";
+    for (what, text) in [
+        ("path", path_key),
+        ("quoted path", quoted),
+        ("dotted path", dotted),
+        ("another table", other_table),
+        ("path after a multi-line array", after_array),
+    ] {
+        assert!(
+            !toolchain_text_violations("rust-toolchain.toml", text).is_empty(),
+            "{what}: accepted"
+        );
+    }
+    let fine = "[toolchain]\nchannel = \"1.99.1\" # pinned\ncomponents = [\"clippy\"]\nprofile = \"minimal\"\ntargets = [\n  \"a=b\",\n]\n";
+    assert!(toolchain_text_violations("rust-toolchain.toml", fine).is_empty());
 }
