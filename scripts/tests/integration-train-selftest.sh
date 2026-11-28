@@ -2080,6 +2080,58 @@ for sg in HUP TERM INT; do
     ident_end "early $sg" "$NC"
 done
 
+# (f1) TWO DIFFERENT signals 1 ms apart on the EARLY path: the first one's handler starts the exit and CPython's
+# finalization resets Python-level handlers to SIG_DFL, so a second signal arriving there kills the process with
+# the default action unless the tool blocks and ignores INT/TERM/HUP first. The hook holds the process INSIDE
+# module teardown (TRAIN_TEST_EARLY_EXIT_WINDOW) so the second signal lands in that window every time.
+# Invariant asserted: every run EXITED (returncode > 0, never a death by signal) with 128+n, n one of the two
+# signals sent. Which n wins is reported as a note, not asserted.
+cat >"$S/early2.py" <<'PYEOF'
+import collections, os, signal, subprocess, sys, time
+
+script, ready, tmpdir, reps = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+bad, wins = [], collections.Counter()
+for order in ("HUP+INT", "INT+HUP", "INT+TERM", "TERM+INT"):
+    sent = order.split("+")
+    allowed = [128 + int(getattr(signal, "SIG" + x)) for x in sent]
+    for _ in range(reps):
+        if os.path.exists(ready):
+            os.unlink(ready)
+        env = dict(os.environ, TRAIN_SELFTEST="1", TRAIN_TEST_PAUSE_AFTER_HANDLERS="0.5", TRAIN_TEST_READY_FILE=ready,
+                   TRAIN_TEST_EARLY_EXIT_WINDOW="0.25", TMPDIR=tmpdir)
+        p = subprocess.Popen([sys.executable, "-I", "-B", script, "--repo", tmpdir], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, env=env)
+        for _ in range(400):
+            if os.path.exists(ready):
+                break
+            time.sleep(0.01)
+        else:
+            p.kill()
+            p.wait()
+            bad.append("%s: no ready file" % order)
+            continue
+        p.send_signal(getattr(signal, "SIG" + sent[0]))
+        time.sleep(0.001)
+        p.send_signal(getattr(signal, "SIG" + sent[1]))
+        try:
+            rc = p.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+            rc = "hang"
+        if rc not in allowed:
+            bad.append("%s: rc %s%s" % (order, rc, " (KILLED by signal %d)" % -rc if isinstance(rc, int) and rc < 0 else ""))
+        else:
+            wins[(order, rc)] += 1
+left = [x for x in os.listdir(tmpdir) if x.startswith("itrain-")]
+sys.stderr.write("note: early double signals, first-handled winners: %s\n" % dict(sorted(wins.items())))
+print("ok" if not bad and not left else "BAD %s left=%s" % (bad[:3], left))
+PYEOF
+mkdir -p "$S/early2tmp"
+EARLY2=$(python3 -I -B "$S/early2.py" "$SCRIPT" "$S/early2ready" "$S/early2tmp" 5 2>"$S/early2.err")
+echo "$(<"$S/early2.err")"
+check "early: two different signals 1 ms apart (4 orders x 5): every run exits 128+n of one of them, never killed by the second ($EARLY2)" eq "$EARLY2" ok
+
 # (f2) a signal INSIDE Popen/just after it, deterministic: the tool pauses right after it started its first
 # WRITING git child (`git init`; the hook makes that child write into the private root 0.8 s later, as a
 # slow git child does after an early cleanup) and before the child
@@ -2210,11 +2262,14 @@ def tool(extra_env, sig, delay, anchor=None):
     for x in os.listdir(tmpdir):
         if x.startswith("itrain-"):
             shutil.rmtree(os.path.join(tmpdir, x), ignore_errors=True)
+    planted = os.path.join(caller, ".git", "refs", "heads", "train-prelocked.lock")
+    kept = open(planted).read() if os.path.exists(planted) else None  # byte-identical to what was planted
     locks = subprocess.run(["find", os.path.join(caller, ".git", "refs"), "-name", "*.lock"],
                            capture_output=True, text=True).stdout.split()
     for lk in locks:
         os.unlink(lk)
     return {"rc": p.returncode, "ref": len(rs), "line": len(lines), "lock": len(locks),
+            "lockc": int(kept == "planted by another process\n"),
             "dyes": int("DOES exist" in js.get("delivery_error", "")),
             "json": int(bool(named) and named in [r.split()[0] for r in rs]),
             "same": int(bool(rs) and rs[0].split()[1] == js.get("commits", {}).get("n1")),
@@ -2234,12 +2289,13 @@ if mode == "case":  # a hook pauses right after update-ref was spawned; the sign
     if os.environ.get("DELIV_PRELOCK"):  # a lock of ANOTHER process on the very ref the tool will create
         extra["TRAIN_TEST_BRANCH"] = "train-prelocked"
         pl = os.path.join(caller, ".git", "refs", "heads", "train-prelocked.lock")
-        open(pl, "w").close()
+        with open(pl, "w") as fh:
+            fh.write("planted by another process\n")
     o = tool(extra, None if sg == "none" else sg, 0)
     if "+" in sg:  # several signals: the exit status is 128+n of ONE of them (the first handled), never a traceback
         o["rc"] = "ok" if o["rc"] in [names[x] for x in sg.split("+")] else "BAD%s" % o["rc"]
     if hook in ("slowexit", "stuck") or os.environ.get("DELIV_PRELOCK"):
-        print(fmt(o, ["rc", "ref", "line", "json", "dyes", "derr", "lock"]))
+        print(fmt(o, ["rc", "ref", "line", "json", "dyes", "derr", "lock"] + (["lockc"] if os.environ.get("DELIV_PRELOCK") else [])))
     else:
         print(fmt(o, ["rc", "ref", "line", "json", "same", "flag"] if sg != "none" else ["rc", "ref", "line", "json", "derr"]))
 elif mode == "kill9":  # SIGKILL in the delivery pause: only what --help promises is asserted
@@ -2353,8 +2409,8 @@ check "delivery: a timeout that fires AFTER update-ref wrote the ref says the br
 check "delivery: a stuck update-ref's <ref>.lock is removed after the timeout kill (no ref, no lock left)" eq "$(python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" stuck none 1)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=0"
 # a lock that exists BEFORE delivery starts is another process's: delivery fails (exit 2, no ref) and the lock stays,
 # both when update-ref fails fast on it and when it is also stuck past the timeout (the guard is what keeps it)
-check "delivery: a lock that pre-exists on the ref: exit 2, no ref, the lock is NOT removed" eq "$(DELIV_PRELOCK=1 python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" none none -)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=1"
-check "delivery: a pre-existing lock survives a stuck update-ref's timeout kill" eq "$(DELIV_PRELOCK=1 python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" stuck none 1)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=1"
+check "delivery: a lock that pre-exists on the ref: exit 2, no ref, the lock is NOT removed" eq "$(DELIV_PRELOCK=1 python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" none none -)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=1 lockc=1"
+check "delivery: a pre-existing lock survives, byte-identical, a stuck update-ref's timeout kill" eq "$(DELIV_PRELOCK=1 python3 -I -B "$S/deliv.py" case "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" stuck none 1)" "rc=2 ref=0 line=0 json=0 dyes=0 derr=1 lock=1 lockc=1"
 # BLOCKER 3: SIGKILL in the delivery pause: only what --help promises: HEAD, index, worktree and every existing ref
 # unchanged; the new train-* branch may or may not exist (update-ref runs in its own session): reported, not asserted
 KILL9=$(python3 -I -B "$S/deliv.py" kill9 "$SCRIPT" "$NC" "$S/dready" "$S/delivtmp" "$WT" 2>"$S/kill9.err")
@@ -2404,7 +2460,7 @@ check "fine commands: rev-parse, log, status, diff, reset, checkout, worktree li
 HELP=$(python3 -I -B "$SCRIPT" --help 2>&1)
 HELPN=$(printf '%s' "$HELP" | tr -s ' \n' '  ')
 for phrase in 'git commit' 'git fetch' 'git gc' 'git repack' 'git pack-refs' 'worktree list' 'git for-each-ref refs/heads/train-*' \
-    'red includes: timed out' "'conflict' or 'uncheckoutable'" 'the JSON is LOST' 'exit 2 prints a' 'own stale lock is removed' 'removable with'; do
+    'red includes: timed out' "'conflict' or 'uncheckoutable'" 'the JSON is LOST' 'exit 2 prints a' 'own stale lock is removed' 'removable with' "the exit code and the JSON are the verdict's"; do
     check "--help states: $phrase" has "$HELPN" "$phrase"
 done
 fi # newc

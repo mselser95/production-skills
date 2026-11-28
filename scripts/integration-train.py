@@ -183,6 +183,8 @@ Content git itself refuses to check out (exit 128: a .git entry, a symlinked .gi
 only that candidate: 'ejected: uncheckoutable', git's first error line
 (control characters escaped) in "error". A private root that cannot be removed is named on
 stderr and in the JSON ("leftover"); the exit code is unchanged.
+A signal that arrives once the verdict is being reported (end-of-run cleanup has started) is
+ignored: the exit code and the JSON are the verdict's.
 Exit: 0 all admitted landed, 1 something ejected, 2 usage/git/delivery/unexpected error,
       3 nothing was verified, 128+N after SIGHUP/SIGINT/SIGTERM (129/130/143; when several
       different signals arrive at once the first handled wins: the lowest number). Every
@@ -444,8 +446,9 @@ class Train:
             cmd = ["sh", "-c", '"$@"; sleep 4', "sh"] + list(cmd)
         if hold == "update-ref" and ur_mode == "stuck":
             # test hook: a stuck update-ref: it holds <ref>.lock (as git does) and never finishes
+            # (a lock that already exists is left byte-identical: git would fail or wait on it, not rewrite it)
             cmd = ["sh", "-c", 'for a in "$@"; do case $a in --git-dir=*) g=${a#--git-dir=};; refs/heads/*) '
-                   'r=$a;; esac; done; : >"$g/$r.lock"; sleep 5', "sh"] + list(cmd)
+                   'r=$a;; esac; done; [ -e "$g/$r.lock" ] || : >"$g/$r.lock"; sleep 5', "sh"] + list(cmd)
         self.spawning = True
         try:
             proc = subprocess.Popen(cmd, start_new_session=True, **kw)
@@ -462,6 +465,7 @@ class Train:
         finally:
             self.spawning = False
         if self.sig_pending:
+            _no_more_signals()
             sys.exit(128 + self.sig_pending)
         return proc
 
@@ -708,6 +712,7 @@ class Train:
         if self.exiting:
             return
         self.exiting = signum
+        _no_more_signals()
         if self.spawning:  # inside Popen: unwinding now would lose the child; spawn() acts on it
             self.sig_pending = signum
             return
@@ -1531,10 +1536,41 @@ def parse(argv):
 _EARLY = []
 
 
+def _no_more_signals():
+    """From here to the end of the process no INT/TERM/HUP can change the exit status. CPython's
+    finalization resets Python-level handlers to SIG_DFL once sys.exit has begun, so a flag in a
+    handler is not enough: the signals are BLOCKED (one that is pending stays pending) and IGNORED
+    (one that is ever unblocked is discarded, not delivered with the default action). Every path that
+    ends the process after a signal, or after the verdict, goes through here: the early handler, the
+    Train handler and its deferred exit in spawn(), and the exit of __main__."""
+    signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))
+    for sig in SIGS:
+        signal.signal(sig, signal.SIG_IGN)
+
+
+class _FinalizeWindow:
+    """Test hook object: its __del__ runs during module teardown and sleeps (sleep bound as a default:
+    builtins and module globals are already gone by then)."""
+    def __init__(self, secs):
+        self.secs = secs
+
+    def __del__(self, sleep=time.sleep):
+        sleep(self.secs)
+
+
+_WINDOW = None
+
+
 def _early_exit(signum, frame):
-    if _EARLY:  # a second signal must not replace the first one's exit status mid-unwind
+    _no_more_signals()  # FIRST: a second signal must not replace the first one's exit status, not even mid-finalization
+    if _EARLY:
         return
     _EARLY.append(signum)
+    if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_EARLY_EXIT_WINDOW"):
+        # test hook: hold the process inside interpreter finalization (module teardown, where CPython has
+        # already reset the Python-level handlers to SIG_DFL), so a second signal lands there reliably
+        global _WINDOW
+        _WINDOW = _FinalizeWindow(float(os.environ["TRAIN_TEST_EARLY_EXIT_WINDOW"]))
     sys.exit(128 + signum)
 
 
@@ -1562,7 +1598,7 @@ def main(argv):
     try:
         return t.run()
     except SystemExit:
-        signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))  # nothing interrupts the report below
+        _no_more_signals()  # nothing interrupts the report below
         if not t.delivered and t.pending and not t.json_done:
             try:  # the signal may have hit update-ref after the ref was created: look, never assume
                 got = t.git("rev-parse", "--verify", "-q", "refs/heads/" + t.pending[0], caller="gitdir",
@@ -1593,4 +1629,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        _rc = main(sys.argv[1:])
+    except SystemExit:
+        _no_more_signals()
+        raise
+    _no_more_signals()  # the verdict (or the fatal exit 2) is final: a late signal changes nothing
+    sys.exit(_rc)
