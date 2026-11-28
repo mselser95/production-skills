@@ -748,8 +748,15 @@ pc "oversize indented: every line indented two spaces, then the exporter fragmen
 pc "oversize indented GREEN: a 5 MiB SQL dump with an indented 'services: text' line deep inside a COPY block" OK "+dump5.sql" "" "$DUMP5"$'\n    services: text\n'"$DUMP5"
 pc "oversize GREEN: a 5 MiB dump with no services:/include: line" OK "+dumpn.sql" "" "$DUMPN"
 pc "oversize indented: an unparsable file whose key line is at the smallest indentation -> COMPOSE-UNREADABLE-FILE with both line numbers and the remedy" $'COMPOSE-UNREADABLE-FILE: `bigind-broken.txt` looks like a compose file and cannot be read (line 1 is a `services`/`include` key; the parse error is at line \nif this is not a compose file, move it out of db/ or rename that key' "+bigind-broken.txt" "" $'  services:\n    a: [\n'"$BIGPAD"
+# the smallest indentation is taken from the first CODE lines, however long the comment header above them is
+HDR73="$(python3 -B -c 'print("# comment line of the header\n" * 2700, end="")')"
+DATEDOC=$'  services:\n    exporter:\n      environment: {PGSSLMODE: disable}\n      labels: {built: 2026-02-30}\n'
+pc "oversize indented: a 73 KiB comment header, then an indented document PyYAML rejects (impossible date) -> COMPOSE-UNREADABLE-FILE naming the key line" $'COMPOSE-UNREADABLE-FILE: `hdrdate.txt` looks like a compose file and cannot be read (line 2701 is a `services`/`include` key' "+hdrdate.txt" "" "$HDR73"$'\n'"$DATEDOC$BIGPAD"
+pc "oversize GREEN: the same 73 KiB header, then a 5 MiB SQL dump with an indented 'services: text' line deep inside" OK "+hdrdump.sql" "" "$HDR73"$'\n'"$DUMP5"$'\n    services: text\n'"$DUMP5"
+pc "oversize GREEN: an oversize file that is only comments" OK "+onlycomments.txt" "" "$HDR73"$'\n'"$BIGPAD"
 pc "fail closed names the key line and the parse error line, never the line's text (small file)" $'COMPOSE-UNREADABLE-FILE: `smallbad.txt` looks like a compose file and cannot be read (line 2 is a `services`/`include` key; the parse error is at line 4): it cannot be shown harmless; if this is not a compose file, move it out of db/ or rename that key' "+smallbad.txt" "" $'x: 1\nservices:\n  a: [\n'
 pmx "parity: the any-indentation scan reverted to column 0 (an indented oversize compose file is skipped)" 'if oversize and not (ANY_KEY.search(text) or' 'if oversize and not (TOP_KEY.search(text) or' -- 'BASE-EXPORTER: bigind.txt defines the service `exporter`' "+bigind.txt" "" "$INDPAD"$'\n'"$INDEXF"
+pmx "parity: the indentation window anchored at byte 0 again (a long comment header hides the key line)" 'for ln in text[start_:start_ + HEAD_SCAN].splitlines():' 'for ln in text[:HEAD_SCAN].splitlines():' -- $'COMPOSE-UNREADABLE-FILE: `hdrdate.txt` looks like a compose file' "+hdrdate.txt" "" "$HDR73"$'\n'"$DATEDOC$BIGPAD"
 pmx "parity: the smallest-indentation rule removed (a deep dump line makes an unparsable dump a false RED)" 'if least is not None and len(m.group(0)) - len(m.group(0).lstrip(" \t")) <= least:' 'if True:' -- OK "+dump6.sql" "" "x: [unclosed"$'\n'"$DUMP5"$'\n    services: text\n'
 pmx "parity: content judgment reverted to name-based (db/extra.json is not read)" $'        if not yaml_:\n            judge_lenient(rel_, p_, link_)\n            continue\n' $'        if not yaml_:\n            continue\n' -- $'BASE-EXPORTER: extra.json defines the service `exporter`' "+extra.json" "" "$EXFJ"
 pmx "parity: only the first document of a stream is read" 'docs = lenient_docs(text)' 'docs = (lenient_docs(text) or [None])[:1]' -- 'COMPOSE-UNKNOWN-FILE: `multi.txt`' "+multi.txt" "" $'a: 1\n---\n'"$EXF"
@@ -861,7 +868,7 @@ else flunk "mutant parity: special-file rule: anchor not found or no-op"; fi
 hugerun() { PARITY_SELFTEST=1 PARITY_SELFTEST_HUGE_CAP=2097152 rtp "$1" "${2:-60}"; }
 head -c 2621440 /dev/zero | tr '\0' ' ' > "$rt/db/huge.txt"
 hugerun "$parity"
-if [[ $rc == 1 && $out == *'COMPOSE-UNCHECKED-FILE: `huge.txt` is over 64 MiB: it was not read'* && $out != *Traceback* ]]; then pass "real tree: a text file over the bound is COMPOSE-UNCHECKED-FILE, named (bound lowered by the test hook)"; else flunk "real tree: huge text file" "rc=$rc ${out:0:200}"; fi
+if [[ $rc == 1 && $out == *'COMPOSE-UNCHECKED-FILE: `huge.txt` is over 2097152 bytes (test hook): it was not read'* && $out != *Traceback* ]]; then pass "real tree: a text file over the bound is COMPOSE-UNCHECKED-FILE, named, with the bound that applied (lowered by the test hook)"; else flunk "real tree: huge text file" "rc=$rc ${out:0:200}"; fi
 rtp "$parity"
 if [[ $rc == 0 && $out == *"parity-check: OK"* ]]; then pass "real tree: the same 2.5 MiB file without the hook is read as an ordinary large file (green)"; else flunk "real tree: huge.txt without the hook" "rc=$rc ${out:0:200}"; fi
 rtm="$tmp/mut/rt-huge.sh"; cp "$parity" "$rtm"
@@ -874,6 +881,17 @@ head -c 2621440 /dev/zero > "$rt/db/huge.bin"
 hugerun "$parity"
 if [[ $rc == 0 && $out == *"parity-check: OK"* ]]; then pass "real tree: a binary file over the bound is skipped (the NUL check runs first)"; else flunk "real tree: huge binary file" "rc=$rc ${out:0:200}"; fi
 rm -f "$rt/db/huge.bin"
+# the cap variable alone does nothing: the hook needs PARITY_SELFTEST=1 too (a stray variable must not make the real check skip or refuse)
+printf 'services: {other: {image: x}}\n' > "$rt/db/capflag.txt"
+capalone() { PARITY_SELFTEST_HUGE_CAP=10 rtp "$1" "${2:-60}"; }
+capalone "$parity"
+if [[ $rc == 1 && $out == *'COMPOSE-UNKNOWN-FILE: `capflag.txt`'* && $out != *COMPOSE-UNCHECKED-FILE* ]]; then pass "real tree: PARITY_SELFTEST_HUGE_CAP without PARITY_SELFTEST=1 is ignored (COMPOSE-UNKNOWN-FILE, not UNCHECKED)"; else flunk "real tree: cap variable without the flag" "rc=$rc ${out:0:200}"; fi
+rtm="$tmp/mut/rt-flag.sh"; cp "$parity" "$rtm"
+if replace_in "$rtm" 'os.environ.get("PARITY_SELFTEST") == "1" and ' ''; then
+  capalone "$parity"; rcc=$rc; outc="$out"; capalone "$rtm" 20
+  if [[ $rcc == 1 && $outc == *'COMPOSE-UNKNOWN-FILE: `capflag.txt`'* && $out == *'COMPOSE-UNCHECKED-FILE: `capflag.txt`'* ]]; then echo "RED  mutation parity: the PARITY_SELFTEST=1 requirement removed (the stray cap bites; control green)"; ok=$((ok + 1)); else flunk "mutation parity: flag requirement removed: GREEN or control not green" "rcc=$rcc rc=$rc"; fi
+else flunk "mutant parity: flag requirement: anchor not found or no-op"; fi
+rm -f "$rt/db/capflag.txt"
 sect "promtool"
 # ---- 3. promtool ----------------------------------------------------------------------------------
 # red_pair NAME FN CTL MUT: FN must pass on CTL (the unmutated copy) and fail on MUT

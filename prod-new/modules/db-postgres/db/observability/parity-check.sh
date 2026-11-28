@@ -789,8 +789,10 @@ for name_ in listing:
 YAML_EXEMPT = ()   # exact relative paths a legitimate multi-document or tagged file may be exempted at (none ship)
 LENIENT_CAP = 1 << 20     # above this a file is not parsed unless a column-0 `services:` / `include:` line says it is compose
 HUGE_CAP = 64 << 20       # above this a file is not read at all: COMPOSE-UNCHECKED-FILE (fail closed)
+HUGE_LABEL = "64 MiB"     # the bound that applied, as the finding prints it
 if os.environ.get("PARITY_SELFTEST") == "1" and os.environ.get("PARITY_SELFTEST_HUGE_CAP", "").isdigit():
     HUGE_CAP = int(os.environ["PARITY_SELFTEST_HUGE_CAP"])   # TEST HOOK, honoured only with PARITY_SELFTEST=1: the selftest lowers the bound instead of writing 65 MiB
+    HUGE_LABEL = f"{HUGE_CAP} bytes (test hook)"
 HEAD_SCAN = 64 << 10      # the indentation of an oversize file's document is read from its first 64 KiB
 # the shape of a compose document's top-level key in block style (they sit at column 0): key syntax, not a word
 TOP_KEY = re.compile(r"""(?m)^(?:services|"services"|'services'|include)[ \t]*:""")
@@ -841,12 +843,17 @@ def lenient_docs(text):
 def key_line(text, oversize):
     """The 1-based line of the key that made a file look like compose, or 0. Up to LENIENT_CAP: the first key at column 0.
     Over it: the first key line whose indentation is the SMALLEST among the non-blank, non-comment lines of the first
-    64 KiB (a top-level key of an indented document); a key nested deeper (a dump line `    services: x`) does not count."""
+    64 KiB of text counted from the FIRST CODE LINE, however long a leading comment header is (a top-level key of an
+    indented document); a key nested deeper (a dump line `    services: x`) does not count. No code line: 0."""
     if not oversize:
         m = TOP_KEY.search(text)
         return text.count("\n", 0, m.start()) + 1 if m else 0
+    first_code = re.search(r"^[ \t]*[^ \t\r\n#]", text, re.M)
+    if first_code is None:
+        return 0   # blank and comments only: not compose
+    start_ = text.rfind("\n", 0, first_code.start()) + 1
     least = None
-    for ln in text[:HEAD_SCAN].splitlines():
+    for ln in text[start_:start_ + HEAD_SCAN].splitlines():
         t_ = ln.lstrip(" \t")
         if t_ and not t_.startswith("#"):
             least = len(ln) - len(t_) if least is None else min(least, len(ln) - len(t_))
@@ -881,7 +888,7 @@ def judge_lenient(rel_, p_, link_):
     if b"\0" in data[:8192] and not utf16:
         return   # binary
     if len(data) > HUGE_CAP:
-        fail("COMPOSE-UNCHECKED-FILE", f"`{rel_}`{link_} is over 64 MiB: it was not read, so it cannot be shown harmless; delete it or move it outside db/")
+        fail("COMPOSE-UNCHECKED-FILE", f"`{rel_}`{link_} is over {HUGE_LABEL}: it was not read, so it cannot be shown harmless; delete it or move it outside db/")
         return
     try:
         text = data.decode("utf-16" if utf16 else "utf-8")
