@@ -62,10 +62,17 @@ use std::sync::{Arc, OnceLock};
 /// The module directory, read at RUN time: cargo sets `CARGO_MANIFEST_DIR` for
 /// `cargo test` in the checkout it runs for, so a binary compiled in one
 /// checkout and executed by cargo for another inspects the other. The
-/// compile-time value is only the fallback for a binary run by hand.
+/// compile-time value is only the fallback for a binary run by hand (without
+/// `CARGO_MANIFEST_DIR` in its environment it inspects the tree it was
+/// compiled in).
 fn root() -> PathBuf {
-    std::env::var_os("CARGO_MANIFEST_DIR")
-        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from)
+    root_from(std::env::var_os("CARGO_MANIFEST_DIR"))
+}
+
+/// The pure half of `root()`: a run-time value wins, `None` falls back to the
+/// compile-time one.
+fn root_from(runtime: Option<OsString>) -> PathBuf {
+    runtime.map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from)
 }
 
 /// The canonical form of a module path: the identity of a checkout, so the
@@ -87,34 +94,89 @@ fn shared_target_message(me: &str, other: &str) -> String {
     )
 }
 
+fn unwritable(dir: &Path, e: &std::io::Error) -> String {
+    format!(
+        "the architecture tests write their fixtures and an ownership marker under {}; make it \
+         writable or point CARGO_TARGET_DIR elsewhere ({e})",
+        dir.display()
+    )
+}
+
 /// Target-directory ownership. `marker` holds the canonical path of the module
 /// that first used the target directory. Absent: created atomically
 /// (`create_new`) with `me`. Equal: fine. Different and still on disk: an
-/// error naming both. Different and gone from disk (deleted or moved): taken
-/// over, by removing the dead owner's marker and claiming again.
+/// error naming both. Different and gone from disk (deleted or moved), or
+/// still EMPTY after a bounded wait (a writer that died between creating and
+/// writing it; an empty marker names nobody, so nobody can be wronged): taken
+/// over.
 fn claim_target(marker: &Path, me: &str) -> Result<(), String> {
+    claim_target_with(marker, me, &mut |_| {})
+}
+
+/// `claim_target` with a hook called after a takeover's rename and before its
+/// re-read, so a test can interleave a concurrent claimer.
+///
+/// A takeover never deletes: it writes `me` to a unique temp file beside the
+/// marker and `rename`s it over the marker (atomic), then RE-READS the marker
+/// and proceeds only if it holds `me`; a different LIVE path there is refused
+/// as usual. What remains possible: two claimers taking over the same dead
+/// owner race, the later rename wins, and the earlier claimer's re-read then
+/// sees the other's path and refuses (if live) or takes over again; both
+/// outcomes are consistent with the file's final content. A writer that is
+/// merely SLOW (not dead) for longer than the wait can still have its marker
+/// replaced; its late write goes to the replaced file.
+fn claim_target_with(
+    marker: &Path,
+    me: &str,
+    after_takeover: &mut dyn FnMut(&Path),
+) -> Result<(), String> {
     use std::io::{ErrorKind, Write};
-    fs::create_dir_all(marker.parent().unwrap()).map_err(|e| e.to_string())?;
+    static TMP: AtomicUsize = AtomicUsize::new(0);
+    let dir = marker.parent().unwrap();
+    fs::create_dir_all(dir).map_err(|e| unwritable(dir, &e))?;
+    let mut empty_reads = 0;
     for _ in 0..100 {
         match File::options().write(true).create_new(true).open(marker) {
             Ok(mut f) => {
-                f.write_all(me.as_bytes()).map_err(|e| e.to_string())?;
+                f.write_all(me.as_bytes())
+                    .map_err(|e| unwritable(dir, &e))?;
                 return Ok(());
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 let other = fs::read_to_string(marker).unwrap_or_default();
-                if other.is_empty() {
+                if other.is_empty() && empty_reads < 25 {
                     // The winner has created the file and not written it yet.
+                    empty_reads += 1;
                     std::thread::sleep(std::time::Duration::from_millis(20));
-                } else if other == me {
+                    continue;
+                }
+                if other == me {
                     return Ok(());
-                } else if Path::new(&other).exists() {
+                }
+                if !other.is_empty() && Path::new(&other).exists() {
                     return Err(shared_target_message(me, &other));
-                } else if fs::read_to_string(marker).ok().as_deref() == Some(other.as_str()) {
-                    let _ = fs::remove_file(marker);
+                }
+                // Dead owner, or a marker still empty after the wait: take over.
+                let tmp = dir.join(format!(
+                    "OWNER.{}.{}",
+                    std::process::id(),
+                    TMP.fetch_add(1, Ordering::SeqCst)
+                ));
+                fs::write(&tmp, me).map_err(|e| unwritable(dir, &e))?;
+                if let Err(e) = fs::rename(&tmp, marker) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(unwritable(dir, &e));
+                }
+                after_takeover(marker);
+                let now = fs::read_to_string(marker).unwrap_or_default();
+                if now == me {
+                    return Ok(());
+                }
+                if !now.is_empty() && Path::new(&now).exists() {
+                    return Err(shared_target_message(me, &now));
                 }
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(unwritable(dir, &e)),
         }
     }
     Err(format!(
@@ -130,9 +192,10 @@ fn guard() {
     static OWNED: OnceLock<Result<(), String>> = OnceLock::new();
     let r = OWNED.get_or_init(|| {
         let module = root();
-        let target =
-            module.join(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()));
-        claim_target(&target.join("arch-fixtures/OWNER"), &owner_id(&module))
+        claim_target(
+            &target_dir().join("arch-fixtures/OWNER"),
+            &owner_id(&module),
+        )
     });
     if let Err(m) = r {
         panic!("{m}");
@@ -1564,11 +1627,14 @@ missing_docs = "warn"
 
 const FIXTURE_CRATES: [(&str, &str, &str); 1] = [("svc_domain", "svc-domain", "crates/domain")];
 
-/// The target directory the test runs under: `CARGO_TARGET_DIR` (relative
-/// ones resolve against the module, cargo's working directory for a test), else
-/// `target/` in the module.
+/// The target directory the test runs under, as cargo itself reports it
+/// (`cargo metadata`'s `target_directory`: `CARGO_TARGET_DIR` resolved against
+/// the module, which is cargo's working directory for a test, and
+/// `build.target-dir` from a cargo config). Residual: a relative
+/// `CARGO_TARGET_DIR` is resolved by the INVOKING cargo against ITS working
+/// directory, which a test cannot see; run `cargo test` from the module root.
 fn target_dir() -> PathBuf {
-    root().join(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
+    PathBuf::from(text(field(metadata(), "target_directory")))
 }
 
 fn fixture_target() -> PathBuf {
@@ -2386,6 +2452,88 @@ fn the_target_marker_refuses_a_live_foreign_owner_and_takes_over_a_dead_one() {
     assert!(
         claim_target(&marker, &a).is_err(),
         "a dead checkout cannot displace a live owner"
+    );
+}
+
+/// An EMPTY marker (a writer died between creating and writing it) names
+/// nobody: it is taken over, silently.
+#[test]
+fn an_empty_target_marker_is_taken_over() {
+    guard();
+    let sc = Scratch::new();
+    let marker = sc.path().join("t/arch-fixtures/OWNER");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+    let me = owner_id(sc.path());
+    claim_target(&marker, &me).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), me);
+    let leftovers = fs::read_dir(marker.parent().unwrap()).unwrap().count();
+    assert_eq!(leftovers, 1, "a takeover left a temp file behind");
+}
+
+/// A read-only target directory fails with a message naming the path and what
+/// the tests need, not a bare `Permission denied`.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_target_directory_names_the_path() {
+    guard();
+    use std::os::unix::fs::PermissionsExt;
+    let sc = Scratch::new();
+    let ro = sc.path().join("ro");
+    fs::create_dir_all(&ro).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = ro.join("probe");
+    let writable_anyway = fs::write(&probe, "x").is_ok(); // running as root
+    let r = claim_target(&ro.join("OWNER"), "me");
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
+    if writable_anyway {
+        return;
+    }
+    let err = r.unwrap_err();
+    assert!(err.contains(&ro.display().to_string()), "{err}");
+    assert!(
+        err.contains("make it writable or point CARGO_TARGET_DIR elsewhere"),
+        "{err}"
+    );
+}
+
+/// A takeover re-reads the marker: if a concurrent claimer overwrote it with a
+/// LIVE foreign path between our rename and our re-read, we refuse.
+#[test]
+fn a_takeover_rereads_the_marker_and_refuses_a_live_overwrite() {
+    guard();
+    let sc = Scratch::new();
+    let marker = sc.path().join("t/OWNER");
+    let live = sc.path().join("live");
+    fs::create_dir_all(&live).unwrap();
+    let live = owner_id(&live);
+    let dead = sc.path().join("dead").to_string_lossy().into_owned();
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    // Control: nobody interferes, the takeover of a dead owner succeeds.
+    fs::write(&marker, &dead).unwrap();
+    claim_target_with(&marker, "me", &mut |_| {}).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "me");
+    // The interleaving: a live foreign path lands before the re-read.
+    fs::write(&marker, &dead).unwrap();
+    let err = claim_target_with(&marker, "me", &mut |m| fs::write(m, &live).unwrap()).unwrap_err();
+    assert!(err.contains(&live), "{err}");
+    assert_eq!(fs::read_to_string(&marker).unwrap(), live);
+}
+
+/// `root()` reads the run-time `CARGO_MANIFEST_DIR`: a run-time value wins
+/// over the compile-time one, `None` falls back; and `root()` is that call.
+#[test]
+fn root_prefers_the_runtime_manifest_dir() {
+    guard();
+    let runtime = PathBuf::from("/runtime/checkout");
+    assert_eq!(root_from(Some(runtime.clone().into())), runtime);
+    assert_eq!(root_from(None), PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let src = fs::read_to_string(root().join("tests/architecture.rs")).unwrap();
+    let body = &src[src.find("fn root() -> PathBuf {").unwrap()..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    assert!(
+        body.contains("root_from(std::env::var_os(\"CARGO_MANIFEST_DIR\"))"),
+        "{body}"
     );
 }
 
