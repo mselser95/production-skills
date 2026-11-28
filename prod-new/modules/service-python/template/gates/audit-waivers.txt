@@ -1,5 +1,7 @@
 # Dependency-audit waivers. One per line, four fields separated by whitespace:
 #   <advisory id>  <expiry YYYY-MM-DD>  <owner>  <reason, free text>
 # An entry is honoured until its expiry date (inclusive) and is a FAILURE after it, so a
-# waiver can never become permanent by neglect. A malformed line is a failure too.
+# waiver can never become permanent by neglect. A malformed line, a duplicate id and an expiry more than 180 days
+# ahead are failures too, and so is a STALE waiver: one whose id matches no finding of the
+# current audit must be deleted.
 # Empty on purpose: this scaffold has no known advisory to waive.

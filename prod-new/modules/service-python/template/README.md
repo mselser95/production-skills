@@ -135,22 +135,39 @@ there); the rest is `unit.mk`. Times are measured on a laptop with a warm `uv` c
 | target | what it runs | time | blocks merge |
 |---|---|---|---|
 | `check-fast` | `uv sync --locked`; `ruff check`; `ruff format --check`; `mypy --strict`; `pytest -q` (all lanes) | about 10 s | yes (CI job `check-fast`) |
-| `verify` | `check-fast`; `lock-check`; `audit`; `pytest -q` again under `HYPOTHESIS_PROFILE=ci` | about 30 s | yes (CI job `verify`) |
+| `verify` | `check-fast`; `lock-check`; `test-lanes-cover`; `audit`; `pytest -q` again under `HYPOTHESIS_PROFILE=ci` | about 30 s | yes (CI job `verify`) |
 | `lint` / `typecheck` | `ruff check` + `ruff format --check` / `mypy` | under 1 s | via `check-fast` |
 | `test` | `pytest -q` over `tests/` | about 7 s | via `check-fast` |
 | `test-unit`, `test-contract`, `test-architecture` | one lane = one directory of `tests/` (`make test-architecture` for just the zone rules) | 7 s, 1 s, 1 s | via `check-fast` |
 | `lock-check` | `uv lock --check`: `uv.lock` equals what `pyproject.toml` asks for | under 1 s | via `verify` |
-| `audit` | `uv audit` over the locked set (needs the network) through `gates/audit.py`; fails closed when the advisory service is unreachable; a finding passes only with a dated line in `gates/audit-waivers.txt`, and an expired line fails | about 1 s | via `verify`; also nightly in CI |
+| `audit` | `uv audit` over the locked set (needs the network) through `gates/audit.py`; fails closed when the advisory service is unreachable; a finding passes only with a dated line in `gates/audit-waivers.txt`; an expired, duplicate, malformed, over-180-days or stale (matching no finding) line fails | about 1 s | via `verify`; also nightly in CI |
+| `test-lanes-cover` | the test ids collected over `tests/` equal the union of the lanes' (collection only) | about 1 s | via `verify` |
+| `architecture` | alias of `test-architecture` (the Go template's name) | 1 s | via `check-fast` |
 | `fmt` | `ruff format` and `ruff check --fix` (writes files) | n/a | no |
 
 Run one lane: `make test-contract`, or any pytest selection: `uv run pytest tests/unit/test_money.py -q`.
 
-CI: `ci/python-unit.yml` (jobs `check-fast`, `verify`, and a scheduled `nightly` that runs
-`make audit`). The assembler places `ci/**` under the unit; GitHub runs workflows only from
-`.github/workflows`, so in a single-repo layout copy it there, and in a monorepo the root
-workflow calls it as a reusable workflow (`working-directory: services/<SERVICE>`). Its path
-filters are relative to the unit root. Actions are pinned by commit SHA, `uv` by version,
-every job has `timeout-minutes`, the token is read-only, no secrets are used.
+CI: `.github/workflows/python-unit.yml`, the one copy (jobs `check-fast`, `verify`, and a
+scheduled `nightly` that runs `make audit`). In the single layout the assembler places it at
+the repository root's `.github/workflows/`, where it runs on pull requests and pushes with no
+manual step (its path filters include the workflow file itself). GitHub runs a workflow only from
+`.github/workflows` of the repository root, and a local `uses: ./.github/workflows/...` can only
+reach that directory, so in a monorepo the same file lands at the ROOT's `.github/workflows/`
+and the root's own caller uses it with `working-directory: services/<SERVICE>`; its filters
+are relative to the repository root, so nothing of a service triggers it from there (the root
+owns the prefixed filters, and drops or keeps the schedule). The concurrency group names the
+unit, so two units calling it in one run never cancel each other. Actions are pinned by commit
+SHA, `uv` by version AND wheel hash (`ci/uv-requirements.txt`, installed with
+`pip install --require-hashes`: the hashes are PyPI's published sha256 for the 0.13.7 wheels of
+Linux and macOS, x86_64 and arm64), every job has `timeout-minutes` and the same
+`working-directory` default, the token is read-only, no secrets are used.
+
+Target names against the sibling templates: `check-fast`, `verify` and `test` are the same in
+Go; the Go template calls the architecture lane `architecture`, this one `test-architecture`, so
+`make architecture` is an alias here and a monorepo root can delegate `$(MAKE) -C <unit>
+architecture` for either language. `make -f <unit>/Makefile <target>` works from any directory.
+`verify` also runs `test-lanes-cover`: the test ids `make test` collects must equal the union of
+the lane targets', so a test file outside every lane cannot hide from them.
 
 Decisions against the design row ("pyright strict, import-linter"):
 
