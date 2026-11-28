@@ -1,0 +1,15 @@
+[package]
+name = "svc-adapter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "<SERVICE> adapter zone: HTTP in, memory store out; depends on app and domain"
+
+# The dependency graph IS the zone rule: app + domain. Not `platform`.
+[dependencies]
+svc-app = { path = "../app" }
+svc-domain = { path = "../domain" }
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+# Checked-in manifest of every span this service emits.
+#
+# Contract: spans are named by the typed `SpanName` enum in
+# crates/app/src/telemetry.rs; tests/observability_contract.rs compares it with
+# this file in both directions (name and attribute keys).
+
+- name: svc.deposit
+  emitted_by: crates/app/src/ledger.rs (Ledger::deposit -> traced)
+  attrs: [event_type]
+  note: >
+    Wraps the full command: validation, invariant check, domain apply
+    (inside the store's update). Closed as an error when the command failed at any stage.
+
+- name: svc.withdraw
+  emitted_by: crates/app/src/ledger.rs (Ledger::withdraw -> traced)
+  attrs: [event_type]
+  note: Same pipeline as svc.deposit, for the withdrawal command.

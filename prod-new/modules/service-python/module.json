@@ -1,0 +1,54 @@
+{
+  "id": "service-python",
+  "requires": [],
+  "conflicts": [],
+  "source": "template",
+  "slots": {
+    "SERVICE": {
+      "description": "service name, lowercase kebab-case (the distribution name and the CLI name); replaced literally in file contents and in paths",
+      "charset": "lower-digits-dash",
+      "max_len": 40
+    },
+    "PACKAGE": {
+      "description": "import package name of the service: SERVICE with every hyphen turned into an underscore, a lowercase Python identifier that is not a keyword and does not shadow a standard-library module (the scaffold's own tests refuse those); replaced literally (src/<PACKAGE>)",
+      "charset": "identifier",
+      "max_len": 40
+    },
+    "OWNER": {
+      "description": "GitHub owner (user or org) of the repository; replaced literally",
+      "max_len": 39
+    }
+  },
+  "unit_kind": "service",
+  "placement": {
+    ".github/**": "root",
+    "CODEOWNERS": "root",
+    "AGENTS.md": "root",
+    "registries/**": "root",
+    ".prod/**": "root",
+    "docs/**": "root",
+    "scripts/**": "root",
+    "production.yaml": "unit",
+    "Makefile": "unit",
+    "pyproject.toml": "unit",
+    "uv.lock": "unit",
+    ".python-version": "unit",
+    ".gitignore": "unit",
+    "README.md": "unit",
+    "src/**": "unit",
+    "tests/**": "unit",
+    "observability/**": "unit",
+    "verification/**": "unit",
+    "regressions/**": "unit",
+    "benchmarks/**": "unit"
+  },
+  "exclude": [
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/.pytest_cache/**",
+    "**/.hypothesis/**",
+    "**/*.egg-info/**"
+  ]
+}

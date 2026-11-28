@@ -35,8 +35,25 @@ for h in $hosts; do
     exit 2
   fi
 done
+# W3 pre-flight: a cell whose grader would be refused (agent could write the workdir) is SKIPPED here, before any model call;
+# run.sh --preflight is the one decision (the same grade_ok() the real run uses). EVAL_SKIP_GRADER would spend money on cells
+# that are never graded: refused outright.
+if [[ "${EVAL_SKIP_GRADER:-0}" == 1 ]]; then echo "eval-live: REFUSING -- EVAL_SKIP_GRADER=1 would spend real model calls on cells that are never graded" >&2; exit 2; fi
+skipped=0 skiplist=" "
+pf="$(mktemp "${TMPDIR:-/tmp}/eval-live-pf.XXXXXX")" || exit 2
 for t in "${tasks[@]}"; do
   for h in $hosts; do
+    if ! bash "$here/run.sh" --task "$t" --arm skill --host "$h" --rep 1 --preflight 2>"$pf"; then
+      echo "eval-live: SKIP $(basename "$(dirname "$t")")/$(basename "$t") on $h (no model call): $(tail -n 1 "$pf" | cut -c1-240)" >&2
+      skipped=$((skipped + 1)); skiplist="$skiplist$h:$t "
+    fi
+  done
+done
+rm -f "$pf"
+echo "eval-live: pre-flight skipped $skipped cell group(s) (host x task) that could not be graded"
+for t in "${tasks[@]}"; do
+  for h in $hosts; do
+    if [[ "$skiplist" == *" $h:$t "* ]]; then continue; fi
     m=""; [[ "$h" == claude ]] && m="${EVAL_MODEL_CLAUDE:-}"; [[ "$h" == codex ]] && m="${EVAL_MODEL_CODEX:-}"
     r=1
     while (( r <= n )); do
@@ -45,6 +62,7 @@ for t in "${tasks[@]}"; do
         bash "$here/run.sh" --task "$t" --arm "$arm" --host "$h" --rep "$r" --out "$res" --model "$m" --order-seed "$seed"
         rc=$?
         if [[ $rc -eq 3 ]]; then echo "eval-live: STOP -- host $h cannot run here (credential or sandbox failure, row recorded)" >&2; exit 3; fi
+        if [[ $rc -eq 4 ]]; then echo "eval-live: STOP -- a credential copy could not be removed (scrub-failed, row recorded; see the run.sh stderr line above)" >&2; exit 4; fi
         [[ $rc -eq 0 ]] || echo "eval-live: run.sh could not even start $t $h $arm $r (rc $rc)" >&2
       done
       r=$((r + 1))

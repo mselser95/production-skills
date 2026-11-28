@@ -1,0 +1,86 @@
+[project]
+name = "<SERVICE>"
+version = "0.1.0"
+description = "<SERVICE>: a units ledger service (zones: domain, app, adapters, platform)."
+readme = "README.md"
+# Floor = the oldest minor still in security support when this module was written
+# (3.11, end of life 2027-10); .python-version pins the interpreter used locally.
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+"<SERVICE>" = "<PACKAGE>.__main__:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis==6.170.22",
+    "mypy==2.4.1",
+    "pytest==9.2.0",
+    "ruff==0.17.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "<PACKAGE>"
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest]
+minversion = "9.0"
+strict = true
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+filterwarnings = ["error"]
+xfail_strict = true
+markers = [
+    "property: property-based tests (Hypothesis)",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "F", "E", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "PERF", "PL", "TRY",
+    "BLE",  # blind except
+    "S",    # security (flake8-bandit)
+    "DTZ",  # naive datetimes
+    "T20",  # print
+    "LOG", "G",  # logging
+    "PT",   # pytest style
+    "ASYNC",
+    "ANN",  # annotations everywhere
+    "ARG",
+    "TID",  # tidy imports (relative imports banned)
+]
+# TRY003 (long messages inside raise) is style, not safety: the domain errors carry
+# short fixed messages by design.
+ignore = ["TRY003"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+# `tests` sorts after the service package whatever its name (otherwise the import order,
+# and so `ruff check`, would depend on the package name).
+known-first-party = ["<PACKAGE>"]
+sections = { tests = ["tests"] }
+section-order = ["future", "standard-library", "third-party", "first-party", "tests", "local-folder"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "PLR0913"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+python_version = "3.11"
+files = ["src", "tests"]

@@ -1,0 +1,44 @@
+{
+  "id": "service-rust",
+  "requires": [],
+  "conflicts": [],
+  "source": ".",
+  "slots": {
+    "SERVICE": {
+      "description": "service name; replaced literally in file contents and in paths",
+      "charset": "lower-digits-dash",
+      "max_len": 40
+    },
+    "OWNER": {
+      "description": "GitHub owner (user or org) of the repository; replaced literally",
+      "max_len": 39
+    }
+  },
+  "unit_kind": "service",
+  "placement": {
+    ".github/**": "root",
+    "CODEOWNERS": "root",
+    "AGENTS.md": "root",
+    ".gitignore": "root",
+    "registries/**": "root",
+    ".prod/**": "root",
+    "docs/**": "root",
+    "scripts/**": "root",
+    "module.json": "unit",
+    "production.yaml": "unit",
+    "Cargo.toml": "unit",
+    "Cargo.lock": "unit",
+    "rust-toolchain.toml": "unit",
+    "rustfmt.toml": "unit",
+    "clippy.toml": "unit",
+    "README.md": "unit",
+    "src/**": "unit",
+    "tests/**": "unit",
+    "observability/**": "unit",
+    "Makefile": "unit",
+    "crates/**": "unit"
+  },
+  "exclude": [
+    "target/**"
+  ]
+}

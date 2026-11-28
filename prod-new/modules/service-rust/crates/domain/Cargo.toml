@@ -1,0 +1,13 @@
+[package]
+name = "svc-domain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "<SERVICE> domain zone: pure ledger rules, no_std, no dependencies"
+
+# Deliberately empty: the dependency graph IS the zone rule.
+[dependencies]
+
+[lints]
+workspace = true

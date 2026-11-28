@@ -1,0 +1,32 @@
+# Checked-in manifest of every metric series this service emits.
+#
+# Contract: tests/contract/test_observability_contract.py reads this file with a strict
+# subset parser and compares it with the metric calls in src/ and with a real /metrics
+# scrape, in both directions: a metric emitted in code and absent here fails, and a metric
+# listed here and never emitted fails. Same schema as the reference service template.
+#
+# Fields:
+#   name   - the series name, exactly as emitted
+#   type   - counter | gauge
+#   labels - closed label set, [] if none
+#   note   - anything an alert-rule author needs to know
+
+- name: svc_build_info
+  type: gauge
+  labels: [revision]
+  note: >
+    Build-info convention: the value is always 1 and the signal lives in the label.
+    `revision` is SVC_REVISION, one distinct value per running process.
+
+- name: svc_commands_total
+  type: counter
+  labels: [command, outcome]
+  note: >
+    Ledger commands by command (deposit, withdraw) and outcome (applied, duplicate,
+    rejected, invalid_amount). A rising `rejected` share is overdraft pressure, not a fault.
+
+- name: svc_ledger_balance_minor
+  type: gauge
+  labels: []
+  note: >
+    The ledger balance in minor units after the last command. Integer by construction.

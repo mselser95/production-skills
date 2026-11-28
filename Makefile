@@ -43,7 +43,11 @@ help:
 	@echo "eval-live   PAID: every corpus task x claude,codex x skill,bare x N reps; needs EVAL_LIVE=1 (make eval-live EVAL_LIVE=1 N=3)"
 
 # ---- the cheap gate -------------------------------------------------------
-check-fast: actionlint lint gates
+# One line: the recorder (scripts/evidence-record.sh) owns the gate list and runs each gate
+# once, in a clean environment, actionlint and lint first, then `gates`. The Makefile is only
+# the caller; nothing reads it to decide what is attested.
+check-fast:
+	@bash scripts/evidence-record.sh --run check-fast
 
 # actionlint FIRST and locally -- see the ordering rule above.
 actionlint:
@@ -51,127 +55,64 @@ actionlint:
 	@actionlint
 	@echo "actionlint: workflows valid"
 
-# -print0/xargs -0 is load-bearing and was learned the hard way: passing an
-# unquoted $(files) variable to shellcheck under zsh does NOT word-split, so
-# every path arrives as ONE argument and shellcheck dies with "File name too
-# long" -- exit 2, no findings, and a reader who sees a filename list scrolling
-# past reads it as a report. A lint that cannot run must not look like a lint
-# that found nothing.
+# `make lint` is `scripts/lint-parallel.sh`: shellcheck at -S warning, with -x, over the
+# tracked shell scripts, ONE FILE PER shellcheck call, in parallel (LINT_JOBS, default
+# min(4, cores)). It remembers nothing between runs.
 #
-# -S warning, RAISED from -S error on 2026-08-30 after the warning tier was
-# classified and emptied: 67 findings -> 0. Raising it is the point. A tier
-# nobody enforces drifts back, and the 67 had accumulated precisely because
-# the gate stopped at error -- among them one genuinely dead expiry variable,
-# a LOC count that miscounts filenames with spaces, and 60 unguarded `cd`s in
-# a selftest, each followed by an assertion that would have measured the wrong
-# tree.
+# NO CACHE. An earlier version cached clean verdicts. A sound cache could cover only the
+# files that provably source nothing, a small minority of the groups, so a warm run cost
+# about as much as a cold one; it was also the part that failed review twice.
 #
-# The config.sh files are SOURCED, never executed, so they carry
-# `# shellcheck shell=bash` instead of a shebang rather than being excluded:
-# excluding them would take the nine files most likely to be hand-edited out of
-# the only check that reads them.
-# `set -e` on the FIRST line of this recipe is the load-bearing character, and
-# it is here because the recipe without it was decorative. Measured 2026-08-29,
-# ten minutes after this file was written: appending a genuine `if [ "$$x" = ];`
-# to a probe made `shellcheck -S error` exit 1 on its own, and `make lint`
-# STAYED GREEN. A backslash-continued recipe is ONE shell command to make, so
-# only the LAST element's status is graded -- and the last element was the
-# `echo` that announces success, which cannot fail.
+# WHAT IS LINTED: REAL FILES. Every tracked *.sh is resolved to its real path (symlinks
+# followed) and each distinct real file is linted exactly once, `shellcheck -x -S warning
+# -- <path>` from the repo root. A tracked symlink is not a script of its own, it IS its
+# target; findings print under the real path plus `also reachable as: <links>`. A link
+# out of the tree, dangling or to a directory is exit 2. No verdict is shared between
+# different real files, even byte-identical ones: four review rounds failed on predicting
+# what shellcheck follows (rc files, source-path, ignored or binary sources, links out of
+# the tree), and shellcheck applies those itself. Measured here: 176 tracked paths, 25 of
+# them symlinks, 151 real files; sharing between byte-identical real files would have saved
+# 22 invocations (761 KB), including the second copy of the largest script
+# (verify-standard.sh, about 3 s of CPU), so those are linted separately on purpose.
+# A symlinked script that sources directory-relatively (source-path=SCRIPTDIR) is checked
+# only against its real directory's siblings.
 #
-# A gate whose success message is also the thing make grades is not a gate. It
-# was caught by mutating it rather than by reading it, which is the only reason
-# it is not still sitting here reporting 62 clean scripts forever. Every other
-# multi-line recipe in this file is `set -e` or one-command-per-line for the
-# same reason.
+# -x per file is LOOSER than the old single-call recipe in two cases: a script sourcing a
+# tracked non-.sh file or an untracked file is followed and can be clean where the old
+# recipe printed a false positive. So an untracked or out-of-tree sourced file can make the
+# local verdict differ from CI's, which has only the clone.
+#
+# COST. 151 shellcheck invocations; the largest real file (verify-standard.sh, about 3 s of
+# CPU alone) is the floor. CPU of one run, measured 2026-11-27 on a laptop (macOS, 4 jobs,
+# shellcheck 0.11.0, load average about 9 from other work): about 19 s (17 user + 2
+# system); a run under load average 50+ cost about 34 s. No wall-clock promise: it depends on load.
+#
+# TRACKED FILES ONLY (`git ls-files`). The gate used to walk the working tree
+# while CI lints what the clone contains, so the two ran over different sets:
+# raising the severity turned the local gate red on gitignored per-user
+# `config.sh` files that CI has never seen, and a gate that fails only on the
+# author's machine is one they learn to bypass. `git ls-files` also covers a NEW
+# file the moment it is staged, which is when the pre-commit hook runs, so nothing
+# being committed escapes it; uncommitted scratch and per-user config are skipped.
+#
+# ONE FILE PER CALL, WITH -x. Without -x shellcheck follows a sourced file only if
+# that file happens to be on the same command line, so a verdict depended on which
+# files shared a call. Every file is now linted alone and sources are always followed.
+#
+# Exit codes (0 clean, 1 findings, 2 tool error with 2 over 1; the list of what is a
+# tool error, timeouts and refused links included, is in the header of the script). A lint that cannot run must not look like one that found
+# nothing. The recipe is ONE command on purpose: make grades its exit status directly
+# (the old multi-line recipe once stayed green over a real finding because only its
+# trailing `echo` was graded).
 lint:
 	@command -v shellcheck >/dev/null || { echo "shellcheck missing -- brew install shellcheck" >&2; exit 2; }
-#
-# TRACKED FILES ONLY (`git ls-files`), and that alignment was itself a finding.
-# The gate used to walk the working tree while CI lints what the clone contains,
-# so the two ran over different sets: raising this to -S warning turned the local
-# gate red on gitignored per-user `config.sh` files that CI has never seen, and a
-# gate that fails only on the author's machine is one they learn to bypass.
-#
-# `git ls-files` also covers a NEW file the moment it is staged, which is exactly
-# when the pre-commit hook runs -- so nothing being committed escapes the lint.
-# What it deliberately skips is uncommitted scratch and per-user config, neither
-# of which this gate is protecting anyone from.
-#
-# DEDUPED BY CONTENT, which is not a coverage compromise. install.sh mirrors the
-# shared probes into all nine skills, so `verify-standard.sh` alone appears ten
-# times byte-identically; shellcheck on identical bytes returns an identical
-# verdict, so linting one representative per sha256 checks exactly the same set
-# of distinct programs. Measured: 62 files -> 30s, deduped -> a third of that,
-# and the file COUNT is still printed next to the unique count so a reader can
-# see the ratio rather than take the saving on trust. If the two ever converge,
-# the mirroring broke.
-	@set -e; \
-	  n=$$(git ls-files '*.sh' | grep -c .); \
-	  if [ "$$n" -eq 0 ]; then echo "lint: found ZERO shell scripts -- a clean lint over nothing is not a clean lint" >&2; exit 2; fi; \
-	  uniq_files=$$(git ls-files '*.sh' -z \
-	    | xargs -0 shasum -a 256 | sort -k1,1 -u | awk '{ $$1=""; sub(/^ +/,""); print }'); \
-	  u=$$(printf '%s\n' "$$uniq_files" | grep -c .); \
-	  if [ "$$u" -eq 0 ]; then echo "lint: deduped to ZERO files -- refusing to report clean over nothing" >&2; exit 2; fi; \
-	  printf '%s\n' "$$uniq_files" | tr '\n' '\0' | xargs -0 shellcheck -S warning; \
-	  echo "shellcheck: $$u unique script(s) of $$n clean at severity=warning"
+	@bash scripts/lint-parallel.sh
 
 # The repo's own probes, run against the repo itself -- the half that was missing.
+# The list lives in scripts/evidence-record.sh (GATES, group `main`), with the reason each gate
+# exists; this line only calls it. It stops at the first failing gate, as the recipe lines did.
 gates:
-	@bash $(PROBES)/skills-static.sh
-	@bash $(PROBES)/agents-budget.sh
-	@bash $(PROBES)/skill-weight.sh
-	@bash $(PROBES)/policy-coverage.sh
-	@bash $(PROBES)/row-vacuity-sweep.sh
-	@bash $(PROBES)/row-catalogue.sh
-	@bash $(PROBES)/check-registries.sh
-# The shell files this repo VENDORS into scaffolds are held to the template's own
-# gate-hygiene rules HERE, before a consumer's check-fast finds them: the
-# single-suite selftest shipped a PREFIX-ASSIGN-EXPAND that only the consumer's
-# gate-hygiene-fitness.sh caught, because nothing in this repo ran it over the
-# files it vendors. Findings fail; the latent GREPQ advisories are printed.
-	@bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts prod-new/modules/*/scripts
-# And the wiring of that step itself: probe-wiring over the template's scripts
-# reports gate-hygiene-fitness.sh as an orphan the moment the line above is
-# deleted. Every other template script is a declared exception (run downstream).
-	@bash $(PROBES)/probe-wiring.sh prod-new/template/scripts
-	@bash $(PROBES)/probe-wiring.sh
-# scripts/ too, added after review noticed nothing covered it: evidence-record.sh
-# and instantiate-template.sh are gates by any reasonable reading, and they lived
-# outside the only check that asks whether a gate is driven.
-	@bash $(PROBES)/probe-wiring.sh scripts
-# The modules' scripts (prod-new/modules/*/scripts), one probe-wiring run per module
-# because the tool takes ONE directory: db-pin-check.sh was an orphan gate until this
-# loop existed. Zero module dirs is an error, not a pass. db-pin-verify-live.sh needs
-# Docker and is a declared exception in probe-wiring.sh.
-	@set -e; n=0; for d in prod-new/modules/*/scripts; do [ -d "$$d" ] || continue; bash $(PROBES)/probe-wiring.sh "$$d"; n=$$((n+1)); done; \
-	  if [ "$$n" -eq 0 ]; then echo "gates: found ZERO module script dirs -- refusing to report a pass over nothing" >&2; exit 2; fi
-# The database image pin: the lock is read offline (no network, no Docker). A broken
-# lock, or a broken gate (its selftest runs in `make selftests`), goes red here; the
-# module's compose files are checked against the lock in the same invocation.
-	@bash prod-new/modules/db-postgres/scripts/db-pin-check.sh prod-new/modules/db-postgres/db/image.lock --compose prod-new/modules/db-postgres/db/compose.yml prod-new/modules/db-postgres/db/compose.timescale.yml
-# probe-wiring counts a Makefile target as an invoker even when nothing calls the
-# target, so it cannot see that `db-test` (the only runner of db-bootstrap-test.sh)
-# is driven by no workflow. This is that missing half, for this one target.
-	@bash prod-new/modules/db-postgres/scripts/db-ci-wired.sh .github/workflows/pr.yaml
-# And the ratified invariants: an invariant nothing runs is precisely the shape
-# the three of them exist to refuse.
-	@bash $(PROBES)/probe-wiring.sh verification/ratified
-# The vended template's VERSION, and the producer side of the drift question.
-# check-template-drift.sh runs in the SCAFFOLDED repo and answers "am I behind?";
-# this runs here, where the template actually moves, and refuses to let the vended
-# surface change without the digest being updated in the same commit. Downstream
-# repos pin that digest, so a silent change is a silent divergence in every one.
-	@bash scripts/template-digest.sh
-# The gap report is the document this whole bootstrap produces, and its summary
-# is what gets read. It said high(0) while two high rows sat in a second table
-# nobody had updated, and one of them hid a genuinely open item. The numbers are
-# derived from the tables now and compared to what the prose claims.
-	@bash scripts/gap-report-consistency.sh
-# Nothing in this repo executed the template's workflows -- not actionlint, not the
-# scaffold job's check-fast -- so an installer piped from a mutable branch shipped
-# to every scaffold unnoticed. This reads them: remote scripts must be pinned to a
-# commit (or checksummed) and tools must not install at @latest/@main.
-	@bash scripts/template-workflow-pins.sh
+	@bash scripts/evidence-record.sh --run gates
 
 # The database module's bootstrap test: starts a REAL PostgreSQL per variant (Docker,
 # ~30 s each), so it is in no aggregate target. The pr.yaml job `db` runs it.
@@ -230,28 +171,13 @@ mutation:
 # this repo has actually suffered -- sbom-ordering and check-registries sat RED
 # for weeks because nothing invoked them -- so the glob is the safer default
 # HERE, with the guard closing the hole the workflow names.
-# Template selftests, by origin (checked with cmp against _shared/probes and _shared/probes/tests):
-#   byte-identical MIRRORS of a _shared source, which the glob above already runs:
-#     acceptance-audit, acceptance-coverage, acceptance-gap, check-registries, coverage-ratchet,
-#     gate-run, load-rows, non-vacuity, observability-provenance, probe-self-gate,
-#     sbom-ordering, single-suite-run
-#   TEMPLATE-ONLY, no _shared source (the glob cannot see them):
-#     changed-line-coverage, check-template-drift, probe-selftests-skip   -- run here, listed below
-#     error-handling-fitness, kill-durability-state, retry   -- NOT run by this target; they run
-#                                                               only in a generated repo
-# The listed ones run from the framework tree so they are not first run downstream.
-TEMPLATE_SELFTESTS = prod-new/template/scripts/tests/changed-line-coverage-selftest.sh prod-new/template/scripts/tests/check-template-drift-selftest.sh prod-new/template/scripts/tests/probe-selftests-skip-selftest.sh
+# THE SUITE LIST (the globs, the template-only suites and the REQUIRED ones that must exist and
+# must have run) lives in ONE place, scripts/evidence-record.sh, which executes it: each suite
+# once through scripts/run-once.sh, one line per suite with its case count, which
+# mutation-baseline.sh reads instead of running the suite again. There is NO aggregate line:
+# `make evidence` derives the `probe-selftests` gate from the per-suite lines of the same run.
 selftests:
-	@set -e; n=0; \
-	  for ts in $(TEMPLATE_SELFTESTS); do [ -f "$$ts" ] || { echo "selftests: $$ts is missing: a vendored selftest nothing runs here is first exercised in someone else's CI" >&2; exit 2; }; done; \
-	  for t in $(PROBES)/*-selftest.sh $(PROBES)/tests/*-selftest.sh scripts/tests/*-selftest.sh prod-new/modules/*/scripts/tests/*-selftest.sh $(TEMPLATE_SELFTESTS); do \
-	    [ -f "$$t" ] || continue; \
-	    printf '  %-52s ' "$$(basename $$t)"; \
-	    if bash "$$t" >/dev/null 2>&1; then echo "ok"; else echo "FAIL"; bash "$$t" 2>&1 | tail -20; exit 1; fi; \
-	    n=$$((n+1)); \
-	  done; \
-	  if [ "$$n" -eq 0 ]; then echo "selftests: found ZERO selftests -- refusing to report a pass over an empty set" >&2; exit 2; fi; \
-	  echo "selftests: $$n passed"
+	@bash scripts/evidence-record.sh --run selftests
 
 # TCB verification is part of `verify` because the probes above are only
 # meaningful if the installed copy is the one they describe.
@@ -268,8 +194,13 @@ tcb:
 # dirty tree is noise -- those land as dirty-*.json and are gitignored, which is
 # also why the filename discipline matters: a <sha>.json name is an ATTESTATION
 # and must never be produced from an unclean tree.
+#
+# --attest: a gate that already ran in this job through scripts/run-once.sh (which every
+# gate of check-fast, gates and selftests does), on the same command string and the same
+# tree, is ATTESTED from its recorded line instead of being executed again; anything else is
+# executed here. See evidence-record.sh.
 evidence:
-	@bash scripts/evidence-record.sh
+	@bash scripts/evidence-record.sh --attest
 
 # Regenerating is a deliberate act, never part of a gate run. A digest recomputed
 # automatically would certify whatever happened to be on disk -- which is exactly
