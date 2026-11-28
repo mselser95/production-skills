@@ -85,7 +85,8 @@ if [[ -n "$SHARD_OUT" && -z "$SHARD_GROUP" ]]; then echo "verify-standard: --out
 #
 # BASH_SOURCE[0] rather than $0 so it is right when sourced as well as executed.
 PROBE_SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
-root="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" ) ]] || { echo "PROD_UNIT_ROOT is not a directory: $PROD_UNIT_ROOT" >&2; exit 2; }
+root="${1:-${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
 cd "$root" || exit 2
 
 # =============================================================================
@@ -1598,7 +1599,7 @@ registry_patch_path() {   # <patch>
   [[ "$p" == /* ]] && { printf '%s' "$p"; return; }
   printf '%s/%s' "${RATIFY_MUTATIONS_DIR:-$(dirname "$REG_TSV")/mutations}" "$p"
 }
-registry_tree_hash() { { git diff; git diff --cached; } | shasum | cut -d' ' -f1; }
+registry_tree_hash() { { git diff -- .; git diff --cached -- .; } | shasum | cut -d' ' -f1; }
 registry_cite() {   # existence of every cited test and named patch
   REG_ROWS=0; REG_IDS=""; REG_BAD=""
   local id pkg test tags patch lane
@@ -5388,7 +5389,7 @@ if base="$prov_base"; [ -n "$base" ]; then
   # headers and its neighbour none. Each added func is looked up in the HEAD
   # post-image and must have a `// provenance:` line in the comment block right
   # above its declaration (<= 12 lines: `verifies:`/`author:`/blank `//` allowed).
-  prov_funcs=$(git -c diff.noprefix=false diff -U0 --src-prefix=a/ --dst-prefix=b/ "$base"..HEAD -- '*_test.go' 2>/dev/null | awk -F'\t' '
+  prov_funcs=$(git -c diff.noprefix=false diff -U0 --relative --src-prefix=a/ --dst-prefix=b/ "$base"..HEAD -- '*_test.go' 2>/dev/null | awk -F'\t' '
     /^\+\+\+ /      { f = substr($1, 7); next }
     /^@@ /           { split($0, h, " "); split(h[3], a, ","); ln = substr(a[1], 2) + 0; next }
     /^\+/            { if ($0 ~ /^\+func (Test|Fuzz)/) { fn = $0; sub(/^\+func /, "", fn); sub(/[(].*/, "", fn); if (fn != "TestMain") printf "%s\t%s\t%s\n", ln, fn, f } ln++ }')
@@ -5400,7 +5401,7 @@ if base="$prov_base"; [ -n "$base" ]; then
     prov_id="${prov_file}:${prov_line} ${prov_fn}"
     added=$((added+1))
     phd_head=0; phd_i=$((prov_line-1)); phd_n=0
-    phd_text=$(git show "HEAD:$prov_file" 2>/dev/null | sed -n "1,$((prov_line-1))p")
+    phd_text=$(git show "HEAD:./$prov_file" 2>/dev/null | sed -n "1,$((prov_line-1))p")
     while (( phd_i >= 1 && phd_n < 12 )); do
       phd_l=$(printf '%s\n' "$phd_text" | sed -n "${phd_i}p")
       [[ "$phd_l" =~ ^[[:space:]]*// ]] || break

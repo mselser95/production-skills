@@ -1,6 +1,12 @@
 .PHONY: check-registries verify-standard verify-standard-group verify-standard-merge bench lint test race coverage architecture chaos e2e fuzz verify check-fast test-advisory kill-durability error-handling-fitness gate-hygiene-fitness help template-drift acceptance acceptance-audit probe-selftests acceptance-audit-selftest-run crash-only-selftest sim load soak
 SHELL := /usr/bin/env bash
 
+# The root every gate script operates on: THIS directory. In the single layout
+# it is the git top-level (nothing changes); inside a monorepo it is the unit,
+# which `git rev-parse --show-toplevel` would not be. Exported so every recipe
+# and every script it runs sees the same root.
+export PROD_UNIT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
 # checks + a plain (no -race) `go test ./...` + architecture. It must stay
 # fast (seconds, not minutes) -- `make verify` runs the full lane
