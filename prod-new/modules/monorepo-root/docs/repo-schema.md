@@ -21,15 +21,14 @@ Each unit has exactly `id`, `kind`, `language`, `path`; `id` and `path` are uniq
 | database | sql | `db` | the unit's `Makefile`, whichever of the targets it defines (none mandatory) |
 
 The field names follow the root `production.yaml` v2 `units:` stanza (`id`, `database`), so that
-stanza can be generated from this file. A unit lacks a target when the rule data base make prints for
-the unit (`make -C <unit> -pq -- .`) has no entry for exactly `<target>` with a non-empty recipe (service, database):
-a name only in `.PHONY`, `<target>: ;` and `<target>: other` without a recipe are not targets, whatever the Makefile
-prints or silences (`-s`, `.SILENT`, `$(info)`); or `package.json` has no such script (app, package). An optional one is a `skip` line in the runner; a mandatory one above is refused by the
-settings check (`unit-target`) and FAILs the runner before any unit target is run. A name only in `.PHONY` is not a
-target; a file named like the target beside a rule without `.PHONY` hides it, so declare `.PHONY: <target>`. A
-Makefile with a catch-all rule (`%:` or `.DEFAULT:` with a recipe) and no explicit rule for the target is refused:
-targets cannot be verified; an explicit rule wins, as in make. If make prints no data base, the unit is refused too.
-Inspection parses the Makefile (a parse-time `$(shell ...)` runs, and make remakes a Makefile or included file that
-has a rule); no recipe line runs, `+` and `$(MAKE)` lines included (measured on GNU make 3.81). A target that exists but
-does nothing (`verify: ; true`) cannot be judged by a tool.
+stanza can be generated from this file. A unit lacks a target when make says so by EXIT STATUS: `make -C <unit> -q <target>` (output discarded) exits 0 (nothing
+to do: `<target>: ;`, a name only in `.PHONY`, `<target>: other` where `other` has no recipe, a file named like the target
+without `.PHONY`) or 2 (no rule, no Makefile, an error), or does not answer in time (service, database); only exit 1
+(make would run something) counts as the target; or `package.json` has no such script (app, package). Whatever the
+Makefile prints or silences (`-s`, `.SILENT`, `$(info)`, a `define` that imitates a rule data base) is never read. An
+optional one is a `skip` line in the runner; a mandatory one above is refused by the settings check (`unit-target`) and
+FAILs the runner before any unit target is run. A file named like the target beside a rule without `.PHONY` hides it, so
+declare `.PHONY: <target>`. A Makefile that answers for a name nobody defines (a `%:` rule or `.DEFAULT:`) is refused:
+targets cannot be verified. The inspection is `make -C <unit> -q <target>`: make parses the unit's Makefile (a parse-time `$(shell ...)` runs, and an included file that has a rule may be remade) and, as GNU make does in question mode, executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither; no other recipe line runs (measured on GNU make 3.81). What a recipe does cannot be judged by a tool: a
+`verify` of `@:` is a no-op its owner wrote on purpose (a review matter).
 A directory `db/` must be listed (kind `database`) like `apps/*`, `packages/*` and `services/*`.

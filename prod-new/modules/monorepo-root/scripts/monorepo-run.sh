@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # monorepo-run.sh <target> -- run <target> in every unit of repo.yaml that has it; one line per
-# unit; the first failure stops the run (exit 1). "Has it" is monorepo_check.py's one answer (for a
-# service/database it reads the rule data base of ONE `make -pq -- .` per unit: make parses the unit Makefile,
-# so a parse-time $(shell) runs and a Makefile or included file that has a rule is remade, and NO recipe line
-# runs, `+` and $(MAKE) lines included; it reads package.json scripts for an app/package). A unit without an OPTIONAL target is `skip`; a unit without a
-# MANDATORY one for its kind (monorepo_check.py MANDATORY) is a FAIL before any unit TARGET is run. The unit list is read fully before anything runs, each unit gets
-# stdin from /dev/null, and the run asserts it ran as many units as it announced.
+# unit; the first failure stops the run (exit 1). "Has it" is monorepo_check.py's one answer: for a service/database it is
+# make's exit status for `make -C <unit> -q <target>`, nothing it prints; it reads package.json scripts for an app/package.
+# The inspection is make -C <unit> -q <target>: make parses the unit's Makefile (a parse-time $(shell ...) runs, and an included file that has a rule may be remade) and, as GNU make does in question mode, executes the recipe lines marked + or containing $(MAKE) of the target and of its prerequisites, each recipe at most up to its first line that is neither; no other recipe line runs (measured on GNU make 3.81).
+# A unit without an OPTIONAL target is `skip`; a unit without a MANDATORY one for its kind (monorepo_check.py MANDATORY) is
+# a FAIL before any unit TARGET is run. The unit list is read fully before anything runs, each unit gets stdin from /dev/null,
+# and the run asserts it ran as many units as it announced.
 # PYTHON / PNPM override the interpreters (tests use fakes).
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -6,16 +6,20 @@
   monorepo_check.py validate FILE           validate one repo.yaml against docs/repo-schema.md
 
 Exit: 0 clean - 1 findings - 2 cannot run (PyYAML missing, repo.yaml unreadable for `units`).
-Reads text/JSON/YAML, asks `git ls-files` for a tracked node_modules/, and reads each service/database unit's
-rule data base from ONE `make -pq -- .` per unit (all targets are answered from it): no network, no pnpm. What
-runs during that inspection, measured on GNU make 3.81: the unit Makefile is parsed by make, so a parse-time
-`$(shell ...)` runs, and make remakes a Makefile or included file that has a rule; NO recipe line runs (a
-`+` line and a `$(MAKE)` line included). The units are the repository's own code, trusted as `make check-fast`
-trusts them. The root Makefile and the check read the SAME parser.
+Reads text/JSON/YAML and asks `git ls-files` for a tracked node_modules/. No network, no pnpm.
+"Unit has target T" (service, database) is make's own verdict by EXIT STATUS: `make -C <unit> -q -- T` with
+output discarded (1 = make would run something for T = present; 0 = nothing to do; 2 = no rule or an error;
+a timeout or signal = unanswered; one extra question for a name nobody defines catches a match-anything rule).
+What runs during that inspection (measured on GNU make 3.81): make parses the unit's Makefile (a parse-time
+`$(shell ...)` runs, and an included file that has a rule may be remade) and, as GNU make does in question mode,
+executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe
+at most up to its first line that is neither; no other recipe line runs. The units are the repository's own code,
+trusted as `make check-fast` trusts them. The root Makefile and the check read the SAME function.
 """
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -232,116 +236,65 @@ def same(a, b):
 
 
 def make_env():
-    drop = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES")
+    """The environment of every `make -q` question: the caller's make flags are scrubbed (a root `make -n` /
+    `-i` / `-k` / `-B` / `-s` must not change a unit's answer), the locale is fixed."""
+    drop = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES")
     env = {k: v for k, v in os.environ.items() if k not in drop}
-    env["LC_ALL"] = "C"  # make's own notices in English, whatever the caller's locale
+    env["LC_ALL"] = "C"
     return env
 
 
-# ---- "does this unit have target T": read from make's RULE DATA BASE (`make -pq -- .`), never from what make or
-# the unit prints. The data base is what make built from the Makefile; `-s`, `.SILENT`, `$(info)` banners and a
-# sub-make's noise do not change it. Wording differs between GNU make 3.81 ("commands to execute (from `F', line N):")
-# and 4.x ("recipe to execute (from 'F', line N):"); both are read.
-DB_HEAD_RX = re.compile(r"# Make data base, printed on ")
-CMD_RX = re.compile(r"#\s+(?:commands|recipe) to execute \(from\b")
-ENTRY_RX = re.compile(r"([^\s#:][^:]*?)::?(?:\s.*)?")
-_db_cache = {}
+# ---- "does this unit have target T": make's own VERDICT, read from its EXIT STATUS and nothing else. The question
+# is `make -C <unit> -q -- T` with stdout and stderr discarded, so nothing a Makefile prints (banners, `-s`,
+# `.SILENT`, a `define` shaped like a rule data base) can influence the answer. Exit 1 = make WOULD run something
+# for T; exit 0 = nothing to do; exit 2 = no rule / no Makefile / an error in it. Prerequisite-only targets
+# (`verify: check-fast lint`), pattern rules, included files and double-colon rules are all answered by make.
+MAKE_TIMEOUT = 20  # seconds per question; a make that does not answer in time is an unanswered question
+_rc_cache = {}
+PROBE_NAME = "__monorepo_probe_" + secrets.token_hex(8)  # a name no unit can have as a real target
 
 
-def parse_database(lines):
-    """-> {"targets": {name: {"recipe": bool, "phony": bool}}, "catch_all": bool} from the LAST data base in
-    `lines`, or None when there is none. Only the block that starts at the last `# Make data base, printed on`
-    line is read (parse-time `$(info)` text comes BEFORE the real one), and only its `# Implicit Rules` and
-    `# Files` sections. A target has `recipe` when its entry carries a commands/recipe marker FROM a Makefile
-    followed by a tab-indented line with something in it (an explicit empty recipe, `T: ;`, is a lone tab).
-    Entries under `# Not a target:` are not targets. catch_all = a Makefile `%` pattern rule or a `.DEFAULT`
-    entry with a recipe (they answer any name)."""
-    heads = [i for i, l in enumerate(lines) if DB_HEAD_RX.match(l)]
-    if not heads:
-        return None
-    entries = []
-    section, cur, not_target = None, None, False
-    for l in lines[heads[-1] + 1:]:
-        if l.rstrip() in ("# Files", "# Implicit Rules", "# Variables", "# Directories", "# files hash-table stats:",
-                          "# Pattern-specific Variable Values", "# Finished Make data base"):
-            section, cur = (l.strip()[2:] if l.rstrip() in ("# Files", "# Implicit Rules") else None), None
-        elif section is None:
-            continue
-        elif l == "":
-            cur, not_target = None, False
-        elif l.startswith("# Not a target:"):
-            not_target = True
-        elif cur is None:
-            m = None if l.startswith(("#", "\t")) else ENTRY_RX.fullmatch(l)
-            if m:
-                cur = {"name": m.group(1).strip(), "not": not_target, "phony": False, "marker": False,
-                       "recipe": False, "section": section}
-                entries.append(cur)
-        elif l.startswith("#"):
-            cur["phony"] = cur["phony"] or l.startswith("#  Phony target")
-            cur["marker"] = cur["marker"] or bool(CMD_RX.match(l))
-        elif l.startswith("\t") and cur["marker"] and l.strip() not in ("", ";"):
-            cur["recipe"] = True
-    targets, catch_all = {}, False
-    for e in entries:
-        if e["not"]:
-            continue
-        if e["section"] == "Files":
-            t = targets.setdefault(e["name"], {"recipe": False, "phony": False})
-            t["recipe"] = t["recipe"] or e["recipe"]
-            t["phony"] = t["phony"] or e["phony"]
-            catch_all = catch_all or (e["name"] == ".DEFAULT" and e["recipe"])
-        else:
-            catch_all = catch_all or (e["name"] == "%" and e["recipe"])
-    return {"targets": targets, "catch_all": catch_all}
-
-
-def unit_db(unitdir):
-    """-> {"rc": make's exit status, "targets": ..., "catch_all": ...} for a unit directory, or None when make could
-    not be run or printed no data base (not GNU make, or it stopped before reading the Makefile). ONE make
-    invocation per directory per process: every target is answered from this. The goal is `.` (a directory that
-    always exists), so make reads the Makefile, prints the data base and has nothing to update: measured on GNU
-    make 3.81 it runs no recipe line (`+` and `$(MAKE)` lines included); a parse-time `$(shell)` and the
-    remaking of Makefile / included files still run, as in any make."""
-    if unitdir not in _db_cache:
-        db = None
+def make_rc(unitdir, target):
+    """make's exit status for `make -q -- target` in unitdir, or None when make could not be run, was killed
+    by a signal or did not answer within MAKE_TIMEOUT. One call per (unitdir, target) per process."""
+    key = (unitdir, target)
+    if key not in _rc_cache:
+        rc = None
         try:
-            r = subprocess.run(["make", "-C", unitdir, "-pq", "--", "."], stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
-                               env=make_env(), timeout=30)
-            parsed = parse_database(r.stdout.splitlines())
-            if parsed is not None:
-                db = dict(parsed, rc=r.returncode)
+            r = subprocess.run(["make", "-C", unitdir, "-q", "--", target], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=make_env(),
+                               timeout=MAKE_TIMEOUT)
+            rc = r.returncode if r.returncode >= 0 else None
         except (OSError, subprocess.SubprocessError):
             pass
-        _db_cache[unitdir] = db
-    return _db_cache[unitdir]
+        _rc_cache[key] = rc
+    return _rc_cache[key]
+
+
+def unit_catch_all(unitdir):
+    """True when the unit answers for a name nobody can have defined (a match-anything rule or `.DEFAULT`): an
+    explicit rule cannot be told apart from it by exit status, so such a unit is refused."""
+    return make_rc(unitdir, PROBE_NAME) in (0, 1)
 
 
 def make_target_state(unitdir, target):
-    """'present' | 'absent' | 'idle' | 'catch-all' | 'nodb'. present = the unit's own rule database has a rule
-    for exactly T with a non-empty recipe (an explicit rule wins over a catch-all). idle = such a rule exists but
-    T is not `.PHONY` and a file or directory named T sits in the unit directory, so make would say "up to
-    date". absent = no recipe (a name only in `.PHONY`, `T: ;`, `T: other` without a recipe, no rule) or make
-    exited 2 (no Makefile, an error in it). catch-all = no explicit rule, but a `%` / `.DEFAULT` recipe would
-    answer any name. nodb = no data base to read: the targets cannot be verified."""
-    db = unit_db(unitdir)
-    if db is None:
-        return "nodb"
-    if db["rc"] not in (0, 1):
-        return "absent"
-    t = db["targets"].get(target)
-    if t is not None and t["recipe"]:
-        if not t["phony"] and os.path.lexists(os.path.join(unitdir, target)):
-            return "idle"
+    """'present' | 'idle' | 'norule' | 'error' | 'catch-all'. present = make would run something for T (exit 1).
+    idle = make has nothing to do for T (exit 0: no recipe, or a file named T without `.PHONY`).
+    norule = exit 2 (no rule for T, no Makefile, an error in the Makefile). error = make could not be run, was
+    killed or timed out. catch-all = the unit answers for any name (unit_catch_all)."""
+    if unit_catch_all(unitdir):
+        return "catch-all"
+    rc = make_rc(unitdir, target)
+    if rc == 1:
         return "present"
-    return "catch-all" if db["catch_all"] else "absent"
+    if rc == 0:
+        return "idle"
+    return "norule" if rc == 2 else "error"
 
 
 def has_make_target(unitdir, target):
     """The ONE definition of "this unit has target T" for a service/database; the runner reads it through
-    `units`. A recipe that exists and does nothing (`verify: ; true`) cannot be judged by a tool and counts as
-    present."""
+    `units`. What it cannot tell is what the recipe does (see README, limits)."""
     return make_target_state(unitdir, target) == "present"
 
 
@@ -581,7 +534,8 @@ def check(root):
     cat, cats, globs, gl_lines = check_workspace(root, f)
     pkgs = [(root, rpkg, rtext)]
     parse_failed = set()  # workspace package dirs whose package.json does not parse: ONE `pkg-parse` finding each
-    for d in workspace_dirs(root, globs, f, "pnpm-workspace.yaml", gl_lines):
+    wsdirs = workspace_dirs(root, globs, f, "pnpm-workspace.yaml", gl_lines)
+    for d in wsdirs:
         data, text, perr = read_json(os.path.join(d, "package.json"))
         if perr:
             parse_failed.add(d)
@@ -591,6 +545,10 @@ def check(root):
     for d, data, text in pkgs:
         check_package(root, d, data, text, pm, eng, cat, cats, f)
     check_files(root, set(d for d, _, _ in pkgs) | parse_failed, f)
+    if wsdirs and os.path.isfile(os.path.join(root, "pnpm-workspace.yaml")) \
+            and not os.path.isfile(os.path.join(root, "pnpm-lock.yaml")):
+        f.append(("pnpm-lock.yaml", 1, "lockfile-missing",
+                  "the workspace has JS packages but the root has no pnpm-lock.yaml: run `make lock` and commit the result"))
     check_tracked_node_modules(root, f)
 
     # --- repo.yaml and the units
@@ -635,23 +593,27 @@ def check(root):
                               "unit %s: package.json has no `%s` script" % (u["id"], t)))
             continue
         mk = u["path"] + "/Makefile"
-        states = [(t, make_target_state(p, t)) for t in MANDATORY[u["kind"]]]
-        if any(st == "nodb" for _, st in states) or unit_db(p) is None:
-            f.append((mk, 1, "unit-target", "unit %s: make printed no rule data base (not GNU make, or it failed "
-                      "before reading the Makefile): targets cannot be verified" % u["id"]))
-            continue
-        if unit_db(p)["catch_all"] and (not states or any(st == "catch-all" for _, st in states)):
+        if unit_catch_all(p):
             f.append((mk, 1, "unit-target",
-                      "unit %s: Makefile catch-all rule (`%%:` / `.DEFAULT:`): targets cannot be verified" % u["id"]))
+                      "unit %s: Makefile answers for any target name (a `%%:` rule or `.DEFAULT:`): targets cannot be "
+                      "verified" % u["id"]))
             continue
-        for t, st in states:
+        for t in MANDATORY[u["kind"]]:
+            st = make_target_state(p, t)
             if st == "present":
                 continue
-            what = "has no %s target (make has no recipe for it)" % t
-            if st == "idle":
-                what = ("has no %s target: a file named %s beside a rule that is not .PHONY makes make say \"up to "
-                        "date\"; declare `.PHONY: %s`" % (t, t, t))
-            f.append((mk, 1, "unit-target", "unit %s: Makefile %s" % (u["id"], what)))
+            rc = make_rc(p, t)
+            if st == "idle" and os.path.lexists(os.path.join(p, t)):
+                what = ("make has nothing to do for %s (exit status 0): a file named %s beside a rule that is not "
+                        ".PHONY makes make say \"up to date\"; declare `.PHONY: %s`" % (t, t, t))
+            elif st == "idle":
+                what = ("make has nothing to do for %s (exit status 0): no recipe, or a name only in .PHONY" % t)
+            elif st == "norule":
+                what = "make has no rule for %s, or the Makefile has an error (exit status 2)" % t
+            else:
+                what = "make could not answer for %s (%s)" % (t, "timed out, was killed or could not be run"
+                                                              if rc is None else "exit status %d" % rc)
+            f.append((mk, 1, "unit-target", "unit %s: Makefile has no %s target: %s" % (u["id"], t, what)))
     if not err and not [1 for _, _, r, _ in f if r == "repo-yaml"]:
         for top in ("apps", "packages", "services"):
             base = os.path.join(root, top)
@@ -698,11 +660,8 @@ def cmd_units(root, target):
     for u in data["units"]:
         if u["kind"] in ("service", "database"):
             st = make_target_state(os.path.join(root, u["path"]), target)
-            if st == "nodb":
-                print("monorepo-run: unit %s: make printed no rule data base: targets cannot be verified; refusing to run anything" % u["id"], file=sys.stderr)
-                refused += 1
-            elif st == "catch-all":
-                print("monorepo-run: unit %s: Makefile catch-all rule: targets cannot be verified; refusing to run anything" % u["id"], file=sys.stderr)
+            if st == "catch-all":
+                print("monorepo-run: unit %s: Makefile answers for any target name: targets cannot be verified; refusing to run anything" % u["id"], file=sys.stderr)
                 refused += 1
             has[u["id"]] = st == "present"
         else:

@@ -4,9 +4,9 @@
 # (root, design-system, go x2, rust, python, db-postgres) with its generated repo.yaml, per-unit file ownership,
 # the settings check, the unit list of check-fast, .gitignore anchoring, the db-postgres gate in the tree, the
 # catalog invariant, the GENERATED lockfile (`make lock` under two scopes, then the frozen check), single layout
-# unchanged (and "one service + database" in single layout), and one RED mutation per guarded thing, each with
+# unchanged (and "one service + database" in single layout, for go, rust and python), and one RED mutation per guarded thing, each with
 # a green control. No known gap is pinned: the design-system packages are declared units, so repo.yaml lists
-# them and the root settings check is GREEN on the seven-unit tree with no manual edit.
+# them and the root settings check on the seven-unit tree has no finding but lockfile-missing (GREEN once a lockfile exists).
 # Sequential, no Docker; the network is used by ONE section only (make lock needs the npm registry; that section prints a
 # SKIP, never an ok, when pnpm is absent or the registry unreachable). Needs python3 with PyYAML (PYTHON=<interpreter> to choose
 # one; first of python3, python3.14, python3.13, python3.12 that imports yaml). Final line:
@@ -132,15 +132,53 @@ done
 [[ $have_base -eq 1 ]] || skip "single layout equals the tree at $SBASE" "git history does not contain $SBASE (shallow clone or no git); the all-root equivalence above still ran"
 
 # ---- db-postgres in layout single: its README lives at db/README.md in both layouts (never a root README.md that
-# would collide with a service's), and its gate runs in the assembled tree. NOT covered: "one service + database"
-# in layout single: the assembler refuses it (a declared unit at db/ nested in the root unit directory of a
-# service, exit 2), see the hand-back; no case here pretends otherwise.
+# would collide with a service's), and its gate runs in the assembled tree. "One service + database" follows below.
 expect "single layout: db-postgres alone assembles and generates no inventory" 0 "layout single" \
   A "$mods" --dest "$tmp/single-db" --layout single --module db-postgres
 [[ ! -e "$tmp/single-db/repo.yaml" && -f "$tmp/single-db/db/README.md" && ! -e "$tmp/single-db/README.md" ]] \
   && pass "single layout: db-postgres lands db/README.md and has no root README.md and no repo.yaml" || fail "single layout: db-postgres alone has a root README.md or a repo.yaml, or lacks db/README.md"
 expect "single layout: db-postgres alone: db-pin-check.sh passes in the assembled tree" 0 "^OK db-pin-check" \
   env PATH="$(dirname "$(command -v "$py")"):$PATH" bash "$tmp/single-db/scripts/db-pin-check.sh" "$tmp/single-db/db/image.lock" --compose "$tmp/single-db/db/compose.yml" "$tmp/single-db/db/compose.timescale.yml"
+
+# ---- "one service + database" in layout single (the assembler lets a module's declared units coexist with a service
+# whose unit directory is the root): for each service module, the tree with db-postgres is the service-alone tree plus
+# EXACTLY the files db-postgres places (db/** and scripts/**, both `root`), nothing generated, and its pin gate passes.
+# tree_list <dir>: `path mode sha256` per file or link, sorted
+tree_list() { "$py" - "$1" <<'E'
+import hashlib, os, sys
+root, out = sys.argv[1], []
+for d, ds, fs in os.walk(root):
+    for n in fs + [x for x in ds if os.path.islink(os.path.join(d, x))]:
+        p = os.path.join(d, n); st = os.lstat(p)
+        body = os.readlink(p).encode() if os.path.islink(p) else open(p, "rb").read()
+        out.append("%s %o %s" % (os.path.relpath(p, root), st.st_mode & 0o777, hashlib.sha256(body).hexdigest()))
+print("\n".join(sorted(out)))
+E
+}
+# svcdb_ok <alone-tree> <with-db-tree>: alone is a subset (same mode and digest) of with-db, the extra paths are exactly
+# the db-postgres module's own files under db/ and scripts/, db/README.md among them, none generated
+svcdb_ok() {
+  local a="$1" w="$2" extra want
+  [[ -z "$(comm -23 <(tree_list "$a") <(tree_list "$w"))" ]] || { echo "  a service file differs or is missing"; return 1; }
+  extra="$(comm -13 <(tree_list "$a" | cut -d' ' -f1) <(tree_list "$w" | cut -d' ' -f1))"
+  want="$(cd "$mods/db-postgres" && find db scripts -type f | sort)"
+  [[ "$extra" == "$want" ]] || { echo "  extra files differ from the module's db/ and scripts/ files"; return 1; }
+  [[ -f "$w/db/README.md" && ! -e "$w/repo.yaml" ]] || { echo "  no db/README.md, or a repo.yaml exists"; return 1; }
+  grep -qx 'db/README.md' <<<"$extra" || return 1
+}
+for m in service-go service-rust service-python; do
+  # shellcheck disable=SC2046
+  expect "single layout: $m alone assembles (baseline for the database case)" 0 "layout single" \
+    A "$mods" --dest "$tmp/sd-alone-$m" --layout single --module "$m" $(slots_for "$m")
+  # shellcheck disable=SC2046
+  expect "single layout: $m + db-postgres assembles (exit 0)" 0 "layout single" \
+    A "$mods" --dest "$tmp/sd-$m" --layout single --module "$m" --module db-postgres $(slots_for "$m")
+  out="$(svcdb_ok "$tmp/sd-alone-$m" "$tmp/sd-$m" 2>&1)" \
+    && pass "single layout: $m + db-postgres = $m alone (same files, modes, digests) + db/** and scripts/** of db-postgres, db/README.md, no inventory" \
+    || fail "single layout: $m + db-postgres tree" "$out"
+  expect "single layout: $m + db-postgres: db-pin-check.sh passes in the assembled tree" 0 "^OK db-pin-check" \
+    env PATH="$(dirname "$(command -v "$py")"):$PATH" bash "$tmp/sd-$m/scripts/db-pin-check.sh" "$tmp/sd-$m/db/image.lock" --compose "$tmp/sd-$m/db/compose.yml" "$tmp/sd-$m/db/compose.timescale.yml"
+done
 
 # ---- the assembly: monorepo-root + design-system + a service, real manifests, no corrected copies
 D="$tmp/repo"
@@ -237,8 +275,19 @@ inv_ok "$S7/repo.yaml" && pass "repo.yaml lists exactly seven units: db, tokens,
 
 # ---- the root module's settings check on the assembled trees: no manual edit anywhere, the assembler wrote
 # every entry (the design-system packages are declared units)
-for t in "$S7" "$S6" "$D" "$G"; do
-  expect "settings check GREEN on the assembled tree ${t##*/}, no manual edit" 0 "^OK monorepo-settings-check" check "$t"
+# The trees with JS packages (the design-system) have no lockfile until `make lock` has run: exactly ONE finding,
+# lockfile-missing, and GREEN once a lockfile exists. The lockfile here is written by hand (minimal; the check only tests
+# that the file exists and never parses it), so this proves the rule's presence test, NOT pnpm's acceptance of it (the
+# network section below proves that with the generated lockfile). S6 has no JS package: GREEN with no lockfile.
+minlock() { printf "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n" > "$1/pnpm-lock.yaml"; }
+expect "settings check GREEN on the assembled tree ${S6##*/} (no JS package, so no lockfile needed), no manual edit" 0 "^OK monorepo-settings-check" check "$S6"
+for t in "$S7" "$D" "$G"; do
+  out="$(check "$t" 2>&1)"; rc=$?; found="$(grep -E '^[^ :]+:[0-9]+: ' <<<"$out")"
+  if [[ $rc -eq 1 && "$found" == "pnpm-lock.yaml:1: lockfile-missing "* && $(wc -l <<<"$found") -eq 1 ]]; then
+    pass "settings check on the fresh assembled tree ${t##*/}: exactly ONE finding, lockfile-missing"
+  else fail "settings check on the fresh assembled tree ${t##*/}: exactly ONE finding, lockfile-missing" "exit $rc: $(head -c 300 <<<"$out")"; fi
+  cp -R "$t" "$tmp/lk-${t##*/}"; minlock "$tmp/lk-${t##*/}"
+  expect "settings check GREEN on the assembled tree ${t##*/} once a (hand-written) lockfile exists, no other edit" 0 "^OK monorepo-settings-check" check "$tmp/lk-${t##*/}"
 done
 
 # ---- make -n check-fast at the root, and the unit list it runs (no toolchain is started)
@@ -450,6 +499,34 @@ fi
 
 mut_asm "mutation: an unknown key in the design-system manifest is exit 2" 2 "unknown key" design-system \
   'd["description"]="x"' --layout monorepo --module design-system --slot SCOPE=demo
+
+# ---- mutation on a scratch copy of the ASSEMBLER (placed where it finds template/: $tmp/x/scripts): the single-layout
+# exemption removed (an instance's root unit directory is compared with a declared directory again) makes each
+# "service + db-postgres" assembly exit 2. The control is the UNMUTATED copy, same place, same scenario: it must assemble.
+mkdir -p "$tmp/x/scripts"; cp "$asm" "$tmp/x/scripts/assemble.py"
+XA() { "$py" -I -B "$tmp/x/scripts/assemble.py" --modules-dir "$M" "$@"; }
+for m in service-go service-rust service-python; do
+  # shellcheck disable=SC2046
+  XA --dest "$tmp/xctl-$m" --layout single --module "$m" --module db-postgres $(slots_for "$m") >/dev/null 2>&1 \
+    && pass "control for the next mutation: the unmutated assembler copy assembles $m + db-postgres in single (exit 0)" \
+    || fail "control for the exemption mutation: $m + db-postgres" "the unmutated copy does not assemble"
+done
+if "$py" -I -B - "$tmp/x/scripts/assemble.py" <<'E'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = '            if a.layout == "single" and x["decl"] != y["decl"]:\n                continue  # single: an instance\'s unit directory is the root; declared dirs sit inside it\n'
+if old not in s: sys.exit(3)
+open(p, "w").write(s.replace(old, ""))
+E
+then
+  for m in service-go service-rust service-python; do
+    # shellcheck disable=SC2046
+    expect "mutation: single-layout exemption removed: $m + db-postgres is refused (exit 2, shared unit directory)" 2 "would share the unit directory" \
+      XA --dest "$tmp/xmut-$m" --layout single --module "$m" --module db-postgres $(slots_for "$m")
+  done
+else
+  fail "mutation: single-layout exemption removed" "the edit changed nothing"
+fi
 
 summary="$ok ok, $bad failed"; [[ $skipped -gt 0 ]] && summary+=", $skipped skipped"; echo "$summary"
 [[ $bad -eq 0 ]]

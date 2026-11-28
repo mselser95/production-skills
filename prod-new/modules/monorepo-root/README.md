@@ -44,6 +44,8 @@ constructs; dependency specs are an allow-list too (only the three spec forms be
   `coverage/` and `target/` are): `.npmrc`, `.pnpmfile.*` / `pnpmfile.*`, `package.yaml`, `package.json5`,
   a nested `pnpm-workspace.yaml` (rule `supply-override`); `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`,
   `bun.lock`, `bun.lockb`, `deno.lock`, a nested `pnpm-lock.yaml` (rule `second-lockfile`).
+- A workspace with at least one `package.json` under `apps/*` or `packages/*` and no root `pnpm-lock.yaml` (rule
+  `lockfile-missing`): run `make lock` and commit the result.
 - `package.json` keys (rule `pkg-key`), an ALLOW-list per manifest. Root: `name`, `private`, `packageManager`,
   `engines`, `scripts` (what the shipped root has) and the four dependency fields. Workspace package: `name`,
   `version`, `private`, `type`, `description`, `license`, `main`, `module`, `types`, `exports`, `files`,
@@ -67,7 +69,7 @@ constructs; dependency specs are an allow-list too (only the three spec forms be
   `.git`; a tree that is not a git repository cannot tell a committed `node_modules/` from an install, so it gets no finding).
 - `repo.yaml` (`repo-yaml`, `unit-path`), `unit-unlisted` (a directory under `apps/`, `packages/`,
   `services/`, or `db/`, that is not in `repo.yaml`), `unit-target` (a unit lacks a mandatory target, or its
-  Makefile has a catch-all rule).
+  Makefile answers for any target name).
 
 ## Mandatory and optional unit targets
 
@@ -78,41 +80,44 @@ constructs; dependency specs are an allow-list too (only the three spec forms be
 | database | none | `check-fast`, `verify`, `test` |
 
 One function decides "this unit has target T", used by the check and by `scripts/monorepo-run.sh`: for a service
-or database it reads make's RULE DATA BASE, never what make prints. One `make -C <unit> -pq -- .` per unit (all
-targets are answered from it) prints the data base make built from the Makefile; only the block after the LAST
-`# Make data base, printed on` line is read (a `$(info)` banner that imitates one comes before it), and only its
-`# Implicit Rules` and `# Files` sections. T is present when an entry for exactly `T:` (not under `# Not a target:`)
-has a `commands to execute (from ...)` (make 3.81) or `recipe to execute (from ...)` (4.x) marker followed by a
-non-empty recipe line. `-s`, `.SILENT` and `$(info)` banners do not change the data base, so a name only in `.PHONY`,
-`T: ;` and `T: other` without a recipe are not targets. A target whose name is also a FILE in the unit directory,
-without `.PHONY`, would be "up to date" and never run: it is reported missing, and the fix is `.PHONY: <target>`. A
-catch-all rule (`%:` or `.DEFAULT:` with a recipe) answers any name: with no explicit rule for T the unit is refused
-(`unit-target`, `catch-all rule: targets cannot be verified`), by the check and by the runner; an explicit rule for T
-wins, as in make. A make that prints no data base at all (not GNU make, stopped before reading the Makefile) makes
-the unit's targets unverifiable: RED, never "present"; a make that exits 2 (no Makefile, an error in it) leaves its
-targets missing. For an app or package the function
-reads `package.json` `scripts`. A unit that lacks a mandatory target makes the runner FAIL before any unit target is
-run, and `make check-fast` / `make verify` stop at the settings check first. A target that exists but does nothing
-(`verify: ; true`) cannot be judged by a tool and counts as present.
+or database it asks make for its VERDICT and reads the EXIT STATUS, never anything make prints. For each unit and
+target: `env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOVERRIDES -u GNUMAKEFLAGS -u MAKEFILES make -C <unit> -q -- <target>`
+with stdout and stderr discarded (the caller's make flags are scrubbed, so a root `make -n`, `-i`, `-k`, `-B` or `-s`
+does not change the answer; a call that takes over 20 s is unanswered). GNU make's question mode answers 1 when it
+would run something for the target (PRESENT), 0 when it has nothing to do, 2 on an error (no rule for the target, no
+Makefile, a syntax error). Exit 0 is reported missing: `verify: ;`, a name only in `.PHONY`, `verify: other` where
+`other` has no recipe, and a target whose name is also a FILE in the unit directory without `.PHONY` ("up to date";
+the message adds the hint `.PHONY: <target>`). Exit 2, any other status, a signal or a timeout is missing too, and the
+message carries the exit status. Prerequisite-only targets (`verify: check-fast lint`, the shape of the service
+modules), pattern rules, static pattern rules, included files and double-colon rules are answered by make itself.
+One more question per unit asks for a random name no unit can define (`__monorepo_probe_<16 hex>`): an answer of 0 or 1
+means the unit answers for ANY name (a `%:` rule or `.DEFAULT:`), and the unit is refused (`unit-target`, "answers for
+any target name ... targets cannot be verified") by the check and by the runner, whatever its targets are: an explicit
+rule cannot be told apart from a catch-all by exit status. Answers are cached per (unit, target) within one run. For an
+app or package the function reads `package.json` `scripts`. A unit that lacks a mandatory target makes the runner
+FAIL before any unit target is run, and `make check-fast` / `make verify` stop at the settings check first. The inspection is `make -C <unit> -q <target>`: make parses the unit's Makefile (a parse-time `$(shell ...)` runs, and an included file that has a rule may be remade) and, as GNU make does in question mode, executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither; no other recipe line runs (measured on GNU make 3.81).
 The runner runs each unit with stdin from `/dev/null`, reads the whole unit list before running any, refuses a
 unit path that is a symlink or resolves outside the repository, announces how many units it will run and
 asserts it ran that many.
 
 ## Limits
 
-The check inspects each service/database unit with one `make -pq -- .`. Make parses the unit Makefile: a parse-time
-`$(shell ...)` runs, and make remakes a Makefile or included file that has a rule. No recipe line runs during the
-inspection, `+`-prefixed and `$(MAKE)` lines included (measured on GNU make 3.81 and pinned by a selftest case; a unit
-that declares the goal `.` phony and gives it a recipe is not covered). The root does not sandbox make: the units are the
-repository's own code and are trusted to the degree `make check-fast` trusts them. No unit TARGET RECIPE is run for
-`check-fast`, `verify` or `test` when a mandatory target is missing.
+The inspection is `make -C <unit> -q <target>`: make parses the unit's Makefile (a parse-time `$(shell ...)` runs, and an included file that has a rule may be remade) and, as GNU make does in question mode, executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither; no other recipe line runs (measured on GNU make 3.81). Under `-q` a recipe whose first line is `+`/`$(MAKE)` answers with
+that sub-make's status. The root does not sandbox make: the units are the repository's own code and are trusted to the
+degree `make check-fast` trusts them. No unit TARGET RECIPE is run for `check-fast`, `verify` or `test` when a mandatory
+target is missing.
+
+Scope boundary: the root can tell that make WOULD run something for a target; it cannot tell what a recipe does. A unit
+whose `verify` recipe is `@:` or `@true`, or whose Makefile defines the rule only under a condition on `MAKEFLAGS` /
+`MAKECMDGOALS`, has an owner who wrote a no-op on purpose; that is a review matter, not something this check claims to
+catch.
 
 Install scripts: `strictDepBuilds` and `onlyBuiltDependencies: []` govern DEPENDENCIES only. A workspace package's own
 `preinstall` / `postinstall` / `prepare` scripts are the repository's own code and DO run on a plain `pnpm install`.
 This module's root Makefile and root `package.json` have no install target (they only delegate to `monorepo-run.sh`);
 a human or CI that installs should pass `--ignore-scripts` (`pnpm install --frozen-lockfile --ignore-scripts`), as the
 live selftest does for its network installs.
-Not proven: GNU make 4.x on a real Linux host (its data base wording is asserted only with a hand-written fixture served by a fake `make`).
+Not proven: GNU make 4.x on a real Linux host (the execution facts above were measured on 3.81 only; GNU documents that lines marked `+` or containing `$(MAKE)` run even under `-q`).
 
 ## Adding a unit
 
@@ -130,8 +135,9 @@ catalog versions are at least 7 days old at that moment) and commit the result. 
 or no longer matches the workspace manifests; measured, it needs neither network nor a package store (a cold
 cache is enough), because a frozen install resolves nothing. It is a separate target, NOT a prerequisite of
 `verify`: a fresh scaffold has no lockfile until `make lock`, and a repository of Go, Rust or Python units may
-have no pnpm. The settings check refuses any lockfile other than the root one (`second-lockfile`); it does
-not yet report a missing root lockfile in a workspace with JS packages (see the repository's open list).
+have no pnpm. The settings check refuses any lockfile other than the root one (`second-lockfile`) and reports
+a workspace with JS packages and no root `pnpm-lock.yaml` (`lockfile-missing`), so a fresh scaffold is RED on
+`check-fast` until `make lock` has run and its result is committed.
 
 ## Not here
 

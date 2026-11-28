@@ -1,8 +1,10 @@
 # Root Makefile: discovers the units in repo.yaml and runs the same-named target in each
 # one. No unit's logic lives here; a unit keeps its own Makefile (or package.json script).
-# settings-check runs FIRST for check-fast and verify: a red check stops before any unit TARGET is run
-# (it reads each unit's rule data base with one `make -pq -- .`, which parses the unit's Makefile
-# and runs no recipe line; see README, limits).
+# settings-check runs FIRST for check-fast and verify: a red check stops before any unit TARGET is run.
+# "Unit has target T" is `make -C <unit> -q <T>` per unit and target (exit status only); see README, limits:
+# make parses the unit's Makefile (a parse-time $(shell ...) runs, an included file that has a rule may be remade) and,
+# as GNU make does in question mode, executes the recipe lines marked `+` or containing $(MAKE) of the target and of its
+# prerequisites, each recipe at most up to its first line that is neither; no other recipe line runs (measured on GNU make 3.81).
 SHELL := /bin/bash
 .PHONY: check-fast verify test settings-check lock lock-check
 
