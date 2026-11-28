@@ -1,7 +1,7 @@
 # Frozen output digests of the real service-go, service-rust and service-python modules. Re-recorded on the joined tree each time module content changed on purpose (template, service-rust, service-python); the assembler's output for unchanged input was verified identical. Regenerate on Linux with: bash scripts/tests/assemble-multi-unit-selftest.sh --print-golden (keep this line and the digest rows only).
 service-go single 176 843121a8f1e81c5c6c627bf3f7900c3c4484a1e6e07574fe7a91e3f40ea18edc
-service-go monorepo 176 ca26b4ebef13b6a62cb9ae41a3a2fe95b33328c1af98023f18051ce9d54f84d7
-service-rust single 46 89cb65a44141fc762aabb10278e2c4e06795787519cbf7cd40219b2c4ba466d7
-service-rust monorepo 46 ea96601156c53951e62b7ff4c04140a6080fb3a3525104036eb0a39b63d942a6
-service-python single 62 2f80125bfcfbfb408dccd9683eb01f6f0f15d51353d9a2e6964dbb593995eba4
-service-python monorepo 62 f73236c41dddebf9e3b294d66ff095eb45ee6231e532562807389f9406277d4e
+service-go monorepo 176 ec03652302fc580f9319253bb4eac7f674f1fe3b22d44814fc0be3a0c8d631c5
+service-rust single 46 a32ba86737c6179033d923b023ac81b5ee666d615600ad686e666d313218fd78
+service-rust monorepo 46 52293da321ffcecc1bd60757744b11c8e4afa24e1be4414315c738118e2a9983
+service-python single 62 d9d86a7031ed5d7d24c0d5e0888558fe7a380eb5d2ee6a204cfa647fcf5b2cf7
+service-python monorepo 62 37c0a166ae643645c598e9a26d94b770321b6403692187a95446d7012ea1980c
