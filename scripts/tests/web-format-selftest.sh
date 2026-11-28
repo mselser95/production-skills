@@ -257,6 +257,26 @@ export const leak = (n: number): number => n | 0;"
     mutate "formatNum without options is bad-locale again" src/number.ts "test/options.test.ts test/num.test.ts" "formatNum without an options|locales and sign display" \
       "readOptions<NumOptions>(options, ['locale', 'signDisplay', 'grouping']);" \
       "readOptions<NumOptions>(options ?? {}, ['locale', 'signDisplay', 'grouping']);"
+    # ---- third review (T29b): the five Intl method names are reserved identifiers, minimum grouping 3
+    mutate "guard: a destructured bound format escapes the dot rule" src/locale.ts "test/guard.test.ts" "every finding in src" \
+      "const hasGroup = (parts: Intl.NumberFormatPart[]): boolean => parts.some((p) => p.type === 'group');" \
+      "const hasGroup = (parts: Intl.NumberFormatPart[]): boolean => parts.some((p) => p.type === 'group');
+export const bound = (nf: Intl.NumberFormat): ((v: never) => string) => { const { format } = nf; return format; };"
+    mutate "guard: a computed nf['format'] access added" src/money.ts "test/guard.test.ts" "every finding in src" \
+      "  const resolved = new Intl.NumberFormat(options.locale, style).resolvedOptions();" \
+      "  const resolved = new Intl.NumberFormat(options.locale, style).resolvedOptions();
+  void (new Intl.NumberFormat(options.locale, style) as unknown as Record<string, () => string>)['format'];"
+    mutate "guard: the identifier rule reverted to after-a-dot only" test/guard.test.ts "test/guard.test.ts" "reserved identifiers" \
+      "if (!dotBefore && INTL_MEMBERS.has(tok.text)) add('intlname'" \
+      "if (false && INTL_MEMBERS.has(tok.text)) add('intlname'"
+    mutate "guard: the exact-string rule removed" test/guard.test.ts "test/guard.test.ts" "reserved identifiers" \
+      "(tok.kind === 'str' || tok.kind === 'tpl') && INTL_MEMBERS.has(tok.raw ?? '')" \
+      "(tok.kind === 'str' || tok.kind === 'tpl') && false"
+    mutate "minimum grouping 3 becomes 2" src/locale.ts "test/mingrouping.test.ts" "ee" \
+      "  return 3;
+}" \
+      "  return 2;
+}"
     # typecheck bites: a type error in src is RED, the clean tree was GREEN above
     printf "export const bad: number = 'a';\n" > "$pk/src/zz-type-error.ts"
     out="$(pm tsc -p tsconfig.json)" && fail "mutant type error: typecheck stayed GREEN" || pass "mutant type error in src: typecheck control GREEN, mutant RED"

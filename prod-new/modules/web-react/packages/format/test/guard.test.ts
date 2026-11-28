@@ -32,21 +32,30 @@ import { describe, expect, it } from 'vitest';
 //             exact argument text. Number-style calls are allowed ONLY in locale.ts / money.ts with a numeric LITERAL
 //             argument (the fixed samples) and `.resolvedOptions()` (a currency's fraction digits); the date calls are
 //             allowed ONLY in date.ts (dates legitimately go through Intl). A value passed to Intl is therefore a finding.
+//   intlname  the five names `format` `formatToParts` `formatRange` `formatRangeToParts` `resolvedOptions` as a WHOLE identifier
+//             anywhere that is not after a dot (`const { format } = nf`, `{ format: f }`, `{ format }`, `const format = 1`, a
+//             parameter, an interface member), and a string or template whose entire content is one of them (`nf['format']`).
+//             They are reserved in src/: a bound method can never be named, so it cannot be called out of sight. `formatMoney`
+//             is a different identifier. A comment, or a string that merely contains the name (`"use format() here"`), is not one.
 // A `globalThis.` / `window.` / `self.` / `global.` prefix does not hide a name (`globalThis.Math.round`, `globalThis.Intl`).
 //
 // NOT flagged (documented, not hidden): binary `+` and `-` in general (index arithmetic and string concatenation are
 // everywhere and the rule would need types: `x - y` on strings converts like `* 1`), `++` / `--`, `|` between two
 // non-literals (it is the type-union token), `valueOf` reached by a computed member name (`x['valueOf']()`), any
-// computed member name or string-built name (`Math['round']`, `globalThis['Number']`), unicode-escaped identifiers
+// other computed member name or string-built name (`Math['round']`, `globalThis['Number']`, `'for' + 'mat'`; a string that is
+// exactly one of the five Intl names IS flagged), unicode-escaped identifiers
 // (`\u004dath`), integer literals below ten digits (fixed samples such as 1, -1, 1000), a type position `Intl.X` after
 // `:` / `<` / `,` (told apart from a value alias only by the token before it). The backstop for those is behavioural:
-// the 30-digit round-trip properties and the BigInt oracle (test/properties.test.ts) fail as soon as a float is in the
-// path, because a float loses digits beyond 2^53, and the Intl cross-checks fail on a value formatted by Intl rounding.
+// the 30-digit round-trip properties and the BigInt oracle (test/properties.test.ts) fail as soon as a FLOAT is in the
+// path, because a float loses digits beyond 2^53. They do NOT see a value sent to Intl as a string (Intl reads strings
+// exactly): for that route the guard is the check, with the rounding-mode and negative-zero tests a partial second line.
 
 export interface Token {
   readonly kind: 'id' | 'num' | 'str' | 'tpl' | 'regex' | 'punct';
   readonly text: string;
   readonly line: number;
+  /** The unblanked content of a string or a template text: only for the exact-name rule (`nf['format']`). */
+  readonly raw?: string;
 }
 
 const PUNCT = ['>>>=', '**=', '...', '===', '!==', '<<=', '>>=', '>>>', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<', '>>', '**'];
@@ -60,7 +69,7 @@ export function lex(src: string): Token[] {
   let line = 1;
   // context stack: 'code' with its brace depth, or 'tpl' (inside template text)
   const stack: { mode: 'code' | 'tpl'; depth: number }[] = [{ mode: 'code', depth: 0 }];
-  const push = (kind: Token['kind'], text: string): void => void out.push({ kind, text, line });
+  const push = (kind: Token['kind'], text: string, raw?: string): void => void out.push(raw === undefined ? { kind, text, line } : { kind, text, line, raw });
   const prevAllowsRegex = (): boolean => {
     const p = out[out.length - 1];
     if (p === undefined) return true;
@@ -71,13 +80,15 @@ export function lex(src: string): Token[] {
   // Read template text from i (just after the opening backtick or a closing `}` of a substitution).
   const templateText = (): void => {
     let text = '';
+    let raw = '';
     while (i < src.length) {
       const c = src[i] ?? '';
-      if (c === '\\') { i += 2; continue; }
-      if (c === '`') { i++; push('tpl', text); stack.pop(); return; }
-      if (c === '$' && src[i + 1] === '{') { i += 2; push('tpl', text); stack.push({ mode: 'code', depth: 0 }); return; }
+      if (c === '\\') { raw += src.slice(i, i + 2); i += 2; continue; }
+      if (c === '`') { i++; push('tpl', text, raw); stack.pop(); return; }
+      if (c === '$' && src[i + 1] === '{') { i += 2; push('tpl', text, raw); stack.push({ mode: 'code', depth: 0 }); return; }
       if (c === '\n') line++;
       text += ' ';
+      raw += c;
       i++;
     }
   };
@@ -99,7 +110,7 @@ export function lex(src: string): Token[] {
     if (c === '"' || c === "'") {
       let j = i + 1;
       while (j < src.length && src[j] !== c && src[j] !== '\n') j += src[j] === '\\' ? 2 : 1;
-      push('str', ' '.repeat(Math.max(0, j - i - 1)));
+      push('str', ' '.repeat(Math.max(0, j - i - 1)), src.slice(i + 1, j));
       i = j + 1;
       continue;
     }
@@ -195,6 +206,9 @@ export function scan(source: string): Finding[] {
       if (!isMember && tok.text === 'Number' && next?.text === '.' && /^parse/.test(t[i + 2]?.text ?? '')) add('numparse', 'Number.' + (t[i + 2]?.text ?? ''), tok.line);
       if (!isMember && tok.text === 'Math' && next?.text === '.') add('math', 'Math.' + (t[i + 2]?.text ?? ''), tok.line);
       if (dotBefore && INTL_MEMBERS.has(tok.text)) add('intlcall', '.' + tok.text + (next?.text === '(' ? argsAfter(i + 1) : ''), tok.line);
+      // the five names are RESERVED in src/: as a whole identifier anywhere else (a destructuring pattern, an object key or
+      // shorthand, a local, a parameter, a type member) they would let a bound method escape the `.format(` rule
+      if (!dotBefore && INTL_MEMBERS.has(tok.text)) add('intlname', tok.text, tok.line);
       if (!isMember && tok.text === 'Intl') {
         // the chain Intl.A.B... and whether a call follows it
         let end = i;
@@ -208,6 +222,9 @@ export function scan(source: string): Finding[] {
         else if (prev?.kind === 'punct' && ['=', '(', '?', '||', '??', '&&'].includes(prev.text) && t[i - 3]?.text !== 'type') add('intl', chain, tok.line); // `type P = Intl.X` is a type
         else if (prev?.kind === 'id' && prev.text === 'return') add('intl', chain, tok.line);
       }
+    } else if ((tok.kind === 'str' || tok.kind === 'tpl') && INTL_MEMBERS.has(tok.raw ?? '')) {
+      // a string whose WHOLE content is one of the five names is how a computed access is written: `nf['format'](v)`
+      add('intlname', '"' + (tok.raw ?? '') + '"', tok.line);
     } else if (tok.kind === 'num') {
       if (/[.eE]/.test(tok.text) && !/^0[xX]/.test(tok.text)) add('literal', tok.text, tok.line);
       else if (tok.text.replace(/_/g, '').length >= 10) add('literal', tok.text, tok.line);
@@ -373,6 +390,24 @@ describe('the source contains no float-based formatting or arithmetic on values,
     expect(kinds('const I = Intl; const NF = Intl.NumberFormat; return Intl.NumberFormat;')).toEqual(['intl:Intl', 'intl:Intl.NumberFormat', 'intl:Intl.NumberFormat']);
     expect(kinds('const x: Intl.NumberFormat = a; const m = new Map<string, Intl.DateTimeFormat>(); const o: Intl.NumberFormatOptions = {}; type P = Intl.NumberFormatPart[];')).toEqual([]);
     expect(kinds('const a = f.format(utcDay(y, mo, d));')).toEqual(['intlcall:.format(utcDay(y,mo,d))']);
+  });
+  it('the five Intl method names are reserved identifiers: a bound or computed method is a finding (control)', () => {
+    expect(kinds('const { format } = nf;')).toEqual(['intlname:format']);
+    expect(kinds('const { format: f } = nf;')).toEqual(['intlname:format']);
+    expect(kinds('({ formatToParts } = nf);')).toEqual(['intlname:formatToParts']);
+    expect(kinds('const a = nf[\'format\'](v);')).toEqual(['intlname:"format"']);
+    expect(kinds('const a = nf["resolvedOptions"]();')).toEqual(['intlname:"resolvedOptions"']);
+    expect(kinds('const a = nf[`formatRange`](1, 2);')).toEqual(['intlname:"formatRange"']);
+    expect(kinds('const o = { fmt: nf.format };')).toEqual(['intlcall:.format']);
+    expect(kinds('const o = { format };')).toEqual(['intlname:format']);
+    expect(kinds('const format = 1;')).toEqual(['intlname:format']);
+    expect(kinds('function f(formatRangeToParts: string) {}')).toEqual(['intlname:formatRangeToParts']);
+    expect(kinds('interface I { format: string }')).toEqual(['intlname:format']);
+    // whole identifiers only; comments and longer strings say nothing
+    expect(kinds('const a = formatMoney(x); const b = formatDecimal(y); const c = reformat(z); const d = format2;')).toEqual([]);
+    expect(kinds('// format() here\n/* const { format } = nf */ const s = "use format() here"; const t = `a format b`;')).toEqual([]);
+    // string concatenation stays documented as not flagged
+    expect(kinds('const a = nf[\'for\' + \'mat\'](v);')).toEqual([]);
   });
   it('the scanner is not fooled: comments, strings, regex literals, a marker and a leading `*` hide nothing and fake nothing (control)', () => {
     expect(kinds('// x.toFixed(2)\n/* Number(x) */\n/*\n * Number(x)\n */')).toEqual([]);

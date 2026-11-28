@@ -103,8 +103,8 @@ describe('percent grouping is the percent style own (not the plain-number one)',
     expect(text(formatDecimal('1234567.5', { locale: 'mr-IN' }))).toBe('12,34,567.5');
     expect(pct('12345.675', { locale: 'mr-IN' })).toBe('1,234,567.5%');
   });
-  it('equals Intl in 64 locales on displayed integer parts of 1 to 9 digits (a failure prints both strings)', () => {
-    const locales = ('mr-IN ml-IN ne-NP or-IN te-IN es-ES hu-HU bg-BG et-EE be-BY en-US en-GB en-IN en-CH de-DE de-AT de-CH fr-FR fr-CH fr-CA es-MX es-AR pt-BR pt-PT it-IT nl-NL sv-SE nb-NO da-DK fi-FI pl-PL cs-CZ sk-SK ru-RU uk-UA tr-TR el-GR ro-RO hr-HR sl-SI lt-LT lv-LV ca-ES gl-ES eu-ES ja-JP ko-KR zh-CN zh-TW hi-IN bn-BD bn-IN ta-IN kn-IN gu-IN pa-IN as-IN ar-EG ar-SA he-IL fa-IR ur-PK th-TH vi-VN id-ID').split(' ');
+  const locales = ('mr-IN ml-IN ne-NP or-IN te-IN es-ES hu-HU bg-BG et-EE be-BY en-US en-GB en-IN en-CH de-DE de-AT de-CH fr-FR fr-CH fr-CA es-MX es-AR pt-BR pt-PT it-IT nl-NL sv-SE nb-NO da-DK fi-FI pl-PL cs-CZ sk-SK ru-RU uk-UA tr-TR el-GR ro-RO hr-HR sl-SI lt-LT lv-LV ca-ES gl-ES eu-ES ja-JP ko-KR zh-CN zh-TW hi-IN bn-BD bn-IN ta-IN kn-IN gu-IN pa-IN as-IN ar-EG ar-SA he-IL fa-IR ur-PK th-TH vi-VN id-ID').split(' ');
+  it(`equals Intl in ${locales.length} locales on displayed integer parts of 1 to 9 digits (a failure prints both strings)`, () => {
     expect(locales.length).toBeGreaterThanOrEqual(60);
     const ratios: string[] = [];
     for (let n = 1; n <= 9; n++) {

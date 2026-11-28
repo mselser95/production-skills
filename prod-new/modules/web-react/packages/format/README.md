@@ -51,8 +51,10 @@ Rules (each is pinned by a test):
   `{ ok: true, text: string }`; anything else (null included) is the placeholder, and a non-string placeholder
   argument falls back to the dash. An options object without `locale` is `bad-locale`.
 - **Unknown option keys are refused.** A key the function does not know (a typo such as `maximumFractionDigits` for
-  `maxFractionDigits`, or another formatter's key) is `bad-options`, never silently ignored. `formatNum(1, undefined)`
-  is `bad-options` like the other five.
+  `maxFractionDigits`, or another formatter's key) is `bad-options`: an unknown OWN ENUMERABLE key is never silently
+  ignored. A non-enumerable own key or an inherited (prototype) key is not checked; that is harmless, because options
+  are read by known name only, so such a key has no effect. `formatNum(1, undefined)` is `bad-options` like the other
+  five.
 - **Counts.** `formatNum` accepts an integer string, a bigint, or a number that is a safe integer.
 - **Negative money** uses the locale's own minus pattern; there is no accounting-parentheses style.
 - **Instants.** `formatDate` accepts RFC 3339 `YYYY-MM-DDThh:mm:ss[.f{1,9}](Z|+hh:mm|-hh:mm)`; fractional seconds ARE
@@ -66,7 +68,7 @@ Rules (each is pinned by a test):
 - No compact notation: it rounds to significant digits, which hides digits.
 
 Tests (`pnpm test`): unit tables per function, fast-check properties (fixed seed) against an independent BigInt oracle,
-the TZ matrix, Intl cross-checks (33 locales x 5 currencies x 3 displays for money, 64 locales x displayed integer
+the TZ matrix, Intl cross-checks (33 locales x 5 currencies x 3 displays for money, 67 locales x displayed integer
 parts of 1 to 9 digits for percent, RTL locales for decimals), a never-throws fuzz over every parameter, option
 read-once and unknown-key tests, and `test/guard.test.ts`.
 
@@ -76,17 +78,23 @@ marker). It flags: `.toFixed` / `.toPrecision` / `.toExponential` / `.toLocaleSt
 `-`; `* / % **` (and compound forms; a generator's `function*` is not one); bitwise `~ ^ & << >> >>>` (and compound
 forms) and `|` next to a numeric literal; a binary `- 0`; float or 10-digit numeric literals; every `Intl` call,
 construction or alias; and every `.format(` / `.formatToParts(` / `.formatRange(` / `.formatRangeToParts(` /
-`.resolvedOptions(` member. A `globalThis.` / `window.` / `self.` / `global.` prefix hides nothing. Number-style Intl
+`.resolvedOptions(` member. Those five Intl method names are reserved identifiers in `src/`: the guard flags each as a
+whole identifier wherever it occurs (a destructuring pattern, an object key or shorthand, a local, a parameter, an
+interface member, a string that is exactly the name as in `nf['format']`), so a bound method can never be named and
+called out of sight; `formatMoney` is another identifier, and a comment or a longer string is not a finding. A
+`globalThis.` / `window.` / `self.` / `global.` prefix hides nothing. Number-style Intl
 calls are allowed only in `locale.ts` (and `resolvedOptions` in `money.ts`) with a numeric literal argument; the date
 calls only in `date.ts`. The exemptions are an explicit allow-list in the test (`ALLOW`, exact expected length), each
 entry pinning its file, the finding and the full source LINE of its site, so each is a visible diff and swapping one use
 for another fails.
 
 What the guard does NOT flag, by design (it has no types): binary `+` / `-` in general, `++` / `--`, `|` between two
-non-literals (the type-union token), computed or string-built member names (`Math['round']`, `x['valueOf']()`),
-unicode-escaped identifiers, integer literals below ten digits, a type-position `Intl.X`. The backstop for those is
-behavioural: the 30-digit round-trip properties and the BigInt oracle fail as soon as a float is in the path (a float
-loses digits beyond 2^53). The hermetic repo selftest only runs a coarse grep with no exemption marker; this test is
+non-literals (the type-union token), other computed or string-built member names (`Math['round']`, `x['valueOf']()`, `'for' + 'mat'`; a literal key that is
+exactly one of the five Intl names IS flagged), unicode-escaped identifiers, integer literals below ten digits, a
+type-position `Intl.X`. The backstop for FLOAT paths is behavioural: the 30-digit round-trip properties and the BigInt
+oracle fail as soon as a float is in the path (a float loses digits beyond 2^53). They cannot see a value sent to Intl
+as a string (Intl reads strings exactly): for a value routed through Intl the guard is the check, with the rounding-mode
+and negative-zero tests as a partial second line. The hermetic repo selftest only runs a coarse grep with no exemption marker; this test is
 the real guard.
 
 ## Declared gaps
