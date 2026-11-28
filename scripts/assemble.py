@@ -79,7 +79,8 @@ was placed and whichever module placed it: a declared-unit module places its fil
 links inside its declared directories are checked the same way. A ROOT link (output outside every
 unit directory) whose target lies inside a unit directory couples the root to a unit and is refused,
 exit 1, naming link, target and unit; so is a root link to a directory that CONTAINS a unit directory
-(`l -> services`, it reaches into every unit); a root link to a root file is fine. Layout single is unchanged.
+(`l -> services`, it reaches into every unit; the repository root itself, `l -> .` or `docs/l -> ..`,
+contains every unit); a root link to a root file is fine. Layout single is unchanged for links.
 ASYMMETRY: a `--unit` instance may not place a ROOT file inside its own unit directory (it must use a
 `unit` placement), while a declared-unit module's root files land in its declared directories by
 definition, because declared units have no `unit` placement.
@@ -88,7 +89,8 @@ directory is the root) and a module's declared units, which are just directories
 there; real file collisions are still exit 1 by the same-path rule, and two modules declaring the same
 fixed directory still clash (exit 2) in both layouts. RULE: the single exemption covers the directory
 comparison only; "at most one database unit" (instances plus declared units) and unit-id uniqueness
-hold in both layouts.
+hold in both layouts. Layout single got STRICTER on the database count on purpose: two database
+modules (or instances) were accepted there before and are now exit 2.
 
 SLOT VALUES. ONE grammar for every value, checked before anything else:
   1 to 64 characters (the length cap), each in [A-Za-z0-9._-], the first in
@@ -1286,7 +1288,7 @@ def run():
             # A root link: the root must not couple itself to a unit.
             for y in uall:
                 d = fold(y["dir"])
-                if d and (nk == d or nk.startswith(d + "/") or (nk and d.startswith(nk + "/"))):
+                if d and (nk == d or nk.startswith(d + "/") or nk in ("", ".") or d.startswith(nk + "/")):
                     bad_link.append("%s -> %s (module %s): a root link whose target %s lies inside or "
                                     "contains the unit directory %s of unit %s; a link from the root "
                                     "couples it to a unit"

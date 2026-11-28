@@ -93,7 +93,7 @@ flushq() {   # run every queued case in one process; the protocol is strict, any
   local -a ids=(); local line tag name st text want idx=0 end=-1 rc
   while IFS= read -r line; do ids+=("$line"); done <"$qids"
   want=${#ids[@]}
-  python3 -I -B "$tmp/batch.py" "$asm" "$mods" "$res" "$qf" "$tmp" >"$tmp/batch.out" 2>"$tmp/batch.err"; rc=$?
+  python3 -I -B "${runner:-$tmp/batch.py}" "$asm" "$mods" "$res" "$qf" "$tmp" >"$tmp/batch.out" 2>"$tmp/batch.err"; rc=$?
   while IFS=$'\t' read -r tag name st text; do
     if [[ "$tag" == END ]]; then end="$name"
     elif [[ "$tag" == R && $idx -lt $want && "$name" == "${ids[$idx]}" ]]; then
@@ -209,6 +209,33 @@ grep -q '^ok   meta-r3' <<<"$mo" && grep -q '^FAIL batch runner died -- exit 3' 
 meta fake "$R2" '(__import__("os").write(1, b"END\t3\n"), __import__("os")._exit(0))'
 grep -q '^ok   meta-r1' <<<"$mo" && grep -q '^FAIL mfake-2 -- no result' <<<"$mo" && grep -q '^FAIL mfake-3 -- no result' <<<"$mo" && grep -q '^FAIL batch runner died' <<<"$mo" \
   && pass "0: exit 0 and a forged sentinel with two results missing: the missing records are reported" || fail "0: forged sentinel" "$mo"
+# 0b. the three checks of the PROTOCOL itself, each pinned by a case whose only detector is that check. The fault is a
+# planted fd-1 line in the assembler copy (a forged line) or a canned runner (`runner=` replaces batch.py, FAKE holds its lines).
+# NOT claimed: an in-process batch cannot be tamper-proof against code that sets out to forge results (a fault that writes a
+# whole forged sequence to fd 1 and exits 0 stays green). The property is fail-CLOSED against crashes and accidents.
+cat >"$tmp/fake.py" <<'PY'
+import os
+for l in os.environ["FAKE"].split("|"):
+    print(l.replace("\\t", "\t"))
+PY
+metaf() {   # metaf <name> <FAKE lines separated by |> -> $mo, $mrc like meta; three records are queued, none really run
+  flushq
+  rq x "f$1-1" 0 - --layout single; rq x "f$1-2" 0 - --layout single; rq x "f$1-3" 0 - --layout single
+  mo=$(runner="$tmp/fake.py" FAKE="$2" flushq 2>&1); mrc=0
+  grep -q '^FAIL' <<<"$mo" && mrc=1
+  return 0
+}
+metaf ctl 'R\tfctl-1\tok\tone|R\tfctl-2\tok\ttwo|R\tfctl-3\tok\tthree|END\t3'
+[[ $mrc -eq 0 && "$(grep -c '^ok   ' <<<"$mo")" == 3 ]] && pass "0b: control (a canned runner with correct lines, order and sentinel): 3 ok, no FAIL" || fail "0b: control" "$mo"
+meta fa "$R1" '__import__("os").write(1, b"R\tmfa-2\tok\tforged\n")'
+grep -q "^FAIL batch protocol: unexpected line 'R mfa-2'" <<<"$mo" \
+  && pass "0b: a forged 'R <next id> ok' line before the real one is a FAIL (unexpected line)" || fail "0b: forged line" "$mo"
+metaf ord 'R\tford-2\tok\ttwo|R\tford-1\tok\tone|R\tford-3\tok\tthree|END\t3'
+grep -q "^FAIL batch protocol: unexpected line 'R ford-2'" <<<"$mo" \
+  && pass "0b: results out of record order are a FAIL" || fail "0b: record order" "$mo"
+metaf end 'R\tfend-1\tok\tone|R\tfend-2\tok\ttwo|R\tfend-3\tok\tthree|END\t2'
+grep -q "^FAIL batch runner died -- exit 0, sentinel '2' (want 3)" <<<"$mo" \
+  && pass "0b: every R line present but END counts 2 of 3: a FAIL naming the sentinel" || fail "0b: END count" "$mo"
 if [[ -n "${META_ONLY:-}" ]]; then echo "$ok ok, $bad failed"; [[ $bad -eq 0 ]]; exit; fi
 
 # run <name> <rc> <stderr-grep|-> <args...>: exit class, message, and (rc != 0) nothing written, no .assemble-* left
@@ -628,6 +655,29 @@ run c19a 0 - --layout monorepo --unit lnkin:a --unit lnkin:ab --slot OWNER=o && 
 rq "19: a root link to services/a-extra/x (not a unit) beside unit services/a: allowed" c19b 0 - --layout monorepo --unit svc:a --module rtl3 --slot OWNER=o
 rq "19: monorepo: a root link to the directory that contains the units (l -> services): exit 1, link named" c19c 1 'l -> services.*root link' --layout monorepo --unit svc:a --module rtl4 --slot OWNER=o
 rq "19: layout single: the same root link is unchanged (allowed)" c19d 0 - --layout single --unit svc:a --module rtl4 --slot OWNER=o
+
+# 20. a root link to the repository root contains every unit (monorepo: refused); string-prefix targets are not ancestors
+mk dbm2 '"slots":{"OWNER":"owner"},"unit":{"kind":"database","language":"sql"},"placement":{"schema.sql":"unit"}' 'schema.sql=-- <OWNER>\n'
+mk rtl5 '"placement":{"LICENSE":"root","l":"root"}' 'LICENSE=MIT\n'
+ln -s . "$mods/rtl5/l"
+mk rtl6 '"placement":{"LICENSE":"root","l":"root"}' 'LICENSE=MIT\n'
+ln -s ./ "$mods/rtl6/l"
+mk rtl7 '"placement":{"LICENSE":"root","docs/l":"root"}' 'LICENSE=MIT\n'
+mkdir -p "$mods/rtl7/docs"; ln -s .. "$mods/rtl7/docs/l"
+mk rtl8 '"placement":{"LICENSE":"root","l":"root"}' 'LICENSE=MIT\n'
+ln -s serv "$mods/rtl8/l"
+rq "20: monorepo: a root link l -> . (the root contains every unit): exit 1, link named" c20a 1 'l -> \..*root link' --layout monorepo --unit svc:a --module rtl5 --slot OWNER=o
+rq "20: monorepo: a root link l -> ./: exit 1" c20b 1 'l -> \./.*root link' --layout monorepo --unit svc:a --module rtl6 --slot OWNER=o
+rq "20: monorepo: a root link docs/l -> .. (resolves to the root): exit 1" c20c 1 'docs/l -> \.\..*root link' --layout monorepo --unit svc:a --module rtl7 --slot OWNER=o
+for n in 5 6 7; do rq - "c20s$n" 0 - --layout single --unit svc:a --module "rtl$n" --slot OWNER=o; done
+qok && pass "20: layout single: the same three root links stay allowed" || fail "20: single root links"
+rq "20: a root link l -> serv beside unit services/a (serv is a string prefix, not an ancestor): allowed" c20d 0 - --layout monorepo --unit svc:a --module rtl8 --slot OWNER=o
+# the database count where only two instances / modules reach it
+rq "20: monorepo: two database modules (--module dbm --module dbm2): exit 2, both named" c20e 2 'dbm.*dbm2.*database units|dbm2.*dbm.*database units' --layout monorepo --module dbm --module dbm2 --slot OWNER=o
+rq "20: single: the same two database modules: exit 2, both named" c20f 2 'dbm.*dbm2.*database units|dbm2.*dbm.*database units' --layout single --module dbm --module dbm2 --slot OWNER=o
+rq "20: single: two database instances of different modules (--unit dbm:a --unit dbm2:b): exit 2" c20g 2 'database units|share the unit directory' --layout single --unit dbm:a --unit dbm2:b --slot OWNER=o
+rq "20: monorepo: two database instances of different modules: exit 2" c20h 2 'database units|share the unit directory' --layout monorepo --unit dbm:a --unit dbm2:b --slot OWNER=o
+rq "20: single: two instances of ONE database module (--unit dbm:a --unit dbm:b): exit 2" c20i 2 'database units|share the unit directory' --layout single --unit dbm:a --unit dbm:b --slot OWNER=o
 
 flushq
 
