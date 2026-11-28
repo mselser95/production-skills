@@ -43,12 +43,14 @@ export function orPlaceholder(result: FormatResult, placeholder: string = PLACEH
 
 /**
  * A snapshot of the options a formatter reads: each key is read ONCE, inside a try, so a getter that throws (or a
- * revoked Proxy) makes the call `bad-options` instead of throwing at render time. `undefined` = not a plain options
- * object (null, a primitive, an array) or unreadable.
+ * revoked Proxy) makes the call `bad-options` instead of throwing at render time. A key the function does not know
+ * (a typo such as `maximumFractionDigit`) is `bad-options` too, so a mistyped option can never be ignored silently.
+ * `undefined` = not a plain options object (null, a primitive, an array), unreadable, or carrying an unknown key.
  */
 export function readOptions<T>(options: unknown, keys: readonly string[]): T | undefined {
   try {
     if (typeof options !== 'object' || options === null || Array.isArray(options)) return undefined;
+    if (Object.keys(options).some((k) => !keys.includes(k))) return undefined;
     const out: Record<string, unknown> = {};
     for (const k of keys) {
       const v = (options as Record<string, unknown>)[k];

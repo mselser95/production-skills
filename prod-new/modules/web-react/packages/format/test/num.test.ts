@@ -43,7 +43,8 @@ describe('formatNum', () => {
     expect(num(5, { signDisplay: 'always' })).toBe('+5');
     expect(num(1234567, { grouping: false })).toBe('1234567');
     expect(num(1, { locale: 'tlh' })).toBe('ERR:bad-locale');
-    expect(text(formatNum(1, undefined as never))).toBe('ERR:bad-locale');
+    expect(text(formatNum(1, undefined as never))).toBe('ERR:bad-options'); // missing options object: the same answer as the other five formatters
+    expect(text(formatNum(1, {} as never))).toBe('ERR:bad-locale'); // an options object without a locale
     expect(num(1, { signDisplay: 'x' as never })).toBe('ERR:bad-options');
   });
 });

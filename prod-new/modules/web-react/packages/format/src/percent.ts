@@ -28,6 +28,7 @@ export function formatPercent(ratio: string, opts: FractionOptions): FormatResul
   const p = parseDecimal(ratio);
   if (!p.ok) return failWith(p.reason);
   const shifted = shiftTwo(p.value);
-  const body = renderBody(shifted, r, numberSymbols(options.locale), true);
-  return okText(applyTemplate(learnTemplates(options.locale, { style: 'percent' }), shifted, body, r.sign));
+  const style: Intl.NumberFormatOptions = { style: 'percent' };
+  const body = renderBody(shifted, r, numberSymbols(options.locale, style), true);
+  return okText(applyTemplate(learnTemplates(options.locale, style), shifted, body, r.sign));
 }

@@ -224,9 +224,39 @@ export const leak = (s: string): string => (+s).toString();"
 export const leak = (s: string): string => s
   .toFixed(2);"
     mutate "guard: an extra allow entry without bumping the count" test/guard.test.ts "test/guard.test.ts" "exactly the expected number" \
-      "  { file: 'round.ts', kind: 'arith', text: 'lastKept % 2', why: 'parity of one ASCII digit (half-even)' }," \
-      "  { file: 'round.ts', kind: 'arith', text: 'lastKept % 2', why: 'parity of one ASCII digit (half-even)' },
-  { file: 'round.ts', kind: 'math', text: 'Math.round', why: 'mutant' },"
+      "why: 'parity of one ASCII digit (half-even)' }," \
+      "why: 'parity of one ASCII digit (half-even)' },
+  { file: 'round.ts', kind: 'math', text: 'Math.round', line: 'x', why: 'mutant' },"
+    # ---- second review (T29b): percent symbols and minimum grouping, the Intl rule, options
+    mutate "percent borrows the plain-number grouping" src/percent.ts "test/percent.test.ts" "mr-IN" \
+      "numberSymbols(options.locale, style), true)" \
+      "numberSymbols(options.locale), true)"
+    mutate "minimum grouping learned from the 1000 sample" src/locale.ts "test/percent.test.ts" "es-ES" \
+      "hasGroup(percent ? auto.formatToParts(10) : auto.formatToParts(1000))" \
+      "hasGroup(auto.formatToParts(1000))"
+    mutate "guard: formatMoney hands the amount to Intl" src/money.ts "test/guard.test.ts" "every finding in src" \
+      "  return okText(applyTemplate(learnTemplates(options.locale, style), p.value, body, r.sign));" \
+      "  return okText(new Intl.NumberFormat(options.locale, style).format(amount as never));"
+    mutate "guard: a formatToParts(value) added in number.ts" src/number.ts "test/guard.test.ts" "every finding in src" \
+      "const SIGNS: readonly string[] = ['auto', 'always'];" \
+      "const SIGNS: readonly string[] = ['auto', 'always'];
+export const leak = (nf: Intl.NumberFormat, v: string): Intl.NumberFormatPart[] => nf.formatToParts(v as never);"
+    mutate "guard: an allowed token swapped for the same token on another line" src/number.ts "test/guard.test.ts" "every finding in src" \
+      "const min = gmin ?? Math.min(defMin, gmax ?? defMax);" \
+      "const min = gmin ?? Math.min(defMax, gmax ?? defMax);"
+    mutate "guard: x | 0 added" src/types.ts "test/guard.test.ts" "every finding in src" \
+      "export const PLACEHOLDER = '\u2014';" \
+      "export const PLACEHOLDER = '\u2014';
+export const leak = (n: number): number => n | 0;"
+    mutate "an option is read twice" src/types.ts "test/options.test.ts" "reads every option once" \
+      "      if (v !== undefined) out[k] = v;" \
+      "      if (v !== undefined) out[k] = (options as Record<string, unknown>)[k];"
+    mutate "an unknown option key is ignored" src/types.ts "test/options.test.ts" "unknown option key|typo or a foreign key" \
+      "    if (Object.keys(options).some((k) => !keys.includes(k))) return undefined;" \
+      "    void keys;"
+    mutate "formatNum without options is bad-locale again" src/number.ts "test/options.test.ts test/num.test.ts" "formatNum without an options|locales and sign display" \
+      "readOptions<NumOptions>(options, ['locale', 'signDisplay', 'grouping']);" \
+      "readOptions<NumOptions>(options ?? {}, ['locale', 'signDisplay', 'grouping']);"
     # typecheck bites: a type error in src is RED, the clean tree was GREEN above
     printf "export const bad: number = 'a';\n" > "$pk/src/zz-type-error.ts"
     out="$(pm tsc -p tsconfig.json)" && fail "mutant type error: typecheck stayed GREEN" || pass "mutant type error in src: typecheck control GREEN, mutant RED"

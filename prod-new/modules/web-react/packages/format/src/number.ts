@@ -115,7 +115,7 @@ export function formatNum(value: string | bigint | number, options: NumOptions):
   if (typeof value === 'bigint') text = value.toString();
   else if (typeof value === 'number') text = Number.isSafeInteger(value) ? String(value) : undefined;
   const p = parseInteger(text);
-  const o = readOptions<NumOptions>(options ?? {}, ['locale', 'signDisplay', 'grouping']); // missing options: bad-locale below (pinned)
+  const o = readOptions<NumOptions>(options, ['locale', 'signDisplay', 'grouping']);
   if (o === undefined) return failWith('bad-options');
   const r = resolveFraction({ locale: '', minFractionDigits: 0, maxFractionDigits: 0, ...(o.signDisplay === undefined ? {} : { signDisplay: o.signDisplay }) }, 0, 0);
   return withParsed(p, o.locale, r, (d, rr, loc) => plain(d, rr, loc, o.grouping ?? true));

@@ -1,5 +1,5 @@
 // What the package learns from Intl, and how. The VALUE being formatted never enters Intl. Intl is asked only about
-// SAFE small integers (1, -1, 1000, 1234567890123) to learn the locale's symbols, grouping sizes and the placement
+// fixed SAFE sample numbers (1, -1, 1.5, 10, 100, 1000, 10000, 1234567890123: literals, never the value) to learn the locale's symbols, grouping sizes and the placement
 // of a currency or percent sign around the digits. Digits are always ASCII: every Intl object here is built with
 // numberingSystem 'latn', whatever numbering the locale tag asks for ("ar-EG", "en-US-u-nu-arab").
 
@@ -48,6 +48,21 @@ export function isSupportedLocale(locale: unknown): locale is string {
 
 const symbolCache = new Map<string, NumberSymbols>();
 
+const hasGroup = (parts: Intl.NumberFormatPart[]): boolean => parts.some((p) => p.type === 'group');
+
+/**
+ * Minimum grouping digits (1: group at `primary + 1` digits, 2: wait for one more, 3: wait for two more), learned from
+ * samples whose DISPLAYED integer part has exactly 4 and then 5 digits. The percent style multiplies by 100, so its
+ * samples are 10 and 100 (shown as 1000% and 10000%): asking percent about 1000 would show six digits and learn
+ * "group" in locales (be, bg, es, et, hu) that group a four-digit percent only from five. Literal arguments only:
+ * these are fixed samples, never the value being formatted.
+ */
+function minGrouping(auto: Intl.NumberFormat, percent: boolean): number {
+  if (hasGroup(percent ? auto.formatToParts(10) : auto.formatToParts(1000))) return 1;
+  if (hasGroup(percent ? auto.formatToParts(100) : auto.formatToParts(10000))) return 2;
+  return 3;
+}
+
 /**
  * The separators and grouping of a locale, learned from Intl on safe samples. `style` selects WHICH Intl style is
  * asked: none = plain numbers; `{style: 'currency', currency, currencyDisplay}` or `{style: 'percent'}` = that style's
@@ -69,7 +84,7 @@ export function numberSymbols(locale: string, style: Intl.NumberFormatOptions = 
       decimal: part(always.formatToParts(1.5), 'decimal', '.'),
       primary,
       secondary,
-      minGrouping: auto.formatToParts(1000).some((p) => p.type === 'group') ? 1 : 2,
+      minGrouping: minGrouping(auto, style.style === 'percent'),
     };
   });
 }

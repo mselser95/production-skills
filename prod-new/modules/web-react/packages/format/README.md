@@ -2,8 +2,10 @@
 
 All display formatting goes through this package. It is pure TypeScript with no runtime dependency, and it formats
 wire values that travel as decimal STRINGS: the digits are validated by a strict grammar, rounded and grouped by string
-arithmetic, never through `Number`, `parseFloat` or `toFixed`. `Intl` is asked only about the locale's symbols,
-grouping sizes and sign / currency / percent patterns (on small safe integers), never to format the value itself.
+arithmetic, never through `Number`, `parseFloat` or `toFixed`. Number, money and percent values never reach `Intl`;
+`Intl` formats only fixed sample numbers (to learn a locale's symbols, grouping sizes and sign / currency / percent
+patterns) and `Date` instants, and is asked a currency's fraction digits (`resolvedOptions`). The guard test enforces
+that sentence on `src/` (see Tests).
 
 ```ts
 formatDecimal(value: string, { locale, minFractionDigits?, maxFractionDigits?, rounding?, signDisplay?, grouping? })
@@ -33,14 +35,24 @@ Rules (each is pinned by a test):
 - **Money separators are the currency style's own.** CLDR defines currency separators apart from plain-number ones in
   some locales (fr-CH money decimal `.`, de-AT money group `.`, en-CH money group `,`), so `formatMoney` learns group,
   decimal, grouping sizes and minimum grouping per (locale, currency, currencyDisplay) from `Intl`'s currency style on
-  safe sample numbers. Percent was measured in 33 locales and equals `Intl` with the plain-number separators.
+  safe sample numbers.
+- **Percent symbols are the percent style's own.** CLDR's percent pattern groups by 3 where the decimal pattern groups
+  Indian-style (`mr`, `ml`, `ne`, `or`, `te`: `mr-IN` 1234.5678 is `123,456.78%`, not `1,23,456.78%`). Group and decimal
+  separators and grouping sizes are learned from `Intl`'s percent style; the MINIMUM grouping is learned from percent
+  samples whose DISPLAYED integer part has exactly 4 digits and then 5 (the samples 10 and 100, shown as 1000% and
+  10000%), because `be`, `bg`, `es`, `et`, `hu` print a four-digit percent ungrouped (`1234 %`). Money and plain
+  decimals learn minimum grouping from a displayed 4-digit and 5-digit sample in their own style (1000, 10000).
 - **No ambient state.** `locale` is required (an unsupported tag is `bad-locale`, it does not fall back to the machine's
   default); `formatDate` requires `timeZone`. Results are identical under any `TZ`.
 - **Never throws.** Every exported function returns a result (or a string) for a value of any JS type in any
-  parameter. An options argument that is not a plain object (null, a primitive, an array) or cannot be read (a getter
-  or Proxy that throws) is `bad-options`: each option is read once, inside a try. `orPlaceholder` shows text only for
+  parameter. An options argument that is not a plain object (null, a primitive, an array, or missing) or cannot be read
+  (a getter or Proxy that throws) is `bad-options`: each option is read once, inside a try, and the output follows
+  that first read. `orPlaceholder` shows text only for
   `{ ok: true, text: string }`; anything else (null included) is the placeholder, and a non-string placeholder
-  argument falls back to the dash. `formatNum` with a missing options object is `bad-locale` (locale is required).
+  argument falls back to the dash. An options object without `locale` is `bad-locale`.
+- **Unknown option keys are refused.** A key the function does not know (a typo such as `maximumFractionDigits` for
+  `maxFractionDigits`, or another formatter's key) is `bad-options`, never silently ignored. `formatNum(1, undefined)`
+  is `bad-options` like the other five.
 - **Counts.** `formatNum` accepts an integer string, a bigint, or a number that is a safe integer.
 - **Negative money** uses the locale's own minus pattern; there is no accounting-parentheses style.
 - **Instants.** `formatDate` accepts RFC 3339 `YYYY-MM-DDThh:mm:ss[.f{1,9}](Z|+hh:mm|-hh:mm)`; fractional seconds ARE
@@ -54,13 +66,28 @@ Rules (each is pinned by a test):
 - No compact notation: it rounds to significant digits, which hides digits.
 
 Tests (`pnpm test`): unit tables per function, fast-check properties (fixed seed) against an independent BigInt oracle,
-the TZ matrix, Intl cross-checks (33 locales x 5 currencies x 3 displays for money, RTL locales for decimals), a
-never-throws fuzz over every parameter, and `test/guard.test.ts`. The guard lexes `src/` (comments, strings, template
-code and regex literals handled by state, no per-line escape marker) and flags `.toFixed` / `.toPrecision` /
-`.toExponential` / `.toLocaleString` / `.toString`, `parseFloat(` / `parseInt(` / `Number(` / `String(`, `Math.*`,
-unary `+` and non-literal unary `-`, `* / % **` (and compound forms) and float or 10-digit numeric literals. The
-exemptions are an explicit allow-list in the test (`ALLOW`, with an exact expected length), so each one is a visible
-diff. The hermetic repo selftest only runs a coarse grep with no exemption marker; this test is the real guard.
+the TZ matrix, Intl cross-checks (33 locales x 5 currencies x 3 displays for money, 64 locales x displayed integer
+parts of 1 to 9 digits for percent, RTL locales for decimals), a never-throws fuzz over every parameter, option
+read-once and unknown-key tests, and `test/guard.test.ts`.
+
+The guard lexes `src/` (comments, strings, template code and regex literals handled by state, no per-line escape
+marker). It flags: `.toFixed` / `.toPrecision` / `.toExponential` / `.toLocaleString` / `.toString` / `.valueOf`;
+`parseFloat(` / `parseInt(` / `Number(` / `String(` / `isFinite(` / `isNaN(`; `Math.*`; unary `+` and non-literal unary
+`-`; `* / % **` (and compound forms; a generator's `function*` is not one); bitwise `~ ^ & << >> >>>` (and compound
+forms) and `|` next to a numeric literal; a binary `- 0`; float or 10-digit numeric literals; every `Intl` call,
+construction or alias; and every `.format(` / `.formatToParts(` / `.formatRange(` / `.formatRangeToParts(` /
+`.resolvedOptions(` member. A `globalThis.` / `window.` / `self.` / `global.` prefix hides nothing. Number-style Intl
+calls are allowed only in `locale.ts` (and `resolvedOptions` in `money.ts`) with a numeric literal argument; the date
+calls only in `date.ts`. The exemptions are an explicit allow-list in the test (`ALLOW`, exact expected length), each
+entry pinning its file, the finding and the full source LINE of its site, so each is a visible diff and swapping one use
+for another fails.
+
+What the guard does NOT flag, by design (it has no types): binary `+` / `-` in general, `++` / `--`, `|` between two
+non-literals (the type-union token), computed or string-built member names (`Math['round']`, `x['valueOf']()`),
+unicode-escaped identifiers, integer literals below ten digits, a type-position `Intl.X`. The backstop for those is
+behavioural: the 30-digit round-trip properties and the BigInt oracle fail as soon as a float is in the path (a float
+loses digits beyond 2^53). The hermetic repo selftest only runs a coarse grep with no exemption marker; this test is
+the real guard.
 
 ## Declared gaps
 
