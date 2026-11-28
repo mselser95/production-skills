@@ -1,0 +1,25 @@
+# The ONE place versions and install policy are written. A workspace package says "catalog:"
+# (or "catalog:<name>") for a third-party dependency and "workspace:*" for a sibling.
+# scripts/monorepo-settings-check.sh holds this file to an ALLOW-list: the only top-level keys are
+# `packages`, `catalog`, `catalogs` and the eight settings below, each with its required value; any
+# other key (overrides, packageExtensions, minimumReleaseAgeExclude, registry, ...) is refused,
+# and so is a catalog entry that is not an exact version. onlyBuiltDependencies is a block list
+# of plain package names, each with a `# reason: <why>` comment on its own line, for example
+#   - esbuild # reason: downloads its platform binary in postinstall
+packages:
+  - apps/*
+  - packages/*
+
+catalogMode: strict
+catalog:
+  "@types/node": 26.6.6
+  typescript: 7.0.2
+  vitest: 5.1.1
+
+engineStrict: true
+strictPeerDependencies: true
+strictDepBuilds: true
+onlyBuiltDependencies: []
+blockExoticSubdeps: true
+minimumReleaseAge: 10080
+trustPolicy: no-downgrade

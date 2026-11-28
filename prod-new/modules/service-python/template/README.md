@@ -125,6 +125,12 @@ new stalled connections faster than 128 per 2 s can still occupy the head phase.
 reverse proxy / TLS terminator in front and have it enforce: TLS, client read and write
 timeouts, a request-size limit, and connection and rate limits per client.
 
+## Where its files land
+
+Layout `single`: everything at the repository root. Layout `monorepo`: every file of this module is a UNIT file
+and lands under `services/<id>/` (its own `.gitignore`, `Makefile`, `production.yaml`), so two instances never
+collide, EXCEPT the one reusable workflow `.github/workflows/python-unit.yml`, which lands at the repository root in both layouts because GitHub reads workflows only there. It is byte-identical for every unit (it names no unit), so several Python units share the one copy. The root-level caller that invokes it per unit belongs to the monorepo-root module and is a later step. Its manifest also places `.github/`, `AGENTS.md`, `registries/`, `.prod/`, `docs/` and `scripts/` as unit files should the template gain them.
+
 ## Gates
 
 Every target runs against the lock (the Makefile exports `UV_LOCKED=1`: a stale lock is an

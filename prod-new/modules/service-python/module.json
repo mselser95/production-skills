@@ -20,14 +20,19 @@
     }
   },
   "unit_kind": "service",
+  "unit": {
+    "kind": "service",
+    "language": "python"
+  },
   "placement": {
-    ".github/**": "root",
-    "CODEOWNERS": "root",
-    "AGENTS.md": "root",
-    "registries/**": "root",
-    ".prod/**": "root",
-    "docs/**": "root",
-    "scripts/**": "root",
+    ".github/workflows/python-unit.yml": "root",
+    ".github/**": "unit",
+    "CODEOWNERS": "unit",
+    "AGENTS.md": "unit",
+    "registries/**": "unit",
+    ".prod/**": "unit",
+    "docs/**": "unit",
+    "scripts/**": "unit",
     "production.yaml": "unit",
     "Makefile": "unit",
     "unit.mk": "unit",

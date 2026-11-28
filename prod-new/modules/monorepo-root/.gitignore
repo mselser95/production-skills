@@ -1,6 +1,9 @@
 node_modules/
 dist/
 coverage/
-.cache/
-.vite/
+.turbo/
 *.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store

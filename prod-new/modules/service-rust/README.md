@@ -122,6 +122,12 @@ period, and the exit code is 0 when drained, 3 when requests were abandoned, 1
 on a startup error. A SECOND SIGINT/SIGTERM while draining exits at once with
 code 4, abandoning whatever was in flight.
 
+## Where its files land
+
+Layout `single`: everything at the repository root. Layout `monorepo`: every file of this module is a UNIT file
+and lands under `services/<id>/` (its own `.gitignore`, `Makefile`, `production.yaml`, `registries/`), so two instances never
+collide and the module places nothing at the repository root. It ships no CI workflow (see below): the repository root's `.github/workflows/` is the only directory GitHub reads, and the root-level caller that runs `make check-fast` per unit belongs to the monorepo-root module (a later step).
+
 ## Limits of this example
 
 * State is process memory; a restart starts empty.

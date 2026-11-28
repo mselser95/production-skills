@@ -1,0 +1,22 @@
+{
+  "name": "@ds-scope/format",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Display formatting for wire values: decimal strings (money, prices, sizes, percentages), integer counts and instants, by string arithmetic, never through a float.",
+  "engines": { "node": ">=24 <27" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "fast-check": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,25 +1,20 @@
 {
   "id": "db-postgres",
-  "summary": "PostgreSQL 18 image pin: one tested PostgreSQL + TimescaleDB pair, pinned by digest, with a static gate; born monitored (exporter overlay, required metrics, alerts with tests, scrape test).",
-  "contributes": [
-    { "path": "db/image.lock", "role": "the tested image pair (tags, per-platform digests, observed versions, verification date)" },
-    { "path": "scripts/db-pin-check.sh", "role": "offline gate (make gates): no latest, index digest on every reference, PG 18, pair rule, tag/version/data_directory consistency, staleness; checks compose files against the lock" },
-    { "path": "scripts/db_pin_compose.py", "role": "PyYAML parse of one compose file for the gate (services, build/extends refusal, duplicate keys)" },
-    { "path": "scripts/tests/db-pin-check-selftest.sh", "role": "hermetic selftest and mutation proof of the gate (make selftests)" },
-    { "path": "scripts/db-bootstrap-test.sh", "role": "Docker test (make db-test, CI job db): starts the compose stack in a throwaway project and runs the SQL assertions; --variant plain|timescale" },
-    { "path": "scripts/db-pin-verify-live.sh", "role": "opt-in, needs Docker: starts each pinned image and compares its runtime facts with the lock; run when bumping the pair" },
-    { "path": "scripts/tests/db-pin-verify-live-selftest.sh", "role": "hermetic selftest of the live verifier with a fake docker (make selftests)" },
-    { "path": "db/compose.observability.yml", "role": "additive overlay: the postgres_exporter service (digest-pinned, read-only, non-root, no cap, no host port, monitor password as a file)" },
-    { "path": "db/observability/image.lock", "role": "the pinned exporter and promtool images (same line format as db/image.lock)" },
-    { "path": "db/observability/exporter/exporter.env", "role": "the exporter's non-secret connection settings (verify-full TLS, password file)" },
-    { "path": "db/observability/required-metrics.txt", "role": "the monitoring contract: metric names a scrape must contain, one reason per line" },
-    { "path": "db/observability/alerts/postgres.rules.yml", "role": "Prometheus alert rules, each with severity, summary, description and runbook" },
-    { "path": "db/observability/alerts/postgres.rules.test.yml", "role": "promtool unit tests: a firing and a non-firing case for every alert" },
-    { "path": "db/observability/RUNBOOK.md", "role": "one section per alert: what it means and the first three checks" },
-    { "path": "db/observability/parity-check.sh", "role": "offline gate: alerts, contract, tests, runbook anchors and the exporter overlay agree (PyYAML)" },
-    { "path": "scripts/db-scrape-test.sh", "role": "Docker test (add to make db-test): starts db + exporter in a throwaway project, scrapes, asserts pg_up and every required metric; --mutate revoke-monitor must go RED" },
-    { "path": "scripts/tests/db-observability-selftest.sh", "role": "hermetic selftest and mutation proof of the parity check, the overlay rules and the scrape test with a fake docker (make selftests)" }
-  ],
   "requires": [],
-  "liabilities": ["pg19-reevaluate"]
+  "conflicts": [],
+  "source": ".",
+  "slots": {},
+  "unit_kind": "database",
+  "placement": {
+    "db/**": "root",
+    "scripts/**": "root"
+  },
+  "units": [
+    {
+      "id": "db",
+      "kind": "database",
+      "language": "sql",
+      "path": "db"
+    }
+  ]
 }
