@@ -148,7 +148,10 @@ Algorithm (one batch per invocation):
     exist and nothing names it, or it exists and the branch line and the JSON name it (the
     JSON then carries "interrupted_after_delivery": true when a signal ended the run; exit
     128+N). A timed-out or failed update-ref is exit 2 and the message says whether the
-    branch exists (the JSON names it then). If delivery fails the exit is 2,
+    branch exists (the JSON names it then). The read-back and the exit path's look at the ref
+    are bounded too (10 s each): when git hangs there the message says the branch's existence
+    "could NOT be confirmed" (exit 2) or "could NOT be determined" (after a signal: 128+N),
+    never that it exists or not. After a signal the tool exits within 25 seconds even if git hangs. If delivery fails the exit is 2,
     the JSON says "delivery_error" with the verified "commit", and the private root is
     KEPT (its path is printed) so the result is not lost; objects already stored in
     yours stay as unreachable garbage, no ref is left. The same garbage (an unreferenced pack,
@@ -261,6 +264,15 @@ SIGS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 QUIET = ("conflict", "empty", "unrelated", "unrepresentable-on-this-filesystem", "uncheckoutable")
 STALE_SECONDS = 86400
 UPDATE_REF_TIMEOUT = 10
+BLOCKED_GIT_TIMEOUT = 10  # every short local git read made while INT/TERM/HUP are blocked
+
+
+def blocked_git_timeout():
+    """The bound for a git read made with the signals blocked; a test may lower it, under the selftest only."""
+    if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_BLOCKED_GIT_TIMEOUT"):
+        return float(os.environ["TRAIN_TEST_BLOCKED_GIT_TIMEOUT"])
+    return BLOCKED_GIT_TIMEOUT
+
 UNREP = "unrepresentable-on-this-filesystem"
 # The `why` values an ejection record can carry, classified for recovery:
 #   red, timeout   a verify OUTCOME (a timeout is a red run): retryable against the landed set
@@ -409,6 +421,7 @@ class Train:
         self.names = {}
         self.base_sha = ""
         self.delivered = ""  # the branch name once delivery completed (a late signal still reports it)
+        self.state_unknown = None  # the branch whose existence a bounded read-back could not determine
         self.pending = None  # (branch, sha) while update-ref may be in flight
         self.landed_out = []
         self.commits_out = {}
@@ -1337,6 +1350,7 @@ class Train:
         # update-ref inherits the blocked mask, is not killed by cleanup, and has a hard timeout.
         old = signal.pthread_sigmask(signal.SIG_BLOCK, set(SIGS))
         err = None
+        unknown = False
         try:
             self.pending = (branch, sha)
             try:
@@ -1345,11 +1359,16 @@ class Train:
                          if os.environ.get("TRAIN_SELFTEST") else UPDATE_REF_TIMEOUT)
             except Fatal as e:
                 err = e
-            got = self.git("rev-parse", "--verify", "-q", "refs/heads/" + branch, caller="gitdir",
-                           ok=(0, 1)).stdout.strip()
+            try:  # a read-back that hangs is killed after its bound: the branch's state is then UNKNOWN
+                got = self.git("rev-parse", "--verify", "-q", "refs/heads/" + branch, caller="gitdir",
+                               ok=(0, 1), timeout=blocked_git_timeout()).stdout.strip()
+            except Fatal as e:
+                got = ""
+                unknown = True
+                err = err or e
             if got:
                 self.delivered = branch  # the ref exists: from here every exit names it
-            elif err is not None and getattr(err, "rc", 1) is None and not prelock:
+            elif err is not None and not unknown and getattr(err, "rc", 1) is None and not prelock:
                 # update-ref timed out and was killed AND collected (git() reaps its whole group before it
                 # raises), and the read-back says the ref does not exist: the lock beside that one
                 # random, create-only ref name can only be this tool's own stale lock; remove it.
@@ -1359,10 +1378,13 @@ class Train:
                 except OSError:
                     pass
         finally:
+            if unknown:
+                self.state_unknown = branch  # the exit path must not ask git again
             signal.pthread_sigmask(signal.SIG_SETMASK, old)  # a pending signal acts HERE, outcome known
         if err is not None:
             raise Fatal("%s (branch refs/heads/%s %s)" % (
-                err, branch, "DOES exist" if self.delivered else "does not exist"))
+                err, branch, "could NOT be confirmed to exist or not" if unknown
+                else "DOES exist" if self.delivered else "does not exist"))
         if self.delivered != branch or got != sha:
             raise Fatal("branch %s does not point at %s" % (branch, sha[:12]))
         self.git("cat-file", "-e", sha + "^{tree}", caller="gitdir")
@@ -1439,6 +1461,10 @@ class Train:
             first_green = self.runs == 1 and not reds and landed == batch
             self.write_state(window, len(batch), len(reds), first_green, not quiet)
         self.cleanup()  # before the summary, so a root that cannot be removed is IN it
+        if os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_REPORT_READY"):
+            with open(os.environ["TRAIN_TEST_REPORT_READY"], "w") as fh:  # test hook: the verdict is about to be reported
+                fh.write("reporting\n")
+            time.sleep(0.4)
         leftover = ""
         if not self.keep_root and self.tmp and os.path.lexists(self.tmp):
             leftover = self.tmp
@@ -1598,14 +1624,17 @@ def main(argv):
         return t.run()
     except SystemExit:
         _no_more_signals()  # nothing interrupts the report below
-        if not t.delivered and t.pending and not t.json_done:
+        unknown = t.state_unknown
+        if not t.delivered and t.pending and not t.json_done and not unknown:
             try:  # the signal may have hit update-ref after the ref was created: look, never assume
                 got = t.git("rev-parse", "--verify", "-q", "refs/heads/" + t.pending[0], caller="gitdir",
-                            ok=(0, 1)).stdout.strip()
+                            ok=(0, 1), timeout=blocked_git_timeout()).stdout.strip()
                 if got == t.pending[1]:
                     t.delivered = t.pending[0]
-            except BaseException:  # noqa: BLE001
-                pass
+            except BaseException:  # noqa: BLE001 -- includes the bounded read's timeout: state unknown
+                unknown = t.pending[0]
+        if unknown and not t.delivered:
+            say("integration branch refs/heads/%s: existence could NOT be determined (state unknown)" % unknown)
         if t.delivered and not t.json_done:  # a signal after delivery: the branch must be named
             t.json_done = True
             say("integration branch: %s (delivered before the signal arrived)" % t.delivered)
