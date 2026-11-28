@@ -274,10 +274,11 @@ fn a_second_signal_exits_at_once_with_code_4() {
     svc.sigterm();
     // Wait until the FIRST signal is observably handled (the listener is
     // closed, which the server does only after the handler set `stop`) before
-    // sending the second. Standard signals do not queue: two sent while the
-    // first is still pending are delivered as ONE, the handler never sees the
-    // second and the process drains instead of exiting 4 (the flake this
-    // replaces: back-to-back `kill`s lost the second one under load).
+    // sending the second. Defensive; NOT reproduced: standard signals do not
+    // queue, so two sent while the first is still pending would be delivered
+    // as ONE and the process would drain instead of exiting 4, but this test
+    // was green 30/30 without the wait, so no failing run shows the race. The
+    // wait costs nothing and rules it out by construction.
     within(Duration::from_secs(5), || refused(svc.addr))
         .expect("the first signal must close the listener");
     svc.sigterm();

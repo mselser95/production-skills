@@ -1,20 +1,37 @@
 //! What the Cargo workspace cannot express by itself.
 //!
 //! Zone purity: `domain` and `app` can reach no file, socket, clock, thread or
-//! environment. Four layers, each tested, because code behind a `cfg` is never
-//! built on the bare-metal target and so never seen by the compiler there:
+//! environment, and contain no `unsafe`. The rule this file follows: it does
+//! not RECOGNISE spellings in text (four review rounds each found a new
+//! spelling that got through), it ASKS THE COMPILER, with arguments of its
+//! own that no checked file can override.
 //!
-//! 1. The compiler, on a target with no `std` (`make check-nostd`, with
-//!    `--all-features`): builds exactly what is NOT conditionally compiled.
+//! 1. The compiler gate (`compile_forbidding_unsafe`): this test runs, by
+//!    itself, `cargo rustc --lib --all-features --target thumbv7em-none-eabi
+//!    --profile check -- -F unsafe_code` on `domain` and on `app`. The target
+//!    has no `std`, so any `std` item and any spelling of `extern crate std`
+//!    (`r#std` too) is E0463; `-F unsafe_code` is a forbid set on the rustc
+//!    command line, which an attribute or a `[lints]` table cannot lower
+//!    (`#![allow(unsafe_code)]` is E0453). Nothing here goes through `make` or
+//!    a variable the Makefile owns. A missing target FAILS with the install
+//!    hint; it never skips. Code behind a `cfg` is not built there, hence:
 //! 2. L1 (here): the list of source files the COMPILER read in the HOST build
 //!    of the workspace (rustc's dep-info, which names every file including
 //!    `#[path]` modules and `include!`d files) must all sit inside the crate's
-//!    own `src/`.
+//!    own `src/`. Alone it guards ownership (a pure crate's code lives in its
+//!    `src/`), not purity: the file would still be compiled by the gate.
 //! 3. L2 (here): none of those files may contain the word `cfg` (except a line
-//!    that is exactly `#[cfg(test)]`), nor `include!`-family macros.
+//!    that is exactly `#[cfg(test)]`), nor `include!`-family macros. Alone it
+//!    guards the one thing the gate cannot see: `std` behind a `cfg` that is
+//!    false on the bare-metal target.
 //! 4. L3 (here): `domain` and `app` declare no features and no optional
-//!    dependency, and nothing in the workspace enables a feature on them or
-//!    turns their default features off.
+//!    dependency, and nothing enables a feature on them or turns their default
+//!    features off. Defence in depth: the gate builds with `--all-features`, so
+//!    on its own L3 guards nothing the gate does not already.
+//!
+//! The fixtures at the end of this file run ONE attack each on a copy of the
+//! domain crate through the same functions: the layer that must catch it goes
+//! RED, every other layer stays clean, and an unattacked control passes.
 //!
 //! Why L2 refuses a word instead of parsing: without proc macros and build
 //! scripts (both refused below) the identifier `cfg` cannot be synthesised by
@@ -22,9 +39,8 @@
 //! compilation; and `#[cfg(test)]` code exists only in test builds. A comment
 //! that mentions the word is refused too (no comment stripping, on purpose).
 //!
-//! The Makefile is pinned by one exact line, so the gate cannot be disabled
-//! unnoticed (a `-` prefix, `|| true`, `.IGNORE`, a second recipe line). The
-//! two remaining rules are source scans and WEAKER: only `config.rs` reads the
+//! The Makefile is NOT pinned any more: nothing rests on its text. The
+//! remaining rules are source scans and WEAKER: only `config.rs` reads the
 //! environment, and the bearer token is compared through the constant-time
 //! helper.
 #![allow(
@@ -289,199 +305,140 @@ fn the_release_profile_keeps_overflow_checks_and_unwinds() {
     assert!(t.contains("panic=\"unwind\""));
 }
 
+// ---- the compiler gate: the test ASKS THE COMPILER, with flags no checked file can override ----
+
 /// The bare-metal target `domain` and `app` are compiled for. It has no `std`.
 const NOSTD_TARGET: &str = "thumbv7em-none-eabi";
 
-/// The ONE recipe line of `check-nostd`, byte for byte: a tab, the command, no
-/// `-`, `@-` or `+` prefix, nothing appended (`|| true`, `; true`, a
-/// continuation). Reading Makefile text is acceptable for one exact line; this
-/// is not a Makefile grammar.
-const CHECK_NOSTD_LINE: &str = "\t$(CARGO) check --locked --lib -p svc-domain -p svc-app --all-features --target thumbv7em-none-eabi";
-
-/// What is wrong with the Makefile's wiring of the no-std check, as messages.
-fn makefile_violations(mk: &str) -> Vec<String> {
-    let mut bad = Vec::new();
-    let lines: Vec<&str> = mk.lines().collect();
-    // Target definition lines: a column-0 line `names: prerequisites`.
-    let defs = |name: &str| -> Vec<(usize, &str)> {
-        lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !l.starts_with([' ', '\t', '#']))
-            .filter_map(|(i, l)| l.split_once(':').map(|(h, r)| (i, h, r)))
-            .filter(|(_, h, _)| h.split_whitespace().any(|t| t == name))
-            .map(|(i, _, r)| (i, r))
-            .collect()
-    };
-    let nostd = defs("check-nostd");
-    if nostd.len() != 1 {
-        bad.push(format!(
-            "`check-nostd` must be defined exactly once, found {}",
-            nostd.len()
-        ));
-    }
-    if let Some(&(at, rest)) = nostd.first() {
-        if !rest.trim().is_empty() {
-            bad.push(format!(
-                "`check-nostd` takes no prerequisites and no `;` or `::` recipe: {rest:?}"
-            ));
-        }
-        // The recipe: until the next column-0 line that is not blank or a comment.
-        let recipe: Vec<&str> = lines[at + 1..]
-            .iter()
-            .copied()
-            .take_while(|l| l.trim().is_empty() || l.starts_with(['\t', '#']))
-            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-            .collect();
-        if recipe != [CHECK_NOSTD_LINE] {
-            bad.push(format!(
-                "the recipe of `check-nostd` must be exactly one line, byte-equal to {CHECK_NOSTD_LINE:?}; found {recipe:?}"
-            ));
-        }
-    }
-    let prereqs = |name: &str| -> Vec<String> {
-        defs(name)
-            .iter()
-            .flat_map(|(_, r)| r.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
-            .collect()
-    };
-    if defs("check-fast").len() != 1 || !prereqs("check-fast").iter().any(|t| t == "check-nostd") {
-        bad.push("`check-fast` must be defined once with `check-nostd` as a prerequisite".into());
-    }
-    if defs("verify").len() != 1 || !prereqs("verify").iter().any(|t| t == "check-fast") {
-        bad.push("`verify` must be defined once with `check-fast` as a prerequisite".into());
-    }
-    let phony: Vec<&str> = lines
-        .iter()
-        .filter_map(|l| l.strip_prefix(".PHONY:"))
-        .flat_map(str::split_whitespace)
-        .collect();
-    if !phony.contains(&"check-nostd") {
-        bad.push("`check-nostd` must be listed in .PHONY".into());
-    }
-    // Things that turn a failing recipe into a pass, or swap the command.
-    let cargo_defs: Vec<&&str> = lines
-        .iter()
-        .filter(|l| {
-            let t = l
-                .trim_start()
-                .trim_start_matches("export ")
-                .trim_start_matches("override ");
-            t.strip_prefix("CARGO").is_some_and(|r| {
-                let r = r.trim_start();
-                ["=", "?=", ":=", "::=", "+=", "!="]
-                    .iter()
-                    .any(|op| r.starts_with(op))
-            })
-        })
-        .collect();
-    if cargo_defs != [&"CARGO ?= cargo"] {
-        bad.push(format!(
-            "`CARGO ?= cargo` must be the only CARGO assignment: {cargo_defs:?}"
-        ));
-    }
-    for l in &lines {
-        let t = l.trim_start();
-        for banned in [
-            ".IGNORE",
-            ".SILENT",
-            ".ONESHELL",
-            ".SHELLFLAGS",
-            "SHELL",
-            "MAKEFLAGS",
-            "export MAKEFLAGS",
-            "override MAKEFLAGS",
-            "include ",
-            "-include ",
-            "sinclude ",
-        ] {
-            if !l.starts_with('\t') && t.starts_with(banned) {
-                bad.push(format!("refused Makefile line (`{banned}`): {l:?}"));
-            }
-        }
-    }
-    bad
+/// A Cargo workspace the zone checks run against: this module, or a fixture.
+struct Tree {
+    root: PathBuf,
+    /// `None`: Cargo's own choice (the `CARGO_TARGET_DIR` the test runs under).
+    target_dir: Option<PathBuf>,
+    /// The real tree has a lockfile that must not move; a fixture has none.
+    locked: bool,
 }
 
-#[test]
-fn the_no_std_target_check_is_wired_into_the_gate_and_the_toolchain() {
-    let mk = fs::read_to_string(root().join("Makefile")).unwrap();
-    assert_eq!(makefile_violations(&mk), Vec::<String>::new());
-    assert!(
-        NOSTD_TARGET.contains("-none"),
-        "a target with an OS has std"
-    );
-    assert!(CHECK_NOSTD_LINE.ends_with(&format!("--target {NOSTD_TARGET}")));
-    let tc = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
-    assert!(
-        squash(&tc).contains(&format!("targets=[\"{NOSTD_TARGET}\"")),
-        "rust-toolchain.toml must install {NOSTD_TARGET}"
-    );
+impl Tree {
+    fn real() -> Self {
+        Self {
+            root: root(),
+            target_dir: None,
+            locked: true,
+        }
+    }
+
+    /// `cargo <sub> --offline [--locked] [--target-dir ..]`, run in the tree.
+    fn cargo(&self, sub: &str) -> Command {
+        let mut c = Command::new(cargo());
+        c.current_dir(&self.root).arg(sub).arg("--offline");
+        if self.locked {
+            c.arg("--locked");
+        }
+        if let Some(dir) = &self.target_dir {
+            c.arg("--target-dir").arg(dir);
+        }
+        c
+    }
 }
 
-#[test]
-fn makefile_pin_refuses_every_way_to_ignore_the_nostd_compile() {
-    let mk = fs::read_to_string(root().join("Makefile")).unwrap();
-    let canon = format!("{CHECK_NOSTD_LINE}\n");
-    assert!(
-        mk.contains(&canon),
-        "the pinned line is not in the Makefile"
-    );
-    let with = |to: &str| mk.replacen(&canon, to, 1);
-    let cases = [
-        ("a - prefix", with(&canon.replace("\t$", "\t-$"))),
-        ("a @- prefix", with(&canon.replace("\t$", "\t@-$"))),
-        ("a + prefix", with(&canon.replace("\t$", "\t+$"))),
-        ("|| true", with(&canon.replace('\n', " || true\n"))),
-        ("; true", with(&canon.replace('\n', " ; true\n"))),
-        ("a second line", with(&format!("{canon}\ttrue\n"))),
-        (
-            "a blank then a second line",
-            with(&format!("{canon}\n\ttrue\n")),
-        ),
-        (
-            "--all-features dropped",
-            with(&canon.replace(" --all-features", "")),
-        ),
-        ("a package dropped", with(&canon.replace(" -p svc-app", ""))),
-        (
-            "a continuation",
-            with(&canon.replace('\n', " \\\n\t|| true\n")),
-        ),
-        ("a .IGNORE line", format!("{mk}\n.IGNORE: check-nostd\n")),
-        ("a .IGNORE line, no target", format!("{mk}\n.IGNORE:\n")),
-        ("MAKEFLAGS -k", format!("MAKEFLAGS += -k\n{mk}")),
-        ("MAKEFLAGS ik", format!("MAKEFLAGS = ik\n{mk}")),
-        ("SHELL replaced", format!("SHELL = /usr/bin/true\n{mk}")),
-        ("CARGO replaced", format!("{mk}\nCARGO = true\n")),
-        ("an include", format!("-include local.mk\n{mk}")),
-        ("check-nostd twice", format!("{mk}\ncheck-nostd:\n\ttrue\n")),
-        (
-            "check-nostd with a prerequisite",
-            mk.replacen("check-nostd:\n", "check-nostd: fmt\n", 1),
-        ),
-        (
-            "check-nostd not in check-fast",
-            mk.replacen("check-fast: check-nostd", "check-fast:", 1),
-        ),
-        (
-            "check-nostd not phony",
-            mk.replacen(" check-nostd ", " ", 1),
-        ),
-        (
-            "verify without check-fast",
-            mk.replacen("verify: check-fast", "verify:", 1),
-        ),
-    ];
-    for (what, text) in cases {
-        assert_ne!(text, mk, "{what}: the probe did not change the Makefile");
-        assert!(
-            !makefile_violations(&text).is_empty(),
-            "{what}: accepted\n{text}"
+/// The unit of a pure crate that is compiled for the no-std target: its lib,
+/// with every feature on (code behind a declared feature is built too).
+fn nostd_unit(target: &str) -> Vec<String> {
+    ["--lib", "--all-features", "--target", target]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+/// Why a compile failed, for a person: the tail of the compiler's output, and
+/// for a missing target the one-line reason this is a FAILURE and not a skip.
+fn compiler_failure(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+    if stderr.contains("may not be installed") {
+        return format!(
+            "a compile target is not installed (rust-toolchain.toml lists it; install it as the hint below says). This check never skips, because a skipped compile proves nothing about `std`.\n{tail}"
         );
     }
-    // Comments and blank lines around the recipe are fine.
-    assert!(makefile_violations(&format!("{mk}\n# a comment\n")).is_empty());
+    tail
+}
+
+/// Compiles ONE unit of the crate at `rel` (relative to the tree) with
+/// `-F unsafe_code` on the rustc command line (`cargo rustc ... -- -F
+/// unsafe_code`). A forbid set there cannot be lowered by an attribute in the
+/// crate (`#![allow(unsafe_code)]` is error E0453) or by a `[lints]` table, so
+/// no property rests on those files being intact. `cargo rustc` passes the
+/// flag to THIS crate only, never to a dependency. `Err` carries the reason.
+fn compile_forbidding_unsafe(tree: &Tree, rel: &str, unit: &[String]) -> Result<(), String> {
+    let out = tree
+        .cargo("rustc")
+        .arg("--manifest-path")
+        .arg(tree.root.join(rel).join("Cargo.toml"))
+        .args(["--profile", "check"])
+        .args(unit)
+        .args(["--", "-F", "unsafe_code"])
+        .output()
+        .unwrap();
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(compiler_failure(&String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
+#[test]
+fn the_compiler_refuses_std_and_unsafe_code_in_domain_and_app() {
+    // Run by THIS test, with its own arguments: not through `make`, not through
+    // a variable a Makefile owns. Whatever else is edited, a `std` item, any
+    // spelling of `extern crate std`, or an `unsafe` token is an error here.
+    let tree = Tree::real();
+    for rel in ["crates/domain", "crates/app"] {
+        if let Err(why) = compile_forbidding_unsafe(&tree, rel, &nostd_unit(NOSTD_TARGET)) {
+            panic!("{rel} does not compile for {NOSTD_TARGET} with -F unsafe_code:\n{why}");
+        }
+    }
+}
+
+#[test]
+fn unsafe_code_is_forbidden_from_the_command_line_in_the_other_zones_too() {
+    let tree = Tree::real();
+    for (rel, unit) in [
+        ("crates/adapter", "--lib"),
+        ("crates/platform", "--lib"),
+        (".", "--bin=svc"),
+    ] {
+        if let Err(why) = compile_forbidding_unsafe(&tree, rel, &[unit.to_owned()]) {
+            panic!("{rel} does not compile with -F unsafe_code:\n{why}");
+        }
+    }
+}
+
+/// A valid no-std target that is NOT installed in the toolchain under test.
+fn a_target_that_is_not_installed() -> &'static str {
+    let out = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned()))
+        .args(["--print", "sysroot"])
+        .current_dir(root())
+        .output()
+        .unwrap();
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    [
+        "thumbv6m-none-eabi",
+        "thumbv7m-none-eabi",
+        "thumbv8m.main-none-eabi",
+        "thumbv7em-none-eabihf",
+    ]
+    .into_iter()
+    .find(|t| !sysroot.join("lib/rustlib").join(t).exists())
+    .expect("every candidate target is installed: add another name to this list")
+}
+
+#[test]
+fn a_missing_no_std_target_fails_with_the_install_hint_and_never_skips() {
+    let target = a_target_that_is_not_installed();
+    let why = compile_forbidding_unsafe(&Tree::real(), "crates/domain", &nostd_unit(target))
+        .expect_err("a compile for a target that is not installed must fail, not skip");
+    assert!(why.contains("never skips"), "{why}");
+    assert!(why.contains("rustup target add"), "{why}");
 }
 
 #[test]
@@ -543,7 +500,7 @@ fn early_message_domain_and_app_name_no_std_items() {
             // Test-only code (after the `#[cfg(test)]` line) may use std.
             let prod = full.split("\n#[cfg(test)]\n").next().unwrap_or("");
             let s = squash(prod);
-            // Only a hint; `make check-nostd` is what refuses std.
+            // Only a hint; the no-std compile in this file is what refuses std.
             assert!(!s.contains("std::"), "{}: names `std::`", f.display());
             assert!(
                 !s.contains("externcratestd"),
@@ -623,7 +580,8 @@ fn dep_info_paths(text: &str, base: &Path) -> Vec<PathBuf> {
 
 /// The host build of the workspace, as `cargo check --workspace --lib`: the
 /// same feature unification `make check-fast` gets, so a feature that
-/// `adapter` switches on in `app` is in effect here. Run ONCE per test binary.
+/// `adapter` switches on in `app` is in effect here. The real tree is built
+/// ONCE per test binary (`host_build`); a fixture tree is built by its case.
 ///
 /// Why this way: the compiler's own artifact message names the unit's output
 /// file (`lib<crate>-<hash>.rmeta`), and rustc writes `<crate>-<hash>.d` next
@@ -632,62 +590,60 @@ fn dep_info_paths(text: &str, base: &Path) -> Vec<PathBuf> {
 fn host_build() -> &'static BTreeMap<String, HostUnit> {
     static BUILD: OnceLock<BTreeMap<String, HostUnit>> = OnceLock::new();
     BUILD.get_or_init(|| {
-        let out = Command::new(cargo())
-            .args([
-                "check",
-                "--locked",
-                "--offline",
-                "--workspace",
-                "--lib",
-                "--message-format=json",
-            ])
-            .current_dir(root())
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "the host build failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut units = BTreeMap::new();
-        for line in stdout
-            .lines()
-            .filter(|l| l.contains("\"compiler-artifact\""))
-        {
-            let msg = P(line.as_bytes(), 0).value();
-            let target = field(&msg, "target");
-            let name = text(field(target, "name"));
-            if (name != "svc_domain" && name != "svc_app")
-                || !strings(field(target, "kind")).iter().any(|k| k == "lib")
-            {
-                continue;
-            }
-            let files = strings(field(&msg, "filenames"));
-            let rmeta = PathBuf::from(files.first().expect("an artifact with no file"));
-            let stem = rmeta.file_stem().unwrap().to_string_lossy().into_owned();
-            let dep_info =
-                rmeta.with_file_name(format!("{}.d", stem.strip_prefix("lib").unwrap_or(&stem)));
-            let raw = fs::read_to_string(&dep_info)
-                .unwrap_or_else(|e| panic!("no dep-info at {}: {e}", dep_info.display()));
-            let sources = dep_info_paths(&raw, &root())
-                .into_iter()
-                .map(|p| {
-                    fs::canonicalize(&p)
-                        .unwrap_or_else(|e| panic!("{} is not readable: {e}", p.display()))
-                })
-                .collect();
-            units.insert(
-                name.to_owned(),
-                HostUnit {
-                    features: strings(field(&msg, "features")),
-                    sources,
-                },
-            );
-        }
+        let units = host_units(&Tree::real());
         assert_eq!(units.len(), 2, "the build did not report domain and app");
         units
     })
+}
+
+fn host_units(tree: &Tree) -> BTreeMap<String, HostUnit> {
+    let out = tree
+        .cargo("check")
+        .args(["--workspace", "--lib", "--message-format=json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the host build failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut units = BTreeMap::new();
+    for line in stdout
+        .lines()
+        .filter(|l| l.contains("\"compiler-artifact\""))
+    {
+        let msg = P(line.as_bytes(), 0).value();
+        let target = field(&msg, "target");
+        let name = text(field(target, "name"));
+        if (name != "svc_domain" && name != "svc_app")
+            || !strings(field(target, "kind")).iter().any(|k| k == "lib")
+        {
+            continue;
+        }
+        let files = strings(field(&msg, "filenames"));
+        let rmeta = PathBuf::from(files.first().expect("an artifact with no file"));
+        let stem = rmeta.file_stem().unwrap().to_string_lossy().into_owned();
+        let dep_info =
+            rmeta.with_file_name(format!("{}.d", stem.strip_prefix("lib").unwrap_or(&stem)));
+        let raw = fs::read_to_string(&dep_info)
+            .unwrap_or_else(|e| panic!("no dep-info at {}: {e}", dep_info.display()));
+        let sources = dep_info_paths(&raw, &tree.root)
+            .into_iter()
+            .map(|p| {
+                fs::canonicalize(&p)
+                    .unwrap_or_else(|e| panic!("{} is not readable: {e}", p.display()))
+            })
+            .collect();
+        units.insert(
+            name.to_owned(),
+            HostUnit {
+                features: strings(field(&msg, "features")),
+                sources,
+            },
+        );
+    }
+    units
 }
 
 const PURE_CRATES: [(&str, &str, &str); 2] = [
@@ -700,23 +656,38 @@ fn outside<'a>(files: &'a [PathBuf], src: &Path) -> Vec<&'a PathBuf> {
     files.iter().filter(|f| !f.starts_with(src)).collect()
 }
 
+/// L1: the files the compiler read for a pure crate must all be inside the
+/// crate's own `src/`, as messages. `crates` = (lib name, package, dir).
+fn l1_violations(
+    tree: &Tree,
+    units: &BTreeMap<String, HostUnit>,
+    crates: &[(&str, &str, &str)],
+) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (lib, _, dir) in crates {
+        let unit = &units[*lib];
+        let src = fs::canonicalize(tree.root.join(dir).join("src")).unwrap();
+        if !unit.sources.iter().any(|f| f.ends_with("src/lib.rs")) {
+            bad.push(format!(
+                "{lib}: the dep-info does not list src/lib.rs: {:?}",
+                unit.sources
+            ));
+        }
+        let outside = outside(&unit.sources, &src);
+        if !outside.is_empty() {
+            bad.push(format!(
+                "{lib}: the compiler read files outside {}: a `#[path]`, `include!` or `[lib] path` reaches out of `src`: {outside:?}",
+                src.display()
+            ));
+        }
+    }
+    bad
+}
+
 #[test]
 fn l1_the_compiler_read_only_files_inside_the_src_of_domain_and_app() {
-    for (lib, _, dir) in PURE_CRATES {
-        let unit = &host_build()[lib];
-        let src = fs::canonicalize(root().join(dir).join("src")).unwrap();
-        assert!(
-            unit.sources.iter().any(|f| f.ends_with("src/lib.rs")),
-            "{lib}: the dep-info does not list lib.rs: {:?}",
-            unit.sources
-        );
-        let bad = outside(&unit.sources, &src);
-        assert!(
-            bad.is_empty(),
-            "{lib}: the compiler read files outside {}: a `#[path]` or `include!` reaches out of `src`: {bad:?}",
-            src.display()
-        );
-    }
+    let bad = l1_violations(&Tree::real(), host_build(), &PURE_CRATES);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 #[test]
@@ -793,11 +764,11 @@ fn conditional_compilation_violations(file: &str, src: &str) -> Vec<String> {
     bad
 }
 
-#[test]
-fn l2_no_conditional_compilation_and_no_file_inclusion_in_the_files_the_compiler_read() {
+/// L2 over every file the compiler read for the pure crates, as messages.
+fn l2_violations(units: &BTreeMap<String, HostUnit>, crates: &[(&str, &str, &str)]) -> Vec<String> {
     let mut bad = Vec::new();
-    for (lib, _, _) in PURE_CRATES {
-        for f in &host_build()[lib].sources {
+    for (lib, _, _) in crates {
+        for f in &units[*lib].sources {
             let src = fs::read_to_string(f).unwrap();
             bad.extend(conditional_compilation_violations(
                 &f.display().to_string(),
@@ -805,6 +776,12 @@ fn l2_no_conditional_compilation_and_no_file_inclusion_in_the_files_the_compiler
             ));
         }
     }
+    bad
+}
+
+#[test]
+fn l2_no_conditional_compilation_and_no_file_inclusion_in_the_files_the_compiler_read() {
+    let bad = l2_violations(host_build(), &PURE_CRATES);
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
@@ -973,4 +950,242 @@ fn l3_checker_refuses_a_feature_an_optional_dependency_and_a_dependent_that_swit
         !feature_violations(&meta("{}", &clean_app, &clean_adapter), &built).is_empty(),
         "a feature enabled in the host build: accepted"
     );
+}
+
+// ---- fixtures: ONE attack on a copy of the domain crate, through the same checks ----
+//
+// Each case copies `crates/domain` into a tiny workspace of its own, applies
+// one attack and runs the SAME functions the real tree is checked with
+// (`compile_forbidding_unsafe`, `host_units`, `l1_violations`,
+// `l2_violations`). A case names which layers must go red and requires every
+// other layer it runs to stay clean, so removing a layer (or loosening it:
+// `src/` -> the crate dir) turns the case RED, and the control stays green.
+
+const FIXTURE_WORKSPACE: &str = r#"[workspace]
+resolver = "2"
+members = ["crates/domain"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.99"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+"#;
+
+const FIXTURE_CRATES: [(&str, &str, &str); 1] = [("svc_domain", "svc-domain", "crates/domain")];
+
+fn fixture_target() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root().join("target"), PathBuf::from)
+        .join("arch-fixtures")
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap() {
+        let p = e.unwrap().path();
+        let dest = to.join(p.file_name().unwrap());
+        if p.is_dir() {
+            copy_dir(&p, &dest);
+        } else {
+            fs::copy(&p, &dest).unwrap();
+        }
+    }
+}
+
+/// Replaces `from` with `to` in `file`, which must change.
+fn edit(file: &Path, from: &str, to: &str) {
+    let t = fs::read_to_string(file).unwrap();
+    assert!(t.contains(from), "{}: {from:?} not found", file.display());
+    fs::write(file, t.replacen(from, to, 1)).unwrap();
+}
+
+fn append(file: &Path, text: &str) {
+    let mut t = fs::read_to_string(file).unwrap();
+    t.push_str(text);
+    fs::write(file, t).unwrap();
+}
+
+/// A fixture workspace with a copy of the real domain crate; `attack` gets the
+/// crate directory. The path is fixed per case (so builds are reused).
+fn fixture(case: &str, attack: fn(&Path)) -> Tree {
+    let dir = fixture_target().join("work").join(case);
+    let _ = fs::remove_dir_all(&dir);
+    let krate = dir.join("crates/domain");
+    copy_dir(&root().join("crates/domain/src"), &krate.join("src"));
+    fs::copy(
+        root().join("crates/domain/Cargo.toml"),
+        krate.join("Cargo.toml"),
+    )
+    .unwrap();
+    fs::write(dir.join("Cargo.toml"), FIXTURE_WORKSPACE).unwrap();
+    attack(&krate);
+    Tree {
+        root: dir,
+        target_dir: Some(fixture_target().join("build")),
+        locked: false,
+    }
+}
+
+const UNSAFE_GETPID: &str =
+    "\nextern \"C\" {\n    fn getpid() -> i32;\n}\n\n/// Not pure.\npub fn pid() -> i32 {\n    unsafe { getpid() }\n}\n";
+
+/// The reviewer's attack: the lints table commented out, the forbid attribute
+/// deleted, and an `unsafe` call into libc.
+fn attack_unsafe_with_lints_commented_out(krate: &Path) {
+    edit(
+        &krate.join("Cargo.toml"),
+        "[lints]\nworkspace = true",
+        "# [lints] workspace = true",
+    );
+    edit(&krate.join("src/lib.rs"), "#![forbid(unsafe_code)]\n", "");
+    append(&krate.join("src/lib.rs"), UNSAFE_GETPID);
+}
+
+/// The stronger attacker: the crate itself ALLOWS the lint.
+fn attack_unsafe_with_allow_attribute(krate: &Path) {
+    edit(
+        &krate.join("src/lib.rs"),
+        "#![forbid(unsafe_code)]",
+        "#![allow(unsafe_code)]",
+    );
+    append(&krate.join("src/lib.rs"), UNSAFE_GETPID);
+}
+
+fn attack_extern_crate_raw_std(krate: &Path) {
+    append(&krate.join("src/lib.rs"), "\nextern crate r#std as host;\n");
+}
+
+/// `std` behind a `cfg` that is false on the bare-metal target: the no-std
+/// compile never sees it, only L2 does.
+fn attack_std_behind_a_cfg(krate: &Path) {
+    append(
+        &krate.join("src/lib.rs"),
+        "\n#[cfg(not(target_os = \"none\"))]\nmod host_only {\n    extern crate std;\n    /// Not pure.\n    pub fn args() -> usize {\n        std::env::args().count()\n    }\n}\n",
+    );
+}
+
+/// A `#[path]` attribute split across lines (the L2 line scan cannot see it)
+/// naming a pure file that sits in the crate directory but OUTSIDE `src/`.
+fn attack_multiline_path_outside_src(krate: &Path) {
+    fs::create_dir_all(krate.join("host")).unwrap();
+    fs::write(
+        krate.join("host/io.rs"),
+        "//! Outside src.\npub fn f() {}\n",
+    )
+    .unwrap();
+    append(
+        &krate.join("src/lib.rs"),
+        "\n#[path\n    = \"../host/io.rs\"]\nmod io;\n",
+    );
+}
+
+/// `[lib] path` pointing out of `src/`.
+fn attack_lib_path_outside_src(krate: &Path) {
+    fs::create_dir_all(krate.join("host")).unwrap();
+    fs::write(krate.join("host/lib.rs"), "//! Outside src.\n#![no_std]\n").unwrap();
+    append(
+        &krate.join("Cargo.toml"),
+        "\n[lib]\npath = \"host/lib.rs\"\n",
+    );
+}
+
+/// `std` behind a DECLARED feature: only `--all-features` makes the no-std
+/// compile build it.
+fn attack_std_behind_a_declared_feature(krate: &Path) {
+    append(&krate.join("Cargo.toml"), "\n[features]\nstd = []\n");
+    append(
+        &krate.join("src/lib.rs"),
+        "\n#[cfg(feature = \"std\")]\nextern crate std;\n",
+    );
+}
+
+fn no_attack(_: &Path) {}
+
+/// (case, attack, run the no-std compile, run the host build + L1 + L2, layers that must be red)
+type FixtureCase = (&'static str, fn(&Path), bool, bool, &'static [&'static str]);
+
+#[test]
+fn every_attack_on_a_copy_of_domain_turns_its_layer_red_and_the_control_stays_green() {
+    let cases: [FixtureCase; 8] = [
+        ("control", no_attack, true, true, &[]),
+        (
+            "unsafe_lints_commented_out",
+            attack_unsafe_with_lints_commented_out,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "unsafe_allow_attribute",
+            attack_unsafe_with_allow_attribute,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "extern_crate_raw_std",
+            attack_extern_crate_raw_std,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "std_behind_a_declared_feature",
+            attack_std_behind_a_declared_feature,
+            true,
+            false,
+            &["compiler"],
+        ),
+        (
+            "std_behind_a_cfg",
+            attack_std_behind_a_cfg,
+            true,
+            true,
+            &["l2"],
+        ),
+        (
+            "multiline_path_outside_src",
+            attack_multiline_path_outside_src,
+            false,
+            true,
+            &["l1"],
+        ),
+        (
+            "lib_path_outside_src",
+            attack_lib_path_outside_src,
+            false,
+            true,
+            &["l1"],
+        ),
+    ];
+    for (name, attack, run_compiler, run_host, red) in cases {
+        let tree = fixture(name, attack);
+        let mut layers: Vec<(&str, Vec<String>)> = Vec::new();
+        if run_compiler {
+            let r = compile_forbidding_unsafe(&tree, "crates/domain", &nostd_unit(NOSTD_TARGET));
+            layers.push(("compiler", r.err().into_iter().collect()));
+        }
+        if run_host {
+            let units = host_units(&tree);
+            layers.push(("l1", l1_violations(&tree, &units, &FIXTURE_CRATES)));
+            layers.push(("l2", l2_violations(&units, &FIXTURE_CRATES)));
+        }
+        for (layer, found) in &layers {
+            assert_eq!(
+                !found.is_empty(),
+                red.contains(layer),
+                "{name}: layer {layer} should be {} but found {found:?}",
+                if red.contains(layer) { "RED" } else { "clean" }
+            );
+        }
+        for want in red {
+            assert!(
+                layers.iter().any(|(l, _)| l == want),
+                "{name}: layer {want} was not run"
+            );
+        }
+    }
 }

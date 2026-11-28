@@ -8,13 +8,12 @@
     clippy::indexing_slicing
 )]
 mod common;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::TcpStream;
 use std::sync::{Mutex, PoisonError};
-use std::thread;
 use std::time::{Duration, Instant};
 
-use common::{call, call_with, options, parse, raw, start, within, TOKEN};
+use common::{call, call_with, options, raw, read_all, start, within, TOKEN};
 
 /// Tests that open many sockets run one at a time.
 static HEAVY: Mutex<()> = Mutex::new(());
@@ -80,110 +79,95 @@ fn only_optional_whitespace_around_the_header_value_is_ignored() {
     server.finish();
 }
 
-/// Flooders that keep reconnecting and sending ONE byte, while normal clients
-/// send a complete request in one packet.
-const FLOODERS: usize = 32;
-/// Sockets each flooder keeps open at once: 32 x 4 = 128 > the 48 head slots,
-/// so the registry is full the whole time and must evict.
-const HELD_PER_FLOODER: usize = 4;
-const NORMAL_REQUESTS: usize = 50;
-/// Measured on the oldest-first policy (10 runs): every run answered all 50.
-/// The "fewest bytes first" policy this replaced answered 4/200 and 6/200
-/// under 96 flooders. 40 of 50 leaves a wide margin on both sides.
-const MIN_NORMAL_OK: usize = 40;
+/// Stalled heads that each sent ONE byte: more than the 48 head slots, so the
+/// registry is full and every newcomer evicts someone.
+const HELD: usize = 60;
+/// What `HELD` heads must have evicted at least: `HELD` minus the 48 slots.
+const MIN_EVICTIONS: u64 = 12;
+/// Well-behaved clients, one after the other.
+const ROUNDS: usize = 20;
+/// How long a well-behaved client waits for its answer. Generous on purpose:
+/// this test asserts WHO is evicted, never how fast anything is answered.
+const PATIENT: Duration = Duration::from_secs(10);
 
-/// One healthz request, one packet, a short deadline: true on a 200.
-fn healthz_ok(addr: std::net::SocketAddr) -> bool {
-    let Ok(mut s) = TcpStream::connect(addr) else {
-        return false;
-    };
-    let _ = s.set_read_timeout(Some(Duration::from_millis(1500)));
-    if s.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
-    let mut out = Vec::new();
-    let _ = s.read_to_end(&mut out);
-    parse(&String::from_utf8_lossy(&out)).map(|r| r.0) == Some(200)
-}
-
+/// The property of the eviction policy, built without a clock: when the head
+/// table is full, the OLDEST head is evicted, so a newcomer that has sent
+/// nothing yet is not evicted by older heads that have sent a byte.
+///
+/// Why this is deterministic: the accept loop registers connections in accept
+/// order and the kernel queues them in connect order, so connecting
+/// sequentially FIXES the registry order, whatever the host load. Per round a
+/// good client connects (registered, zero bytes), then ONE newer stalled
+/// connection arrives while the table is full, and only then does the good
+/// client send its request. Oldest-first evicts an old stalled head and the
+/// good client is answered; "fewest bytes first" (the policy this replaced)
+/// evicts the good client, which has the fewest, and gets no reply.
 #[test]
-fn a_reconnect_flood_of_one_byte_clients_does_not_starve_normal_requests() {
+fn a_newcomer_is_not_evicted_by_older_stalled_heads_when_the_head_table_is_full() {
     let _one_at_a_time = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let mut o = options();
-    o.head_deadline = Duration::from_secs(1);
-    o.request_deadline = Duration::from_secs(2);
+    // Deadlines far beyond the test: a slow host cannot make the server cut a client.
+    o.head_deadline = Duration::from_secs(120);
+    o.request_deadline = Duration::from_secs(120);
     let server = start(o);
     let addr = server.addr;
 
-    let go = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let flooders: Vec<_> = (0..FLOODERS)
+    // The stalled heads, opened one after the other (each `connect` returns
+    // once the handshake is done, so each is established before the next).
+    let mut stalled: Vec<TcpStream> = (0..HELD)
         .map(|_| {
-            let go = go.clone();
-            thread::spawn(move || {
-                let mut held: std::collections::VecDeque<TcpStream> = Default::default();
-                while go.load(std::sync::atomic::Ordering::SeqCst) {
-                    if let Ok(mut s) = TcpStream::connect(addr) {
-                        let _ = s.write_all(b"G");
-                        held.push_back(s);
-                        if held.len() > HELD_PER_FLOODER {
-                            held.pop_front();
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(2));
-                }
-                held // still stalled: the server must cut each of them
-            })
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(b"G").unwrap();
+            s
         })
         .collect();
-    thread::sleep(Duration::from_millis(300)); // let the registry fill
-    let ok = (0..NORMAL_REQUESTS)
-        .filter(|_| {
-            let r = healthz_ok(addr);
-            thread::sleep(Duration::from_millis(20));
-            r
-        })
-        .count();
-    go.store(false, std::sync::atomic::Ordering::SeqCst);
-    let mut stalled: Vec<TcpStream> = flooders
-        .into_iter()
-        .flat_map(|h| h.join().unwrap())
-        .collect();
-    eprintln!("flood: {ok}/{NORMAL_REQUESTS} normal requests answered");
+    // Connections are accepted in order: once this scrape is answered, every
+    // stalled head above has been registered, and the table has evicted.
+    let (_, scrape) = call(addr, "GET", "/metrics", "");
+    let evictions = |scrape: &str| -> u64 {
+        scrape
+            .lines()
+            .find_map(|l| l.strip_prefix("svc_http_head_evictions_total "))
+            .and_then(|v| v.trim().parse().ok())
+            .expect("the eviction counter must be exported")
+    };
     assert!(
-        ok >= MIN_NORMAL_OK,
-        "only {ok}/{NORMAL_REQUESTS} normal requests answered under the flood"
+        evictions(&scrape) >= MIN_EVICTIONS,
+        "the table did not fill: {scrape}"
     );
 
-    // Every stalled connection is closed by the server (evicted, or cut by the
-    // 1 s head deadline with a 408) well before the request deadline.
-    let t = Instant::now();
-    for s in &mut stalled {
-        let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
-        let mut out = Vec::new();
-        let _ = s.read_to_end(&mut out);
+    for round in 0..ROUNDS {
+        let mut good = TcpStream::connect(addr).unwrap();
+        let mut newer = TcpStream::connect(addr).unwrap();
+        newer.write_all(b"G").unwrap();
+        stalled.push(newer);
+        good.set_read_timeout(Some(PATIENT)).unwrap();
+        good.write_all(b"GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        let answer = read_all(&mut good).map(|r| r.0);
+        assert_eq!(
+            answer,
+            Some(200),
+            "round {round}: a client that arrived before ONE newer stalled head was evicted (answer {answer:?})"
+        );
     }
+
+    // The evictions are the table's work and are counted.
+    let (_, scrape) = call(addr, "GET", "/metrics", "");
     assert!(
-        t.elapsed() < Duration::from_millis(2500),
-        "stalled connections outlived the head deadline: {:?}",
-        t.elapsed()
+        evictions(&scrape) >= MIN_EVICTIONS,
+        "evictions: {}",
+        evictions(&scrape)
     );
+    drop(stalled);
     assert!(
-        within(Duration::from_secs(2), || server.monitor.live_connections()
+        within(Duration::from_secs(10), || server
+            .monitor
+            .live_connections()
             == 0)
         .is_some(),
-        "connections are still live after every client was cut"
+        "connections are still live after every client went away"
     );
-
-    let (_, scrape) = call(addr, "GET", "/metrics", "");
-    let evictions: u64 = scrape
-        .lines()
-        .find_map(|l| l.strip_prefix("svc_http_head_evictions_total "))
-        .and_then(|v| v.trim().parse().ok())
-        .expect("the eviction counter must be exported");
-    assert!(evictions >= 12, "evictions: {evictions}\n{scrape}");
-    drop(stalled);
     server.finish();
 }
 

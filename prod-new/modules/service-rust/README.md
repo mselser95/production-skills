@@ -18,18 +18,18 @@ src/main.rs      all four                               composition root (packag
 
 | enforced by | what |
 |---|---|
-| the compiler, on a target with no `std` | `make check-nostd` compiles `domain` and `app` for `thumbv7em-none-eabi` (no `std`) with `--all-features`: no file, socket, clock, thread or environment access can compile there, and `extern crate std` in ANY spelling is error E0463. It runs inside `make check-fast` and `make verify`; `rust-toolchain.toml` installs the target. It builds only what is NOT conditionally compiled, which is why the next four rows exist. `#![forbid(unsafe_code)]` is a workspace lint on every crate. |
+| the compiler, on a target with no `std` | `tests/architecture.rs` itself runs `cargo rustc --lib --all-features --target thumbv7em-none-eabi --profile check -- -F unsafe_code` on `domain` and on `app` (no `make`, no variable a Makefile owns). On that target any `std` item, and `extern crate std` in ANY spelling (`r#std` too), is error E0463; the test fails (never skips) if the target is not installed. `-F unsafe_code` is a forbid on the rustc command line: no attribute (`#![allow(unsafe_code)]` is E0453) and no `[lints]` table can lower it, so the unsafe ban does not rest on `Cargo.toml` or `lib.rs` text; the same flag is applied to `adapter`, `platform` and `svc`. `make check-nostd` runs the same compile as a convenience; nothing rests on the Makefile, and a Makefile edited so that `check-fast` runs nothing at all is outside what an in-repo test can see (the CI workflow that calls it is the outer gate). It builds only what is NOT conditionally compiled, which is why the next three rows exist. |
 | the compiler, through Cargo | A zone names only the crates its `Cargo.toml` lists, so `app` cannot name `adapter`, and `adapter` and `platform` cannot see each other. |
-| a test, L1: which files exist | `tests/architecture.rs` runs `cargo check --workspace --lib --message-format=json` ONCE (the host build, with the same feature unification as `make check-fast`), takes each pure crate's output file from the compiler's own artifact message, reads the dep-info rustc wrote beside it (every source file it read, `#[path]` modules and `include!`d files included) and requires every one to be inside that crate's `src/`. |
-| a test, L2: no conditional compilation | every file L1 lists is REFUSED (not parsed) if it contains the word `cfg` anywhere, comments included, unless the whole line is exactly `#[cfg(test)]`; also `include!`, `include_str!`, `include_bytes!` and `#[path = ...]`. Without proc macros and build scripts (both refused) `macro_rules!` cannot synthesise the identifier `cfg`, so a source with no such token has no conditional compilation; `#[cfg(test)]` code exists only in test builds. |
-| a test, L3: no features | `cargo metadata`: `domain` and `app` declare an empty `features` map and no optional dependency; no package enables a feature on them or sets `default-features = false`; the host build enabled none on them. |
-| a test | the exact dependency lists (add `platform` to `domain` and it is RED); `domain` and `app` have only `lib`/`test` targets (no build script, no proc-macro); the Makefile recipe of `check-nostd` is ONE line, byte-equal to the canonical command (a `-` or `@-` prefix, `\|\| true`, a second line, a changed `CARGO` are RED), `check-fast` lists `check-nostd` as a prerequisite, and `.IGNORE`, `SHELL`, `MAKEFLAGS`, `include` lines are refused; `rust-toolchain.toml` installs the target; the release profile keeps overflow checks and unwinding. |
+| a test, L1: which files exist | `tests/architecture.rs` runs `cargo check --workspace --lib --message-format=json` ONCE (the host build, with the same feature unification as `make check-fast`), takes each pure crate's output file from the compiler's own artifact message, reads the dep-info rustc wrote beside it (every source file it read, `#[path]` modules and `include!`d files included) and requires every one to be inside that crate's `src/`. | Alone this guards ownership (a pure crate's code lives in its own `src/`), not purity: the gate compiles those files anyway.
+| a test, L2: no conditional compilation | every file L1 lists is REFUSED (not parsed) if it contains the word `cfg` anywhere, comments included, unless the whole line is exactly `#[cfg(test)]`; also `include!`, `include_str!`, `include_bytes!` and `#[path = ...]`. Without proc macros and build scripts (both refused) `macro_rules!` cannot synthesise the identifier `cfg`, so a source with no such token has no conditional compilation; `#[cfg(test)]` code exists only in test builds. | Alone this guards the one thing the gate cannot see: `std` behind a `cfg` that is false on the bare-metal target.
+| a test, L3: no features | `cargo metadata`: `domain` and `app` declare an empty `features` map and no optional dependency; no package enables a feature on them or sets `default-features = false`; the host build enabled none on them. | Defence in depth: the gate builds with `--all-features`, so L3 alone adds nothing the gate does not already refuse.
+| a test | the exact dependency lists (add `platform` to `domain` and it is RED); `domain` and `app` have only `lib`/`test` targets (no build script, no proc-macro); the release profile keeps overflow checks and unwinding. Fixtures: one attack each on a copy of `domain` (the lints table commented out plus `unsafe`; `#![allow(unsafe_code)]`; `extern crate r#std`; `std` behind a declared feature; `std` behind a `cfg`; a multi-line `#[path]`; `[lib] path` outside `src/`) must turn exactly the layer that owns it RED, with a clean control. The Makefile text is no longer pinned: nothing rests on it. |
 | a source scan (weaker) | an early message that `domain`/`app` name no `std::` item outside their `#[cfg(test)]` tail; only `crates/platform/src/config.rs` reads the environment; the token is compared through `ct_eq`. |
 
 Not enforced: the purity of `adapter`, `platform` and `main` (they are the I/O
 zones); test-only code (`#[cfg(test)]` may use `std` and files); the
-environment of the person running `make` (a `CARGO=true make` or a `MAKEFLAGS`
-in the shell is outside the file); the host build is the DEFAULT target, so
+environment of the person running `make` (it does not matter to the zone
+checks: the test runs its own compile); the host build is the DEFAULT target, so
 code that exists only on another operating system is not read (L2 refuses the
 `cfg` that would select it). CI images need the `thumbv7em-none-eabi`
 rust-std component: `rustup target add` or the toolchain file's `targets`.
@@ -73,10 +73,12 @@ with that table in both directions: name, type and label keys
   registry is full a newcomer evicts the OLDEST connection still reading its
   head (closed with no reply, `svc_http_head_evictions_total` counts it). A
   flood of reconnecting clients that send one byte therefore cannot keep
-  normal one-packet requests out (`tests/hardening.rs` floods with 32
-  reconnecting 1-byte clients and requires at least 40 of 50 normal requests
-  answered; measured 50/50); every stalled connection is closed by the head
-  deadline. Policies that rank by progress ("fewest bytes first") were
+  normal one-packet requests out (`tests/hardening.rs` holds 60 stalled
+  1-byte heads open, then 20 times connects a good client, lets ONE newer
+  stalled head arrive while the table is full, and requires the good client to
+  be answered: a property of who is evicted, with no throughput floor and no
+  clock); every stalled connection is closed by the head deadline
+  (`tests/http_limits.rs`). Policies that rank by progress ("fewest bytes first") were
   measured and starve normal clients (4/200 and 6/200 answered under 96
   flooders), because a flooder that has sent one byte outranks every newcomer.
   KNOWN COST: a legitimately slow head can be evicted when the table is full
@@ -118,8 +120,8 @@ code 4, abandoning whatever was in flight.
 * State is process memory; a restart starts empty.
 * The applied-id set is never pruned (retention is unbounded here); a real
   store keeps ids for a bounded idempotency window or in a unique index.
-* No CI is generated by this module: `make check-nostd` (zone purity) runs
-  in `make check-fast` locally, but nothing in a generated repository runs
+* No CI is generated by this module: the zone-purity compile (a test in
+  `tests/architecture.rs`) runs in `make check-fast` locally, but nothing in a generated repository runs
   it on a pull request until the repository's workflow calls `make check-fast`.
 * `make verify` equals `make check-fast` today. cargo-deny, coverage and
   mutation testing are a later change.
