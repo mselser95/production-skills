@@ -242,10 +242,14 @@ def clear_flags(path):
             pass
 
 
-def force_remove(path):
+def force_remove(path, deadline=0.0):
     """Remove `path` entirely: first make every directory under it owner-traversable (never
-    following a symlink), then rmtree; retried once. A symlink is unlinked, never entered."""
-    for _ in (0, 1):
+    following a symlink), then rmtree; retried once, and, when `deadline` > 0, again and again
+    for that many seconds (a child that was still writing). A symlink is unlinked, never entered."""
+    end = time.time() + deadline
+    tries = 0
+    while True:
+        tries += 1
         if os.path.islink(path) or not os.path.isdir(path):
             clear_flags(path)
             try:
@@ -270,8 +274,10 @@ def force_remove(path):
                 for f in files:
                     clear_flags(os.path.join(root, f))
             shutil.rmtree(path, ignore_errors=True)
-        if not os.path.lexists(path):
+        if not os.path.lexists(path) or (tries >= 2 and time.time() >= end):
             return
+        if tries >= 2:
+            time.sleep(0.05)
 
 
 def stale_notice():
@@ -322,6 +328,9 @@ class Train:
         self.commits_out = {}
         self.batch_n = 0
         self.json_done = False
+        self.children = set()  # child processes in flight; each leads its own process group
+        self.spawning = False  # inside Popen: a signal is only recorded, then acted on once registered
+        self.sig_pending = 0
 
     # ---- plumbing -------------------------------------------------------
     def make_root(self):
@@ -332,6 +341,48 @@ class Train:
             signal.pthread_sigmask(signal.SIG_SETMASK, old)
         self.uid = os.path.basename(self.tmp)
         self.priv = os.path.join(self.tmp, "repo.git")
+
+    def spawn(self, cmd, hold=False, **kw):
+        """Start a child in its OWN process group and register it before any signal can unwind
+        us: a handler that fires inside Popen only records the signal (on_signal); it is acted on
+        here, after the registration, so cleanup always knows every child it must kill."""
+        if hold and os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_HOLD_FILE"):
+            # test hook: emulate a child that is still writing into the private root later
+            cmd = ["sh", "-c", 'sleep 0.8; mkdir -p "$0/late" && echo x >"$0/late/f"; cd / && exec "$@"',
+                   self.tmp] + list(cmd)
+        self.spawning = True
+        try:
+            proc = subprocess.Popen(cmd, start_new_session=True, **kw)
+            if hold and os.environ.get("TRAIN_SELFTEST") and os.environ.get("TRAIN_TEST_HOLD_FILE"):
+                with open(os.environ["TRAIN_TEST_HOLD_FILE"], "w") as fh:
+                    fh.write("held\n")
+                time.sleep(0.3)  # test hook: a signal in this window is deferred, never lost
+            self.children.add(proc)
+        finally:
+            self.spawning = False
+        if self.sig_pending:
+            sys.exit(128 + self.sig_pending)
+        return proc
+
+    def reap(self, proc):
+        """Kill the child's whole group and collect it; forget it."""
+        self.kill_group(proc)
+        try:
+            proc.wait()
+        except BaseException:  # noqa: BLE001 -- cleanup must go on
+            pass
+        self.children.discard(proc)
+
+    def run_child(self, cmd, **kw):
+        """subprocess.run, through spawn: (stdout, stderr, returncode) of a finished child."""
+        proc = self.spawn(cmd, **kw)
+        try:
+            out, err = proc.communicate()
+        except BaseException:
+            self.reap(proc)
+            raise
+        self.children.discard(proc)
+        return out, err, proc.returncode
 
     def build_env(self):
         base = dict(os.environ)
@@ -345,11 +396,11 @@ class Train:
             "GIT_COMMITTER_NAME": IDENT_NAME, "GIT_COMMITTER_EMAIL": IDENT_EMAIL})
         drop = set(LOCAL_ENV_SUPERSET)
         try:
-            p = subprocess.run(["git", "rev-parse", "--local-env-vars"], cwd=self.tmp,
-                               capture_output=True, text=True, env=self.genv,
-                               stdin=subprocess.DEVNULL)
-            if p.returncode == 0:
-                drop.update(x.strip() for x in p.stdout.split("\n") if x.strip().startswith("GIT_"))
+            out, _, rc = self.run_child(["git", "rev-parse", "--local-env-vars"], cwd=self.tmp,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                        env=self.genv, stdin=subprocess.DEVNULL)
+            if rc == 0:
+                drop.update(x.strip() for x in out.split("\n") if x.strip().startswith("GIT_"))
         except OSError as e:
             raise Fatal("cannot run git: %s" % e)
         self.venv = {k: v for k, v in base.items()
@@ -386,13 +437,13 @@ class Train:
         # own process group: a signal that unwinds us kills the WHOLE group (`git worktree add`
         # runs a child that keeps writing the tree after its parent is killed)
         popen_kw = {k: v for k, v in kw.items() if k != "input"}
-        proc = subprocess.Popen(cmd, start_new_session=True, **popen_kw)
+        proc = self.spawn(cmd, hold=(sub == "init"), **popen_kw)
         try:
             out, err = proc.communicate(kw.get("input"))
         except BaseException:
-            self.kill_group(proc)
-            proc.wait()
+            self.reap(proc)
             raise
+        self.children.discard(proc)
         p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
         if p.returncode not in ok:
             first = (p.stderr.strip().split("\n") or [""])[0][:200]
@@ -402,8 +453,8 @@ class Train:
 
     def check_git_version(self):
         try:
-            out = subprocess.run(["git", "--version"], capture_output=True, text=True,
-                                 env=self.genv, cwd=self.tmp, stdin=subprocess.DEVNULL).stdout
+            out = self.run_child(["git", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, env=self.genv, cwd=self.tmp, stdin=subprocess.DEVNULL)[0]
         except OSError as e:
             raise Fatal("cannot run git: %s" % e)
         m = re.search(r"(\d+)\.(\d+)", out)
@@ -546,6 +597,9 @@ class Train:
         return self.git("rev-parse", "HEAD", cwd=wt).stdout.strip()
 
     def on_signal(self, signum, frame):
+        if self.spawning:  # inside Popen: unwinding now would lose the child; spawn() acts on it
+            self.sig_pending = self.sig_pending or signum
+            return
         sys.exit(128 + signum)
 
     def cleanup(self):
@@ -554,6 +608,9 @@ class Train:
         self.cleaned = True
         for sig in SIGS:
             signal.signal(sig, signal.SIG_IGN)
+        killed = bool(self.children)
+        for proc in list(self.children):  # first stop everything that could still write, THEN remove
+            self.reap(proc)
         if self.tmp is None:
             return
         if self.keep_root:  # everything but the private repository holding the verified result
@@ -561,7 +618,7 @@ class Train:
                 if n != "repo.git":
                     force_remove(os.path.join(self.tmp, n))
             return
-        force_remove(self.tmp)
+        force_remove(self.tmp, 3.0 if killed else 0.0)
 
     # ---- admission ------------------------------------------------------
     def describe(self, c, base_sha):
@@ -795,9 +852,8 @@ class Train:
         env["PWD"] = wt
         env["TMPDIR"] = vtmp
         with open(out, "w") as fh:
-            p = subprocess.Popen(self.a.verify, shell=True, cwd=wt, stdout=fh, env=env,
-                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                 start_new_session=True)
+            p = self.spawn(self.a.verify, shell=True, cwd=wt, stdout=fh, env=env,
+                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
             try:
                 try:
                     rc = p.wait(timeout=self.a.verify_timeout)
@@ -808,6 +864,7 @@ class Train:
             finally:
                 self.kill_group(p)
                 p.poll()
+                self.children.discard(p)
         dt = time.time() - t0
         after = self.priv_snapshot()
         changed = [k for k in snap if snap[k] != after[k]]
