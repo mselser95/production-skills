@@ -118,6 +118,9 @@ done
 # placement set to root; and (when the history has it) equals the tree built from the manifests of the
 # commit before the per-unit placement (231d25f)
 SBASE=231d25f
+# service-python gained files after that commit (ci/**, gates/**, unit.mk), which its manifest there cannot
+# place: its base is the last manifest before the per-unit placement that knows the module's current files
+SBASE_PY=9602de2
 b="$tmp/b"; mkdir -p "$b/modules"; cp -R "$here/prod-new/template" "$b/template"
 for m in service-go service-rust service-python; do cp -R "$mods/$m" "$b/modules/$m"; done
 have_base=0
@@ -132,13 +135,14 @@ for m in service-go service-rust service-python; do
   [[ -d "$tmp/single-allroot-$m" && "$(tree_hash "$tmp/single-$m")" == "$(tree_hash "$tmp/single-allroot-$m")" ]] \
     && pass "single layout: $m tree equals the all-root-placement tree (no file moved by unit placement)" \
     || fail "single layout: $m tree differs from the all-root-placement tree"
-  if [[ $have_base -eq 1 ]]; then
-    gitq -C "$here" show "$SBASE:prod-new/modules/$m/module.json" > "$b/modules/$m/module.json"
+  mbase="$SBASE"; [[ "$m" == service-python ]] && mbase="$SBASE_PY"
+  if [[ $have_base -eq 1 ]] && gitq -C "$here" rev-parse -q --verify "$mbase^{commit}" >/dev/null 2>&1; then
+    gitq -C "$here" show "$mbase:prod-new/modules/$m/module.json" > "$b/modules/$m/module.json"
     # shellcheck disable=SC2046
     A "$b/modules" --dest "$tmp/single-base-$m" --layout single --module "$m" $(slots_for "$m") >/dev/null 2>&1
     [[ -d "$tmp/single-base-$m" && "$(tree_hash "$tmp/single-$m")" == "$(tree_hash "$tmp/single-base-$m")" ]] \
-      && pass "single layout: $m tree equals the tree of the manifest at $SBASE" \
-      || fail "single layout: $m tree differs from the tree of the manifest at $SBASE"
+      && pass "single layout: $m tree equals the tree of the manifest at $mbase" \
+      || fail "single layout: $m tree differs from the tree of the manifest at $mbase"
   fi
 done
 [[ $have_base -eq 1 ]] || skip "single layout equals the tree at $SBASE" "git history does not contain $SBASE (shallow clone or no git); the all-root equivalence above still ran"
