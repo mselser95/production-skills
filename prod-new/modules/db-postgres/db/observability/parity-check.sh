@@ -499,6 +499,11 @@ if not isinstance(svc, dict):
 overlay_dir = os.path.dirname(overlay_path)
 
 
+def nonregular(path):
+    # a directory, or a symlink to nothing: it cannot be read as a compose file
+    return os.path.isdir(path) or (os.path.lexists(path) and not os.path.exists(path))
+
+
 def exists(path):
     try:
         open(path, "rb").close()
@@ -696,6 +701,9 @@ for name_ in listing:
         continue
     if name_ not in COMPOSE_CLOSED and name_ not in AUTO_MERGED:
         fail("COMPOSE-UNKNOWN-FILE", f"`{name_}` is a compose file this check does not know (the closed list is {', '.join(COMPOSE_CLOSED)}); add it to the list in parity-check.sh and the README, or delete it")
+    if nonregular(os.path.join(overlay_dir, name_)):
+        fail("COMPOSE-UNKNOWN-FILE", f"`{name_}` is not a regular file (a directory or a dangling link named like a compose file): compose would try to read it; delete it")
+        continue
     cf = load(os.path.join(overlay_dir, name_))
     cf = cf if isinstance(cf, dict) else {}
     if "include" in cf:
@@ -707,13 +715,75 @@ for name_ in listing:
         ext = v.get("extends") if isinstance(v, dict) else None
         if ext is not None and (str(ext.get("service", "") if isinstance(ext, dict) else ext) in ov_services or "observability" in str(ext)):
             fail("BASE-EXPORTER", f"{name_} service `{k}` extends the overlay or one of its services")
-# Every `docker compose` command the module DOCUMENTS (README, RUNBOOK, the comments of the compose
-# files) or RUNS (the `-f "$dbdir/<file>"` of the two container scripts) may use `-f` files from the
-# closed list only: documenting a fourth merge source without listing it is a finding.
+# COMPOSE MENTIONS, by an ALLOW-LIST of command shapes. A deny-list of the spellings of "use this
+# file" (`--file`, `--file=x`, `-fx`, a `\` continuation, `--profile x -f`, `COMPOSE_FILE=`,
+# `docker-compose`, `podman compose`...) always misses one. So: join `\` continuations; a "mention" is
+# any logical line where `compose` follows docker/podman/nerdctl, or the token `docker-compose`, or a
+# COMPOSE_FILE / COMPOSE_ENV_FILES / COMPOSE_PROFILES / COMPOSE_PROJECT_NAME name; every mention must be
+#     docker compose( -f <bare file name on the closed list>){0,3}( <subcommand and its arguments>)?
+# (the `-f` in exactly that spelling, distinct files, no path, no quotes, no `=`; the rest has no token
+# starting with -f, --file, --project-directory, --profile, --env-file, --project-name or -p), or be one
+# of the two shapes the container scripts build their command with (pinned below). Anything else is a
+# COMPOSE-DOC-FILE finding naming file:line and the offending token.
 DOC_SOURCES = [("README.md", os.path.join(overlay_dir, "..", "README.md")),
                ("observability/RUNBOOK.md", None)]
-DOC_SOURCES += [(n_, os.path.join(overlay_dir, n_)) for n_ in listing if re.fullmatch(r"(docker-)?compose.*\.ya?ml", n_, re.I)]
-DOC_CMD = re.compile(r"docker compose((?:\s+(?:-p\s+\S+|--env-file\s+\S+|\[?-f\s+[^\s\]`]+\]?))*)")
+DOC_SOURCES += [(n_, os.path.join(overlay_dir, n_)) for n_ in listing if re.fullmatch(r"(docker-)?compose.*\.ya?ml", n_, re.I) and not nonregular(os.path.join(overlay_dir, n_))]
+SCRIPT_SOURCES = [("scripts/db-scrape-test.sh", "../scripts/db-scrape-test.sh"), ("scripts/db-bootstrap-test.sh", "../scripts/db-bootstrap-test.sh")]
+DOC_SOURCES += [(l_, os.path.join(overlay_dir, r_)) for l_, r_ in SCRIPT_SOURCES]
+COMPOSE_MENTION = re.compile(r"(?<![\w-])(?:(?:docker|podman|nerdctl)\s+compose\b|docker-compose(?=\s|$))", re.I)
+COMPOSE_ENVNAME = re.compile(r"COMPOSE_(?:FILE|ENV_FILES|PROFILES|PROJECT_NAME)")
+SCRIPT_PINS = (  # the shell constructions the two scripts build their command with, literally
+    re.compile(r'dc\(\) \{ docker compose -p "\$proj" --env-file "\$envf" "\$\{files\[@\]\}" "\$@"; \}\Z'),
+    re.compile(r'DC=\(docker compose -p "\$proj" --env-file "\$envf"(?: -f "\$dbdir/[^"\s]+")+\)\Z'),
+)
+BAD_FLAG_PREFIX = ("-f", "--file", "--project-directory", "--profile", "--env-file", "--project-name", "-p")
+
+
+def logical_lines(raw):
+    out, cur, start = [], None, 0
+    for n_, line_ in enumerate(raw.split("\n"), 1):
+        if cur is None:
+            start = n_
+            cur = ""
+        else:
+            line_ = re.sub(r"^\s*(?:#\s?)?", "", line_)   # the next line of a comment continuation
+        if line_.rstrip().endswith("\\"):
+            cur += line_.rstrip()[:-1] + " "
+            continue
+        out.append((start, cur + line_))
+        cur = None
+    if cur is not None:
+        out.append((start, cur))
+    return out
+
+
+def judge_mention(tail):
+    """None when the command is an accepted shape, else (what is wrong, the offending token)."""
+    toks = tail.replace("[", " ").replace("]", " ").split()
+    if toks[0].lower() != "docker" or len(toks) < 2 or toks[1].lower() != "compose":
+        return ("only `docker compose` is a documented command (not docker-compose, podman, nerdctl)", toks[0])
+    i, seen = 2, []
+    while i < len(toks) and toks[i] == "-f":
+        if i + 1 >= len(toks):
+            return ("`-f` without a file name", "-f")
+        f_ = toks[i + 1]
+        if "/" in f_ or f_.startswith((".", "~", "$")):
+            return ("write the bare file name (no path, no ./)", f_)
+        if f_ not in COMPOSE_CLOSED:
+            return ("NOTCLOSED", f_)
+        if f_ in seen:
+            return ("the same -f file twice", f_)
+        seen.append(f_)
+        i += 2
+    if len(seen) > 3:
+        return ("more than three -f files", "-f")
+    for t_ in toks[i:]:
+        u_ = t_.strip("\"'")
+        if u_.startswith(BAD_FLAG_PREFIX):
+            return ("a flag that names a file, directory, profile or project is not a documented shape (only `-f <closed-list file>` right after `docker compose`)", u_)
+    return None
+
+
 for label_, p_ in DOC_SOURCES:
     if p_ is None:
         raw_ = runbook
@@ -721,12 +791,24 @@ for label_, p_ in DOC_SOURCES:
         raw_ = read(p_)
     else:
         continue
-    flat_ = re.sub(r"\s*\n\s*(?:#\s*)?", " ", raw_)
-    for m_ in DOC_CMD.finditer(flat_):
-        for f_ in re.findall(r"-f\s+([^\s\]`]+)", m_.group(1)):
-            f_ = f_.strip("\"'")
-            if f_ not in COMPOSE_CLOSED:
-                fail("COMPOSE-DOC-FILE", f"{label_} documents `docker compose -f {f_}`, which is not on the closed list ({', '.join(COMPOSE_CLOSED)})")
+    is_script_ = label_.startswith("scripts/")
+    for ln_, text_ in logical_lines(raw_):
+        env_ = COMPOSE_ENVNAME.search(text_)
+        if env_:
+            fail("COMPOSE-DOC-FILE", f"{label_}:{ln_} mentions `{env_.group(0)}`, which can name a compose file outside the closed list; the documented shape is `docker compose [-f <file>]... <subcommand>`")
+            continue
+        if is_script_ and any(pin_.match(text_.strip()) for pin_ in SCRIPT_PINS):
+            continue
+        for m_ in COMPOSE_MENTION.finditer(text_):
+            tail_ = re.split(r"[`);|&]|\s#", text_[m_.start():], maxsplit=1)[0]
+            bad_ = judge_mention(tail_)
+            if bad_ is None:
+                continue
+            why_, tok_ = bad_
+            if why_ == "NOTCLOSED":
+                fail("COMPOSE-DOC-FILE", f"{label_} {'runs' if is_script_ else 'documents'} `docker compose -f {tok_}`, which is not on the closed list ({', '.join(COMPOSE_CLOSED)}) (line {ln_})")
+            else:
+                fail("COMPOSE-DOC-FILE", f"{label_}:{ln_} `{tok_}`: {why_}")
 for label_, rel_ in (("scripts/db-scrape-test.sh", "../scripts/db-scrape-test.sh"), ("scripts/db-bootstrap-test.sh", "../scripts/db-bootstrap-test.sh")):
     p_ = os.path.join(overlay_dir, rel_)
     if exists(p_):

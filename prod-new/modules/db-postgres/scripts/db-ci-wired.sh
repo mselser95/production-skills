@@ -9,10 +9,19 @@
 #   - exactly ONE step whose `run` mentions `db-test`, and that `run` (trailing whitespace
 #     stripped) is EXACTLY the single line `make db-test` (so `set +e` ... `exit 0` around it,
 #     or a second `make db-test || true` step, is refused);
-#   - that step has no `shell`, no `working-directory`, no `continue-on-error` (absent or literal
-#     false), and an `if` that is absent or exactly `steps.changed.outputs.run == 'true'` (an
-#     allow-list of ONE expression: `always() && false` and friends are refused);
-#   - the JOB has no `if` and no `continue-on-error`, and `timeout-minutes` is an integer >= 10;
+#   - ALLOW-LISTS (anything else is refused, naming the key; a deny-list always misses one key):
+#       the `make db-test` STEP carries only `name`, `run`, `if`, `id`, `timeout-minutes` (an
+#       integer), and the `if` is absent or exactly `steps.changed.outputs.run == 'true'` (an
+#       allow-list of ONE expression: `always() && false` and friends are refused);
+#       every step BEFORE it carries only `name`, `uses`, `with`, `run`, `if`, `id`, `env`,
+#       `continue-on-error` (the shipped workflow uses the first six and `env`; the last is
+#       judged below); an `env` there may not name MAKE, MAKEFLAGS, MFLAGS, GNUMAKEFLAGS, SHELL,
+#       PATH, BASH_ENV or ENV; no `run` line of the job mentions GITHUB_ENV or GITHUB_PATH (a
+#       `echo MAKEFLAGS=-n >> "$GITHUB_ENV"` turns `make db-test` into a no-op for the later step);
+#       the JOB carries only `name`, `runs-on`, `timeout-minutes`, `steps` (no `env`, `defaults`,
+#       `if`, `needs`, `container`, `services`, `strategy`, `continue-on-error`);
+#       the WORKFLOW has no top-level `env` and no `defaults`;
+#   - `timeout-minutes` of the job is an integer >= 10;
 #   - before it, a live step whose run has a line matching one anchored pattern for installing
 #     PyYAML (`pip install [--quiet] [quote]PyYAML[==x.y][quote]`, nothing after it), and one with
 #     a `docker pull` line; each has no continue-on-error other than false and the SAME `if`
@@ -29,6 +38,11 @@ import re, sys, yaml
 
 FALSE = {"false", "${{ false }}", "${{false}}", "0"}
 STEP_IF = "steps.changed.outputs.run == 'true'"   # the one `if` the shipped workflow gates its steps with
+
+STEP_KEYS = {"name", "run", "if", "id", "timeout-minutes"}
+PRE_KEYS = {"name", "uses", "with", "run", "if", "id", "env", "continue-on-error"}
+JOB_KEYS = {"name", "runs-on", "timeout-minutes", "steps"}
+BAD_ENV = re.compile(r"(MAKE|MAKEFLAGS|MFLAGS|GNUMAKEFLAGS|SHELL|PATH|BASH_ENV|ENV)\Z")
 
 def never(v):
     return v is False or str(v).strip().lower() in FALSE
@@ -49,11 +63,15 @@ jobs = (doc or {}).get("jobs") if isinstance(doc, dict) else None
 job = jobs.get("db") if isinstance(jobs, dict) else None
 if not isinstance(job, dict):
     refuse(f"{path} has no job `db`")
-if "if" in job:
-    refuse("job `db` has an `if` (no job-level condition is allowed: it can switch the whole job off)")
-if soft(job.get("continue-on-error")):
-    refuse("job `db` has continue-on-error")
+for key in ("env", "defaults"):
+    if isinstance(doc, dict) and key in doc:
+        refuse(f"the workflow has a top-level `{key}` (it can change how every `run` executes, `make db-test` included)")
+for key in job:
+    if key not in JOB_KEYS:
+        refuse(f"job `db` has the key `{key}` (allowed: {', '.join(sorted(JOB_KEYS))}; any other key can switch the job off or change how make runs)")
 steps = job.get("steps") or []
+if not all(isinstance(s, dict) for s in steps):
+    refuse("job `db` has a step that is not a mapping")
 def lines_of(s):
     return [l.strip() for l in s["run"].splitlines()] if isinstance(s, dict) and isinstance(s.get("run"), str) else []
 
@@ -63,15 +81,29 @@ if len(hits) != 1:
     refuse(f"job `db` must have exactly one step whose run mentions db-test (found {len(hits)})")
 if hits[0]["run"].rstrip() != "make db-test":
     refuse("the db-test step's run must be exactly the single line `make db-test` (no `set +e`, `|| true`, `exit 0` or other lines)")
-for key in ("shell", "working-directory"):
-    if key in hits[0]:
-        refuse(f"the `make db-test` step sets `{key}` (it can change how a failure is reported or where it runs)")
-if soft(hits[0].get("continue-on-error")):
-    refuse("the `make db-test` step has continue-on-error")
+for key in hits[0]:
+    if key not in STEP_KEYS:
+        refuse(f"the `make db-test` step has the key `{key}` (allowed: {', '.join(sorted(STEP_KEYS))}; any other key changes what make does or how a failure is reported)")
+tmo = hits[0].get("timeout-minutes")
+if "timeout-minutes" in hits[0] and (isinstance(tmo, bool) or not isinstance(tmo, int)):
+    refuse("the `make db-test` step's timeout-minutes is not an integer")
 if "if" in hits[0] and hits[0]["if"] != STEP_IF:
     refuse(f"the `make db-test` step's `if` is not exactly `{STEP_IF}`")
 live = hits
 first = steps.index(live[0])
+for s in steps[:first]:
+    for key in s:
+        if key not in PRE_KEYS:
+            refuse(f"step {s.get('name', '(unnamed)')!r} before `make db-test` has the key `{key}` (allowed: {', '.join(sorted(PRE_KEYS))})")
+    env = s.get("env")
+    if env is not None and not isinstance(env, dict):
+        refuse(f"step {s.get('name', '(unnamed)')!r} has an `env` that is not a mapping")
+    for k in (env or {}):
+        if BAD_ENV.match(str(k)):
+            refuse(f"step {s.get('name', '(unnamed)')!r} sets env `{k}` (it changes how make or the shell runs)")
+for s in steps:
+    if any("GITHUB_ENV" in l or "GITHUB_PATH" in l for l in lines_of(s)):
+        refuse(f"step {s.get('name', '(unnamed)')!r} mentions GITHUB_ENV or GITHUB_PATH (it can set MAKEFLAGS, SHELL or PATH for `make db-test`)")
 test_if = live[0].get("if")
 
 

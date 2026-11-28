@@ -549,6 +549,33 @@ pc "README documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: RE
 pc "RUNBOOK (a command wrapped over two lines) documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: observability/RUNBOOK.md documents `docker compose -f compose.other.yml`' "$RB" 'compose.observability.yml up -d' 'compose.observability.yml -f compose.other.yml up -d'
 pc "a compose file's own comment documents a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: compose.timescale.yml documents `docker compose -f compose.other.yml`' "compose.timescale.yml" '#   docker compose -f compose.yml -f compose.timescale.yml up -d' '#   docker compose -f compose.yml -f compose.other.yml up -d'
 pc "the scrape test runs a fourth -f file -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: scripts/db-scrape-test.sh runs `docker compose -f compose.other.yml`' "../scripts/db-scrape-test.sh" '-f "$dbdir/compose.observability.yml")' '-f "$dbdir/compose.observability.yml" -f "$dbdir/compose.other.yml")'
+# sixth review: the documented-command reader is an ALLOW-LIST of shapes. Every case below carries a
+# non-compose-named extra.yml with the exporter fragment, so a missed spelling would be a real hole.
+EXTRA=$'services:\n  exporter:\n    environment: {PGSSLMODE: disable}\n'
+dcx() { pc "$1" "$2" "../README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' "$3"$'\x01'"$EXTRA"; }   # NAME WANT NEWTEXT
+dcx "compose mention: --file extra.yml -> COMPOSE-DOC-FILE" $'COMPOSE-DOC-FILE: README.md:\n`--file`: a flag' 'docker compose --file extra.yml up -d'
+dcx "compose mention: --file=extra.yml -> COMPOSE-DOC-FILE" '`--file=extra.yml`: a flag' 'docker compose --file=extra.yml up -d'
+dcx "compose mention: glued -fextra.yml -> COMPOSE-DOC-FILE" '`-fextra.yml`: a flag' 'docker compose -fextra.yml up -d'
+dcx "compose mention: a command wrapped with a trailing backslash -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: README.md documents `docker compose -f extra.yml`' $'docker compose -f compose.yml -f compose.observability.yml \\\n  -f extra.yml up -d'
+dcx "compose mention: --profile x before -f -> COMPOSE-DOC-FILE" '`--profile`: a flag' 'docker compose --profile x -f compose.yml -f extra.yml up -d'
+dcx "compose mention: --project-directory before -f -> COMPOSE-DOC-FILE" '`--project-directory`: a flag' 'docker compose --project-directory . -f extra.yml up -d'
+dcx "compose mention: two spaces between docker and compose -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: README.md documents `docker compose -f extra.yml`' 'docker  compose -f compose.yml -f extra.yml up -d'
+dcx "compose mention: COMPOSE_FILE=...:extra.yml -> COMPOSE-DOC-FILE" 'COMPOSE-DOC-FILE: README.md:' 'COMPOSE_FILE=compose.yml:extra.yml docker compose up'
+dcx "compose mention: COMPOSE_FILE named alone -> COMPOSE-DOC-FILE" '`COMPOSE_FILE`' 'export COMPOSE_FILE=extra.yml'
+dcx "compose mention: docker-compose -f ... extra.yml -> COMPOSE-DOC-FILE" '`docker-compose`: only `docker compose`' 'docker-compose -f compose.yml -f extra.yml up -d'
+dcx "compose mention: podman compose -f ... extra.yml -> COMPOSE-DOC-FILE" '`podman`: only `docker compose`' 'podman compose -f compose.yml -f extra.yml up -d'
+dcx "compose mention: nerdctl compose -> COMPOSE-DOC-FILE" '`nerdctl`: only `docker compose`' 'nerdctl compose -f compose.yml up -d'
+dcx "compose mention: -f ./compose.yml -> refused, write the bare file name" '`./compose.yml`: write the bare file name' 'docker compose -f ./compose.yml -f compose.observability.yml up -d'
+dcx "compose mention: a quoted -f file -> COMPOSE-DOC-FILE" 'documents `docker compose -f "extra.yml"`' 'docker compose -f compose.yml -f "extra.yml" up -d'
+dcx "compose mention: the same -f file twice -> COMPOSE-DOC-FILE" 'the same -f file twice' 'docker compose -f compose.yml -f compose.yml up -d'
+dcx "compose mention: -f after the subcommand -> COMPOSE-DOC-FILE" '`-f`: a flag' 'docker compose up -f extra.yml'
+dcx "compose mention: -f with no file name -> COMPOSE-DOC-FILE" '`-f` without a file name' 'docker compose -f'
+dcx "compose mention: a legitimate command with logs -> still OK" OK 'docker compose -f compose.yml -f compose.observability.yml logs exporter'
+dcx "compose mention: ps -> still OK" OK 'docker compose -f compose.yml -f compose.observability.yml ps'
+dcx "compose mention: down -v -> still OK" OK 'docker compose -f compose.yml -f compose.observability.yml down -v'
+dcx "compose mention: up -d --wait -> still OK" OK 'docker compose -f compose.yml -f compose.observability.yml up -d --wait'
+dcx "compose mention: docker compose ps without -f -> still OK" OK 'docker compose ps'
+dcx "compose mention: prose that says compose without docker -> not a mention" OK 'compose merges the files in order, and a Compose v2 project name is the directory'
 pc "the password file is the superuser's in BOTH files -> OVERLAY-SECRET (exactly /run/secrets/db_monitor_password)" 'OVERLAY-SECRET: DATA_SOURCE_PASS_FILE must be exactly' "$AL$X1$EV" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password"
 URI_OK='db:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt'
 pu() { # NAME WANT URI: the allow-list AND exporter.env edited consistently, so only the floor can notice
@@ -577,7 +604,18 @@ pmx "parity: compose enumeration reduced to compose.yml only (timescale fragment
     if not re.fullmatch' 'for name_ in ["compose.yml"]:
     if not re.fullmatch' -- 'BASE-EXPORTER: compose.timescale.yml defines the service `exporter`' "compose.timescale.yml" "$TSANCH" "$TSANCH"$'  exporter: {}\n'
 pmx "parity: the closed list of compose files removed" '    if name_ not in COMPOSE_CLOSED and name_ not in AUTO_MERGED:' '    if False:' -- 'COMPOSE-UNKNOWN-FILE: `compose.extra.yml`' "+compose.extra.yml" "" $'services: {}\n'
-pmx "parity: the documented-commands check removed" '    for m_ in DOC_CMD.finditer(flat_):' '    for m_ in []:' -- 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "../README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
+pmx "parity: the documented-commands check removed" '        for m_ in COMPOSE_MENTION.finditer(text_):' '        for m_ in []:' -- 'COMPOSE-DOC-FILE: README.md documents `docker compose -f compose.other.yml`' "../README.md" "$README_CMD" 'docker compose -f compose.yml -f compose.other.yml -f compose.observability.yml up -d'
+dcxm() { pmx "$1" "$2" "$3" -- "$4" "../README.md"$'\x01'"+extra.yml" "$README_CMD"$'\x01' "$5"$'\x01'"$EXTRA"; }   # NAME ANCHOR REPL WANT NEWTEXT
+dcxm "parity: continuation joining removed (the wrapped command is two lines)" '        if line_.rstrip().endswith("\\"):' '        if False:' 'documents `docker compose -f extra.yml`' $'docker compose -f compose.yml -f compose.observability.yml \\\n  -f extra.yml up -d'
+dcxm "parity: the anchored shape loosened to flags right after docker compose (--profile x -f passes)" '        if u_.startswith(BAD_FLAG_PREFIX):' '        if False:' '`--profile`: a flag' 'docker compose --profile x -f compose.yml -f extra.yml up -d'
+dcxm "parity: --project-directory not refused" '"--project-directory", ' '' '`--project-directory`: a flag' 'docker compose --project-directory . up -d'
+dcxm "parity: --file not refused" 'BAD_FLAG_PREFIX = ("-f", "--file", ' 'BAD_FLAG_PREFIX = ("-f", ' '`--file=extra.yml`: a flag' 'docker compose --file=extra.yml up -d'
+dcxm "parity: the glued -fFILE form not refused" 'BAD_FLAG_PREFIX = ("-f", "--file", ' 'BAD_FLAG_PREFIX = ("--file", ' '`-fextra.yml`: a flag' 'docker compose -fextra.yml up -d'
+dcxm "parity: the COMPOSE_FILE rule removed" '        if env_:' '        if False:' 'COMPOSE-DOC-FILE: README.md:' 'COMPOSE_FILE=compose.yml:extra.yml docker compose up'
+dcxm "parity: docker-compose not a mention" '|docker-compose(?=\s|$))' ')' '`docker-compose`: only `docker compose`' 'docker-compose -f compose.yml -f extra.yml up -d'
+dcxm "parity: podman not a mention" '(?:(?:docker|podman|nerdctl)\s+compose' '(?:(?:docker)\s+compose' '`podman`: only `docker compose`' 'podman compose -f compose.yml -f extra.yml up -d'
+dcxm "parity: the path refusal removed (-f ./compose.yml)" '        if "/" in f_ or f_.startswith((".", "~", "$")):' '        if False:' '`./compose.yml`: write the bare file name' 'docker compose -f ./compose.yml -f compose.observability.yml up -d'
+pmx "parity: the exporter-in-base rule loosened to non-empty only (even {} passes)" '    if str(k) in ov_services:' '    if str(k) in ov_services and v:' -- 'BASE-EXPORTER: compose.yml defines the service `exporter`' "compose.yml" "$BASEANCH" "$BASEANCH"$'  exporter: {}\n'
 pmx "parity: the password-file floor back to a /run/secrets prefix" 'if env_vars.get("DATA_SOURCE_PASS_FILE", "") != "/run/secrets/db_monitor_password":' 'if not env_vars.get("DATA_SOURCE_PASS_FILE", "").startswith("/run/secrets/"):' -- 'OVERLAY-SECRET: DATA_SOURCE_PASS_FILE must be exactly' "$AL$X1$EV" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password" "env DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password${X1}DATA_SOURCE_PASS_FILE=/run/secrets/db_superuser_password"
 pmx "parity: the URI floor back to the three old checks (host)" 'if not m_uri:' 'if False:' 'elif sorted(m_uri.group(2).split("&")) !=' 'elif False and sorted(m_uri.group(2).split("&")) !=' -- "OVERLAY-URI" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=other:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt${X1}DATA_SOURCE_URI=other:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt"
 pmx "parity: the URI floor back to the three old checks (&user=)" 'if not m_uri:' 'if False:' 'elif sorted(m_uri.group(2).split("&")) !=' 'elif False and sorted(m_uri.group(2).split("&")) !=' -- "OVERLAY-URI" "$AL$X1$EV" "env DATA_SOURCE_URI=$URI_OK${X1}DATA_SOURCE_URI=$URI_OK" "env DATA_SOURCE_URI=$URI_OK&user=postgres${X1}DATA_SOURCE_URI=$URI_OK&user=postgres"
@@ -599,6 +637,12 @@ if [[ $rc == 1 && $out == *"OVERLAY-DIGEST: exporter image"* && $out == *"parity
 mkdir -p "$tmp/noyaml"; printf '#!/bin/sh\nexit 1\n' > "$tmp/noyaml/python3"; chmod +x "$tmp/noyaml/python3"
 out="$(PATH="$tmp/noyaml:$PATH" bash "$parity" 2>&1)"; rc=$?
 if [[ $rc == 2 && $out == *"PyYAML is not importable"* ]]; then pass "no PyYAML -> exit 2, never green"; else flunk "no PyYAML -> exit 2" "rc=$rc"; fi
+# a compose-named SYMLINK TO A DIRECTORY (and a dangling link) is a named finding, not a traceback (real run on a scratch copy)
+cp "$dbdir/compose.timescale.yml" "$dbdir/compose.observability.yml" "$tmp/w/db/"   # the digest-less overlay of the run above is replaced
+mkdir -p "$tmp/w/dirtarget"; ln -s "$tmp/w/dirtarget" "$tmp/w/db/compose.dirlink.yml"; ln -s "$tmp/w/nowhere" "$tmp/w/db/compose.dangling.yml"
+out="$(bash "$parity" --dir "$tmp/w/db/observability" 2>&1)"; rc=$?
+if [[ $rc == 1 && $out == *"COMPOSE-UNKNOWN-FILE: \`compose.dirlink.yml\` is not a regular file"* && $out == *"COMPOSE-UNKNOWN-FILE: \`compose.dangling.yml\` is not a regular file"* && $out != *Traceback* ]]; then pass "a compose-named symlink to a directory or to nothing: a named finding, exit 1, no traceback"; else flunk "compose-named symlink to a directory" "rc=$rc ${out:0:200}"; fi
+rm -f "$tmp/w/db/compose.dirlink.yml" "$tmp/w/db/compose.dangling.yml"
 
 sect "promtool"
 # ---- 3. promtool ----------------------------------------------------------------------------------
@@ -1123,10 +1167,55 @@ if [[ -r $workflow ]]; then
   expect_ok "CI: 'pip install --dry-run' is refused" ciw_refuses "$ciwired" "$W8"
   expect_ok "CI: 'pip install PyYAML || true' is refused" ciw_refuses "$ciwired" "$W9"
   vmut "db-ci-wired: the exact-run rule back to 'a line of the block'" "$ciwired" 'if hits[0]["run"].rstrip() != "make db-test":' 'if "make db-test" not in [l.strip() for l in hits[0]["run"].splitlines()]:' ciw_refuses "$W1"
-  vmut "db-ci-wired: the shell / working-directory rule removed" "$ciwired" 'for key in ("shell", "working-directory"):' 'for key in ():' ciw_refuses "$W2"
-  vmut "db-ci-wired: the job-if rule removed" "$ciwired" 'if "if" in job:' 'if False:' ciw_refuses "$W5"
+  vmut "db-ci-wired: the shell / working-directory rule removed" "$ciwired" '    if key not in STEP_KEYS:' '    if False:' ciw_refuses "$W2"
+  vmut "db-ci-wired: the job-if rule removed" "$ciwired" '    if key not in JOB_KEYS:' '    if False:' ciw_refuses "$W5"
   vmut "db-ci-wired: the step-if allow-list removed" "$ciwired" 'if "if" in hits[0] and hits[0]["if"] != STEP_IF:' 'if False:' ciw_refuses "$W6"
   vmut "db-ci-wired: the pip pattern loosened to a substring (types-PyYAML passes)" "$ciwired" 'if not before(lambda l: PIP.match(l)):' 'if not before(lambda l: "pip install" in l and "PyYAML" in l):' ciw_refuses "$W7"
+  # sixth review: ALLOW-LISTS of keys at step, job and workflow level (anything that changes how `make` runs is refused)
+  ciw_names() { local o; o="$(bash "$1" "$2" 2>&1)"; [[ $? == 1 && $o == *"$3"* ]]; }   # SCRIPT WORKFLOW KEY: refused, naming KEY
+  JOBHEAD=$'  db:\n    runs-on: ubuntu-latest\n'; PYLINE=$'          python3 -c "import yaml; print(\'PyYAML\', yaml.__version__)"\n'
+  cw senv_n "$DBRUN" $'        env:\n          MAKEFLAGS: -n\n        run: make db-test\n'; S1="$CWF"
+  cw senv_k "$DBRUN" $'        env:\n          MAKEFLAGS: -k\n        run: make db-test\n'; S2="$CWF"
+  cw senv_shell "$DBRUN" $'        env:\n          SHELL: /bin/true\n        run: make db-test\n'; S3="$CWF"
+  cw senv_path "$DBRUN" $'        env:\n          PATH: /tmp/fake:/usr/bin\n        run: make db-test\n'; S4="$CWF"
+  cw jenv "$JOBHEAD" "$JOBHEAD"$'    env:\n      MAKEFLAGS: -n\n'; S5="$CWF"
+  cw wenv $'name: PR\non:' $'name: PR\nenv:\n  MAKEFLAGS: -n\non:'; S6="$CWF"
+  cw jdef "$JOBHEAD" "$JOBHEAD"$'    defaults:\n      run:\n        shell: true {0}\n'; S7="$CWF"
+  cw wdef $'name: PR\non:' $'name: PR\ndefaults:\n  run:\n    shell: true {0}\non:'; S8="$CWF"
+  cw ghenv "$PYLINE" "$PYLINE"$'          echo MAKEFLAGS=-n >> "$GITHUB_ENV"\n'; S9="$CWF"
+  cw ghpath "$PYLINE" "$PYLINE"$'          echo /tmp/fake >> "$GITHUB_PATH"\n'; S10="$CWF"
+  cw container "$JOBHEAD" "$JOBHEAD"$'    container: alpine\n'; S11="$CWF"
+  cw needs "$JOBHEAD" "$JOBHEAD"$'    needs: [lint]\n'; S12="$CWF"
+  cw strategy "$JOBHEAD" "$JOBHEAD"$'    strategy:\n      matrix: {x: [1]}\n'; S13="$CWF"
+  cw prestepshell "$PYLINE" "$PYLINE"$'        shell: true {0}\n'; S14="$CWF"   # a key of a preceding step outside the allow-list
+  cw stepuses "$DBRUN" $'        uses: ./x\n        run: make db-test\n'; S15="$CWF"
+  cw stepcoe "$DBRUN" $'        continue-on-error: false\n        run: make db-test\n'; S16="$CWF"
+  cw prestepenv "$PYLINE" "$PYLINE"$'        env:\n          MAKEFLAGS: -n\n'; S17="$CWF"
+  expect_ok "CI: step env MAKEFLAGS=-n (make prints and runs nothing) is refused, naming env" ciw_names "$ciwired" "$S1" '`env`'
+  expect_ok "CI: step env MAKEFLAGS=-k is refused" ciw_names "$ciwired" "$S2" '`env`'
+  expect_ok "CI: step env SHELL=/bin/true is refused" ciw_names "$ciwired" "$S3" '`env`'
+  expect_ok "CI: step env PATH=... is refused" ciw_names "$ciwired" "$S4" '`env`'
+  expect_ok "CI: job-level env is refused, naming env" ciw_names "$ciwired" "$S5" '`env`'
+  expect_ok "CI: workflow-level env is refused, naming env" ciw_names "$ciwired" "$S6" '`env`'
+  expect_ok "CI: job-level defaults.run.shell is refused, naming defaults" ciw_names "$ciwired" "$S7" '`defaults`'
+  expect_ok "CI: workflow-level defaults.run.shell is refused, naming defaults" ciw_names "$ciwired" "$S8" '`defaults`'
+  expect_ok "CI: a preceding step writing MAKEFLAGS=-n to GITHUB_ENV is refused" ciw_names "$ciwired" "$S9" 'GITHUB_ENV'
+  expect_ok "CI: a preceding step writing to GITHUB_PATH is refused" ciw_names "$ciwired" "$S10" 'GITHUB_PATH'
+  expect_ok "CI: job container is refused" ciw_names "$ciwired" "$S11" '`container`'
+  expect_ok "CI: job needs is refused" ciw_names "$ciwired" "$S12" '`needs`'
+  expect_ok "CI: job strategy is refused" ciw_names "$ciwired" "$S13" '`strategy`'
+  expect_ok "CI: a key outside the allow-list on a preceding step (shell) is refused" ciw_names "$ciwired" "$S14" '`shell`'
+  expect_ok "CI: uses on the db-test step is refused" ciw_names "$ciwired" "$S15" '`uses`'
+  expect_ok "CI: continue-on-error (even false) on the db-test step is refused" ciw_names "$ciwired" "$S16" '`continue-on-error`'
+  expect_ok "CI: a preceding step env that names MAKEFLAGS is refused" ciw_names "$ciwired" "$S17" 'MAKEFLAGS'
+  vmut "db-ci-wired: the step key allow-list removed" "$ciwired" '    if key not in STEP_KEYS:' '    if False:' ciw_names "$S1" '`env`'
+  vmut "db-ci-wired: the job key allow-list removed (job env)" "$ciwired" '    if key not in JOB_KEYS:' '    if False:' ciw_names "$S5" '`env`'
+  vmut "db-ci-wired: the job key allow-list removed (container)" "$ciwired" '    if key not in JOB_KEYS:' '    if False:' ciw_names "$S11" '`container`'
+  vmut "db-ci-wired: the workflow env/defaults rule removed (env)" "$ciwired" 'for key in ("env", "defaults"):' 'for key in ():' ciw_names "$S6" '`env`'
+  vmut "db-ci-wired: the workflow env/defaults rule removed (defaults)" "$ciwired" 'for key in ("env", "defaults"):' 'for key in ():' ciw_names "$S8" '`defaults`'
+  vmut "db-ci-wired: the GITHUB_ENV rule removed" "$ciwired" 'if any("GITHUB_ENV" in l or "GITHUB_PATH" in l for l in lines_of(s)):' 'if False:' ciw_names "$S9" 'GITHUB_ENV'
+  vmut "db-ci-wired: the preceding-step key allow-list removed" "$ciwired" '        if key not in PRE_KEYS:' '        if False:' ciw_names "$S14" '`shell`'
+  vmut "db-ci-wired: the preceding-step env name rule removed" "$ciwired" '        if BAD_ENV.match(str(k)):' '        if False:' ciw_names "$S17" 'MAKEFLAGS'
 else flunk "CI wiring pin" "cannot read $workflow"; fi
 
 sect ""

@@ -55,14 +55,16 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   healthcheck that needs `pg_up 1`, waits for a healthy `db`. It logs in as `app_monitor` (member of `pg_monitor`,
   not superuser) with `sslmode=verify-full`, the password only as a FILE (`db_monitor_password` secret). The
   port is NOT published: reach it on the compose network as `exporter:9187`, or opt in with a file of
-  your own OUTSIDE `db/`, passed as one more `-f` (any other compose-named file inside `db/` is refused), that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
+  your own OUTSIDE `db/`, passed as one more `-f` (any other compose-named file inside `db/` is refused; a file you pass from OUTSIDE `db/` is never read by `parity-check.sh`, so what it adds is your responsibility), that adds `ports: ["127.0.0.1:9187:9187"]`. Use it with
   `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`. Keep no `.env`
   in `db/`: compose loads it on its own and would substitute `${VAR}` from it, so `parity-check.sh` refuses one.
   The overlay is the ONLY compose file in `db/` that may say anything about its own services. The CLOSED list of
   compose files `db/` may hold is `compose.yml`, `compose.timescale.yml` and `compose.observability.yml`; any other
   compose-named file there (`compose*.y[a]ml`, `docker-compose*.y[a]ml`) is `COMPOSE-UNKNOWN-FILE`, a new one is a
-  change to the list in `parity-check.sh`, and every `docker compose -f` this module documents or runs must name a
-  file on the list (`COMPOSE-DOC-FILE`). A compose file in `db/` must be plain YAML (no `<<` merge keys, no
+  change to the list in `parity-check.sh`, and every compose command line this module documents or runs must be
+  `docker compose` followed by up to three `-f <bare file name from the list>` pairs and then only the subcommand and
+  its arguments (no `--file`, `-fFILE`, `--profile`, `--project-directory`, `-p`, `./` path, compose environment
+  variable, `docker-compose` or `podman`; a `\` continuation is joined first), else `COMPOSE-DOC-FILE`. A compose file in `db/` must be plain YAML (no `<<` merge keys, no
   `!override`/`!reset` tags, one document), so that what the check reads is what compose merges: valid compose that
   uses them exits 2 (fails closed, on purpose).
 - `db/observability/required-metrics.txt` - the contract: names a scrape must contain, each with its reason.
