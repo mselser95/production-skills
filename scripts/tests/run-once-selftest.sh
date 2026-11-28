@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# run-once-selftest.sh -- scripts/run-once.sh records one line per run, derived from what it
-# EXECUTED (the canonical argv, never a caller-supplied label), only with an explicit run id and
-# never under make -n/-q/-t; and vouches for a recorded result ONLY when the id, the command
-# string, the tree identity and the run id all match a strictly well-formed line, with no
-# conflicting duplicate.
+# run-once-selftest.sh -- scripts/run-once.sh runs a command in a CLEAN ENVIRONMENT (env -i plus a
+# fixed allowlist: nothing a caller or a Makefile exported reaches it), records one line per run,
+# derived from what it EXECUTED (the canonical argv, never a caller-supplied label), only with an
+# explicit run id and never under make -n/-q/-t (MAKEFLAGS read the way make writes it); and
+# vouches for a recorded result ONLY when the id, the command string, the tree identity, the run
+# id, the environment-allowlist hash and the runner hash all match a strictly well-formed line,
+# with no conflicting duplicate.
 # provenance: candidate; ttl: 2027-02-27; pinning: true
 # Hermetic: a scratch git repo holding a copy of the script; no network, no repo suite re-run.
-# The Makefile `selftests` wiring (records each suite, REQUIRED_SELFTESTS guard) is driven here
-# too, over a scratch copy of the real Makefile with its variables overridden on the command line.
+# No case reads a Makefile of this repo: the Makefile is not part of the trust path.
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 unset EVIDENCE_RESULTS EVIDENCE_RUN_ID EVIDENCE_MAX_AGE MAKEFLAGS MFLAGS
@@ -16,10 +17,10 @@ trap 'rm -rf "$T"' EXIT
 S="$T/repo"; mkdir -p "$S/scripts" "$S/gates" "$T/out"
 cp "$root/scripts/run-once.sh" "$S/scripts/run-once.sh"
 mkdir -p "$S/.prod"; echo keep > "$S/.prod/keep"
-printf '#!/usr/bin/env bash\nexit "${XRC:-0}"\n' > "$S/gates/x.sh"
+printf '#!/usr/bin/env bash\nexit "$(cat gates/x.rc 2>/dev/null || echo 0)"\n' > "$S/gates/x.sh"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$S/gates/y.sh"
-printf '#!/usr/bin/env bash\necho "${N:-0} ok"\n' > "$S/gates/cnt.sh"
-git -C "$S" init -q . && git -C "$S" add -A && git -C "$S" -c user.email=t@t -c user.name=t commit -q -m base || exit 2
+printf '#!/usr/bin/env bash\necho "$(cat gates/cnt.n 2>/dev/null || echo 0) ok"\n' > "$S/gates/cnt.sh"
+git -C "$S" init -q . && printf 'gates/*.rc\ngates/*.n\n' >> "$S/.git/info/exclude" && git -C "$S" add -A && git -C "$S" -c user.email=t@t -c user.name=t commit -q -m base || exit 2
 echo "tracked" > "$S/tracked.txt"; git -C "$S" add tracked.txt && git -C "$S" -c user.email=t@t -c user.name=t commit -q -m tracked
 
 CASES=0; FAILED=0
@@ -39,8 +40,8 @@ ro g1 -- bash -c 'echo hello; echo "12 ok, 0 failed"' >"$T/out/o1" 2>&1; rc=$?
 check "run: exit code of the command is passed through (0)" 0 "$rc"
 check "run: the command's output is shown (tee)" 2 "$(wc -l <"$T/out/o1" | tr -d ' ')"
 check "run: exactly one line is recorded" 1 "$(wc -l <"$RES" | tr -d ' ')"
-check "run: the line has twelve tab-separated columns" 12 "$(awk -F'\t' '{print NF}' "$RES")"
-check "run: column 1 is the format tag, column 2 the id" "v2 g1" "$(cut -f1,2 "$RES" | tr '\t' ' ')"
+check "run: the line has fourteen tab-separated columns" 14 "$(awk -F'\t' '{print NF}' "$RES")"
+check "run: column 1 is the format tag, column 2 the id" "v3 g1" "$(cut -f1,2 "$RES" | tr '\t' ' ')"
 check "run: the evidence column is the last unindented line" "12 ok, 0 failed" "$(cut -f12 "$RES")"
 check "run: tree identity is HEAD plus clean" "$(git -C "$S" rev-parse HEAD)+clean" "$(cut -f9 "$RES")"
 ro g2 -- bash -c 'exit 3' >/dev/null 2>&1; check "run: a failing command's exit code is passed through (3)" 3 "$?"
@@ -52,9 +53,9 @@ check "run: a command with no output still records a verdict-from-exit-code evid
 ro 'bad id' -- true >/dev/null 2>&1; check "run: a bad id is refused (2)" 2 "$?"
 ro g6 true >/dev/null 2>&1; check "run: a missing -- is refused (2)" 2 "$?"
 ro g7 -- >/dev/null 2>&1; check "run: no command is refused (2)" 2 "$?"
-ro g8 -- bash -c 'printf "a\tb\n"' >/dev/null 2>&1; check "run: a plain command whose OUTPUT has a tab is recorded (1 line)" 1 "$(grep -c "^v2.g8" "$RES")"
+ro g8 -- bash -c 'printf "a\tb\n"' >/dev/null 2>&1; check "run: a plain command whose OUTPUT has a tab is recorded (1 line)" 1 "$(grep -c "^v3.g8" "$RES")"
 ro g9 -- printf '%s' $'a\tb' >/dev/null 2>&1; rc=$?
-check "run: an argv holding a TAB is recorded in quoted form: exit 0, still twelve columns" "0 12" "$rc $(awk -F'\t' '$2=="g9"{print NF}' "$RES")"
+check "run: an argv holding a TAB is recorded in quoted form: exit 0, still fourteen columns" "0 14" "$rc $(awk -F'\t' '$2=="g9"{print NF}' "$RES")"
 
 # ---- the recorded command IS the executed argv, canonically quoted (no --as label) -----------
 fresh canon
@@ -83,7 +84,7 @@ for mf in n 'nw -- VAR=x' '-n' '--dry-run' '--just-print' '--recon' '--question'
 done
 rm -f "$RES"; MFLAGS=-n ro dr -- true >/dev/null 2>&1; rc=$?
 check "dry run: MFLAGS=-n -> exit 2, nothing recorded" "2 absent" "$rc $(present "$RES")"
-for mf in w s '-j4 --jobserver-auth=3,4' 'k -- X=n' '-- RUN=nqt' 's --no-print-directory' '--warn-undefined-variables'; do
+for mf in w s '-j4 --jobserver-auth=3,4' 'k -- X=n' '-- RUN=nqt' 's --no-print-directory' '--warn-undefined-variables' '-Otarget' '-Iinc' '-j4 -l2.5' '-ofile.txt' ' --jobserver-auth=3,4'; do
   rm -f "$RES"; MAKEFLAGS="$mf" ro dr -- true >/dev/null 2>&1; rc=$?
   check "dry run: MAKEFLAGS='$mf' is NOT a dry run -> recorded" "0 present" "$rc $(present "$RES")"
 done
@@ -169,7 +170,7 @@ good=$(grep . "$RES")
 printf '%s\n' "garbage line" >> "$RES"
 check "resolve: a malformed line anywhere voids the WHOLE file" "miss malformed-results-file" "$(res2 a1 "$CMD")"
 n=0
-for mut in '$1="v3"' '$4="zero"' '$4="00"' '$4="01"' '$4="1000"' '$4="-1"' '$4=""' '$6="nothex"' "\$6=substr(\$6,1,63)" '$9="notatree"' '$9=substr($9,1,40)"+dirty-abc"' '$10=""' '$10="r 1"' '$2="a b"' '$7="yesterday"' '$8="12ab"' '$8="0123456789"' '$8="1"' '$11="x"' '$12=$12 "\r"' '$13="extra"' 'NF=11'; do
+for mut in '$1="v2"' '$4="zero"' '$4="00"' '$4="01"' '$4="1000"' '$4="-1"' '$4=""' '$6="nothex"' "\$6=substr(\$6,1,63)" '$9="notatree"' '$9=substr($9,1,40)"+dirty-abc"' '$10=""' '$10="r 1"' '$2="a b"' '$7="yesterday"' '$8="12ab"' '$8="0123456789"' '$8="1"' '$11="x"' '$12=$12 "\r"' '$15="extra"' 'NF=13' '$13="abc"' '$13=""' '$14="abc"' '$14=substr($14,1,15)" "' '$13="ZZZZZZZZZZZZ"'; do
   n=$((n+1)); printf '%s\n' "$good" | awk -F'\t' -v OFS='\t' "{ $mut; print }" > "$RES"
   check "resolve: malformed variant $n ($mut) is never attested" "miss malformed-results-file" "$(res2 a1 "$CMD")"
 done
@@ -186,9 +187,9 @@ check "counts: a hand-written exit field 00 voids the file for counts too" 0 "$(
 
 # ---- attest: failures and duplicates --------------------------------------------------------
 fresh dup
-XRC=1 ro a1 -- bash gates/x.sh >/dev/null 2>&1
+echo 1 > "$S/gates/x.rc"; ro a1 -- bash gates/x.sh >/dev/null 2>&1
 check "resolve: a recorded FAILURE is attested as rc 1, never as a pass" "attested 1" "$(res a1 "bash gates/x.sh")"
-XRC=0 ro a1 -- bash gates/x.sh >/dev/null 2>&1
+echo 0 > "$S/gates/x.rc"; ro a1 -- bash gates/x.sh >/dev/null 2>&1
 check "resolve: conflicting outcomes for one id -> miss" "miss conflicting-lines-for-this-id" "$(res a1 "bash gates/x.sh")"
 fresh dup2
 ro a1 -- bash gates/x.sh >/dev/null 2>&1; ro a1 -- bash gates/x.sh >/dev/null 2>&1
@@ -199,7 +200,7 @@ check "resolve: a failing line under ANOTHER command string does not conflict" "
 
 # ---- resolve-set: several wants, one tree measurement ----------------------------------------
 fresh set
-ro s1 -- bash gates/x.sh >/dev/null 2>&1; XRC=2 ro s2 -- bash gates/x.sh >/dev/null 2>&1
+echo 0 > "$S/gates/x.rc"; ro s1 -- bash gates/x.sh >/dev/null 2>&1; echo 2 > "$S/gates/x.rc"; ro s2 -- bash gates/x.sh >/dev/null 2>&1
 set_out=$(printf 's1\tbash gates/x.sh\ns2\tbash gates/x.sh\ns3\tbash gates/x.sh\n' | (cd "$S" && EVIDENCE_RESULTS="$RES" EVIDENCE_RUN_ID=r1 bash scripts/run-once.sh resolve-set | cut -f1-3 | tr '\t' ' ' | tr '\n' '|'))
 check "resolve-set: one verdict per want, in order (pass, fail, miss)" "s1 attested 0|s2 attested 2|s3 miss no-line-for-this-id-command-tree-run|" "$set_out"
 
@@ -233,39 +234,135 @@ cp "$T/res-cnt.good" "$RES"; RUN=r9
 check "counts: a line from another run is not trusted" 0 "$(ro counts | wc -l | tr -d ' ')"; RUN=r1
 check "counts: the untampered file offers the suite (the cases above were real)" 1 "$(ro counts | grep -c 'fake-selftest.sh')"
 fresh cnt2
-N=17 ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1; N=17 ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1
+echo 17 > "$S/gates/cnt.n"; ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1; ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1
 check "counts: the same count twice is offered once" 1 "$(ro counts | wc -l | tr -d ' ')"
-N=18 ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1
+echo 18 > "$S/gates/cnt.n"; ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1
 check "counts: two different counts for one suite and command -> not offered" 0 "$(ro counts | wc -l | tr -d ' ')"
 printf 'garbage\n' >> "$RES"
 check "counts: a malformed file offers nothing" 0 "$(ro counts | wc -l | tr -d ' ')"
 
-# ---- the Makefile wiring: `selftests` records each suite and guards the required list -------
-M="$T/mk"; mkdir -p "$M/scripts" "$M/probes/tests" "$M/scripts/tests"
-cp "$root/scripts/run-once.sh" "$M/scripts/run-once.sh"; cp "$root/Makefile" "$M/Makefile"
-printf '#!/usr/bin/env bash\necho "3 ok, 0 failed"\n' > "$M/probes/a-selftest.sh"
-printf '#!/usr/bin/env bash\necho "5 case(s) passed"\n' > "$M/probes/tests/b-selftest.sh"
-git -C "$M" init -q . && git -C "$M" add -A && git -C "$M" -c user.email=t@t -c user.name=t commit -q -m base
-mk() { (cd "$M" && EVIDENCE_RUN_ID=m1 EVIDENCE_RESULTS="$T/mk.tsv" make --no-print-directory selftests PROBES=probes TEMPLATE_SELFTESTS= REQUIRED_SELFTESTS="$1" 2>&1); }
-mkr() { (cd "$M" && EVIDENCE_RUN_ID=m1 EVIDENCE_RESULTS="$T/mk.tsv" bash scripts/run-once.sh "$@"); }
-rm -f "$T/mk.tsv"
-mk "probes/a-selftest.sh probes/tests/b-selftest.sh" > "$T/out/mk1"
-check "make selftests: runs the fake suites and ends 'selftests: 2 passed'" "selftests: 2 passed" "$(tail -1 "$T/out/mk1")"
-check "make selftests: there is NO aggregate line, only one line per suite" "2 0" "$(wc -l <"$T/mk.tsv" | tr -d ' ') $(grep -c 'probe-selftests' "$T/mk.tsv")"
-check "make selftests: records each suite with its case count" "probes/a-selftest.sh 3|probes/tests/b-selftest.sh 5" "$(mkr counts | sed 's/^selftest://' | awk -F'\t' '{printf "%s%s %s", sep, $1, $3; sep="|"}')"
-check "make selftests: the per-suite lines are ones mutation-baseline can consume (id and command agree)" "2" "$(mkr counts | awk -F'\t' '{id=$1; sub(/^selftest:/,"",id); if ($2 == "bash " id) n++} END{print n+0}')"
-rm -f "$T/mk.tsv"; (cd "$M" && EVIDENCE_RUN_ID=m1 EVIDENCE_RESULTS="$T/mk.tsv" make -n --no-print-directory selftests PROBES=probes TEMPLATE_SELFTESTS= REQUIRED_SELFTESTS="probes/a-selftest.sh" >/dev/null 2>&1); rc=$?
-check "make -n selftests: exits 0 and writes NOTHING (no recipe line smuggles execution)" "0 absent" "$rc $(present "$T/mk.tsv")"
-rm -f "$T/mk.tsv"; mk "probes/a-selftest.sh probes/gone-selftest.sh" > "$T/out/mk2"; echo $? > "$T/out/mk2rc"
-check "make selftests: a REQUIRED suite that does not exist -> exit 2 naming it" "2 1" "$(cat "$T/out/mk2rc") $(grep -c 'gone-selftest.sh is missing' "$T/out/mk2")"
-printf '#!/usr/bin/env bash\necho "1 ok"\n' > "$M/odd-selftest.sh"
-mk "probes/a-selftest.sh odd-selftest.sh" > "$T/out/mk3"; echo $? > "$T/out/mk3rc"
-check "make selftests: a REQUIRED suite outside the glob -> exit 2 'did not run it'" "2 1" "$(cat "$T/out/mk3rc") $(grep -c 'odd-selftest.sh exists but the glob did not run it' "$T/out/mk3")"
-printf '#!/usr/bin/env bash\necho "boom"; echo "1 ok"; exit 1\n' > "$M/probes/c-selftest.sh"
-rm -f "$T/mk.tsv"; mk "probes/a-selftest.sh" > "$T/out/mk4"; echo $? > "$T/out/mk4rc"
-check "make selftests: a failing suite -> non-zero exit" 1 "$([ "$(cat "$T/out/mk4rc")" != 0 ] && echo 1 || echo 0)"
-check "make selftests: ...and its output tail is printed" 1 "$(grep -c '^boom$' "$T/out/mk4")"
-check "make selftests: ...and the failing suite's own line is recorded (attested, non-zero)" "attested 1" "$(mkr resolve selftest:probes/c-selftest.sh 'bash probes/c-selftest.sh' | cut -f1,2 | awk '{print $1 " " ($2 != 0)}')"
+# ---- THE CLEAN ENVIRONMENT: nothing a caller or a Makefile exported reaches the command ---------
+# provenance: candidate; ttl: 2027-02-27; pinning: true
+# dump.sh writes the environment it sees, how `grep` resolves, what a glob gives and its shell options.
+printf '#!/usr/bin/env bash\n{ env | sort; echo "TYPE_GREP=$(type -t grep)"; echo "GLOB=$(echo gates/*.sh)"; echo "SET=$-"; } > "$1"\n' > "$S/gates/dump.sh"
+fresh env; D="$T/out/dump"
+dump() { rm -f "$D"; (cd "$S" && env "$@" bash scripts/run-once.sh d -- bash gates/dump.sh "$D" >/dev/null 2>&1); }
+seen() { grep -c "^$1=" "$D" 2>/dev/null | tr -d ' '; }
+dump SKIP=1;                         check "env: an exported SKIP=1 does not reach the command" 0 "$(seen SKIP)"
+printf 'export SKIP_FROM_BE=1\n' > "$T/be.sh"
+dump BASH_ENV="$T/be.sh";            check "env: BASH_ENV is neither passed nor sourced by the command's shell" "0 0" "$(seen BASH_ENV) $(seen SKIP_FROM_BE)"
+dump ENV="$T/be.sh";                 check "env: ENV does not reach the command" 0 "$(seen ENV)"
+(cd "$S" && rm -f "$D" && bash -c 'grep() { echo hijack; }; export -f grep; bash scripts/run-once.sh d -- bash gates/dump.sh "$0"' "$D" >/dev/null 2>&1)
+check "env: an exported bash function named like a command the gate calls does not reach it" "TYPE_GREP=file" "$(grep '^TYPE_GREP=' "$D")"
+dump 'GLOBIGNORE=*';                 check "env: GLOBIGNORE is dropped and the glob still expands" "0 1" "$(seen GLOBIGNORE) $(grep -c 'gates/x.sh' "$D")"
+dump IFS=x;                          check "env: an exported IFS does not reach the command" 0 "$(seen IFS)"
+dump CDPATH=/tmp;                    check "env: CDPATH does not reach the command" 0 "$(seen CDPATH)"
+dump SHELLOPTS=xtrace BASHOPTS=nullglob; check "env: SHELLOPTS / BASHOPTS are dropped (no xtrace in the command's shell)" "0 0 0" "$(seen SHELLOPTS) $(seen BASHOPTS) $(grep -c '^SET=.*x' "$D")"
+dump MAKEFLAGS=w MAKELEVEL=1 MFLAGS=-w; check "env: MAKEFLAGS / MAKELEVEL / MFLAGS do not reach the command" 0 "$(( $(seen MAKEFLAGS) + $(seen MAKELEVEL) + $(seen MFLAGS) ))"
+dump PATH=".:$PATH";                 check "env: PATH is TRUSTED and passed as is (a relative . first stays first; documented boundary)" 1 "$(grep -c '^PATH=\.:' "$D")"
+dump GIT_DIR=/nonexistent GIT_INDEX_FILE=/nonexistent; check "env: GIT_* variables do not reach the command" 0 "$(( $(seen GIT_DIR) + $(seen GIT_INDEX_FILE) ))"
+dump CLAUDE_CONFIG_DIR=/cfg GOROOT=/g GOPATH=/gp pythonLocation=/p RUNNER_TEMP=/r LANG=C GOFLAGS=-mod=mod GONOSUMDB=x SHELLCHECK_OPTS=-e1 REGISTRIES_DIR=/x DB_PIN_TODAY=2000-01-01
+check "env: allowlisted names DO reach the command (non-vacuity of the pass-through)" "/cfg /g /gp /p /r C" "$(for v in CLAUDE_CONFIG_DIR GOROOT GOPATH pythonLocation RUNNER_TEMP LANG; do sed -n "s/^$v=//p" "$D"; done | tr '\n' ' ' | sed 's/ $//')"
+check "env: ...and GOFLAGS, GONOSUMDB, SHELLCHECK_OPTS, REGISTRIES_DIR, DB_PIN_TODAY do not" 0 "$(( $(seen GOFLAGS) + $(seen GONOSUMDB) + $(seen SHELLCHECK_OPTS) + $(seen REGISTRIES_DIR) + $(seen DB_PIN_TODAY) ))"
+# a target-specific export and make's own command-line variables, through a REAL make
+MM="$T/mkenv"; mkdir -p "$MM/scripts" "$MM/gates"; cp "$root/scripts/run-once.sh" "$MM/scripts/"; cp "$S/gates/dump.sh" "$MM/gates/"
+printf '.PHONY: x\nx: export SKIP := 1\nx: export BASH_ENV := %s\nx:\n\t@bash scripts/run-once.sh d -- bash gates/dump.sh %s\n' "$T/be.sh" "$D" > "$MM/Makefile"
+git -C "$MM" init -q . && git -C "$MM" add -A && git -C "$MM" -c user.email=t@t -c user.name=t commit -q -m base
+rm -f "$D"; (cd "$MM" && make --no-print-directory x FOO=bar >/dev/null 2>&1)
+check "env: through a real make, a target-specific export / BASH_ENV / MAKEFLAGS / MAKELEVEL never reach the command" "present 0 0 0 0 0" "$(present "$D") $(seen SKIP) $(seen BASH_ENV) $(seen SKIP_FROM_BE) $(seen MAKEFLAGS) $(seen MAKELEVEL)"
+# a weakening variable against the REAL gate it weakens (check-registries.sh reads REGISTRIES_DIR)
+RG="$T/regrepo"; mkdir -p "$RG/_shared/probes" "$RG/registries" "$T/cleanreg"
+cp "$root/_shared/probes/check-registries.sh" "$RG/_shared/probes/"
+printf 'entries:\n  - id: w1\n    obligation: o\n    owner: t\n    created: 2020-01-01\n    expires: 2020-02-01\n    reason: expired long ago\n' > "$RG/registries/waivers.yaml"
+printf 'entries:\n  - id: ok1\n    obligation: o\n    owner: t\n    created: 2020-01-01\n    expires: never\n    reason: permanent lever\n' > "$T/cleanreg/waivers.yaml"
+git -C "$RG" init -q . && git -C "$RG" add -A && git -C "$RG" -c user.email=t@t -c user.name=t commit -q -m base
+(cd "$RG" && bash _shared/probes/check-registries.sh >/dev/null 2>&1); r_plain=$?
+(cd "$RG" && REGISTRIES_DIR="$T/cleanreg" bash _shared/probes/check-registries.sh >/dev/null 2>&1); r_weak=$?
+cp "$root/scripts/run-once.sh" "$RG/scripts-run-once.sh" 2>/dev/null; mkdir -p "$RG/scripts"; mv "$RG/scripts-run-once.sh" "$RG/scripts/run-once.sh"
+(cd "$RG" && REGISTRIES_DIR="$T/cleanreg" bash scripts/run-once.sh reg -- bash _shared/probes/check-registries.sh >/dev/null 2>&1); r_run=$?
+check "env: control, the real gate fails on an expired waiver (1) and the variable WOULD weaken it (0)" "1 0" "$r_plain $r_weak"
+check "env: REGISTRIES_DIR set by the caller does not reach the real gate run through the runner (still 1)" 1 "$r_run"
+# clean-exec: what evidence-record.sh uses to clean itself
+ce=$(cd "$S" && SKIP=1 BASH_ENV="$T/be.sh" bash scripts/run-once.sh clean-exec env); check "clean-exec: the same environment, plus the marker evidence-record.sh looks for" "0 1" "$(grep -c '^SKIP=' <<<"$ce") $(grep -c '^EVIDENCE_CLEAN_ENV=1$' <<<"$ce")"
+(cd "$S" && MAKEFLAGS=n bash scripts/run-once.sh clean-exec true >/dev/null 2>&1); check "clean-exec: refuses under make -n (2)" 2 "$?"
+check "tree-id: a GIT_DIR in the caller's environment cannot redirect the identity" "$(cd "$S" && bash scripts/run-once.sh tree-id)" "$(cd "$S" && GIT_DIR=/nonexistent bash scripts/run-once.sh tree-id)"
+
+# ---- the line states which contract it ran under, and a reader trusts only its own ---------------
+fresh sig
+ro h1 -- bash -c 'echo hello' >/dev/null 2>&1
+want_env=$(printf '%s\n' PATH HOME TMPDIR LANG LC_ALL LC_CTYPE TERM USER LOGNAME CI GITHUB_ACTIONS CLAUDE_CONFIG_DIR EVIDENCE_RUN_ID EVIDENCE_RESULTS GOROOT GOPATH GOCACHE GOMODCACHE GOPROXY GOTOOLCHAIN LD_LIBRARY_PATH pythonLocation PKG_CONFIG_PATH RUNNER_TEMP RUNNER_OS GITHUB_WORKSPACE XDG_CACHE_HOME | git hash-object --stdin | cut -c1-12)
+check "line: column 13 is the hash of the allowlist NAMES (never values)" "$want_env" "$(cut -f13 "$RES")"
+check "line: column 14 is the hash of the runner script itself" "$(git hash-object "$S/scripts/run-once.sh" | cut -c1-16)" "$(cut -f14 "$RES")"
+good=$(cat "$RES")
+printf '%s\n' "$good" | awk -F'\t' -v OFS='\t' '{ $13="aaaaaaaaaaaa"; print }' > "$RES"
+check "resolve: a well-formed line under ANOTHER allowlist hash is never attested" "miss" "$(kind h1 'bash -c echo\ hello')"
+printf '%s\n' "$good" | awk -F'\t' -v OFS='\t' '{ $14="aaaaaaaaaaaaaaaa"; print }' > "$RES"
+check "resolve: a well-formed line under ANOTHER runner hash is never attested" "miss" "$(kind h1 'bash -c echo\ hello')"
+check "counts: ...nor offered by counts" 0 "$(ro counts | wc -l | tr -d ' ')"
+printf '%s\n' "$good" > "$RES"
+check "resolve: the unmodified line is attested (control)" "attested" "$(kind h1 'bash -c echo\ hello')"
+# editing the runner voids earlier lines even when git cannot see the edit (the file is IGNORED)
+RX="$T/rx"; mkdir -p "$RX/scripts"; cp "$root/scripts/run-once.sh" "$RX/scripts/run-once.sh"; echo seed > "$RX/seed.txt"
+git -C "$RX" init -q . && printf 'scripts/run-once.sh\n' >> "$RX/.git/info/exclude" && git -C "$RX" add -A && git -C "$RX" -c user.email=t@t -c user.name=t commit -q -m base
+rxr() { (cd "$RX" && EVIDENCE_RESULTS="$T/rx.tsv" EVIDENCE_RUN_ID=r1 bash scripts/run-once.sh "$@"); }
+rm -f "$T/rx.tsv"; rxr x1 -- true >/dev/null 2>&1
+check "runner hash: a line is attested by the runner that wrote it" "attested" "$(rxr resolve x1 true | cut -f1)"
+echo '# edited' >> "$RX/scripts/run-once.sh"
+check "runner hash: editing the runner (invisible to git here) voids the line" "miss" "$(rxr resolve x1 true | cut -f1)"
+
+# ---- MAKEFLAGS / MFLAGS, read the way make WRITES them (table through the real function) --------
+# R = a dry run / question / touch (refuse), A = anything else (run and record)
+tbl=$(cd "$S" && source scripts/run-once.sh && while IFS='|' read -r exp mf; do
+  if [[ "$mf" == MFLAGS=* ]]; then MAKEFLAGS='' MFLAGS="${mf#MFLAGS=}" make_dry_run && got=R || got=A
+  else MAKEFLAGS="$mf" MFLAGS='' make_dry_run && got=R || got=A; fi
+  [[ "$got" == "$exp" ]] || echo "WRONG[$exp] <$mf> got $got"
+done <<'TABLE'
+R|n
+R|nw
+R|kn
+A|w
+A|k
+A|B
+R|-n
+A|-Otarget
+A|-Iinc
+A|-I inc
+R|-j4 -n
+A|-j4
+A|-l2.5
+A|--no-print-directory
+R| --jobserver-auth=3,4 -n
+A|w -- VAR=n
+A|e -- VAR=xn
+A|-ofile.txt
+A|-Wnothing
+A|-Cdir
+A|-ffile
+A|-Edebug
+R|--dry-run
+R|--just-print
+R|--recon
+R|--question
+R|--touch
+A|--debug=n
+A|--include-dir=nt
+R|MFLAGS=-n
+R|q
+R|t
+R|-q
+R|-t
+R|-nj4
+A|-j4n
+R|-ks -t
+A| -j4 --jobserver-auth=3,4
+TABLE
+)
+check "MAKEFLAGS table: all 39 spellings decided as make writes them (n nw kn w k B -n -Otarget -Iinc ...)" "" "$tbl"
+rm -f "$RES"; MAKEFLAGS='-Otarget' ro dr -- true >/dev/null 2>&1; rc=$?
+check "dry run: MAKEFLAGS='-Otarget' is NOT a dry run end to end (no false refusal) -> recorded" "0 present" "$rc $(present "$RES")"
+
+# ---- the trust model is stated in the header -----------------------------------------------------
+check "header: the trust-model paragraph is present in run-once.sh" 1 "$(grep -c '^# TRUST MODEL (three sentences' "$root/scripts/run-once.sh")"
 
 if (( FAILED > 0 )); then echo "run-once selftest: $FAILED of $CASES case(s) FAILED"; exit 1; fi
 echo "run-once selftest: $CASES case(s) passed"

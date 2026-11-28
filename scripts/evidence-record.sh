@@ -22,70 +22,99 @@
 #
 # So a dirty tree gets a name that cannot be mistaken for an attestation, and
 # carries tree_clean:false.
+
+#
+# WHO RUNS THE GATES (`--run`, what `make gates`, `make selftests` and `make check-fast` call)
+#
+# This record used to EXECUTE every gate below, although almost all of them had already run
+# earlier in the same CI job: 484 of the job's 847 seconds, spent proving what was already proven.
+# The Makefile then ran each gate through scripts/run-once.sh and THIS script read the Makefile
+# as text to prove the recipes were what it thought. A hand-written recogniser of a rich format
+# lost that fight (an extra rule, a target-specific export, `$(eval ...)`, a GNUmakefile each forged
+# an attested PASS), so the Makefile is out of the trust path. The property to keep is: AN ATTESTED
+# PASS EXISTS ONLY IF THAT EXACT GATE COMMAND REALLY RAN, ON THIS TREE, IN THIS RUN, AND EXITED 0.
+#
+#   evidence-record.sh --run gates       every `main` gate of GATES, in order, stop at the first failure
+#   evidence-record.sh --run selftests   every suite of the ONE suite list below, stop at the first failure
+#   evidence-record.sh --run check-fast  the `pre` gates, then the `main` ones
+#   evidence-record.sh --run <id>...     named gates, in the order given (unknown id: exit 2, nothing run)
+#
+# A Makefile target is one line calling this. Each gate runs as its argv through
+# `scripts/run-once.sh`, which executes it in a CLEAN ENVIRONMENT and writes its one line from the
+# exit status of that very execution. The set `--run gates` executes IS the GATES array and the
+# set `--attest` reports IS the GATES array: nothing here is compared with anything, so nothing can
+# drift. `make gates` stopped at the first failing recipe line before and still does (so do the others).
+#
+# TRUST MODEL (three sentences, repeated in scripts/run-once.sh). The results file protects against
+# a stale line, a line of another run, a line of another tree, a dry run, and a gate renamed or
+# weakened through its ENVIRONMENT (every gate runs under `env -i` with a fixed allowlist of names,
+# and so does this script itself, re-executed through the same mechanism at its first line). It does
+# NOT protect against a step of the same job that writes the results file by hand or edits a tracked
+# script (the same power as editing any gate), nor against a changed PATH that substitutes a tool (PATH
+# is trusted and passed as is; pre-existing). A Makefile edit can therefore only stop calling this
+# script (no line exists, `--attest` EXECUTES everything: slow, true) or call something that forges
+# lines (the same-job tampering above).
 #
 # ATTEST MODE (`--attest`, what `make evidence` passes)
 #
-# This record used to EXECUTE every gate below, although almost all of them had
-# already run earlier in the same CI job (`make check-fast`, `make selftests`):
-# 484 of the job's 847 seconds, spent proving what was already proven. The property
-# the repetition protected, written into the workflow next to this step, was that a
-# record assembled from another step's exit codes attests to what the YAML says ran,
-# not to what ran. It is kept by a different mechanism, and the property to restore
-# is: AN ATTESTED PASS EXISTS ONLY IF THAT EXACT GATE COMMAND REALLY RAN, ON THIS
-# TREE, IN THIS RUN, AND EXITED 0.
-#
-# The Makefile runs each gate through scripts/run-once.sh, which is the thing that
-# executes it and writes one line, DERIVED FROM WHAT IT EXECUTED: the canonical quoting
-# of the argv (printf %q of each word), the exit code, the output hash, the tree identity,
-# the run id, the time. There is no caller-supplied label. In attest mode a gate is taken
-# from that file ONLY when a well-formed line exists for the same id, the same canonical
-# argv (re-derived here from GATES), the same tree identity (HEAD, tracked changes,
-# untracked content) and the same run id, within the age limit, with no conflicting
+# A gate is taken from the results file ONLY when a well-formed line exists for the same id, the
+# same canonical argv (derived here from GATES by the shell, quoted by run-once.sh's own `canon`),
+# the same tree identity (HEAD, tracked changes, untracked content), the same run id, the same
+# environment-allowlist hash and the same runner hash, within the age limit, with no conflicting
 # duplicate. Without EVIDENCE_RUN_ID nothing is recorded and nothing is attested: a local
-# `make evidence` executes every gate, as before this mechanism existed.
+# `make evidence` executes every gate. Anything else -- no file, an empty one, a malformed one,
+# another HEAD, another argv, a dirtied tree, conflicting lines -- falls back to EXECUTING the gate
+# here (through run-once.sh, so in the clean environment too), and the record says so. A recorded
+# non-zero exit makes the record fail exactly as an executed failure does. Every gate in the record
+# carries `source`: executed or attested, and an attested one names where it came from.
 #
-# `probe-selftests` has NO aggregate line. It is attested only when every suite the
-# Makefile's SELFTEST_GLOBS resolves to has its own such line of this run, and its verdict
-# is derived from them (a failing suite line makes it FAIL).
+# `probe-selftests` has NO aggregate line. It is attested only when every suite of the suite list
+# below has its own line of this run, and its verdict is derived from them (a failing suite line
+# makes it FAIL).
 #
-# Anything else -- no file, an empty one, a malformed one, no run id, another HEAD,
-# another argv, a dirtied tree, conflicting lines -- falls back to EXECUTING the gate here,
-# as before, and the record says so. A recorded non-zero exit makes the record fail exactly
-# as an executed failure does. Every gate in the record carries `source`: executed or
-# attested, and an attested one names where it came from.
+# WHICH GATES `--run gates` DOES NOT RUN (groups `post` and `agg`): mutation-trend reads the suite
+# counts the selftests recorded and would run every suite again on a laptop; ratified-invariants
+# is `make verify`'s, not `make gates`'s; tcb-integrity needs the installer to have run (CI's
+# install.sh step comes after check-fast); probe-selftests is derived from the suite lines. They are
+# executed at attest time when no line vouches for them, as before this redesign.
 #
-# WHAT A MAKEFILE EDIT CAN STILL DO, and what catches it. It cannot write a line, make a line
-# name a command that did not run, or turn a dry run into evidence (run-once.sh refuses under
-# make -n/-q/-t; the wiring check refuses $(MAKE) and `+` on recorder lines). It CAN change
-# what a gate does (edit the gate script: the tree identity changes and the record is
-# `dirty-`), run a gate unattested (the record then executes it), drop a gate from the
-# Makefile (the GATES denominator still lists it, so the record executes it), or run the
-# right argv in a neutered environment (an exported variable, make's command line): that is
-# the gate's own business, and the wiring check only pins the Makefile LINE itself.
-# `--check-wiring` (see below) turns every other edit of a recorder line into exit 2.
-#
-# Usage: evidence-record.sh [--attest] [--check-wiring]
-#   --check-wiring  run the guards below and stop (exit 0 = consistent); reads text, runs nothing
+# Usage: evidence-record.sh [--attest | --run <gates|selftests|check-fast|id>...]
 # Exit: 0 every gate passed · 1 a gate failed (recorded, then reported) · 2 refused
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.." || exit 2
 
-attest=0; check_wiring=0
-for a in "$@"; do
-  case "$a" in
-    --attest) attest=1 ;;
-    --check-wiring) check_wiring=1 ;;
-    *) echo "evidence-record: unknown argument '$a'" >&2; exit 2 ;;
-  esac
-done
+# CLEAN SELF. The first thing this script does is replace itself with the same script under the
+# allowlisted environment (run-once.sh `clean-exec`, which also refuses a make dry run while the
+# caller's MAKEFLAGS is still visible). Shell options, exported functions, GLOBIGNORE, BASHOPTS
+# and the rest therefore cannot change how GATES globs expand or which suites resolve.
+if [[ -z "${EVIDENCE_CLEAN_ENV:-}" ]]; then
+  exec bash scripts/run-once.sh clean-exec bash scripts/evidence-record.sh "$@"
+fi
+unset EVIDENCE_CLEAN_ENV
+# canon, summary_of, resolve_set, make_dry_run: ONE implementation, in run-once.sh (sourcing runs nothing)
+# shellcheck source=run-once.sh
+source scripts/run-once.sh
+if make_dry_run; then
+  echo "evidence-record: refusing to run or write under a make dry run / question / touch (MAKEFLAGS='${MAKEFLAGS:-}' MFLAGS='${MFLAGS:-}')" >&2
+  exit 2
+fi
 
-# The gates, each named as the dimension it answers. This list is the record's
-# denominator: a gate missing from here is a dimension the record silently does
-# not cover, so it is written once, next to the Makefile targets it mirrors.
-# Each entry is `id|<command as shell text>`. The command is what run-once.sh must have
-# EXECUTED for the gate to be attested: its canonical argv (printf %q of each word, after the
-# shell expanded it) is compared with the one run-once.sh recorded. `probe-selftests` is
-# the exception: it has no aggregate line, and is derived from the per-suite lines.
+attest=0; run_mode=0; TARGETS=()
+while (( $# > 0 )); do
+  case "$1" in
+    --attest) attest=1 ;;
+    --run) run_mode=1; shift; TARGETS=("$@"); break ;;
+    *) echo "evidence-record: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+  shift
+done
+if (( run_mode && attest )); then echo "evidence-record: --run and --attest are exclusive" >&2; exit 2; fi
+if (( run_mode && ${#TARGETS[@]} == 0 )); then echo "evidence-record: --run needs gates, selftests, check-fast or gate ids" >&2; exit 2; fi
+
+# The gates, each named as the dimension it answers. This list is the record's denominator AND what
+# `--run` executes: a gate missing from here is a dimension nothing covers, so it is written once.
+# Each entry is `id|<command as shell text>`; the text is evaluated into an argv (so a glob
+# expands) and that argv is what runs. Groups (PRE_IDS, POST_IDS, AGG_IDS below the array).
 GATES=(
   "ci-workflows-valid|make --no-print-directory actionlint"
   "shell-correctness|make --no-print-directory lint"
@@ -97,289 +126,176 @@ GATES=(
   "row-catalogue|bash _shared/probes/row-catalogue.sh"
   "liability-registries|bash _shared/probes/check-registries.sh"
   "gate-hygiene|bash prod-new/template/scripts/gate-hygiene-fitness.sh _shared/probes prod-new/template/scripts prod-new/modules/*/scripts"
+  "gates-are-driven-template|bash _shared/probes/probe-wiring.sh prod-new/template/scripts"
   "gates-are-driven|bash _shared/probes/probe-wiring.sh"
   "gates-are-driven-scripts|bash _shared/probes/probe-wiring.sh scripts"
   "gates-are-driven-modules|bash -c 'rc=0; n=0; for d in prod-new/modules/*/scripts; do [ -d \"\$d\" ] || continue; bash _shared/probes/probe-wiring.sh \"\$d\" || rc=1; n=\$((n+1)); done; [ \"\$n\" -gt 0 ] && [ \"\$rc\" = 0 ]'"
   "db-image-pin|bash prod-new/modules/db-postgres/scripts/db-pin-check.sh prod-new/modules/db-postgres/db/image.lock --compose prod-new/modules/db-postgres/db/compose.yml prod-new/modules/db-postgres/db/compose.timescale.yml"
   "db-test-ci-wired|bash prod-new/modules/db-postgres/scripts/db-ci-wired.sh .github/workflows/pr.yaml"
+  "gates-are-driven-ratified|bash _shared/probes/probe-wiring.sh verification/ratified"
   "template-version|bash scripts/template-digest.sh"
-  "mutation-trend|bash scripts/mutation-baseline.sh"
   "gap-report-consistent|bash scripts/gap-report-consistency.sh"
   "template-workflow-pins|bash scripts/template-workflow-pins.sh"
+  "mutation-trend|bash scripts/mutation-baseline.sh"
   "ratified-invariants|make --no-print-directory invariants"
   "probe-selftests|make --no-print-directory selftests"
   "tcb-integrity|bash install.sh --verify"
 )
+# Groups, kept OUT of the entries so each entry stays `id|command` (the shape the selftests of the
+# gates pin with a grep): pre = check-fast's first two; post = executed at attest time only;
+# agg = probe-selftests, derived from the suite lines; every other gate is `main` (`make gates`).
+PRE_IDS=(ci-workflows-valid shell-correctness)
+POST_IDS=(mutation-trend ratified-invariants tcb-integrity)
+AGG_IDS=(probe-selftests)
+# The scripts this runner itself executes; _shared/probes/probe-wiring.sh counts them as driven while
+# a Makefile or workflow calls this runner (it reads this array, comments removed).
+# shellcheck disable=SC2034  # read by probe-wiring.sh, not by this script
+RUNNER_HELPERS=(
+  scripts/run-once.sh
+)
 (( ${#GATES[@]} > 0 )) || { echo "evidence-record: ZERO gates declared -- a record over nothing attests nothing" >&2; exit 2; }
 
-# ---------------------------------------------------------------------------------------
-# THE WIRING CHECK reads the Makefile as TEXT. It never runs make (not even `make -n`: GNU
-# make executes a recipe line holding $(MAKE) or a leading `+` under -n, which is how a dry
-# run once recorded a pass), and it never evals what it reads.
-#
-# WHAT IT ENFORCES
-#  1. COVERAGE: every script `gates:` runs appears in some GATES command (below), so the
-#     record cannot report a clean total over fewer gates than the repo runs (it rotted on its
-#     first day: template-digest.sh was wired and GATES held nine entries).
-#  2. RECIPE GRAMMAR. `gates:` is read the way make reads it (blank lines and column-0
-#     comments inside a recipe do not end it). EVERY recipe line is exactly
-#         @$(RUN) <id> -- <command>
-#     or one of the ALLOWED_LINES below, by exact text. `check-fast:` is held to the same
-#     grammar with its own allowance. Anything else fails, naming the line: an env prefix
-#     (`SKIP=1 $(RUN) ...`), a `-` or `+` prefix, `|| true`, `;`, `&&`, a pipe, a redirection,
-#     a second command, a backslash continuation, a second `gates:` rule or a rule with a
-#     prerequisite or target-specific variable, an unknown $(VAR). <command> may only
-#     use $(PROBES) and `$$`, and must be ONE simple command outside its quotes.
-#  3. NO SMUGGLED EXECUTION: no recorder line (a line holding $(RUN)) anywhere in the Makefile
-#     may hold $(MAKE) / ${MAKE} or start with `+`; RUN, SHELL and PROBES are defined once, RUN
-#     and SHELL to their exact text; no export/override/include/conditional/define/.ONESHELL/
-#     .SHELLFLAGS/.RECIPEPREFIX/.EXPORT_ALL_VARIABLES.
-#  4. DRIFT: the <command> of a `gates:`/`check-fast:` line, after $(PROBES) and `$$` are
-#     resolved, is byte-equal to the GATES command of the same id. run-once.sh records the
-#     canonical quoting of the argv it runs, and --attest compares that to the canonical
-#     quoting of the GATES command (expanded through the shell, so a glob expands the same
-#     way on both sides); equal text yields an equal argv, so a Makefile line that differs
-#     would never be attested and the gate would silently run twice.
-#  5. SELFTEST LIST (when the Makefile has a `selftests:` rule): the suites its SELFTEST_GLOBS
-#     resolves to include every `*-selftest.sh` under the fixed selftest directories
-#     (FLOOR_GLOBS), and REQUIRED_SELFTESTS are among them: dropping a suite from the glob is a
-#     wiring error, not a silent narrowing.
-#
-# BOUNDARY. What the check pins is the Makefile line. It does NOT see the environment the
-# line runs in (an exported variable in the caller, MAKEFLAGS, `make RUN=...` on the command
-# line), and a gate script's behaviour under an env var is the gate's own business. What a
-# Makefile edit still CAN do: change which gate runs where, run a gate unattested (then the
-# record executes it itself), run it from a neutered tree, or edit the gate script (a
-# changed tree, visible in the record). What it can NOT do: write a line, or make a
-# line say another command ran, or make a gate that did not run exit 0, or turn a dry run
-# into evidence.
-# ---------------------------------------------------------------------------------------
-ALLOWED_GATES_LINES=()                                                     # `gates:` allows no non-gate line
-ALLOWED_CHECKFAST_LINES=('@$(MAKE) --no-print-directory gates')            # the one hop from check-fast to gates
-# The directories whose `*-selftest.sh` files MUST be run by `make selftests`
-FLOOR_GLOBS='_shared/probes/*-selftest.sh _shared/probes/tests/*-selftest.sh scripts/tests/*-selftest.sh prod-new/modules/*/scripts/tests/*-selftest.sh'
+# THE SUITE LIST, in ONE place: what `--run selftests` executes and what `probe-selftests` is derived
+# from. Globs are expanded by the shell, in this order, then the template-only suites; a suite named
+# twice runs once.
+# Template selftests, by origin (checked with cmp against _shared/probes and _shared/probes/tests):
+#   byte-identical MIRRORS of a _shared source, which the globs already run:
+#     acceptance-audit, acceptance-coverage, acceptance-gap, check-registries, coverage-ratchet,
+#     gate-run, load-rows, non-vacuity, observability-provenance, probe-self-gate,
+#     sbom-ordering, single-suite-run
+#   TEMPLATE-ONLY, no _shared source (the globs cannot see them):
+#     changed-line-coverage, check-template-drift, probe-selftests-skip   -- run here, listed below
+#     error-handling-fitness, kill-durability-state, retry   -- NOT run by this target; they run
+#                                                               only in a generated repo
+# The listed ones run from the framework tree so they are not first run downstream.
+SUITE_GLOBS=(
+  '_shared/probes/*-selftest.sh'
+  '_shared/probes/tests/*-selftest.sh'
+  'scripts/tests/*-selftest.sh'
+  'prod-new/modules/*/scripts/tests/*-selftest.sh'
+)
+SUITE_TEMPLATE=(
+  prod-new/template/scripts/tests/changed-line-coverage-selftest.sh
+  prod-new/template/scripts/tests/check-template-drift-selftest.sh
+  prod-new/template/scripts/tests/probe-selftests-skip-selftest.sh
+)
+# Each of these must exist AND be among the suites that ran, or the target exits 2 -- so deleting,
+# renaming or un-globbing one is loud (a glob over a renamed directory reports success over nothing).
+SUITE_REQUIRED=(
+  _shared/probes/skills-static-selftest.sh _shared/probes/load-rows-selftest.sh
+  _shared/probes/tests/probe-self-gate-selftest.sh _shared/probes/check-registries-selftest.sh
+  _shared/probes/non-vacuity-selftest.sh _shared/probes/sbom-ordering-selftest.sh
+  _shared/probes/agents-budget-selftest.sh _shared/probes/skill-weight-selftest.sh
+  _shared/probes/prove-mutation-selftest.sh _shared/probes/acceptance-coverage-selftest.sh
+)
 
-MK=()
-if [[ -r Makefile ]]; then while IFS= read -r l || [[ -n "$l" ]]; do MK+=("$l"); done < Makefile; fi
-werr=()
-err() { werr+=("$1"); }
-
-# mk_def NAME: the value of NAME's definition into MKV; fails unless there is exactly one.
-mk_def() {
-  local re="^$1[[:space:]]*(:|::|\\?)?=[[:space:]]*(.*)$" l n=0
-  MKV=""
-  for l in "${MK[@]}"; do
-    if [[ "$l" =~ $re ]]; then MKV="${BASH_REMATCH[2]}"; n=$((n+1)); fi
+# resolve_suites: SUITES = the resolved list. On a broken list SUITE_ERR names why (and the list is
+# empty), so `--run selftests` exits 2 and attest never derives probe-selftests from it.
+SUITES=(); SUITE_ERR=""
+resolve_suites() {
+  local w p seen=" " ran
+  SUITES=(); SUITE_ERR=""
+  for w in "${SUITE_TEMPLATE[@]}"; do
+    [[ -f "$w" ]] || { SUITE_ERR="selftests: $w is missing: a vendored selftest nothing runs here is first exercised in someone else's CI"; return 1; }
   done
-  MKV="${MKV%"${MKV##*[![:space:]]}"}"
-  (( n == 1 ))
-}
-
-# mk_recipe TARGET: the recipe lines (leading tab removed) into REC. The target line must be
-# exactly `TARGET:` and appear once.
-mk_recipe() {
-  local t="$1" line inr=0 found=0 other=0 re="^$1[[:space:]]*:"
-  REC=()
-  for line in "${MK[@]}"; do
-    if (( inr )); then
-      if [[ "$line" =~ ^[[:space:]]*$ ]]; then continue; fi
-      if [[ "$line" == '#'* ]]; then continue; fi
-      if [[ "$line" == $'\t'* ]]; then REC+=("${line#$'\t'}"); continue; fi
-      inr=0
-    fi
-    if [[ "$line" == "$t:" ]]; then inr=1; found=$((found+1))
-    elif [[ "$line" =~ $re ]]; then other=$((other+1)); fi
+  for w in "${SUITE_REQUIRED[@]}"; do
+    [[ -f "$w" ]] || { SUITE_ERR="selftests: $w is missing: it was run by name in CI and must stay"; return 1; }
   done
-  (( other == 0 )) || err "$t: a second rule or a rule with a prerequisite / target-specific variable for \`$t\` (the recipe cannot be read as one)"
-  (( found == 1 )) || { (( found == 0 )) || err "$t: the target is defined $found times"; return 1; }
+  for p in "${SUITE_GLOBS[@]}" "${SUITE_TEMPLATE[@]}"; do
+    # shellcheck disable=SC2086  # the glob IS the point
+    for w in $p; do
+      [[ -f "$w" ]] || continue
+      case "$seen" in *" $w "*) ;; *) SUITES+=("$w"); seen="$seen$w " ;; esac
+    done
+  done
+  ran=" ${SUITES[*]+"${SUITES[*]}"} "
+  for w in "${SUITE_REQUIRED[@]}"; do
+    case "$ran" in *" $w "*) ;; *) SUITES=(); SUITE_ERR="selftests: $w exists but the glob did not run it"; return 1 ;; esac
+  done
+  (( ${#SUITES[@]} > 0 )) || { SUITE_ERR="selftests: found ZERO selftests -- refusing to report a pass over an empty set"; return 1; }
   return 0
 }
 
-# gate_text RAW: resolve a recipe line's command text into shell text (RT). Only $(PROBES)
-# and `$$` are known make expansions.
-gate_text() {
-  local raw="$1" t probes
-  mk_def PROBES && probes="$MKV" || probes="__PROBES_UNDEFINED__"
-  t=${raw//\$\$/$'\001'}
-  local rest=${t//\$\(PROBES\)/}
-  if [[ "$rest" == *'$'* ]]; then RT=""; return 1; fi
-  if [[ "$t" == *'$(PROBES)'* && "$probes" == "__PROBES_UNDEFINED__" ]]; then RT=""; return 1; fi
-  t=${t//\$\(PROBES\)/$probes}
-  RT=${t//$'\001'/\$}
-  return 0
+# gate_cmd ID: the command text of the GATES entry of an id; returns 1 when there is none.
+gate_cmd() {
+  local e
+  for e in "${GATES[@]}"; do
+    [[ "${e%%|*}" == "$1" ]] && { printf '%s' "${e#*|}"; return 0; }
+  done
+  return 1
+}
+# gate_group ID: pre | post | agg | main
+gate_group() {
+  local x
+  for x in "${PRE_IDS[@]}";  do [[ "$x" == "$1" ]] && { printf pre;  return 0; }; done
+  for x in "${POST_IDS[@]}"; do [[ "$x" == "$1" ]] && { printf post; return 0; }; done
+  for x in "${AGG_IDS[@]}";  do [[ "$x" == "$1" ]] && { printf agg;  return 0; }; done
+  printf main
 }
 
-# single_command TEXT: true when TEXT is ONE simple command: outside single quotes there is no
-# ; & | < > ( ) { } ` \ # ! and no $ (outside quotes or inside double quotes), and the quotes close.
-single_command() {
-  local s="$1" i c st=n n=${#1}
-  for (( i = 0; i < n; i++ )); do
-    c=${s:i:1}
-    case "$st" in
-      s) [[ "$c" == "'" ]] && st=n ;;
-      d) case "$c" in
-           '"') st=n ;;
-           '$'|'`'|'\') return 1 ;;
-         esac ;;
-      n) case "$c" in
-           "'") st=s ;;
-           '"') st=d ;;
-           ';'|'&'|'|'|'<'|'>'|'('|')'|'{'|'}'|'`'|'\'|'#'|'!'|'$') return 1 ;;
-         esac ;;
+# gate_argv CMD: evaluate a GATES command text into the argv it stands for (ARGV). GATES is this
+# script's own constant; nothing read from outside is ever evaluated.
+ARGV=()
+gate_argv() { eval "ARGV=($1)"; }
+
+# ---------------------------------------------------------------------------------------------
+# --run: this script executes the gates, one at a time, through run-once.sh (clean environment,
+# line written from the execution's own exit status). Stop at the first failure, like make did.
+# ---------------------------------------------------------------------------------------------
+run_one_gate() {
+  local id="$1" cmd rc
+  cmd=$(gate_cmd "$id") || return 2
+  gate_argv "$cmd"
+  bash scripts/run-once.sh "$id" -- "${ARGV[@]}"; rc=$?
+  if (( rc == 0 )); then printf '  PASS  %s\n' "$id"; else printf '  FAIL  %s (exit %d)\n' "$id" "$rc" >&2; fi
+  return "$rc"
+}
+run_suites() {
+  local t n=0 tl
+  resolve_suites || { echo "$SUITE_ERR" >&2; return 2; }
+  for t in "${SUITES[@]}"; do
+    printf '  %-52s ' "$(basename "$t")"
+    if tl=$(bash scripts/run-once.sh --quiet --count "selftest:$t" -- bash "$t"); then echo "ok"; else echo "FAIL"; printf '%s\n' "$tl"; return 1; fi
+    n=$((n+1))
+  done
+  echo "selftests: $n passed"
+}
+ids_of_group() { local e; for e in "${GATES[@]}"; do [[ "$(gate_group "${e%%|*}")" == "$1" ]] && printf '%s\n' "${e%%|*}"; done; return 0; }
+if (( run_mode )); then
+  PLAN=()
+  for a in "${TARGETS[@]}"; do
+    case "$a" in
+      gates)      while IFS= read -r i; do PLAN+=("gate:$i"); done < <(ids_of_group main) ;;
+      check-fast) while IFS= read -r i; do PLAN+=("gate:$i"); done < <(ids_of_group pre; ids_of_group main) ;;
+      selftests)  PLAN+=("suites") ;;
+      *) gate_cmd "$a" >/dev/null || { echo "evidence-record: unknown gate id or target '$a'" >&2; exit 2; }; PLAN+=("gate:$a") ;;
     esac
   done
-  [[ "$st" == n ]]
-}
-
-GATE_IDS=(); GATE_TEXTS=()      # every `@$(RUN) <id> -- <command>` line of the checked recipes, command resolved
-# check_recipe TARGET ALLOWED_LINE...: apply the grammar to TARGET's recipe.
-check_recipe() {
-  local t="$1" line a ok rid raw gate_re='^@\$\(RUN\) ([A-Za-z0-9_:./-]+) -- (.+)$'
-  shift
-  mk_recipe "$t" || return 0
-  for line in ${REC[@]+"${REC[@]}"}; do
-    if [[ "$line" == *\\ ]]; then err "$t: recipe line ends in a backslash continuation: [$line]"; continue; fi
-    [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
-    ok=0
-    for a in "$@"; do [[ "$line" == "$a" ]] && ok=1; done
-    (( ok )) && continue
-    if [[ "$line" =~ $gate_re ]]; then
-      rid="${BASH_REMATCH[1]}"; raw="${BASH_REMATCH[2]}"
-      if ! gate_text "$raw"; then err "$t: [$line] uses a make expansion other than \$(PROBES) and \$\$"; continue; fi
-      if ! single_command "$RT"; then err "$t: [$line] is not ONE simple command (an unquoted ; & | < > ( ) { } \` \\ # ! \$, or an unclosed quote)"; continue; fi
-      GATE_IDS+=("$rid"); GATE_TEXTS+=("$RT")
-    else
-      err "$t: recipe line is neither '@\$(RUN) <id> -- <command>' nor an allowed line: [$line]"
-    fi
+  (( ${#PLAN[@]} > 0 )) || { echo "evidence-record: nothing to run" >&2; exit 2; }
+  for step in "${PLAN[@]}"; do
+    if [[ "$step" == suites ]]; then run_suites; rc=$?; else run_one_gate "${step#gate:}"; rc=$?; fi
+    (( rc == 0 )) || exit "$rc"
   done
-}
-
-if (( ${#MK[@]} > 0 )); then
-  # 1. coverage (the recipe as make reads it, not "up to the first blank line")
-  uncovered=()
-  if mk_recipe gates; then
-    # capture, then match: `printf | grep -qF` under pipefail reads a MATCH as a miss
-    # when the writer takes SIGPIPE (gate-hygiene-fitness GREPQ-UNDER-PIPEFAIL)
-    gates_text=$(printf '%s\n' "${GATES[@]}")
-    while IFS= read -r probe; do
-      [[ -n "$probe" ]] || continue
-      grep -qF "$probe" <<<"$gates_text" || uncovered+=("$probe")
-    done < <(printf '%s\n' ${REC[@]+"${REC[@]}"} | grep -vE '^[[:space:]]*#' \
-               | grep -oE '[A-Za-z0-9_./$()-]+\.sh' | sed 's|.*/||' | grep -vx 'run-once.sh' | sort -u)
-  fi
-  if (( ${#uncovered[@]} > 0 )); then
-    echo "evidence-record: ${#uncovered[@]} gate(s) run by \`make gates\` are absent from this script's GATES list:" >&2
-    printf '  uncovered: %s\n' "${uncovered[@]}" >&2
-    echo "  The record would report a clean total while measuring less than the repo runs." >&2
-    echo "  Add them to GATES, or the attestation is narrower than it looks." >&2
-    exit 2
-  fi
-  werr=()   # the recipe was parsed once for coverage; check_recipe below reports its errors
-
-  # 2. recipe grammar
-  check_recipe gates "${ALLOWED_GATES_LINES[@]+"${ALLOWED_GATES_LINES[@]}"}"
-  check_recipe check-fast "${ALLOWED_CHECKFAST_LINES[@]}"
-
-  # 3. no smuggled execution
-  run_re='\$[({]RUN[)}]'; make_re='\$[({]MAKE[)}]'; plus_re=$'^\t[@-]*\\+'
-  dir_re1='^(export|unexport|override|include|-include|sinclude|vpath|define|endef|ifeq|ifneq|ifdef|ifndef|else|endif)([[:space:]]|$)'
-  dir_re2='^\.(ONESHELL|SHELLFLAGS|RECIPEPREFIX|EXPORT_ALL_VARIABLES)([[:space:]:]|$)'
-  runlines=0
-  for line in "${MK[@]}"; do
-    if [[ "$line" == $'\t'* && "$line" =~ $run_re ]]; then
-      runlines=$((runlines+1))
-      if [[ "$line" =~ $make_re ]]; then err "recorder line holds \$(MAKE): GNU make runs it under -n: [${line#$'\t'}]"; fi
-      if [[ "$line" =~ $plus_re ]]; then err "recorder line starts with +: GNU make runs it under -n: [${line#$'\t'}]"; fi
-    fi
-    if [[ "$line" =~ $dir_re1 || "$line" =~ $dir_re2 ]]; then
-      err "Makefile directive that can change what a recipe does: [$line]"
-    fi
-  done
-  if (( runlines > 0 )); then
-    if mk_def RUN; then [[ "$MKV" == 'bash scripts/run-once.sh' ]] || err "RUN is defined as [$MKV], not [bash scripts/run-once.sh]"; else err "RUN must be defined exactly once"; fi
-  fi
-  if grep -qE '^SHELL[[:space:]]*[:?]?=' Makefile; then
-    if mk_def SHELL; then [[ "$MKV" == '/usr/bin/env bash' ]] || err "SHELL is defined as [$MKV], not [/usr/bin/env bash]"; else err "SHELL must be defined exactly once"; fi
-  fi
-
-  # 4. drift between the Makefile line and GATES
-  drifted=()
-  for i in "${!GATE_IDS[@]}"; do
-    for g in "${GATES[@]}"; do
-      [[ "${g%%|*}" == "${GATE_IDS[$i]}" ]] || continue
-      [[ "${g#*|}" == "${GATE_TEXTS[$i]}" ]] || drifted+=("${GATE_IDS[$i]}: make gates runs [${GATE_TEXTS[$i]}], GATES holds [${g#*|}]")
-    done
-  done
-  if (( ${#drifted[@]} > 0 )); then
-    echo "evidence-record: ${#drifted[@]} gate(s) run by \`make gates\` under a different command string than GATES:" >&2
-    printf '  drift: %s\n' "${drifted[@]}" >&2
-    echo "  Attest would never match them: they would run twice again. Make the two strings identical." >&2
-    exit 2
-  fi
+  exit 0
 fi
 
-# SUITES: the resolved selftest list (SELFTEST_GLOBS with $(PROBES) and $(TEMPLATE_SELFTESTS)
-# substituted, expanded by the shell glob, no eval), and the REQUIRED ones. Text only.
-SUITES=(); REQ=()
-resolve_suites() {
-  local probes tmpl globs req w seen=" "
-  mk_def PROBES && probes="$MKV" || { err "selftests: PROBES must be defined exactly once"; return 1; }
-  mk_def TEMPLATE_SELFTESTS && tmpl="$MKV" || { err "selftests: TEMPLATE_SELFTESTS must be defined exactly once"; return 1; }
-  mk_def SELFTEST_GLOBS && globs="$MKV" || { err "selftests: SELFTEST_GLOBS must be defined exactly once"; return 1; }
-  globs=${globs//\$\(PROBES\)/$probes}; globs=${globs//\$\(TEMPLATE_SELFTESTS\)/$tmpl}
-  if [[ "$globs" == *'$'* ]]; then err "selftests: SELFTEST_GLOBS holds a make expansion other than \$(PROBES) / \$(TEMPLATE_SELFTESTS)"; return 1; fi
-  for w in $globs; do
-    [[ -f "$w" ]] || continue
-    case "$seen" in *" $w "*) ;; *) SUITES+=("$w"); seen="$seen$w " ;; esac
-  done
-  if mk_def REQUIRED_SELFTESTS; then req="${MKV//\$\(PROBES\)/$probes}"; for w in $req; do REQ+=("$w"); done; fi
-  return 0
-}
+# canon_text CMD: the canonical command string (CANON) of a GATES entry, by run-once.sh's own `canon`
+CANON=""
+canon_text() { gate_argv "$1"; CANON=$(canon "${ARGV[@]}"); }
 
-if (( ${#MK[@]} > 0 )) && grep -qE '^selftests:' Makefile; then
-  if resolve_suites; then
-    seen_s=" ${SUITES[*]+"${SUITES[*]}"} "
-    for w in $FLOOR_GLOBS; do
-      [[ -f "$w" ]] || continue
-      case "$seen_s" in *" $w "*) ;; *) err "selftests: $w is a selftest under the fixed selftest directories that SELFTEST_GLOBS does not run" ;; esac
-    done
-    for w in "${REQ[@]+"${REQ[@]}"}"; do
-      case "$seen_s" in *" $w "*) ;; *) err "selftests: required suite $w is not among the suites SELFTEST_GLOBS resolves to" ;; esac
-    done
-    (( ${#SUITES[@]} > 0 )) || err "selftests: SELFTEST_GLOBS resolves to ZERO suites"
-  fi
-fi
-
-if (( ${#werr[@]} > 0 )); then
-  echo "evidence-record: ${#werr[@]} wiring error(s) in the Makefile:" >&2
-  printf '  wiring: %s\n' "${werr[@]}" >&2
-  echo "  A recorder line must be exactly the canonical form, with no prefix and no second command." >&2
-  exit 2
-fi
-(( check_wiring == 0 )) || { echo "evidence-record: wiring consistent (${#GATES[@]} gates)"; exit 0; }
-
-# THE CANONICAL FORM. run-once.sh records `canon` of the argv it executed: every argument through
-# printf %q, joined by one space. This is the same function (the selftest pins that the two agree
-# on awkward argv, so the form has one definition in effect). A GATES command is shell text: it is
-# evaluated into an argv here, so a glob such as `prod-new/modules/*/scripts` expands exactly as the
-# recipe's shell expanded it, and the argv is then quoted. GATES is this script's own constant;
-# nothing read from the Makefile is ever evaluated.
-canon_var() { local o="" a q; for a in "$@"; do printf -v q '%q' "$a"; o+="${o:+ }$q"; done; CANON=$o; }
-canon_text() { eval "set -- $1"; canon_var "$@"; }
-
-# attest_prepare: ONE call to run-once.sh for everything attest mode will ask (every gate except
-# probe-selftests, plus one `selftest:<suite>` want per suite of the Makefile's resolved list):
-# the tree identity is measured once. Fills RID[] / RREST[] (`kind<TAB>...` per id).
+# attest_prepare: ONE resolve-set for everything attest mode will ask (every gate except
+# probe-selftests, plus one `selftest:<suite>` want per suite): the tree identity is measured once.
+# Fills RID[] / RREST[] (`kind<TAB>...` per id).
 RID=(); RREST=()
 attest_prepare() {
-  local g name cmd t want="" out id rest
-  for g in "${GATES[@]}"; do
-    name="${g%%|*}"; cmd="${g#*|}"
-    [[ "$name" == probe-selftests ]] && continue
+  local gt name cmd t want="" out id rest
+  for gt in "${GATES[@]}"; do
+    name="${gt%%|*}"; cmd="${gt#*|}"
+    [[ "$(gate_group "$name")" == agg ]] && continue
     canon_text "$cmd"; want+="$name"$'\t'"$CANON"$'\n'
   done
-  for t in ${SUITES[@]+"${SUITES[@]}"}; do canon_var bash "$t"; want+="selftest:$t"$'\t'"$CANON"$'\n'; done
-  out=$(printf '%s' "$want" | bash scripts/run-once.sh resolve-set)
+  for t in ${SUITES[@]+"${SUITES[@]}"}; do CANON=$(canon bash "$t"); want+="selftest:$t"$'\t'"$CANON"$'\n'; done
+  out=$(printf '%s' "$want" | resolve_set)
   while IFS=$'\t' read -r id rest; do
     [[ -n "$id" ]] || continue
     RID+=("$id"); RREST+=("$rest")
@@ -389,12 +305,13 @@ RESLINE=""
 res_for() { local i; RESLINE=""; for (( i = 0; i < ${#RID[@]}; i++ )); do [[ "${RID[$i]}" == "$1" ]] && { RESLINE="${RREST[$i]}"; return 0; }; done; return 1; }
 
 # attest_selftests: `probe-selftests` is never taken from an aggregate line (there is none).
-# It is attested only when EVERY suite of the Makefile's resolved list has its own trusted line
+# It is attested only when EVERY suite of the resolved list has its own trusted line
 # of this run (same id, command `bash <suite>`, tree, run id, in time, no conflict), and its
 # verdict is derived from those lines. Sets ST_RC, ST_EV, ST_N, ST_DUR, ST_UTC; on failure sets why.
 attest_selftests() {
   local t kind r1 r2 r3 r4 r5 r6 failed=""
-  (( ${#SUITES[@]} > 0 )) || { why="no-suite-list-in-the-makefile"; return 1; }
+  [[ -z "$SUITE_ERR" ]] || { why="suite-list: $SUITE_ERR"; return 1; }
+  (( ${#SUITES[@]} > 0 )) || { why="no-suite-list"; return 1; }
   ST_DUR=0; ST_UTC=""; ST_N=0
   for t in "${SUITES[@]}"; do
     res_for "selftest:$t" || { why="suite $t: not-asked"; return 1; }
@@ -448,14 +365,14 @@ else
 fi
 mkdir -p .prod/evidence || exit 2
 
-(( attest == 0 )) || attest_prepare
+if (( attest )); then resolve_suites || true; attest_prepare; fi
 passes=0; fails=0; n_exec=0; n_att=0
 declare -a LINES=()
-for g in "${GATES[@]}"; do
-  name="${g%%|*}"; cmd="${g#*|}"
+for gt in "${GATES[@]}"; do
+  name="${gt%%|*}"; cmd="${gt#*|}"; grp=$(gate_group "$name")
   src=executed; why=""; rline=null; from=""; ev=""; rc=0
   if (( attest )); then
-    if [[ "$name" == probe-selftests ]]; then
+    if [[ "$grp" == agg ]]; then
       ST_RC=0; ST_EV=""
       if attest_selftests; then
         src=attested; rc=$ST_RC; ev=$ST_EV
@@ -477,10 +394,13 @@ for g in "${GATES[@]}"; do
     fi
   fi
   if [[ "$src" == executed ]]; then
-    out=$(eval "$cmd" 2>&1); rc=$?
-    # the one-line evidence is cut by run-once.sh's summary, the same code that wrote
+    # executed through run-once.sh like every gate: the clean environment, and a line of its own
+    # when a run id is set. Its output is captured here, not shown.
+    gate_argv "$cmd"
+    out=$(bash scripts/run-once.sh "$name" -- "${ARGV[@]}" 2>&1); rc=$?
+    # the one-line evidence is cut by run-once.sh's summary_of, the same code that wrote
     # the evidence column of the results file, so both sources read alike
-    ev=$(printf '%s\n' "$out" | bash scripts/run-once.sh summary "$rc")
+    ev=$(printf '%s\n' "$out" | summary_of "$rc")
     n_exec=$((n_exec+1))
   else
     n_att=$((n_att+1))

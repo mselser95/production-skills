@@ -153,7 +153,7 @@ fi
 fell=0; mismatch=0
 for i in "${!NAMES[@]}"; do
   was=$(grep -E "^\| \`${NAMES[$i]}\` \|" "$BASELINE" | awk -F'|' '{gsub(/ /,"",$3); print $3}')
-  [[ -n "$was" ]] || { echo "  NEW      ${NAMES[$i]} (${COUNTS[$i]} cases) -- ran, but has no row in the baseline" >&2; mismatch=$((mismatch+1)); continue; }
+  [[ -n "$was" ]] || { echo "  NEW      ${NAMES[$i]} (${COUNTS[$i]} cases) -- ran, but has no row in the baseline (it is regenerated in the Linux container, never on a laptop: make mutation-baseline)" >&2; mismatch=$((mismatch+1)); continue; }
   if (( COUNTS[i] < was )); then
     echo "  FELL     ${NAMES[$i]}  $was -> ${COUNTS[$i]} case(s)" >&2; fell=$((fell+1))
   fi

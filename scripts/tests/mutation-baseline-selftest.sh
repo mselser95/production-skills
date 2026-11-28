@@ -74,21 +74,22 @@ cp "$TMP/good.md" "$TMP/base.md"
 # line is vouched for (same suite, same canonical command, zero exit, same tree identity, same run) and
 # executes the suite when it is not. Each fake suite logs its own execution, so "read" and "ran"
 # are told apart by the log, not by the verdict alone. --write must never read the record. The fake
-# suites take their count and exit code from CASES / RC, so a recorded line is a REAL run of the suite.
+# suites take their count and exit code from files next to them (c.cases / c.rc: a suite run through
+# scripts/run-once.sh no longer sees the caller's environment), so a recorded line is a REAL run of the suite.
 RO="$root/scripts/run-once.sh"; EV="$TMP/results.tsv"; XL="$TMP/exec.log"
-for s in c d; do printf '#!/usr/bin/env bash\necho x >> "%s"\necho "fake: ${CASES:-4} case(s) passed"\nexit "${RC:-0}"\n' "$XL" > "$TMP/$s-selftest.sh"; done
+for s in c d; do printf '#!/usr/bin/env bash\necho x >> "%s"\necho "fake: $(cat "%s/%s.cases" 2>/dev/null || echo 4) case(s) passed"\nexit "$(cat "%s/%s.rc" 2>/dev/null || echo 0)"\n' "$XL" "$TMP" "$s" "$TMP" "$s" > "$TMP/$s-selftest.sh"; done
 SU2="$TMP/c-selftest.sh $TMP/d-selftest.sh"
 runr() { EVIDENCE_RESULTS="$EV" EVIDENCE_RUN_ID=mb1 MUTATION_BASELINE_SUITES="$SU2" MUTATION_BASELINE_FILE="$TMP/base2.md" bash "$MB" "$@" >"$TMP/out3" 2>&1; echo $?; }
 rec() { EVIDENCE_RESULTS="$EV" EVIDENCE_RUN_ID=mb1 bash "$RO" --quiet --count "$@" >/dev/null 2>&1; }
 runs() { local n; n=$(grep -c . "$XL" 2>/dev/null); echo "${n:-0}"; }
 recsuite() { rec "selftest:$TMP/$1-selftest.sh" -- bash "$TMP/$1-selftest.sh"; }   # a real, recorded run of a fake suite
 : > "$XL"; rm -f "$EV"
-CASES=99 recsuite c; : > "$XL"
+echo 99 > "$TMP/c.cases"; recsuite c; rm -f "$TMP/c.cases"; : > "$XL"
 check "--write executes the suites and ignores a recorded count (two rows of 4)" "0 2 2" "$(runr --write) $(runs) $(grep -c '| 4 |' "$TMP/base2.md")"
 : > "$XL"; rm -f "$EV"; recsuite c; : > "$XL"
 check "check mode: a recorded count is read, only the unrecorded suite is executed" "0 1" "$(runr) $(runs)"
 check "check mode: it says how many counts came from the single pass" 1 "$(grep -c '1 of 2 suite count(s) read from the single recorded pass' "$TMP/out3")"
-: > "$XL"; rm -f "$EV"; CASES=2 recsuite c; recsuite d; : > "$XL"
+: > "$XL"; rm -f "$EV"; echo 2 > "$TMP/c.cases"; recsuite c; rm -f "$TMP/c.cases"; recsuite d; : > "$XL"
 check "check mode: the recorded count is what is compared (2 < 4 -> FELL, no suite executed)" "1 0" "$(runr) $(runs)"
 check "check mode: ...and the FELL line names the suite" 1 "$(grep -c 'FELL     c-selftest.sh  4 -> 2' "$TMP/out3")"
 : > "$XL"; awk -F'\t' -v OFS='\t' '{$9="0000000000000000000000000000000000000000+clean"; print}' "$EV" > "$EV.t"; mv "$EV.t" "$EV"
@@ -97,9 +98,9 @@ check "check mode: a count line with another tree identity is NOT trusted (suite
 rec "selftest:$TMP/c-selftest.sh" -- bash -c "CASES=2 bash $TMP/c-selftest.sh"; : > "$XL"
 check "check mode: a count line recorded under another argv (bash -c ...) is NOT trusted" "0 2" "$(runr) $(runs)"
 : > "$XL"; rm -f "$EV"
-RC=1 CASES=2 recsuite c; : > "$XL"
+echo 2 > "$TMP/c.cases"; echo 1 > "$TMP/c.rc"; recsuite c; rm -f "$TMP/c.cases" "$TMP/c.rc"; : > "$XL"
 check "check mode: a FAILED recorded run's count is NOT trusted (suites executed)" "0 2" "$(runr) $(runs)"
-: > "$XL"; rm -f "$EV"; CASES=2 recsuite c; printf 'garbage\n' >> "$EV"; : > "$XL"
+: > "$XL"; rm -f "$EV"; echo 2 > "$TMP/c.cases"; recsuite c; rm -f "$TMP/c.cases"; printf 'garbage\n' >> "$EV"; : > "$XL"
 check "check mode: a malformed results file is NOT trusted (suites executed)" "0 2" "$(runr) $(runs)"
 : > "$XL"; rm -f "$EV"
 check "check mode: no results file at all -> both executed" "0 2" "$(runr) $(runs)"

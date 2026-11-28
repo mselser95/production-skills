@@ -80,6 +80,61 @@ haystack=$(cat "${SURFACES[@]}" 2>/dev/null | sed 's/^[[:space:]]*#.*$//')
   exit 2
 }
 
+# THE RUNNER AS A SURFACE. `make gates` / `make selftests` / `make check-fast` are one line each
+# calling scripts/evidence-record.sh, which owns the gate list (GATES) and the suite list
+# (SUITE_*). The Makefile therefore no longer NAMES the scripts, the runner does. Its lists count
+# as invocations under two conditions, so this is not a loophole:
+#  (a) only for what a surface (Makefile / workflow / hook, comments stripped) really drives:
+#      `evidence-record.sh --run gates` drives the `main` gates, `--run check-fast` the `pre` and
+#      `main` ones, `--run selftests` the suite lists, `--run <id>` that gate, `--attest` every gate
+#      (it executes the ones no line vouches for). If nothing drives the runner, its lists drive
+#      nothing and every script named only there is an orphan.
+#  (b) only GATES entries (`"id|command"`), the SUITE_* and RUNNER_HELPERS array bodies count, read with comment
+#      lines removed: a script named in a runner comment, a header or another string is not wired.
+RUNNER=scripts/evidence-record.sh
+if [[ -f "$RUNNER" ]]; then
+  driven=$(grep -oE 'evidence-record\.sh[[:space:]]+(--run[[:space:]]+[A-Za-z0-9_ -]*|--attest)' <<<"$haystack" || true)
+  if [[ -n "$driven" ]]; then
+    runner_src=$(grep -v '^[[:space:]]*#' "$RUNNER" || true)
+    ids_in() { sed -n -E "s/^$1=\\((.*)\\)[[:space:]]*\$/\\1/p" <<<"$runner_src"; }
+    array_body() { sed -n "/^$1=(/,/^)/p" <<<"$runner_src" | sed '1d;$d'; }
+    gate_ids=(); gate_cmds=()
+    entry_re='"([A-Za-z0-9_-]+)\|(.*)"[[:space:]]*$'   # not anchored at the line start: the comment stripping above is what keeps `# "id|cmd"` out
+    while IFS= read -r l; do
+      if [[ "$l" =~ $entry_re ]]; then gate_ids+=("${BASH_REMATCH[1]}"); gate_cmds+=("${BASH_REMATCH[2]}"); fi
+    done < <(array_body GATES)
+    pre=" $(ids_in PRE_IDS) "; post=" $(ids_in POST_IDS) "; agg=" $(ids_in AGG_IDS) "
+    want_main=0; want_pre=0; want_suites=0; want_all=0; want_ids=" "
+    for w in $driven; do
+      case "$w" in
+        gates) want_main=1 ;;
+        check-fast) want_main=1; want_pre=1 ;;
+        selftests) want_suites=1 ;;
+        --attest) want_all=1 ;;
+        evidence-record.sh|--run) ;;
+        *) want_ids="$want_ids$w " ;;
+      esac
+    done
+    runner_text=""
+    for i in "${!gate_ids[@]}"; do
+      id="${gate_ids[$i]}"; take=0
+      if (( want_all )); then take=1
+      elif [[ "$want_ids" == *" $id "* ]]; then take=1
+      elif [[ "$pre" == *" $id "* ]]; then (( want_pre )) && take=1
+      elif [[ "$post" == *" $id "* || "$agg" == *" $id "* ]]; then :
+      else (( want_main )) && take=1
+      fi
+      (( take )) && runner_text+="${gate_cmds[$i]}"$'\n'
+    done
+    # RUNNER_HELPERS: the scripts the runner itself executes (run-once.sh), driven whenever it is
+    runner_text+="$(array_body RUNNER_HELPERS)"$'\n'
+    if (( want_suites )); then
+      for a in SUITE_GLOBS SUITE_TEMPLATE SUITE_REQUIRED; do runner_text+="$(array_body "$a")"$'\n'; done
+    fi
+    haystack+=$'\n'"$runner_text"
+  fi
+fi
+
 mapfile -t PROBES < <(find "$PROBE_DIR" -name '*.sh' -type f | sort)
 if (( ${#PROBES[@]} == 0 )); then
   echo "probe-wiring: found ZERO probes in $PROBE_DIR -- a clean result over nothing is not a clean result" >&2

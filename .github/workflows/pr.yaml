@@ -29,7 +29,8 @@ jobs:
     env:
       # Ties every line scripts/run-once.sh writes to THIS run: `make evidence` attests
       # only to lines carrying the same id, so a stale results file (a re-run on a
-      # reused workspace, a cache) can never be attested.
+      # reused workspace, a cache) can never be attested. It is on the allowlist of the clean
+      # environment every gate runs in, which is how the gates see it at all.
       EVIDENCE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       # fetch-depth: 0 is what makes the secret scan below mean anything.
@@ -202,8 +203,9 @@ jobs:
           # remember, so a selftest is covered whichever surface somebody
           # forgets to update. It runs before the gates it verifies, so a gate's
           # green is never read without its verifier having been proven.
-          # Both go through scripts/run-once.sh, which leaves one line per gate
-          # and per suite in .evidence/results.tsv -- the lines `make evidence`
+          # Both call scripts/evidence-record.sh --run, which executes each gate and
+          # suite through scripts/run-once.sh in a clean environment and leaves one line
+          # per gate and per suite in .evidence/results.tsv -- the lines `make evidence`
           # and mutation-baseline.sh read below instead of running them again.
           make selftests
           make check-fast
@@ -275,8 +277,9 @@ jobs:
       # here said it did so DELIBERATELY -- "a record assembled from another step's
       # exit codes attests to what the YAML says ran, not to what ran" -- and that
       # property is kept, by a different mechanism: the record is not assembled from
-      # step exit codes. The Makefile runs every gate through scripts/run-once.sh,
-      # which is the process that EXECUTES it and writes its line (command string, exit
+      # step exit codes. scripts/evidence-record.sh --run (what `make gates` and `make
+      # selftests` call) runs every gate through scripts/run-once.sh, in a clean
+      # environment: that is the process that EXECUTES it and writes its line (command string, exit
       # code, hash of the output, tree identity, this run's id). `make evidence`
       # (evidence-record.sh --attest) takes a gate from that file only for a
       # well-formed line with the same id, the same command string, the same tree
@@ -287,9 +290,10 @@ jobs:
       # `make -n` records nothing, and `probe-selftests` has no aggregate line: it is
       # derived from one line per suite of THIS run, so it cannot be attested while a
       # suite is missing. EVIDENCE_RUN_ID (job env above) is what enables recording at all.
-      # What still executes here: mutation-trend (it reads the suite counts the
-      # selftests step recorded), ratified-invariants, tcb-integrity (it needs the
-      # installer step above), and any gate the single pass did not cover.
+      # What still executes here, through the same runner (group `post`/`agg` in GATES, not in
+      # `make gates`): mutation-trend (it reads the suite counts the selftests step recorded),
+      # ratified-invariants, tcb-integrity (it needs the installer step above), and any gate
+      # the single pass did not cover. The Makefile is not read to decide any of this.
       - name: evidence record (dimension 11)
         env:
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/cfg
