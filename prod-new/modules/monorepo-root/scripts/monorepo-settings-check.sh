@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# monorepo-settings-check.sh [ROOT] -- the monorepo root's static gate. Exit 0 clean, 1 findings
+# monorepo-settings-check.sh [ROOT] -- the monorepo root's settings gate. Exit 0 clean, 1 findings
 # (one `file:line: RULE message` per finding), 2 cannot run (no PyYAML, no python3).
-# PYTHON=<interpreter> overrides python3. No network, no pnpm needed (it asks `make -n` per unit).
+# PYTHON=<interpreter> overrides python3. No network, no pnpm. It INSPECTS the units by asking `make -n`,
+# which evaluates a unit Makefile ($(shell), `+` lines and $(MAKE) lines can execute; the units are the
+# repository's own trusted code) but runs no unit target recipe.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="${1:-$(cd "$here/.." && pwd)}"
