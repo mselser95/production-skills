@@ -85,7 +85,7 @@ if [[ -n "$SHARD_OUT" && -z "$SHARD_GROUP" ]]; then echo "verify-standard: --out
 #
 # BASH_SOURCE[0] rather than $0 so it is right when sourced as well as executed.
 PROBE_SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
-[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" ) ]] || { echo "PROD_UNIT_ROOT is not a directory: $PROD_UNIT_ROOT" >&2; exit 2; }
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
 root="${1:-${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
 cd "$root" || exit 2
 

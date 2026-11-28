@@ -28,7 +28,7 @@ set -uo pipefail
 # else, sitting in its own verifier. Found while deriving a mutation baseline
 # from these counts: three suites had none to give.
 CASES=0
-[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" ) ]] || { echo "PROD_UNIT_ROOT is not a directory: $PROD_UNIT_ROOT" >&2; exit 2; }
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
 cd "${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" || exit 2
 
 # ---------------------------------------------------------------------------

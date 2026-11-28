@@ -61,7 +61,7 @@
 #   gate-hygiene-fitness.sh              scan scripts/ and benchmarks/
 #   gate-hygiene-fitness.sh path [...]   scan only those paths
 set -uo pipefail
-[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" ) ]] || { echo "PROD_UNIT_ROOT is not a directory: $PROD_UNIT_ROOT" >&2; exit 2; }
+[[ -z "${PROD_UNIT_ROOT:-}" || ( "$PROD_UNIT_ROOT" == /* && -d "$PROD_UNIT_ROOT" && -f "$PROD_UNIT_ROOT/production.yaml" ) ]] || { echo "PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT" >&2; exit 2; }
 cd "${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" || exit 2
 
 paths=("$@")

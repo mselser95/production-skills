@@ -114,21 +114,42 @@ check "make -C svc-b gate-hygiene-fitness red" 2 "PKILL" "$mono" - make -C "$b" 
 check "make: a wrong PROD_UNIT_ROOT in the environment cannot redirect a unit's gates" 0 "EXPLICITLY empty" "$mono" "$b" make -C "$a" check-registries
 
 # --- 2. invalid PROD_UNIT_ROOT: exit 2, one line, every script -----------------------------
+# Six bad values per script. "<cwd>|<value>": a relative path that does not exist, an absolute
+# path that does not exist, a file, a REAL directory that is not a unit root (the unit's own
+# scripts/), an empty directory, and an EXISTING RELATIVE directory (cwd = the monorepo root,
+# value svc-a: a real unit, refused only because it is not absolute).
 echo "2. invalid PROD_UNIT_ROOT"
-: > "$tmp/afile"
+: > "$tmp/afile"; mkdir "$tmp/emptydir"
 tests="error-handling-fitness-selftest check-registries-selftest non-vacuity-selftest kill-durability-state-selftest"
+bads=("$a|relative/dir" "$a|$tmp/missing-dir" "$a|$tmp/afile" "$a|$a/scripts" "$a|$tmp/emptydir" "$mono|svc-a")
 for s in acceptance-coverage check-registries check-template-drift gate-hygiene-fitness stamp-template-provenance \
          kill-durability error-handling-fitness no-unfilled-slots verify-standard; do
-  for bad in "relative/dir" "$tmp/missing-dir" "$tmp/afile"; do
-    check "$s: '${bad##*/}' -> exit 2" 2 "PROD_UNIT_ROOT is not a directory: $bad" "$a" "$bad" bash "$a/scripts/$s.sh" "$a/acceptance/unitroot.yaml"
+  for cb in "${bads[@]}"; do
+    bad="${cb#*|}"
+    check "$s: '$bad' -> exit 2" 2 "PROD_UNIT_ROOT is not a unit root (no production.yaml): $bad" "${cb%%|*}" "$bad" bash "$a/scripts/$s.sh" "$a/acceptance/unitroot.yaml"
   done
 done
 for s in $tests; do
-  for bad in "relative/dir" "$tmp/missing-dir" "$tmp/afile"; do
-    check "tests/$s: '${bad##*/}' -> exit 2" 2 "PROD_UNIT_ROOT is not a directory: $bad" "$a" "$bad" bash "$a/scripts/tests/$s.sh"
+  for cb in "${bads[@]}"; do
+    bad="${cb#*|}"
+    check "tests/$s: '$bad' -> exit 2" 2 "PROD_UNIT_ROOT is not a unit root (no production.yaml): $bad" "${cb%%|*}" "$bad" bash "$a/scripts/tests/$s.sh"
   done
 done
 check "empty PROD_UNIT_ROOT counts as unset (git top-level: sees svc-b)" 1 "unfilled" "$a" "" bash "$a/scripts/no-unfilled-slots.sh"
+# a bad env value is a caller bug even beside an explicit root argument (the validation runs first)
+check "verify-standard: positional root + bad env -> exit 2" 2 "not a unit root" "$mono" "$a/scripts" bash "$a/scripts/verify-standard.sh" "$a"
+check "acceptance-coverage: positional root + bad env -> exit 2" 2 "not a unit root" "$mono" "$a/scripts" bash "$a/scripts/acceptance-coverage.sh" "$a/acceptance/unitroot.yaml" "$a"
+
+# --- 2b. the four template selftests (no Go needed) run on the unit ---------------------------
+echo "2b. template selftests with PROD_UNIT_ROOT=svc-a"
+# check-registries-selftest is left out of the run: 65 cases, ~9 s wall (over the 5 s budget)
+for s in error-handling-fitness-selftest non-vacuity-selftest kill-durability-state-selftest; do
+  check "tests/$s: unit root = svc-a -> exit 0" 0 - "$mono" "$a" bash "$a/scripts/tests/$s.sh"
+done
+check "tests/error-handling-fitness-selftest: unset, from the monorepo root -> fails" 1 - "$mono" - bash "$a/scripts/tests/error-handling-fitness-selftest.sh"
+check "make -C svc-a error-handling-fitness (selftest + gate) green" 0 - "$mono" - make -C "$a" error-handling-fitness
+check "make -C svc-b error-handling-fitness red" 2 "planted" "$mono" - make -C "$b" error-handling-fitness
+check "make -C svc-a crash-only-selftest green" 0 - "$mono" - make -C "$a" crash-only-selftest
 
 # --- 3. the forms: the scripts the host cannot run for real, and the git calls --------------
 echo "3. source forms"
@@ -138,7 +159,7 @@ form() { # <name> <file> <fixed string>
 for s in acceptance-coverage check-registries check-template-drift gate-hygiene-fitness stamp-template-provenance \
          kill-durability error-handling-fitness no-unfilled-slots verify-standard \
          tests/error-handling-fitness-selftest tests/check-registries-selftest tests/non-vacuity-selftest tests/kill-durability-state-selftest; do
-  form "$s: validates PROD_UNIT_ROOT" "$sc/$s.sh" 'PROD_UNIT_ROOT is not a directory: $PROD_UNIT_ROOT'
+  form "$s: validates PROD_UNIT_ROOT" "$sc/$s.sh" 'PROD_UNIT_ROOT is not a unit root (no production.yaml): $PROD_UNIT_ROOT'
   case "$s" in
     verify-standard) rootform='root="${1:-${PROD_UNIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"' ;;
     acceptance-coverage) rootform='root="${2:-${PROD_UNIT_ROOT:-$(cd "$(dirname "$spec")" && git rev-parse --show-toplevel 2>/dev/null || dirname "$spec")}}"' ;;

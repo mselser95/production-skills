@@ -5,6 +5,12 @@ SHELL := /usr/bin/env bash
 # it is the git top-level (nothing changes); inside a monorepo it is the unit,
 # which `git rev-parse --show-toplevel` would not be. Exported so every recipe
 # and every script it runs sees the same root.
+# A script validates PROD_UNIT_ROOT when it is set and non-empty: an absolute path to
+# a directory that contains production.yaml (the marker every scaffolded unit has at its
+# root, whatever the layout), else exit 2 -- never a silent fallback. A bad value is a
+# caller bug even when the script was also given an explicit root argument: the
+# validation runs first, so the argument does not rescue it. Unset or empty keeps the
+# old rule (git top-level, else the current directory) and checks nothing.
 export PROD_UNIT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # check-fast is the staged-presubmit cheap gate: compile + go vet-class
