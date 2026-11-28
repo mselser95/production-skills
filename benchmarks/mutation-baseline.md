@@ -47,11 +47,13 @@ here would be a threshold nobody derived.
 | `skills-static-selftest.sh` | 21 |
 | `template-digest-selftest.sh` | 8 |
 | `probe-self-gate-selftest.sh` | 29 |
-| `assemble-parity-selftest.sh` | 237 |
+| `assemble-multi-unit-selftest.sh` | 155 |
+| `assemble-parity-selftest.sh` | 240 |
 | `evidence-record-selftest.sh` | 85 |
+| `go-unit-root-selftest.sh` | 145 |
 | `install-hosts-mutations-selftest.sh` | 38 |
 | `install-hosts-selftest.sh` | 52 |
-| `integration-train-selftest.sh` | 500 |
+| `integration-train-selftest.sh` | 584 |
 | `lint-parallel-selftest.sh` | 43 |
 | `mutation-baseline-selftest.sh` | 31 |
 | `plan-dag-selftest.sh` | 347 |
@@ -60,4 +62,4 @@ here would be a threshold nobody derived.
 | `template-vendored-list-selftest.sh` | 5 |
 | `template-workflow-pins-selftest.sh` | 573 |
 | `token-report-selftest.sh` | 20 |
-| **total** | **3592** |
+| **total** | **3979** |
