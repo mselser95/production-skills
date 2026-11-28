@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # monorepo-root-selftest.sh -- the monorepo-root module, assembled for real with the design-system and a
 # service module, then its settings check, its root Makefile and its repo.yaml schema, one RED case per rule.
-# Hermetic, sequential, no network. Needs python3 with PyYAML (PYTHON=<interpreter> to choose one; the
+# The default run is hermetic, sequential, no network, no pnpm; it is what CI runs. MONOREPO_LIVE=1 (set by a human
+# or an opt-in job that has pnpm 10.34.3 and the registry) adds the live pnpm section; NO_PNPM=1 forces it off.
+# Needs python3 with PyYAML (PYTHON=<interpreter> to choose one; the
 # script takes the first of python3, python3.14, python3.13, python3.12 that imports yaml, else exits 2).
 # MOD_SRC=<dir> tests another copy of the module (mutation proofs). Final line: `<N> ok, <M> failed[, K skipped]`.
 # Exit: 0 all ok - 1 a case failed - 2 cannot run.
@@ -415,10 +417,191 @@ out="$(bash "$M6/scripts/monorepo-run.sh" check-fast 2>&1)"; rc=$?
 out="$(make -s -C "$M6" verify 2>&1)"; rc=$?
 [[ $rc -ne 0 && "$out" == *"unit-path"*"symlink"* && ! -e "$MARKER" ]] && pass "the settings check names the symlinked unit path (unit-path), nothing executed" || fail "symlink check" "rc=$rc $(head -c 300 <<<"$out")"
 
-# ---- pnpm: the assembled root really installs (offline, zero third-party dependencies)
+# ---- review 2, B1: package.json top-level keys are an ALLOW-list (root and workspace packages apart)
+# One case through the CLI (the reviewer's devEngines manifest); the key matrix below runs in-process (one python
+# start for all of it: a process per case is what made this suite slow).
+pcase "reviewer-B1: devEngines.runtime in a workspace package is refused (pkg-key), at its line" packages/a/package.json \
+  'd["devEngines"]={"runtime":{"name":"node","version":"22.11.0","onFail":"download"}}' "^packages/a/package.json:[0-9]+: pkg-key package.json key 'devEngines' is not allowed"
+# the shipped manifests are accepted: the module's root package.json and the two design-system packages (verbatim copies)
+DS="$tmp/dsfix"; cp -R "$alone" "$DS"; cp "$modsrc/package.json" "$DS/package.json"; mkdir -p "$DS/packages/tokens" "$DS/packages/theme"
+cat > "$DS/packages/tokens/package.json" <<'J'
+{
+  "name": "@ds-scope/tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Brand-neutral design tokens: DTCG JSON sources, alias resolver, CSS and typed TS emitters.",
+  "engines": { "node": ">=24 <27" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./css": "./dist/tokens.css",
+    "./json": "./dist/tokens.json"
+  },
+  "files": ["src", "dist"],
+  "scripts": {
+    "build": "node scripts/build.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
+J
+cat > "$DS/packages/theme/package.json" <<'J'
+{
+  "name": "@ds-scope/theme",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed theme contract over CSS custom properties, with light and dark themes filled from the tokens package.",
+  "engines": { "node": ">=24 <27" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./css": "./dist/theme.css"
+  },
+  "files": ["src", "dist"],
+  "scripts": {
+    "build": "node scripts/build.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@ds-scope/tokens": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
+J
+sed -i.b 's|^units: \[\]|units:\n  - { id: pkg-tokens, kind: package, language: ts, path: packages/tokens }\n  - { id: pkg-theme, kind: package, language: ts, path: packages/theme }|' "$DS/repo.yaml"; rm "$DS/repo.yaml.b"
+expect "the shipped root package.json and the two design-system manifests (verbatim) are accepted" 0 "^OK" check "$DS"
+
+# ---- review 2, B2: "has target T" is make's own verdict, not "make printed something"
+RULE='check-fast verify:\n\t@echo "x $@" >> "$(LOG)"\n'
+mk2() { local d="$tmp/b2-$1"; mkfake "$d"; mkdir -p "$d/services/x"; printf "$2" > "$d/services/x/Makefile"; repo_yaml "$d" svc-x:services/x; echo "$d"; }
+b2red() { # <label> <tree> <egrep over the output>: root make verify exits non-zero, matches, and no recipe ran
+  local out rc; : > "$LOG"; out="$(make -s -C "$2" verify 2>&1)"; rc=$?
+  if [[ $rc -ne 0 && ! -s "$LOG" && "$out" != *"verify svc-x: ok"* ]] && grep -Eq -- "$3" <<<"$out"; then pass "$1"; else fail "$1" "rc=$rc log=$(cat "$LOG") $(head -c 300 <<<"$out")"; fi
+}
+b2ok() { local out rc; : > "$LOG"; out="$(make -s -C "$2" verify 2>&1)"; rc=$?; if [[ $rc -eq 0 && "$out" == *"verify svc-x: ok"* ]] && logis "x verify,"; then pass "$1"; else fail "$1" "rc=$rc log=$(cat "$LOG") $(head -c 300 <<<"$out")"; fi; }
+T1="$(mk2 info 'check-fast:\n\t@echo "x $@" >> "$(LOG)"\n$(info building orders)\n.PHONY: check-fast verify\n')"
+b2red "a \$(info) banner + .PHONY and no verify rule: root make verify is RED, no unit recipe ran" "$T1" "svc-x: Makefile has no verify target"
+T2="$(mk2 phony 'check-fast:\n\t@echo "x $@" >> "$(LOG)"\n.PHONY: check-fast verify\n')"
+T3="$(mk2 real "$RULE"'$(info building orders)\n.PHONY: check-fast verify\n')"
+b2ok "the same Makefile with a real verify rule (banner, .PHONY): present, runs (control)" "$T3"
+T4="$(mk2 file "$RULE")"
+T5="$(mk2 catchall '%%:\n\t@echo "fwd $@" >> "$(LOG)"\n')"
+b2red "a catch-all %: rule is RED (targets cannot be verified), no recipe ran" "$T5" "unit-target unit svc-x: Makefile catch-all rule .*: targets cannot be verified"
+T6="$(mk2 default '.DEFAULT:\n\t@echo "fwd $@" >> "$(LOG)"\n')"
+: > "$LOG"; out="$(bash "$T5/scripts/monorepo-run.sh" verify 2>&1)"; rc=$?
+[[ $rc -eq 2 && "$out" == *"catch-all rule"* && ! -s "$LOG" ]] && pass "the runner alone refuses a catch-all unit, no recipe ran" || fail "runner catch-all" "rc=$rc $(head -c 200 <<<"$out")"
+# make 4.x wordings, asserted with a FAKE make on PATH so a Linux host is covered without GNU make 4
+FB="$tmp/fakebin"; mkdir -p "$FB"
+cat > "$FB/make" <<'E'
+#!/usr/bin/env bash
+# fake make 4.x: `make -C <dir> -n <target>` in 4.x wording (ASCII quotes). FAKE_MAKE_MODE: top | sub | present
+t="${*: -1}"
+case "$t" in __monorepo_probe_*) echo "make: *** No rule to make target '$t'.  Stop." >&2; exit 2;; esac
+echo "make: Entering directory '$2'"
+case "${FAKE_MAKE_MODE:-}" in
+  present) echo "echo $t" ;;
+  top) case "$t" in check-fast) echo "make: Nothing to be done for 'check-fast'." ;; *) echo "make: '$t' is up to date." ;; esac ;;
+  sub) case "$t" in check-fast) echo "make[1]: Nothing to be done for 'check-fast'." ;; *) echo "make[1]: '$t' is up to date." ;; esac ;;
+esac
+echo "make: Leaving directory '$2'"
+E
+chmod +x "$FB/make"
+# symlinked unit inside the repo, and its control (two real directories)
+M7="$tmp/b3g"; mkfake "$M7"; svc_make "$M7/services/a" a "check-fast verify"; ln -s a "$M7/services/b"; repo_yaml "$M7" svc-a:services/a svc-b:services/b
+: > "$LOG"; out="$(bash "$M7/scripts/monorepo-run.sh" verify 2>&1)"; rc=$?
+[[ $rc -eq 2 && "$out" == *"services/b is a symlink"* && ! -s "$LOG" ]] && pass "the runner alone refuses the in-repo unit symlink (services/b -> a), nothing ran" || fail "in-repo symlink runner" "rc=$rc log=$(cat "$LOG") $(head -c 300 <<<"$out")"
+# git: a tracked node_modules/
+G="$tmp/gt"; cp -R "$B" "$G"; mkdir -p "$G/node_modules/x"; printf '{}' > "$G/node_modules/x/package.json"; git -C "$G" init -q 2>/dev/null
+# the in-process matrix (module under test = the assembled copy of it)
+"$py" -B - "$D/scripts/monorepo_check.py" "$W" "$T2" "$T4" "$T6" "$FB" "$M7" "$G" <<'P' > "$tmp/matrix.out" 2>&1
+import importlib.util, json, os, re, shutil, subprocess, sys
+mod, W, T2, T4, T6, FB, M7, G = sys.argv[1:9]
+spec = importlib.util.spec_from_file_location("mc", mod); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+def say(ok, name, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + ("" if ok else " -- " + detail[:300].replace("\n", " | ")))
+def run(root):
+    m._catch_all.clear()
+    return ["%s:%d: %s %s" % f for f in m.check(root)]
+def has(lines, pat): return any(re.search(pat, l) for l in lines)
+def edit(rel, fn, root=W):
+    p = os.path.join(root, rel); old = open(p).read(); d = json.loads(old); fn(d)
+    open(p, "w").write(json.dumps(d, indent=2)); return p, old
+def restore(p, old): open(p, "w").write(old)
+assert run(W) == [], run(W)
+# workspace and root: every key outside the allow-list is a pkg-key finding naming the key and the file
+WS = "packages/a/package.json"; RT = "package.json"
+bad = [(WS, "devEngines", {"runtime": {"name": "node", "version": "22.11.0", "onFail": "download"}}), (WS, "workspaces", ["x"]),
+       (WS, "dependenciesMeta", {"typescript": {"injected": True}}), (WS, "config", {"registry": "https://registry.example.com/"}),
+       (WS, "publishConfig", {"registry": "https://registry.example.com/", "main": "evil.js"}), (WS, "imports", {"#dep": "left-pad"}),
+       (WS, "os", ["linux"]), (WS, "directories", {"lib": "x"}), (WS, "inventedKey", 1), (WS, "anotherInventedKey", []),
+       (RT, "devEngines", {"runtime": {"name": "node", "version": "22.11.0", "onFail": "download"}}), (RT, "workspaces", ["x"]),
+       (RT, "publishConfig", {"access": "public"}), (RT, "version", "1.0.0"), (RT, "inventedKey", 1)]
+for rel, key, val in bad:
+    p, old = edit(rel, lambda d: d.__setitem__(key, val)); out = run(W); restore(p, old)
+    say(has(out, r"^%s:\d+: pkg-key package.json key '%s' is not allowed" % (re.escape(rel), key)), "pkg-key: %s in %s is refused" % (key, rel), "\n".join(out))
+for label, meta, pat in (("a key besides optional", {"typescript": {"optional": True, "x": 1}}, "peerDependenciesMeta.typescript"),
+                         ("a non-boolean optional", {"typescript": {"optional": "yes"}}, "peerDependenciesMeta.typescript")):
+    p, old = edit(WS, lambda d: d.__setitem__("peerDependenciesMeta", meta)); out = run(W); restore(p, old)
+    say(has(out, "^%s:\\d+: pkg-key %s" % (re.escape(WS), pat)), "peerDependenciesMeta with %s is refused" % label, "\n".join(out))
+p, old = edit(WS, lambda d: d.__setitem__("engines", {"node": ">=24 <27", "bun": ">=1"})); out = run(W); restore(p, old)
+say(has(out, "pm-engines engines.bun"), "an engines key besides node and pnpm is refused", "\n".join(out))
+def allkeys(d):
+    d.update({"type": "module", "description": "x", "license": "MIT", "main": "a.js", "module": "a.mjs", "types": "a.d.ts", "exports": {".": "./a.js"},
+              "files": ["a.js"], "sideEffects": False, "engines": {"node": ">=24 <27"}, "bin": {"a": "a.js"}, "repository": "x", "keywords": ["a"], "author": "x",
+              "peerDependencies": {"typescript": "catalog:"}, "peerDependenciesMeta": {"typescript": {"optional": True}}, "optionalDependencies": {"typescript": "catalog:"}})
+p, old = edit(WS, allkeys); out = run(W); restore(p, old)
+say(out == [], "every key of the workspace allow-list is accepted together", "\n".join(out))
+# B2: make's own verdict
+out = run(T2)
+say(has(out, "unit-target unit svc-x: Makefile has no verify target") and not has(out, "no check-fast"), ".PHONY only (no banner): verify is missing, check-fast (a real rule) is present", "\n".join(out))
+open(os.path.join(T4, "services/x/verify"), "w").close(); out = run(T4)
+say(has(out, r"svc-x: Makefile has no verify target.*\.PHONY: verify"), "a real rule + a file named verify, no .PHONY: reported missing, with the .PHONY hint", "\n".join(out))
+os.remove(os.path.join(T4, "services/x/verify")); out = run(T4)
+say(out == [], "the same unit without the file: present (control)", "\n".join(out))
+out = run(T6)
+say(has(out, "unit-target unit svc-x: Makefile catch-all rule .*targets cannot be verified"), "a .DEFAULT: rule is RED too", "\n".join(out))
+# make 4.x wordings through a fake make on PATH
+path0 = os.environ["PATH"]; os.environ["PATH"] = FB + os.pathsep + path0
+for mode, name in (("top", "make 4.x wording ('T' is up to date / Nothing to be done for 'T')"), ("sub", "make 4.x recursive wording (make[1]: ...)")):
+    os.environ["FAKE_MAKE_MODE"] = mode; out = run(T2)
+    say(has(out, "no check-fast target") and has(out, "no verify target"), name + ": both mandatory targets missing", "\n".join(out))
+os.environ["FAKE_MAKE_MODE"] = "present"; out = run(T2)
+say(out == [], "the fake make with directory notices and a command line: both present (control)", "\n".join(out))
+os.environ["PATH"] = path0; os.environ.pop("FAKE_MAKE_MODE")
+# warnings
+out = run(M7)
+say(has(out, r"^repo.yaml:\d+: unit-path unit svc-b: path services/b: services/b is a symlink"), "an in-repo unit symlink (services/b -> a) is refused by the check", "\n".join(out))
+os.remove(os.path.join(M7, "services/b")); os.mkdir(os.path.join(M7, "services/b")); shutil.copy(os.path.join(M7, "services/a/Makefile"), os.path.join(M7, "services/b/Makefile")); out = run(M7)
+say(out == [], "the same two units as real directories are clean (control)", "\n".join(out))
+out = run(G)
+say(out == [], "an untracked node_modules/ in a git repo is not a finding (control)", "\n".join(out))
+subprocess.run(["git", "-C", G, "add", "-f", "node_modules"], capture_output=True); out = run(G)
+say(has(out, r"^node_modules/x/package.json:1: tracked-node-modules node_modules/ is tracked"), "a TRACKED node_modules/ is RED (tracked-node-modules)", "\n".join(out))
+nm = os.path.join(W, "packages/a/node_modules/x"); os.makedirs(nm); open(os.path.join(nm, "package.json"), "w").write("{}"); out = run(W); shutil.rmtree(os.path.join(W, "packages/a/node_modules"))
+say(out == [], "a package.json under node_modules/ is not stray (control)", "\n".join(out))
+for rel in ("services/s", "packages/a/sub"):
+    os.makedirs(os.path.join(W, rel)); open(os.path.join(W, rel, "package.json"), "w").write('{"name":"s"}'); out = run(W); shutil.rmtree(os.path.join(W, rel))
+    say(has(out, "^%s/package.json:1: stray-package-json" % re.escape(rel)), "a package.json at %s is RED (stray-package-json)" % rel, "\n".join(out))
+os.rmdir(os.path.join(W, "services")) if os.path.isdir(os.path.join(W, "services")) else None
+P
+while IFS= read -r l; do case "$l" in "ok   "*) pass "${l#ok   }";; "FAIL "*) fail "${l#FAIL }";; *) fail "matrix output" "$l";; esac; done < "$tmp/matrix.out"
+[[ -s "$tmp/matrix.out" ]] || fail "matrix produced no output"
+
+# ---- pnpm: the assembled root really installs (offline, zero third-party dependencies); live section, MONOREPO_LIVE=1
 have_pm="$(pnpm -v 2>/dev/null | tail -1)"
 want_pm="$("$py" -c 'import json,sys;print(json.load(open(sys.argv[1]))["packageManager"].split("@")[1])' "$alone/package.json")"
-if [[ -n "${NO_PNPM:-}" ]]; then skip "pnpm install section" "NO_PNPM is set (mutation runs only)"
+if [[ -n "${NO_PNPM:-}" ]]; then skip "pnpm live section" "NO_PNPM is set (mutation runs only)"
+elif [[ -z "${MONOREPO_LIVE:-}" ]]; then skip "pnpm live section (install, overrides, devEngines)" "MONOREPO_LIVE is not set; the default run is hermetic and is what CI runs"
 elif ! command -v pnpm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then skip "pnpm install --frozen-lockfile --offline" "pnpm or node not installed"
 elif [[ "$have_pm" != "$want_pm" ]]; then skip "pnpm install --frozen-lockfile --offline" "installed pnpm $have_pm is not the pinned $want_pm (would fetch it)"
 elif ! node -e 'const m=+process.versions.node.split(".")[0];process.exit(m>=24&&m<27?0:1)'; then skip "pnpm install --frozen-lockfile --offline" "node $(node -v) outside engines.node"
@@ -448,6 +631,17 @@ P
     pass "B1 live: pnpm installed is-odd 3.0.0 although the catalog says 3.0.1 (overrides is a real second home for versions)"
   elif [[ -f "$L/pnpm-lock.yaml" ]]; then fail "B1 live: the override did not take effect" "$(grep -n 'is-odd@' "$L/pnpm-lock.yaml" | head -3)"
   else skip "B1 live install of an overrides construct" "no lockfile written (registry unreachable?): $(tr '\n' ' ' <<<"$lo" | head -c 160)"; fi
+  # Review 2 B1: devEngines.runtime is honoured by pnpm (the lockfile gains node@runtime:<version>, fetched from the
+  # network, outside the catalog and engines.node) and the settings check is RED on that very tree.
+  E2="$tmp/live2"; cp -R "$alone" "$E2"; mkdir -p "$E2/packages/a"
+  printf '{"name":"a","version":"1.0.0","private":true,"scripts":{"test":"true"},"devEngines":{"runtime":{"name":"node","version":"22.11.0","onFail":"download"}}}\n' > "$E2/packages/a/package.json"
+  sed -i.b 's/^units: \[\]/units:\n  - { id: pkg-a, kind: package, language: ts, path: packages\/a }/' "$E2/repo.yaml"; mv "$E2/repo.yaml.b" "$tmp/live2.sedbak"
+  expect "the live devEngines tree is RED (pkg-key)" 1 "packages/a/package.json:[0-9]+: pkg-key package.json key 'devEngines' is not allowed" check "$E2"
+  lo="$(cd "$E2" && CI=true timeout 75 pnpm install --ignore-scripts 2>&1 | tail -n 5)"
+  if [[ -f "$E2/pnpm-lock.yaml" ]] && grep -q 'node@runtime:22.11.0' "$E2/pnpm-lock.yaml"; then
+    pass "B1 live: pnpm honoured devEngines.runtime (lockfile gained node@runtime:22.11.0, outside the catalog and engines.node)"
+  elif [[ -f "$E2/pnpm-lock.yaml" ]]; then fail "B1 live: devEngines.runtime not in the lockfile" "$(head -c 300 "$E2/pnpm-lock.yaml")"
+  else skip "B1 live install of a devEngines construct" "no lockfile written (network unreachable?): $(tr '\n' ' ' <<<"$lo" | head -c 160)"; fi
 fi
 
 summary="$ok ok, $bad failed"; [[ $skipped -gt 0 ]] && summary+=", $skipped skipped"; echo "$summary"

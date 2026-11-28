@@ -6,11 +6,16 @@
   monorepo_check.py validate FILE           validate one repo.yaml against docs/repo-schema.md
 
 Exit: 0 clean - 1 findings - 2 cannot run (PyYAML missing, repo.yaml unreadable for `units`).
-Reads text/JSON/YAML and asks `make -n` whether a unit has a target: no network, no pnpm. The root Makefile and the check read the SAME parser.
+Reads text/JSON/YAML, asks `git ls-files` for a tracked node_modules/, and asks `make -n` whether a unit has a
+target: no network, no pnpm. `make -n` evaluates the unit Makefile (parse-time `$(shell)`, `+` recipe lines and
+`$(MAKE)` lines still execute): the units are the repository's own code, trusted as `make check-fast` trusts
+them. What is guaranteed is that no unit TARGET RECIPE is run by `check` or `units`. The root Makefile and the
+check read the SAME parser.
 """
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -46,6 +51,18 @@ EXACT_VERSION_RX = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z
 CATALOG_REF_RX = re.compile(r"catalog:(?:[A-Za-z0-9_.-]*)")
 REASON_RX = re.compile(r"#\s*reason:\s*\S")
 DEP_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+# package.json: an ALLOW-list of top-level keys, one for the root manifest and one for workspace packages.
+# Sources: the root list is the shipped root package.json (name, private, packageManager, engines, scripts) plus the
+# four dependency fields (their VALUES are rule-checked); the workspace list is the manifests of the design-system
+# packages (name, version, private, type, description, engines, exports, files, scripts, dependencies,
+# devDependencies) plus the plain npm metadata and entry-point keys with no resolution or install-policy effect.
+# `publishConfig`, `devEngines`, `dependenciesMeta`, `workspaces`, `config`, `imports` are not needed by a shipped
+# manifest and are refused with every other key.
+ROOT_PKG_KEYS = frozenset(("name", "private", "packageManager", "engines", "scripts") + DEP_FIELDS)
+WORKSPACE_PKG_KEYS = frozenset(("name", "version", "private", "type", "description", "license", "main", "module",
+                                "types", "exports", "files", "sideEffects", "scripts", "engines", "packageManager",
+                                "bin", "repository", "keywords", "author", "peerDependenciesMeta") + DEP_FIELDS)
+# These five get the more specific `supply-override` message (they are the known second homes for versions).
 REFUSED_PKG_FIELDS = ("resolutions", "overrides", "pnpm", "bundledDependencies", "bundleDependencies")
 # Files whose EXISTENCE anywhere in the repository is refused (compared lower-case), and the rule that says so.
 LOCKFILE_NAMES = frozenset(("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb",
@@ -217,23 +234,77 @@ def same(a, b):
 
 def make_env():
     drop = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES")
-    return {k: v for k, v in os.environ.items() if k not in drop}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env["LC_ALL"] = "C"  # make's own notices in English, whatever the caller's locale
+    return env
+
+
+NOTICE_RX = re.compile(r"make(?:\[\d+\])?: (?:Entering|Leaving) directory\b")
+_Q1, _Q2 = "[`'\u2018]", "['\u2019]"
+
+
+def idle_rx(target, level0):
+    """make's own verdict for a name with nothing to run: 3.81 (`T') and 4.x ('T') wordings, `make:` or the
+    recursive `make[N]:` form."""
+    t = re.escape(target)
+    pre = r"make: " if level0 else r"make\[\d+\]: "
+    return re.compile(pre + r"(?:Nothing to be done for %s%s%s|%s%s%s is up to date)" % (_Q1, t, _Q2, _Q1, t, _Q2))
+
+
+def target_state(lines, target):
+    """'idle' | 'present' from the output of a successful `make -n <target>`. A `make:` verdict for <target>
+    wins over anything else printed (a `$(info)` banner); a `make[N]:` verdict is a sub-make's and only counts
+    as noise, so a recipe that forwards with `$(MAKE)` is still a recipe. Otherwise a target is present when a
+    line remains after removing make's directory notices."""
+    top, sub = idle_rx(target, True), idle_rx(target, False)
+    if any(top.match(l) for l in lines):
+        return "idle"
+    left = [l for l in lines if l.strip() and not NOTICE_RX.match(l) and not sub.match(l)]
+    return "present" if left else "idle"
+
+
+def run_make_n(unitdir, target):
+    """-> (exit status, output lines) of `make -C <unit> -n <target>`, stdout and stderr together; None when
+    make cannot be run. NOTE: make evaluates the Makefile; it can execute `$(shell)`, `+` and `$(MAKE)` lines."""
+    try:
+        r = subprocess.run(["make", "-C", unitdir, "-n", target], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                           env=make_env(), timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.returncode, r.stdout.splitlines()
+
+
+_catch_all = {}
+
+
+def is_catch_all(unitdir):
+    """True when the unit Makefile answers a name nobody wrote (`%:` / `.DEFAULT:`): then every target looks
+    present and a mandatory one cannot be told apart from a forwarded one."""
+    if unitdir not in _catch_all:
+        res = run_make_n(unitdir, "__monorepo_probe_%s__" % secrets.token_hex(6))
+        _catch_all[unitdir] = res is not None and res[0] == 0 and target_state(res[1], "") == "present"
+    return _catch_all[unitdir]
+
+
+def make_target_state(unitdir, target):
+    """'present' | 'idle' | 'absent' | 'catch-all'. Decided from make's own verdict, not from "some output":
+    present = exit 0, no `Nothing to be done for T` / `T is up to date`, and a command line left once make's
+    directory notices are removed. idle = make ran but has nothing to run (a name only in .PHONY, an empty
+    recipe, or a file named T beside a rule that is not .PHONY). absent = make failed (no rule)."""
+    if is_catch_all(unitdir):
+        return "catch-all"
+    res = run_make_n(unitdir, target)
+    if res is None or res[0] != 0:
+        return "absent"
+    return target_state(res[1], target)
 
 
 def has_make_target(unitdir, target):
-    """Ask make: `make -C <unit> -n <target>` exits 0 AND prints at least one command or sub-make line
-    (a bare "Nothing to be done" / "is up to date" is how make answers a name that is only in `.PHONY`,
-    a file of that name, or an empty recipe). The ONE definition of "this unit has target T" for a
-    service/database; the runner reads it through `units`. A recipe that exists and does nothing
-    (`verify: ; true`) cannot be judged by a tool and counts as present."""
-    try:
-        r = subprocess.run(["make", "-C", unitdir, "-n", target], stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True, errors="replace", env=make_env(), timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if r.returncode != 0:
-        return False
-    return any(l.strip() and not MAKE_MSG_RX.match(l) for l in r.stdout.splitlines())
+    """The ONE definition of "this unit has target T" for a service/database; the runner reads it through
+    `units`. A recipe that exists and does nothing (`verify: ; true`) cannot be judged by a tool and counts as
+    present."""
+    return make_target_state(unitdir, target) == "present"
 
 
 def has_script(pkgdir, target):
@@ -344,10 +415,23 @@ def check_package(root, d, data, text, pm, eng, cat, cats, f):
     if not isinstance(data, dict):
         f.append((pf, 1, "pm-engines", "package.json must be an object"))
         return
-    for fld in REFUSED_PKG_FIELDS:
-        if fld in data:
+    allowed = ROOT_PKG_KEYS if d == root else WORKSPACE_PKG_KEYS
+    for fld in data:
+        if fld in REFUSED_PKG_FIELDS:
             f.append((pf, line_of(text, fld, fld), "supply-override",
                       "the `%s` field is refused: it writes versions or install policy outside the catalog / root workspace file" % fld))
+        elif fld not in allowed:
+            f.append((pf, line_of(text, fld, fld), "pkg-key", "package.json key %r is not allowed in a %s manifest; it accepts only %s" % (
+                fld, "root" if d == root else "workspace package", ", ".join(sorted(allowed)))))
+    meta = data.get("peerDependenciesMeta")
+    if meta is not None:
+        if not isinstance(meta, dict):
+            f.append((pf, line_of(text, "peerDependenciesMeta", "peerDependenciesMeta"), "pkg-key", "peerDependenciesMeta must be an object"))
+        else:
+            for name, m in meta.items():
+                if not isinstance(m, dict) or set(m) - {"optional"} or not all(isinstance(v, bool) for v in m.values()):
+                    f.append((pf, line_of(text, "peerDependenciesMeta", name), "pkg-key",
+                              "peerDependenciesMeta.%s must be {optional: true|false} and nothing else" % name))
     for fld in DEP_FIELDS:
         deps = data.get(fld)
         if deps is None:
@@ -380,14 +464,42 @@ def check_package(root, d, data, text, pm, eng, cat, cats, f):
             f.append((pf, line_of(text, "engines", "engines"), "pm-engines", "engines must be an object"))
 
 
-def check_files(root, f):
-    """Existence rules by file name, over every file below root (only node_modules/ and .git/ are skipped)."""
+def check_tracked_node_modules(root, f):
+    """A COMMITTED node_modules/ is an install nobody pinned: refuse every tracked file under one. Needs git; a
+    tree that is not a git repository cannot tell a committed node_modules from an install, so no finding."""
+    if not os.path.exists(os.path.join(root, ".git")):
+        return  # the root is not a git repository root (no .git): nothing to ask, and no process to start
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        r = subprocess.run(["git", "-C", root, "ls-files", "-z"], stdin=subprocess.DEVNULL, capture_output=True,
+                           env=env, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if r.returncode != 0:
+        return
+    seen = set()
+    for p in sorted(r.stdout.decode("utf-8", "replace").split("\0")):
+        parts = p.split("/")
+        if "node_modules" in parts[:-1]:
+            top = "/".join(parts[:parts.index("node_modules") + 1])
+            if top not in seen:
+                seen.add(top)
+                f.append((p, 1, "tracked-node-modules", "%s/ is tracked by git: a committed node_modules is an install "
+                          "nobody pinned; `git rm -r --cached` it and ignore it" % top))
+
+
+def check_files(root, pkg_dirs, f):
+    """Existence rules by file name, over every file below root (only node_modules/ and .git/ are skipped).
+    A package.json outside the root and the workspace packages is `stray-package-json`."""
     for cur, dirs, files in os.walk(root):
         dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS)
         for name in sorted(files):
             p = os.path.join(cur, name)
             isroot = cur == root
             low = name.lower()
+            if low == "package.json" and cur not in pkg_dirs:
+                f.append((os.path.relpath(p, root), 1, "stray-package-json",
+                          "a package.json outside apps/* and packages/* is not checked: make it a workspace package deliberately"))
             if low in LOCKFILE_NAMES or (low == "pnpm-lock.yaml" and not isroot):
                 f.append((os.path.relpath(p, root), 1, "second-lockfile", "%s: the one lockfile is the root pnpm-lock.yaml" % name))
             elif low == "pnpm-workspace.yaml" and not isroot:
@@ -438,7 +550,8 @@ def check(root):
         pkgs.append((d, data, text))
     for d, data, text in pkgs:
         check_package(root, d, data, text, pm, eng, cat, cats, f)
-    check_files(root, f)
+    check_files(root, set(d for d, _, _ in pkgs), f)
+    check_tracked_node_modules(root, f)
 
     # --- repo.yaml and the units
     ryaml = os.path.join(root, "repo.yaml")
@@ -468,11 +581,23 @@ def check(root):
         if u["kind"] in ("app", "package") and not os.path.isfile(os.path.join(p, "package.json")):
             f.append((u["path"] + "/package.json", 1, "unit-target", "unit %s: package.json missing" % u["id"]))
             continue
+        if u["kind"] in ("service", "database") and is_catch_all(p):
+            f.append((u["path"] + "/Makefile", 1, "unit-target",
+                      "unit %s: Makefile catch-all rule (`%%:` / `.DEFAULT:`): targets cannot be verified" % u["id"]))
+            continue
         for t in MANDATORY[u["kind"]]:
-            if not unit_has(root, u, t):
-                where = "/Makefile" if u["kind"] in ("service", "database") else "/package.json"
-                what = "has no %s target (`make -n %s` fails)" % (t, t) if where == "/Makefile" else "has no `%s` script" % t
-                f.append((u["path"] + where, 1, "unit-target", "unit %s: %s %s" % (u["id"], where[1:], what)))
+            if u["kind"] in ("service", "database"):
+                st = make_target_state(p, t)
+                if st == "present":
+                    continue
+                what = "has no %s target (`make -n %s` fails)" % (t, t)
+                if st == "idle":
+                    what = ("has no %s target: `make -n %s` says nothing to be done or up to date; give it a recipe and "
+                            "declare `.PHONY: %s` (a file named %s beside a rule that is not .PHONY hides it)" % (t, t, t, t))
+                f.append((u["path"] + "/Makefile", 1, "unit-target", "unit %s: Makefile %s" % (u["id"], what)))
+            elif not unit_has(root, u, t):
+                f.append((u["path"] + "/package.json", 1, "unit-target",
+                          "unit %s: package.json has no `%s` script" % (u["id"], t)))
     if not err and not [1 for _, _, r, _ in f if r == "repo-yaml"]:
         for top in ("apps", "packages", "services"):
             base = os.path.join(root, top)
@@ -514,6 +639,12 @@ def cmd_units(root, target):
         return 2
     if shutil.which("make") is None:
         print("monorepo-run: make is not installed; cannot decide which units have %s" % target, file=sys.stderr)
+        return 2
+    for u in data["units"]:
+        if u["kind"] in ("service", "database") and is_catch_all(os.path.join(root, u["path"])):
+            print("monorepo-run: unit %s: Makefile catch-all rule: targets cannot be verified; refusing to run anything" % u["id"], file=sys.stderr)
+            refused += 1
+    if refused:
         return 2
     for u in data["units"]:
         must = 1 if target in MANDATORY[u["kind"]] else 0
