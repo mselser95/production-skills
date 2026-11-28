@@ -7,6 +7,12 @@
 #   pg-up                       pg_up is 1 (the exporter logs in over verify-full TLS)
 #   collectors-succeed          no pg_scrape_collector_success is 0
 #   required-metric <name>      every name in observability/required-metrics.txt is present
+#   exporter-tls-verify-full    the RUNNING exporter's DATA_SOURCE_URI (docker inspect of its
+#                               own container) has exactly one sslmode, verify-full, and one
+#                               non-empty sslrootcert; only those two parameters are read
+#                               into a variable and printed, never the whole value
+#   exporter-session-encrypted  from the database side: every app_monitor TCP session
+#                               (the exporter's) has pg_stat_ssl.ssl = true, and there is one
 #   exporter-not-published      the exporter port is not mapped to the host
 #   monitor-not-superuser       app_monitor is not superuser / createrole / createdb
 #   monitor-cannot-create       a CREATE TABLE as app_monitor is refused
@@ -19,8 +25,11 @@
 #   --mutate revoke-monitor
 #               revoke pg_monitor from app_monitor before the scrape and EXPECT it to go
 #               RED (the wal collector needs pg_ls_waldir, which pg_monitor grants).
-#               Exit 1 = RED as intended; exit 4 = the mutation SURVIVED (a vacuous
-#               test). Nothing is restored: the project is torn down.
+#               The mutation is judged by its SPECIFIC effect: exit 1 only when the scrape
+#               was fetched, pg_up is 1, the collector `wal` or `database` fails, the metric
+#               pg_wal_size_bytes is absent and NO other assertion failed (pg_wal_segments
+#               and pg_database_size_bytes are explained too: measured on the pinned images). Any other failure pattern is exit 3. Nothing is
+#               restored: the project is torn down.
 #   --promtool  also run `promtool test rules` in the pinned Prometheus image
 #               (observability/image.lock `prometheus.*`), --network none, read-only.
 #               Off by default: it may pull ~100 MB, which is not part of the 60 s
@@ -37,9 +46,14 @@
 # `rm -f dbscrape-<pid>-promtool` for the optional container). Nothing else is ever
 # stopped, removed or pruned. Passwords are random files in a 0700 scratch dir.
 #
-# Exit: 0 every assertion passed · 1 at least one FAIL (or the mutation went RED as
-# intended) · 2 nothing could be asserted (usage, no docker, stack did not start) ·
-# 4 the mutation survived.
+# Exit codes:
+#   0  every assertion passed (no --mutate)
+#   1  at least one assertion FAILED (no --mutate), or with --mutate: RED exactly as intended
+#   2  nothing could be asserted: usage, no docker, the stack did not start, a docker call
+#      timed out while starting, the revoke itself failed
+#   3  --mutate only: assertions failed, but not the ones the revoke explains (the run broke
+#      for another reason: scrape not fetched, pg_up 0, an unrelated assertion)
+#   4  --mutate only: the mutation SURVIVED, every assertion stayed green (a vacuous test)
 set -uo pipefail
 
 src="${BASH_SOURCE[0]}"; [[ $src == */* ]] || src="./$src"
@@ -69,7 +83,7 @@ last="$scratch/last"; metrics="$scratch/metrics"; envf="$scratch/env"; secdir="$
 : > "$last"
 DC=(docker compose -p "$proj" --env-file "$envf" -f "$dbdir/compose.yml" -f "$dbdir/compose.observability.yml")
 deadline=$((SECONDS + budget))
-pass=0; fail=0
+pass=0; fail=0; failed=()
 
 # bounded SECS CMD... : run CMD (an executable, never a shell function, so the pid we
 # kill IS the process), output to $last, killed after SECS. rc 124 = timed out.
@@ -102,15 +116,33 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 emit() { # PASS|FAIL name [detail]
-  if [[ $1 == PASS ]]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+  if [[ $1 == PASS ]]; then pass=$((pass + 1)); else fail=$((fail + 1)); failed+=("$2"); fi
   echo "$1 $2${3:+: $3}"
 }
 finish() {
   local n=$((pass + fail))
   echo "db-scrape-test: $n assertions, $pass ok, $fail failed ($proj${mutate:+, mutation $mutate})"
   if [[ -n $mutate ]]; then
-    if ((fail > 0)); then echo "RED as intended: --mutate $mutate was detected"; exit 1; fi
-    echo "MUTATION SURVIVED: --mutate $mutate left every assertion green, so the test is vacuous"; exit 4
+    if ((fail == 0)); then
+      echo "MUTATION SURVIVED: --mutate $mutate left every assertion green, so the test is vacuous"; exit 4
+    fi
+    # The revoke breaks the wal collector (pg_ls_waldir) and removes pg_wal_size_bytes;
+    # nothing else may fail, and the scrape must have been fetched with pg_up 1.
+    local f broke=0 has_wal=0 has_coll=0
+    for f in "${failed[@]}"; do
+      case "$f" in
+        collectors-succeed) has_coll=1 ;;
+        "required-metric pg_wal_size_bytes") has_wal=1 ;;
+        "required-metric pg_wal_segments") ;;
+        "required-metric pg_database_size_bytes") ;;   # the database collector needs pg_monitor too (measured)
+        *) broke=1 ;;
+      esac
+    done
+    [[ $up == 1 ]] || broke=1
+    [[ $bad == *'collector="wal"'* || $bad == *'collector="database"'* ]] || broke=1
+    ((has_wal && has_coll)) || broke=1
+    if ((broke == 0)); then echo "RED as intended: --mutate $mutate was detected (${failed[*]})"; exit 1; fi
+    echo "the run broke for another reason: --mutate $mutate failed [${failed[*]}], pg_up '${up:-absent}', failing collectors '${bad:-none}'; the revoke explains only the wal/database collector and pg_wal_size_bytes"; exit 3
   fi
   ((fail == 0)) && exit 0
   exit 1
@@ -161,6 +193,32 @@ else
   emit FAIL scrape-fetched "the exporter did not answer from inside the compose network: $(tail -n 2 "$last" | tr '\n' ' ')"
 fi
 
+# The RUNNING exporter's own connection settings, from docker inspect of its container.
+# Only the DATA_SOURCE_URI line is kept (it holds no password: that is a file), then only
+# the sslmode and sslrootcert parameters are printed; $last is emptied right after.
+exporter_tls() {
+  local cid line uri query p modes="" nmodes=0 nvf=0 nroot=0 root="" kv
+  if ! bounded "$(cap 8)" "${DC[@]}" ps -q exporter; then echo "FAIL: compose ps failed"; return 1; fi
+  cid="$(tr -d ' \n' < "$last")"
+  [[ -n $cid ]] || { echo "FAIL: no exporter container"; return 1; }
+  if ! bounded "$(cap 8)" docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid"; then echo "FAIL: docker inspect failed"; return 1; fi
+  line="$(grep '^DATA_SOURCE_URI=' "$last" | head -n 1)"; : > "$last"
+  [[ -n $line ]] || { echo "FAIL: the exporter has no DATA_SOURCE_URI"; return 1; }
+  uri="${line#DATA_SOURCE_URI=}"; query=""
+  [[ $uri == *\?* ]] && query="${uri#*\?}"
+  IFS='&' read -r -a kv <<<"$query"
+  for p in ${kv[@]+"${kv[@]}"}; do
+    case "$p" in
+      sslmode | sslmode=*) nmodes=$((nmodes + 1)); modes="$modes ${p#sslmode}"; [[ $p == sslmode=verify-full ]] && nvf=$((nvf + 1)) ;;
+      sslrootcert=*) nroot=$((nroot + 1)); root="${p#sslrootcert=}" ;;
+      sslrootcert) nroot=$((nroot + 1)) ;;
+    esac
+  done
+  if ((nmodes == 1 && nvf == 1 && nroot == 1)) && [[ -n $root ]]; then echo "sslmode=verify-full sslrootcert=$root"; return 0; fi
+  echo "sslmode parameters:${modes:- none} (want exactly sslmode=verify-full), sslrootcert count $nroot value '${root:-empty}'"; return 1
+}
+if tls_msg="$(exporter_tls)"; then emit PASS exporter-tls-verify-full "$tls_msg"; else emit FAIL exporter-tls-verify-full "${tls_msg#FAIL: }"; fi
+
 up="$(awk '$1 == "pg_up" { print $2 }' "$metrics")"
 if [[ $up == 1 ]]; then emit PASS pg-up; else emit FAIL pg-up "pg_up is '${up:-absent}', want 1"; fi
 
@@ -180,6 +238,19 @@ while IFS= read -r l; do
   if [[ $l == "PASS "* ]]; then emit PASS "required-metric ${l#PASS }"; else emit FAIL "required-metric ${l#FAIL }" "absent from the scrape"; fi
 done <<<"$missing"
 ((total > 0)) || emit FAIL required-metrics-listed "required-metrics.txt has no names"
+
+# From the DATABASE side: the exporter's own backend (role app_monitor, over TCP) is encrypted.
+# sup_psql runs over the unix socket, so it never counts itself.
+if sup_psql "SELECT count(*) FILTER (WHERE s.ssl) || '/' || count(*) FROM pg_stat_activity a JOIN pg_stat_ssl s USING (pid) WHERE a.usename = 'app_monitor' AND a.client_addr IS NOT NULL"; then
+  enc="$(tr -d ' \n' < "$last")"
+  if [[ $enc =~ ^([0-9]+)/([0-9]+)$ ]] && ((BASH_REMATCH[2] >= 1)) && [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then
+    emit PASS exporter-session-encrypted "$enc sessions encrypted"
+  else
+    emit FAIL exporter-session-encrypted "app_monitor TCP sessions encrypted/total is '${enc:-none}', want n/n with n >= 1"
+  fi
+else
+  emit FAIL exporter-session-encrypted "could not read pg_stat_ssl: $(tail -n 2 "$last" | tr '\n' ' ')"
+fi
 
 # Published on the host? `port` succeeds with a mapping only when one exists.
 if bounded "$(cap 8)" "${DC[@]}" port exporter 9187 && grep -Eq ':[1-9][0-9]*[[:space:]]*$' "$last"; then

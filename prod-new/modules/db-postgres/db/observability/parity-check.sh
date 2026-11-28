@@ -16,7 +16,14 @@
 #   ANNOTATION       an alert lacks severity / summary / description / runbook
 #   RUNBOOK-ANCHOR   a runbook annotation does not point at a heading of RUNBOOK.md
 #   TEST-ORPHAN      the test file names an alert the rules do not define
-#   OVERLAY-*        the exporter service breaks one of the hardening rules (see below)
+#   OVERLAY-*        the exporter service breaks one of the hardening rules: digest, read_only,
+#                    cap_drop, no-new-privileges, user, ports, privilege, secret, healthcheck,
+#                    depends_on, collectors, TLS (exactly one sslmode=verify-full and one
+#                    sslrootcert), LIMITS (cpus, mem_limit, pids_limit), TLS-MOUNT (read-only)
+#   EXPR-NAME-MATCHER / EXPR-UNSUPPORTED   an alert expression uses a `__name__` matcher or a
+#                    construct the metric extractor cannot read (it refuses, never guesses)
+#   RECORDING-RULE   a `record:` rule: recording rules are not checked yet
+#   PROMTOOL-CHECK   `promtool check rules` failed (run only when promtool is on PATH)
 # Exit: 0 green · 1 findings · 2 nothing was checked (python3 or PyYAML missing, a file
 # unreadable, a document that is not valid YAML): never "unchecked = ok".
 set -uo pipefail
@@ -39,7 +46,8 @@ command -v python3 >/dev/null 2>&1 || { echo "parity-check: python3 is not avail
 python3 -B -c 'import yaml' 2>/dev/null || { echo "parity-check: PyYAML is not importable, nothing was checked (pip install PyYAML)" >&2; exit 2; }
 
 exec python3 -B - "$dir" "$overlay" "$lock" <<'PY'
-import os, re, sys
+import os, re, shutil, subprocess, sys
+from urllib.parse import parse_qs
 import yaml
 
 obs, overlay_path, lock_path = sys.argv[1:4]
@@ -106,21 +114,147 @@ if not required:
     die("required-metrics.txt lists no metric")
 
 # ---- PromQL metric names ---------------------------------------------------------
-KEYWORDS = {"and", "or", "unless", "bool", "by", "without", "on", "ignoring", "group_left",
-            "group_right", "offset", "inf", "nan", "start", "end", "atan2"}
+# A hand-written PromQL recogniser is a liability, so this one REFUSES what it cannot see
+# instead of guessing: any construct outside the list below is a finding (EXPR-UNSUPPORTED),
+# never a silent pass. What it understands, after strings and `#` comments are removed:
+#   - metric names: an identifier that is not a keyword or a function, followed by `{`,
+#     `[`, `)`, `,`, an operator or the end; label matchers `{a="b", c=~"d"}` (label names
+#     and string values only); range durations `[5m]` and `[5m:1m]`; `offset <duration>`;
+#   - numbers, including hex, exponents, `Inf` and `NaN` in any case;
+#   - operators `+ - * / % ^ == != < > <= >=` and `and or unless bool atan2`;
+#   - grouping: `by without on ignoring group_left group_right` with an optional label list;
+#   - functions and aggregations from FUNCS, each followed by `(` (aggregations may be
+#     followed by `by` or `without`);
+#   - `absent(x)` and `absent_over_time(x[5m])` use the metric x.
+# Refused: any `__name__` (a metric written as a label matcher is invisible here), a
+# selector that starts with `{` without a metric name, an unknown function, `@`, a
+# duration outside `[...]`/`offset`, unbalanced brackets, any character not listed.
+AGG = {"sum", "avg", "min", "max", "count", "group", "stddev", "stdvar", "topk", "bottomk",
+       "quantile", "count_values"}
+FUNCS = AGG | {"rate", "increase", "irate", "delta", "idelta", "deriv", "predict_linear",
+               "absent", "absent_over_time", "present_over_time", "clamp", "clamp_min",
+               "clamp_max", "time", "vector", "scalar", "abs", "ceil", "floor", "round",
+               "sqrt", "exp", "ln", "log2", "log10", "label_replace", "label_join", "sort",
+               "sort_desc", "histogram_quantile", "avg_over_time", "sum_over_time",
+               "min_over_time", "max_over_time", "count_over_time", "last_over_time",
+               "changes", "resets", "timestamp"}
+GROUPING = {"by", "without", "on", "ignoring", "group_left", "group_right"}
+BINKW = {"and", "or", "unless", "bool", "atan2", "offset"}
+TOK = re.compile(r"""
+    (?P<ws>\s+)
+  | (?P<str>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`)
+  | (?P<comment>\#[^\n]*)
+  | (?P<dur>(?:[0-9]+(?:ms|s|m|h|d|w|y))+(?![A-Za-z0-9_.]))
+  | (?P<num>(?:0[xX][0-9a-fA-F]+|(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)(?![A-Za-z0-9_:.]))
+  | (?P<id>[A-Za-z_:][A-Za-z0-9_:]*)
+  | (?P<op>==|!=|<=|>=|=~|!~|[-+*/%^<>=,:])
+  | (?P<open>[(\[{])
+  | (?P<close>[)\]}])
+""", re.X)
 
 
 def metrics_of(expr):
-    s = re.sub(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'', '""', expr)
-    s = re.sub(r"\[[^\]]*\]", "", s)
-    s = re.sub(r"\{[^}]*\}", "", s)
-    s = re.sub(r"\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)", " ", s)
-    out = set()
-    for m in re.finditer(r"(?<![0-9a-zA-Z_:.])[a-zA-Z_:][a-zA-Z0-9_:]*", s):
-        if m.group(0) in KEYWORDS or re.match(r"\s*\(", s[m.end():]):
-            continue
-        out.add(m.group(0))
-    return out
+    """-> (set of metric names, list of (rule, message) refusals)."""
+    refusals = []
+    if "__name__" in expr:
+        refusals.append(("EXPR-NAME-MATCHER", "write the metric name, not a __name__ matcher"))
+    toks, pos = [], 0
+    while pos < len(expr):
+        m = TOK.match(expr, pos)
+        if not m:
+            refusals.append(("EXPR-UNSUPPORTED", f"cannot read `{expr[pos:pos + 12].strip()}` (unsupported character)"))
+            return set(), refusals
+        pos = m.end()
+        if m.lastgroup not in ("ws", "comment"):
+            toks.append((m.lastgroup, m.group(0)))
+    out, stack = set(), []
+    prev = ("", "")          # the previous token
+    prev_metric = False       # the previous token was a metric name
+    prev2 = ("", "")
+    pending_group = False
+    for i, (kind, text) in enumerate(toks):
+        nxt = toks[i + 1] if i + 1 < len(toks) else ("", "")
+        top = stack[-1] if stack else ""
+        bad = None
+        if top == "{":
+            if kind == "id":
+                pass
+            elif kind == "op" and text in ("=", "!=", "=~", "!~", ","):
+                pass
+            elif kind == "str":
+                pass
+            elif kind == "close" and text == "}":
+                stack.pop()
+            else:
+                bad = f"`{text}` inside a label matcher"
+        elif top == "g":
+            if kind == "id" or (kind == "op" and text == ","):
+                pass
+            elif kind == "close" and text == ")":
+                stack.pop()
+            else:
+                bad = f"`{text}` inside a grouping label list"
+        elif top == "[":
+            if kind == "dur" or (kind == "op" and text == ":"):
+                pass
+            elif kind == "close" and text == "]":
+                stack.pop()
+            else:
+                bad = f"`{text}` inside a range"
+        elif kind == "id":
+            low = text.lower()
+            if low in ("inf", "nan"):
+                pass
+            elif text in GROUPING:
+                if nxt == ("open", "("):
+                    pending_group = True
+                elif text not in ("group_left", "group_right"):
+                    bad = f"`{text}` without a label list"
+            elif text in BINKW:
+                pass
+            elif text in FUNCS and (nxt == ("open", "(") or (text in AGG and nxt[0] == "id" and nxt[1] in ("by", "without"))):
+                pass
+            elif nxt == ("open", "("):
+                bad = f"unknown function `{text}(`"
+            else:
+                out.add(text)
+                prev_metric = True
+                prev2, prev = prev, (kind, text)
+                continue
+        elif kind in ("num", "str"):
+            pass
+        elif kind == "dur":
+            if not (prev == ("id", "offset") or (prev == ("op", "-") and prev2 == ("id", "offset"))):
+                bad = f"duration `{text}` outside a range and `offset`"
+        elif kind == "op":
+            pass
+        elif kind == "open":
+            if text == "{":
+                if not prev_metric:
+                    bad = "a selector with no metric name before `{`"
+                else:
+                    stack.append("{")
+            elif text == "[":
+                if prev_metric or prev == ("close", "}") or prev == ("close", ")"):
+                    stack.append("[")
+                else:
+                    bad = "`[` that does not follow a selector"
+            else:
+                stack.append("g" if pending_group else "(")
+                pending_group = False
+        elif kind == "close":
+            if text == ")" and top == "(":
+                stack.pop()
+            else:
+                bad = f"unbalanced `{text}`"
+        if bad:
+            refusals.append(("EXPR-UNSUPPORTED", bad))
+            return out, refusals
+        prev_metric = False
+        prev2, prev = prev, (kind, text)
+    if stack:
+        refusals.append(("EXPR-UNSUPPORTED", "unbalanced brackets"))
+    return out, refusals
 
 
 # ---- the alert rules --------------------------------------------------------------
@@ -128,10 +262,14 @@ rules_doc = load(os.path.join(obs, "alerts", "postgres.rules.yml"))
 alerts = {}  # name -> rule
 for g in (rules_doc or {}).get("groups") or []:
     for r in g.get("rules") or []:
-        if isinstance(r, dict) and "alert" in r:
+        if isinstance(r, dict) and "record" in r:
+            fail("RECORDING-RULE", f"recording rule `{r['record']}`: recording rules are not checked yet")
+        elif isinstance(r, dict) and "alert" in r:
             if r["alert"] in alerts:
                 fail("ANNOTATION", f"alert {r['alert']} is defined twice")
             alerts[r["alert"]] = r
+        else:
+            fail("RECORDING-RULE", "a rule that is neither `alert:` nor `record:` is not checked")
 if not alerts:
     die("postgres.rules.yml defines no alert")
 
@@ -143,8 +281,10 @@ for m in re.finditer(r"^#{1,6}\s+(.+?)\s*$", runbook, re.M):
 
 SEVERITIES = {"critical", "warning", "info"}
 for name, r in alerts.items():
-    ms = metrics_of(str(r.get("expr", "")))
+    ms, refused = metrics_of(str(r.get("expr", "")))
     used |= ms
+    for rule_name, why in refused:
+        fail(rule_name, f"alert {name}: {why}")
     for m in sorted(ms - set(required)):
         fail("UNKNOWN-METRIC", f"alert {name} uses `{m}`, which is not in required-metrics.txt")
     labels = r.get("labels") or {}
@@ -163,6 +303,19 @@ for name, r in alerts.items():
 for m, dash in sorted(required.items()):
     if m not in used and not dash:
         fail("ORPHAN-METRIC", f"required metric `{m}` is used by no alert and is not marked dashboard-only")
+
+# `promtool check rules` catches what the extractor cannot: a syntactically broken expression.
+promtool = shutil.which("promtool")
+if promtool:
+    try:
+        pr = subprocess.run([promtool, "check", "rules", os.path.join(obs, "alerts", "postgres.rules.yml")],
+                            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        die(f"promtool could not run ({e})")
+    if pr.returncode != 0:
+        fail("PROMTOOL-CHECK", "promtool check rules failed: " + " ".join((pr.stdout + pr.stderr).split())[:300])
+else:
+    print("parity-check: promtool is not on PATH, `promtool check rules` skipped")
 
 # ---- the alert tests (read, not run: promtool runs them where it exists) -------------
 tests_doc = load(os.path.join(obs, "alerts", "postgres.rules.test.yml"))
@@ -252,8 +405,27 @@ env = svc.get("environment") or {}
 if isinstance(env, list):
     env = dict(str(e).partition("=")[::2] for e in env)
 env_vars.update({str(k): str(v) for k, v in env.items()})
-if "sslmode=verify-full" not in env_vars.get("DATA_SOURCE_URI", ""):
-    fail("OVERLAY-TLS", "DATA_SOURCE_URI must carry sslmode=verify-full")
+uri = env_vars.get("DATA_SOURCE_URI", "")
+qs = parse_qs(uri.partition("?")[2], keep_blank_values=True)
+if qs.get("sslmode") != ["verify-full"]:
+    fail("OVERLAY-TLS", f"DATA_SOURCE_URI must carry exactly one sslmode, verify-full (found {qs.get('sslmode')})")
+rootcert = qs.get("sslrootcert") or []
+if len(rootcert) != 1 or not rootcert[0].strip():
+    fail("OVERLAY-TLS", "DATA_SOURCE_URI must carry exactly one non-empty sslrootcert")
+for k in ("cpus", "mem_limit", "pids_limit"):
+    if not svc.get(k):
+        fail("OVERLAY-LIMITS", f"exporter must set {k}")
+tls_ro = False
+for v in svc.get("volumes") or []:
+    if isinstance(v, dict):
+        target, ro = str(v.get("target", "")), v.get("read_only") is True
+    else:
+        parts = str(v).split(":")
+        target, ro = (parts[1] if len(parts) > 1 else ""), "ro" in parts[2:]
+    if rootcert and target and rootcert[0].startswith(target.rstrip("/") + "/") and ro:
+        tls_ro = True
+if not tls_ro:
+    fail("OVERLAY-TLS-MOUNT", "the directory holding sslrootcert must be mounted read-only into the exporter")
 if not env_vars.get("DATA_SOURCE_PASS_FILE", "").startswith("/run/secrets/"):
     fail("OVERLAY-SECRET", "DATA_SOURCE_PASS_FILE must name a file under /run/secrets")
 if env_vars.get("DATA_SOURCE_USER") != "app_monitor":

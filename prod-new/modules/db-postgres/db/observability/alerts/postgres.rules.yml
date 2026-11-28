@@ -1,5 +1,6 @@
 # Prometheus alert rules for the database. One alert per signal in
 # required-metrics.txt that pages or warns; the others are dashboard-only.
+# Thresholds marked TUNABLE are starting points, not facts about any deployment.
 # Every alert: severity, summary, description, runbook (a section of ../RUNBOOK.md),
 # and at least one firing and one non-firing case in postgres.rules.test.yml.
 # parity-check.sh enforces all of that and that no expression uses a metric the
@@ -16,6 +17,18 @@ groups:
           summary: "PostgreSQL is not reachable by its exporter"
           description: "pg_up has been 0 for 1m on {{ $labels.instance }}: the exporter cannot log in or the server is down."
           runbook: "db/observability/RUNBOOK.md#postgresdown"
+
+      - alert: PostgresExporterAbsent
+        # pg_up == 0 cannot fire when the exporter itself is dead: its series is then
+        # ABSENT, not 0. absent() returns 1 exactly when no pg_up series exists.
+        expr: absent(pg_up)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The postgres_exporter is not being scraped"
+          description: "No pg_up series for 5m: the exporter is down or Prometheus cannot reach it, so every other database alert is blind."
+          runbook: "db/observability/RUNBOOK.md#postgresexporterabsent"
 
       - alert: PostgresExporterCollectorFailing
         expr: pg_scrape_collector_success == 0
@@ -117,7 +130,9 @@ groups:
           runbook: "db/observability/RUNBOOK.md#postgrescheckpointsrequested"
 
       - alert: PostgresTempFilesSustained
-        expr: rate(pg_stat_database_temp_bytes[15m]) > 0
+        # TUNABLE: the 1e4 B/s (about 10 KB/s) floor keeps trickles from alerting; see the
+        # runbook section for how to choose it.
+        expr: rate(pg_stat_database_temp_bytes[15m]) > 1e4
         for: 15m
         labels:
           severity: info
@@ -127,8 +142,8 @@ groups:
           runbook: "db/observability/RUNBOOK.md#postgrestempfilessustained"
 
       - alert: PostgresWalDirectoryLarge
-        # 4e9 sits above the default max_wal_size of 1GB with room for a slot that
-        # holds WAL; tune it to the volume.
+        # TUNABLE: 4e9 sits above the default max_wal_size of 1GB with room for a slot
+        # that holds WAL; set it from the volume (see the runbook section).
         expr: pg_wal_size_bytes > 4e9
         for: 15m
         labels:

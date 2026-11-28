@@ -9,6 +9,10 @@ monitoring role.
 
 The exporter cannot log in or the server is not answering, so every other alert is blind too. First: `docker compose ps` and `docker compose logs --tail 50 db exporter` to see whether the server is up and what the exporter says. Second: a login as the monitoring role over TLS (`psql -h 127.0.0.1 -U app_monitor -d app -c 'select 1'` inside the db container) to tell a dead server from a wrong password or an expired certificate. Third: disk space on the data volume and the server log's last lines for a crash or a failed recovery.
 
+## PostgresExporterAbsent
+
+Prometheus has no `pg_up` series at all, which is different from `pg_up == 0`: the exporter is not running or not reachable, so `PostgresDown` and every other alert cannot fire. First: `docker compose ps exporter` and `docker compose logs --tail 50 exporter` (a crash loop, an exporter that cannot start). Second: whether Prometheus can reach `exporter:9187` on the compose network, and whether its scrape job still names this target. Third: the exporter's healthcheck and that its `db` dependency is healthy.
+
 ## PostgresExporterCollectorFailing
 
 One collector fails on every scrape and, since exporter 0.21.0, all of its metrics are dropped, so alerts that use them cannot fire. First: which one, from `pg_scrape_collector_success == 0` (the `collector` label). Second: the exporter log for that collector's error, usually `permission denied` (was `pg_monitor` revoked from `app_monitor`?) or a missing extension (`pg_stat_statements` not created in the `app` database). Third: compare with `scripts/db-scrape-test.sh`, which fails on exactly this.
@@ -47,8 +51,8 @@ Most checkpoints are forced by WAL volume instead of the timer, which means writ
 
 ## PostgresTempFilesSustained
 
-Queries have been spilling sorts or hashes to temporary files for 15 minutes. First: `select query, temp_blks_written from pg_stat_statements order by temp_blks_written desc limit 5` and the `log_temp_files` lines naming the statements. Second: whether those queries are missing an index or select far more rows than they need. Third: raise `work_mem` for that role only, not globally.
+Queries have been spilling sorts or hashes to temporary files for 15 minutes. First: `select query, temp_blks_written from pg_stat_statements order by temp_blks_written desc limit 5` and the `log_temp_files` lines naming the statements. Second: whether those queries are missing an index or select far more rows than they need. Third: raise `work_mem` for that role only, not globally. TUNABLE: the alert's floor (`rate > 1e4` bytes per second, about 10 KB/s) should sit just above the temp-file rate of the normal workload, read from `rate(pg_stat_database_temp_bytes[15m])` over a quiet week.
 
 ## PostgresWalDirectoryLarge
 
-The `pg_wal` directory is larger than 4 GB. First: `select slot_name, active, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) from pg_replication_slots`; an inactive slot retains WAL forever. Second: the archive status if archiving is on (`select * from pg_stat_archiver`), a failing `archive_command` also retains segments. Third: `max_wal_size` and `wal_keep_size` against the volume; drop a dead slot only after confirming its consumer is gone.
+The `pg_wal` directory is larger than 4 GB. First: `select slot_name, active, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) from pg_replication_slots`; an inactive slot retains WAL forever. Second: the archive status if archiving is on (`select * from pg_stat_archiver`), a failing `archive_command` also retains segments. Third: `max_wal_size` and `wal_keep_size` against the volume; drop a dead slot only after confirming its consumer is gone. TUNABLE: the 4 GB threshold (`pg_wal_size_bytes > 4e9`) should be about 1.5 to 2 times the largest `pg_wal_size_bytes` seen in normal operation (at least `max_wal_size`), and always well below the free space of the WAL volume.

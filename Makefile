@@ -118,6 +118,7 @@ gates:
 # ~30 s each), so it is in no aggregate target. The pr.yaml job `db` runs it.
 # Sequential, first failure stops the target (make aborts on a non-zero recipe line).
 db-test:
+	@bash prod-new/modules/db-postgres/db/observability/parity-check.sh
 	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant plain
 	@bash prod-new/modules/db-postgres/scripts/db-bootstrap-test.sh --variant timescale
 	@bash prod-new/modules/db-postgres/scripts/db-scrape-test.sh --promtool

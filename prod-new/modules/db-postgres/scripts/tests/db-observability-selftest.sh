@@ -8,7 +8,8 @@
 #   4. db-scrape-test.sh: clean, pg_up 0, a missing metric, a failing collector, a
 #      published port, an elevated role, a write that works, teardown of exactly its own
 #      project, --mutate revoke-monitor (RED, and a survivor), a hung docker;
-#   5. mutations of the checks themselves, on scratch copies: each must turn a case RED.
+#   5. mutations of the checks themselves, on scratch copies: each must turn a case RED; a
+#      mutant whose anchor is not found FAILS the suite (it is never skipped silently).
 # Final line: `N ok, M failed[, K skipped]`. Exit 1 if any failed.
 # Needs python3 + PyYAML (the same dependency as parity-check.sh); without it the run
 # FAILS, it does not skip.
@@ -67,7 +68,7 @@ pcase() {
   local s="$1" want="$2" f="$3" old="$4" new="$5" out rc
   mk_tree
   if [[ -n $f ]]; then replace_in "$W/$f" "$old" "$new" || return 1; fi
-  out="$(bash "$s" --dir "$W/observability" 2>&1)"; rc=$?
+  out="$(PATH="${PX_PATH:-$PATH}" bash "$s" --dir "$W/observability" 2>&1)"; rc=$?
   if [[ $want == OK ]]; then [[ $rc == 0 && $out == *"parity-check: OK"* ]]
   else [[ $rc == 1 && $out == *"$want"* ]]; fi
 }
@@ -82,7 +83,7 @@ DIG="sha256:a88794758ad461c75f3825b51cde4bde730bdff04b3b24d00efe14217e41f615"
 
 expect_ok "parity-check passes on the tree" pcase "$parity" OK "" "" ""
 out="$(bash "$parity" 2>&1)"; rc=$?
-if [[ $rc == 0 && $out == *"12 alerts"* ]]; then pass "parity-check default paths: 12 alerts read"; else flunk "parity-check default paths" "rc=$rc"; fi
+if [[ $rc == 0 && $out == *"13 alerts"* ]]; then pass "parity-check default paths: 13 alerts read"; else flunk "parity-check default paths" "rc=$rc"; fi
 expect_ok "unknown metric in an alert -> UNKNOWN-METRIC" pcase "$parity" 'UNKNOWN-METRIC: alert PostgresDown uses `pg_upp`' "$R" "expr: pg_up == 0" "expr: pg_upp == 0"
 expect_ok "orphan required metric -> ORPHAN-METRIC" pcase "$parity" 'ORPHAN-METRIC: required metric `pg_orphan_x`' "$RM" "pg_up  " $'pg_orphan_x # nothing uses it\npg_up  '
 expect_ok "dashboard-only orphan is allowed" pcase "$parity" OK "$RM" "pg_up  " $'pg_orphan_x # dashboard-only: panel\npg_up  '
@@ -113,11 +114,44 @@ expect_ok "overlay without the secret -> OVERLAY-SECRET" pcase "$parity" "OVERLA
 expect_ok "password in the environment -> OVERLAY-SECRET" pcase "$parity" "OVERLAY-SECRET: DATA_SOURCE_PASS puts a password" "$EV" "DATA_SOURCE_USER=app_monitor" $'DATA_SOURCE_USER=app_monitor\nDATA_SOURCE_PASS=hunter2'
 expect_ok "password in the URI -> OVERLAY-SECRET" pcase "$parity" "OVERLAY-SECRET: DATA_SOURCE_URI carries a password" "$EV" "DATA_SOURCE_URI=db:5432" "DATA_SOURCE_URI=postgresql://app_monitor:hunter2@db:5432"
 expect_ok "overlay without a healthcheck -> OVERLAY-HEALTHCHECK" pcase "$parity" "OVERLAY-HEALTHCHECK" "$OV" "    healthcheck:" "    x-healthcheck:"
-expect_ok "sslmode weakened -> OVERLAY-TLS" pcase "$parity" "OVERLAY-TLS" "$EV" "sslmode=verify-full" "sslmode=require"
 expect_ok "stat_checkpointer collector off -> OVERLAY-COLLECTORS" pcase "$parity" "OVERLAY-COLLECTORS: exporter command lacks --collector.stat_checkpointer" "$OV" "      - --collector.stat_checkpointer
 " ""
 expect_ok "exporter not waiting for a healthy db -> OVERLAY-DEPENDS" pcase "$parity" "OVERLAY-DEPENDS" "$OV" "condition: service_healthy" "condition: service_started"
 expect_ok "privileged exporter -> OVERLAY-PRIVILEGE" pcase "$parity" "OVERLAY-PRIVILEGE" "$OV" "    read_only: true" $'    read_only: true\n    privileged: true'
+
+# PromQL the extractor cannot see is REFUSED, never passed
+expect_ok "metric as a __name__ matcher -> EXPR-NAME-MATCHER" pcase "$parity" "EXPR-NAME-MATCHER: alert PostgresDown: write the metric name, not a __name__ matcher" "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or {__name__=\"pg_bogus\"} > 0'"
+expect_ok "__name__ regex matcher -> EXPR-NAME-MATCHER" pcase "$parity" "EXPR-NAME-MATCHER" "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or {__name__=~\"pg_.*\"} > 0'"
+expect_ok "__name__ != matcher -> EXPR-NAME-MATCHER" pcase "$parity" "EXPR-NAME-MATCHER" "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or pg_up{__name__!=\"x\"} > 0'"
+expect_ok "selector with no metric name -> EXPR-UNSUPPORTED" pcase "$parity" "a selector with no metric name before" "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or {job=\"x\"} > 0'"
+expect_ok "unknown function -> EXPR-UNSUPPORTED" pcase "$parity" "unknown function \`pg_fn(\`" "$R" "expr: pg_up == 0" "expr: pg_fn(pg_up) == 0"
+expect_ok "unsupported character (@) -> EXPR-UNSUPPORTED" pcase "$parity" "EXPR-UNSUPPORTED: alert PostgresDown: cannot read" "$R" "expr: pg_up == 0" "expr: 'pg_up @ 100 == 0'"
+expect_ok "duration outside a range -> EXPR-UNSUPPORTED" pcase "$parity" "outside a range" "$R" "expr: pg_up == 0" "expr: pg_up == 5m"
+expect_ok "unbalanced brackets -> EXPR-UNSUPPORTED" pcase "$parity" "EXPR-UNSUPPORTED" "$R" "expr: pg_up == 0" "expr: (pg_up == 0"
+expect_ok "Inf, inf and NaN are numbers, not metrics" pcase "$parity" OK "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 and pg_up < Inf and pg_up != NaN and pg_up > -inf and pg_up < 1e9'"
+expect_ok "a comment naming a bogus metric is stripped" pcase "$parity" OK "$R" "expr: pg_up == 0" "expr: |
+          pg_up == 0 # pg_bogus is not a metric here"
+expect_ok "absent(x) uses x -> UNKNOWN-METRIC" pcase "$parity" 'UNKNOWN-METRIC: alert PostgresExporterAbsent uses `pg_nope`' "$R" "expr: absent(pg_up)" "expr: absent(pg_nope)"
+expect_ok "recording rule -> RECORDING-RULE" pcase "$parity" "recording rules are not checked yet" "$R" $'groups:\n' $'groups:\n  - name: rec\n    rules:\n      - record: job:pg_up:sum\n        expr: sum(pg_up)\n'
+# promtool check rules runs inside parity when promtool exists: a stand-in that fails proves the call
+mkdir -p "$tmp/fakept"; printf '#!/bin/sh\necho "boom from the stand-in" >&2\nexit 1\n' > "$tmp/fakept/promtool"; chmod +x "$tmp/fakept/promtool"
+px_fail() { PX_PATH="$tmp/fakept:$PATH" pcase "$@"; }
+expect_ok "promtool check rules failing -> PROMTOOL-CHECK" px_fail "$parity" "PROMTOOL-CHECK: promtool check rules failed: boom from the stand-in" "" "" ""
+if command -v promtool >/dev/null 2>&1; then
+  expect_ok "a syntactically broken expression -> PROMTOOL-CHECK (real promtool)" pcase "$parity" "PROMTOOL-CHECK" "$R" "expr: pg_up == 0" "expr: pg_up =="
+else
+  echo "SKIP real promtool parity case: no promtool on PATH"; skipped=$((skipped + 1))
+fi
+expect_ok "sslmode=require -> OVERLAY-TLS" pcase "$parity" "OVERLAY-TLS" "$EV" "sslmode=verify-full" "sslmode=require"
+expect_ok "sslmode=disable -> OVERLAY-TLS" pcase "$parity" "OVERLAY-TLS" "$EV" "sslmode=verify-full" "sslmode=disable"
+expect_ok "sslmode given twice -> OVERLAY-TLS" pcase "$parity" "OVERLAY-TLS" "$EV" "sslmode=verify-full&" "sslmode=verify-full&sslmode=require&"
+expect_ok "sslmode=verify-fullx (a substring match would pass) -> OVERLAY-TLS" pcase "$parity" "OVERLAY-TLS" "$EV" "sslmode=verify-full&" "sslmode=verify-fullx&"
+expect_ok "sslrootcert missing -> OVERLAY-TLS" pcase "$parity" "exactly one non-empty sslrootcert" "$EV" "&sslrootcert=/tls/server.crt" ""
+expect_ok "exporter without cpus -> OVERLAY-LIMITS" pcase "$parity" "OVERLAY-LIMITS: exporter must set cpus" "$OV" $'    cpus: 0.5\n' ""
+expect_ok "exporter without mem_limit -> OVERLAY-LIMITS" pcase "$parity" "OVERLAY-LIMITS: exporter must set mem_limit" "$OV" $'    mem_limit: 128m\n' ""
+expect_ok "exporter without pids_limit -> OVERLAY-LIMITS" pcase "$parity" "OVERLAY-LIMITS: exporter must set pids_limit" "$OV" $'    pids_limit: 64\n' ""
+expect_ok "tls volume mounted read-write -> OVERLAY-TLS-MOUNT" pcase "$parity" "OVERLAY-TLS-MOUNT" "$OV" "dbtls:/tls:ro" "dbtls:/tls:rw"
+expect_ok "tls volume not mounted -> OVERLAY-TLS-MOUNT" pcase "$parity" "OVERLAY-TLS-MOUNT" "$OV" "      - dbtls:/tls:ro" "      - dbtls:/other:ro"
 
 # a missing PyYAML must be exit 2, not a green: python3 shim that cannot import yaml
 mkdir -p "$tmp/noyaml"; printf '#!/bin/sh\nexit 1\n' > "$tmp/noyaml/python3"; chmod +x "$tmp/noyaml/python3"
@@ -148,15 +182,19 @@ case "$1" in
     case "$args" in
       *" down -v "*) exit 0 ;;
       *" up -d --wait"*) exit "${FAKE_UP_RC:-0}" ;;
+      *" ps -q exporter"*) echo "fakeexporter0001"; exit 0 ;;
       *" port exporter 9187"*)
+        if [[ -n ${FAKE_PORT_OUT+x} ]]; then [[ -n $FAKE_PORT_OUT ]] && echo "$FAKE_PORT_OUT"; exit "${FAKE_PORT_RC:-0}"; fi
         if [[ ${FAKE_PUBLISHED:-0} == 1 ]]; then echo "0.0.0.0:9187"; exit 0; fi
         echo "no port 9187/tcp for container" >&2; exit 1 ;;
       *" exec -T db wget "*)
+        if [[ ${FAKE_WGET_FAIL:-0} == 1 ]]; then echo "wget: error" >&2; exit 1; fi
         if [[ -e $FAKE_LOG.revoked && ${FAKE_REVOKE_NOOP:-0} != 1 ]]; then cat "$FAKE_METRICS_REVOKED"; else cat "$FAKE_METRICS"; fi
         exit 0 ;;
       *" exec -T db sh -c "*)
         case "$lastarg" in
           *"REVOKE pg_monitor"*) : > "$FAKE_LOG.revoked"; exit 0 ;;
+          *pg_stat_ssl*) echo "${FAKE_SSL:-1/1}"; exit 0 ;;
           *rolsuper*) echo "${FAKE_ROLSUPER:-f}"; exit 0 ;;
           "CREATE TABLE public.monitor_write_probe"* | "INSERT INTO"*)
             [[ ${FAKE_WRITE_OK:-0} == 1 ]] && exit 0
@@ -164,6 +202,11 @@ case "$1" in
         esac ;;
     esac
     exit 0 ;;
+  inspect)
+    # the exporter's container env; the canary stands for a secret that must never be printed
+    printf '%s\n' 'PATH=/usr/bin' "DATA_SOURCE_URI=${FAKE_URI-db:5432/app?sslmode=verify-full&sslrootcert=/tls/server.crt}" \
+      'DATA_SOURCE_PASS_FILE=/run/secrets/db_monitor_password' 'CANARY_SECRET=hunter2zz'
+    exit "${FAKE_INSPECT_RC:-0}" ;;
   run) exit "${FAKE_RUN_RC:-0}" ;;
 esac
 exit 0
@@ -184,6 +227,7 @@ sed 's/^pg_up 1$/pg_up 0/' "$tmp/m.ok" > "$tmp/m.pgup0"
 grep -v '^pg_wal_size_bytes' "$tmp/m.ok" > "$tmp/m.missing"
 { cat "$tmp/m.ok"; echo 'pg_scrape_collector_success{collector="stat_statements"} 0'; } > "$tmp/m.collector"
 grep -v -E '^pg_wal_(size_bytes|segments)' "$tmp/m.ok" | sed 's/collector="wal"} 1/collector="wal"} 0/' > "$tmp/m.revoked"
+sed 's/^pg_up 1$/pg_up 0/' "$tmp/m.revoked" > "$tmp/m.revoked.pgup0"
 
 # srun SCRIPT [VAR=val...] [-- args...]: sets out, rc, and the fake's call log in $tmp/log
 srun() {
@@ -197,7 +241,7 @@ srun() {
 }
 projof() { [[ $out =~ \((dbscrape-[0-9]+) ]] && echo "${BASH_REMATCH[1]}"; }
 
-sc_clean() { srun "$1"; [[ $rc == 0 && $out == *"db-scrape-test: $((nreq + 7)) assertions, $((nreq + 7)) ok, 0 failed"* ]]; }
+sc_clean() { srun "$1"; [[ $rc == 0 && $out == *"db-scrape-test: $((nreq + 9)) assertions, $((nreq + 9)) ok, 0 failed"* ]]; }
 sc_pgup() { srun "$1" FAKE_METRICS="$tmp/m.pgup0"; [[ $rc == 1 && $out == *"FAIL pg-up: pg_up is '0'"* ]]; }
 sc_missing() { srun "$1" FAKE_METRICS="$tmp/m.missing"; [[ $rc == 1 && $out == *"FAIL required-metric pg_wal_size_bytes"* ]]; }
 sc_collector() { srun "$1" FAKE_METRICS="$tmp/m.collector"; [[ $rc == 1 && $out == *"FAIL collectors-succeed: failing: collector=\"stat_statements\""* ]]; }
@@ -214,6 +258,7 @@ sc_teardown() {
     [[ -n $line ]] || continue
     case "$line" in
       "compose -p $p1 "*) [[ $line == *" down -v "* ]] && downs=$((downs + 1)) ;;
+      "inspect -f {{range .Config.Env}}{{println .}}{{end}} fakeexporter0001") ;;  # its own exporter container
       *) foreign=$((foreign + 1)) ;;
     esac
   done < "$tmp/log"
@@ -234,6 +279,13 @@ sc_mutate() {
   [[ $rc == 1 && $out == *"RED as intended"* ]] && grep -q 'REVOKE pg_monitor FROM app_monitor' "$tmp/log" \
     && grep -q -E ' down -v ' "$tmp/log"
 }
+# the revoke is judged by its SPECIFIC effect: exit 1 only for the failures it explains
+sc_mutate_broken_scrape() { srun "$1" FAKE_WGET_FAIL=1 -- --mutate revoke-monitor; [[ $rc == 3 && $out == *"broke for another reason"* && $out == *"FAIL scrape-fetched"* ]]; }
+sc_mutate_pgup0() { srun "$1" FAKE_METRICS_REVOKED="$tmp/m.revoked.pgup0" -- --mutate revoke-monitor; [[ $rc == 3 && $out == *"broke for another reason"* ]]; }
+sc_mutate_unrelated() { srun "$1" FAKE_ROLSUPER=t -- --mutate revoke-monitor; [[ $rc == 3 && $out == *"FAIL monitor-not-superuser"* ]]; }
+sc_mutate_ssl() { srun "$1" FAKE_SSL=0/1 -- --mutate revoke-monitor; [[ $rc == 3 ]]; }
+sc_mutate_nodocker() { out="$(env PATH="$tmp/empty" "$BASH" "$1" --mutate revoke-monitor 2>&1)"; rc=$?; [[ $rc == 2 && $out == *"docker not found"* ]]; }
+sc_mutate_start_fails() { srun "$1" FAKE_UP_RC=1 -- --mutate revoke-monitor; [[ $rc == 2 && $out == *"FAIL START"* ]]; }
 sc_mutate_survivor() { srun "$1" FAKE_REVOKE_NOOP=1 -- --mutate revoke-monitor; [[ $rc == 4 && $out == *"MUTATION SURVIVED"* ]]; }
 sc_no_revoke_without_mutate() { srun "$1"; ! grep -q 'REVOKE' "$tmp/log"; }
 sc_hang() {
@@ -242,10 +294,21 @@ sc_hang() {
   ((SECONDS - t0 <= 8)) && [[ $rc == 2 && $out == *"FAIL START"* ]]
 }
 sc_hang_short() { HANGS=4 sc_hang "$1"; }
+# the exporter's own connection settings, read from its container (never printed whole)
+sc_tls() { # URI WANT-substring
+  srun "$1" "FAKE_URI=$2"
+  [[ $rc == 1 && $out == *"FAIL exporter-tls-verify-full"* && $out == *"$3"* && $out != *hunter2zz* && $out != *"DATA_SOURCE_PASS_FILE"* ]]
+}
+sc_tls_ok() { srun "$1"; [[ $rc == 0 && $out == *"PASS exporter-tls-verify-full: sslmode=verify-full sslrootcert=/tls/server.crt"* && $out != *hunter2zz* ]]; }
+sc_ssl() { srun "$1" "FAKE_SSL=$2"; [[ $rc == 1 && $out == *"FAIL exporter-session-encrypted"* ]]; }
+sc_inspect_fails() { srun "$1" FAKE_INSPECT_RC=1; [[ $rc == 1 && $out == *"FAIL exporter-tls-verify-full"* ]]; }
+# `docker compose port` of an unpublished port prints nothing, `:0` or `invalid IP:0`
+sc_port_ok() { srun "$1" "FAKE_PORT_OUT=$2"; [[ $rc == 0 && $out == *"PASS exporter-not-published"* ]]; }
+sc_port_red() { srun "$1" "FAKE_PORT_OUT=$2"; [[ $rc == 1 && $out == *"FAIL exporter-not-published"* ]]; }
 sc_promtool() {
   srun "$1" -- --promtool
   local runl; runl="$(grep '^run ' "$tmp/log" | head -n 1)"; local p; p="$(projof)"
-  [[ $rc == 0 && $runl == *"--name $p-promtool"* && $runl == *"--network none"* && $runl == *"--cpus 1"* && $runl == *"--memory 1g"* \
+  [[ $rc == 0 && $runl == *"--name $p-promtool"* && $runl == *"--network none"* && $runl == *"--cpus 1"* && $runl == *"--memory 1g"* && $runl == *"--tmpfs /tmp"* \
     && $runl == *"quay.io/prometheus/prometheus:v3.16.0@sha256:"* ]] && grep -q "^rm -f $p-promtool\$" "$tmp/log"
 }
 sc_promtool_off() { srun "$1"; ! grep -q '^run ' "$tmp/log"; }
@@ -266,6 +329,29 @@ expect_ok "scrape test: teardown also after a failed assertion" sc_teardown_on_f
 expect_ok "scrape test: no revoke without --mutate" sc_no_revoke_without_mutate "$scrape"
 expect_ok "scrape test: --mutate revoke-monitor issues the revoke, goes RED, tears down" sc_mutate "$scrape"
 expect_ok "scrape test: a mutation that stays green -> exit 4" sc_mutate_survivor "$scrape"
+expect_ok "scrape test: --mutate, scrape not fetched after the revoke -> exit 3, not RED" sc_mutate_broken_scrape "$scrape"
+expect_ok "scrape test: --mutate, pg_up 0 after the revoke -> exit 3" sc_mutate_pgup0 "$scrape"
+expect_ok "scrape test: --mutate, an unrelated assertion fails -> exit 3" sc_mutate_unrelated "$scrape"
+expect_ok "scrape test: --mutate, the encryption assertion fails -> exit 3" sc_mutate_ssl "$scrape"
+expect_ok "scrape test: --mutate without docker -> exit 2" sc_mutate_nodocker "$scrape"
+expect_ok "scrape test: --mutate, the stack does not start -> exit 2" sc_mutate_start_fails "$scrape"
+expect_ok "scrape test: exporter sslmode=verify-full read from its container" sc_tls_ok "$scrape"
+expect_ok "scrape test: exporter sslmode=require -> RED" sc_tls "$scrape" "db:5432/app?sslmode=require&sslrootcert=/tls/server.crt" "sslmode parameters: =require"
+expect_ok "scrape test: exporter sslmode=disable -> RED" sc_tls "$scrape" "db:5432/app?sslmode=disable&sslrootcert=/tls/server.crt" "=disable"
+expect_ok "scrape test: exporter sslmode twice -> RED" sc_tls "$scrape" "db:5432/app?sslmode=verify-full&sslmode=require&sslrootcert=/tls/server.crt" "=verify-full =require"
+expect_ok "scrape test: exporter sslmode=verify-fullx -> RED" sc_tls "$scrape" "db:5432/app?sslmode=verify-fullx&sslrootcert=/tls/server.crt" "=verify-fullx"
+expect_ok "scrape test: exporter without sslmode -> RED" sc_tls "$scrape" "db:5432/app?sslrootcert=/tls/server.crt" "none"
+expect_ok "scrape test: exporter without sslrootcert -> RED" sc_tls "$scrape" "db:5432/app?sslmode=verify-full" "sslrootcert count 0"
+expect_ok "scrape test: exporter with an empty sslrootcert -> RED" sc_tls "$scrape" "db:5432/app?sslmode=verify-full&sslrootcert=" "value 'empty'"
+expect_ok "scrape test: docker inspect fails -> RED" sc_inspect_fails "$scrape"
+expect_ok "scrape test: monitor session not encrypted (ssl = f) -> RED" sc_ssl "$scrape" 0/1
+expect_ok "scrape test: one of two monitor sessions not encrypted -> RED" sc_ssl "$scrape" 1/2
+expect_ok "scrape test: no monitor session visible -> RED" sc_ssl "$scrape" 0/0
+expect_ok "scrape test: port output empty -> not published" sc_port_ok "$scrape" ""
+expect_ok "scrape test: port output ':0' -> not published" sc_port_ok "$scrape" ":0"
+expect_ok "scrape test: port output 'invalid IP:0' -> not published" sc_port_ok "$scrape" "invalid IP:0"
+expect_ok "scrape test: port output 0.0.0.0:9187 -> published, RED" sc_port_red "$scrape" "0.0.0.0:9187"
+expect_ok "scrape test: port output [::]:49153 -> published, RED" sc_port_red "$scrape" "[::]:49153"
 expect_ok "scrape test: a hung docker -> gives up within the budget (exit 2)" sc_hang "$scrape"
 expect_ok "scrape test: --promtool runs the pinned image, own name, no network, removed" sc_promtool "$scrape"
 expect_ok "scrape test: no promtool container without --promtool" sc_promtool_off "$scrape"
@@ -277,7 +363,8 @@ if grep -q ' exec -T db wget -q -O - http://exporter:9187/metrics$' "$tmp/log"; 
 # ---- 5. mutations of the checks themselves -----------------------------------------------------
 mutant() { # SRC NAME ANCHOR REPL -> $tmp/mut/NAME (a scratch copy; the real file is untouched)
   mkdir -p "$tmp/mut"; cp "$1" "$tmp/mut/$2"
-  replace_in "$tmp/mut/$2" "$3" "$4"
+  # an anchor that no longer exists must FAIL the suite, not skip the mutant silently
+  replace_in "$tmp/mut/$2" "$3" "$4" || { flunk "mutant $2: anchor not found, so the mutant did not run" "$3"; return 1; }
 }
 m_scrape() { mutant "$scrape" scrape.sh "$1" "$2"; }
 if m_scrape 'if [[ $l == "PASS "* ]]; then emit PASS "required-metric ${l#PASS }"; else emit FAIL "required-metric ${l#FAIL }" "absent from the scrape"; fi' 'emit PASS "required-metric ${l#* }"'; then
@@ -288,11 +375,24 @@ if m_scrape 'proj="dbscrape-$$"' 'proj="dbscrape-fixed"'; then
   expect_red "scrape test: cleanup/project with a fixed name instead of the unique one" sc_teardown "$tmp/mut/scrape.sh"; fi
 if m_scrape 'trap cleanup EXIT' ':'; then
   expect_red "scrape test: teardown trap removed" sc_teardown "$tmp/mut/scrape.sh"; fi
-if m_scrape 'if bounded "$(cap 8)" "${DC[@]}" port exporter 9187 && [[ $(cat "$last") == *:* ]]; then' 'if false; then'; then
+PORT_RE=':[1-9][0-9]*[[:space:]]*$'   # the scrape test's published-port regex, literally
+if m_scrape "grep -Eq '$PORT_RE' \"\$last\"; then" 'false; then'; then
   expect_red "scrape test: published-port check removed" sc_published "$tmp/mut/scrape.sh"; fi
+if m_scrape "grep -Eq '$PORT_RE'" "grep -Eq ':[0-9]+'"; then
+  expect_red "scrape test: port regex ':[0-9]+' reads 'invalid IP:0' as published" sc_port_ok "$tmp/mut/scrape.sh" "invalid IP:0"; fi
+if m_scrape '--tmpfs /tmp:rw,noexec,nosuid,size=64m ' ''; then
+  expect_red "scrape test: promtool container without a writable /tmp" sc_promtool "$tmp/mut/scrape.sh"; fi
+if m_scrape 'if tls_msg="$(exporter_tls)"; then' 'if true; then'; then
+  expect_red "scrape test: exporter TLS assertion removed" sc_tls "$tmp/mut/scrape.sh" "db:5432/app?sslmode=require&sslrootcert=/tls/server.crt" "sslmode"; fi
+if m_scrape '((nmodes == 1 && nvf == 1 && nroot == 1))' '((nvf >= 1 && nroot == 1))'; then
+  expect_red "scrape test: duplicated sslmode accepted" sc_tls "$tmp/mut/scrape.sh" "db:5432/app?sslmode=verify-full&sslmode=require&sslrootcert=/tls/server.crt" "sslmode"; fi
+if m_scrape '[[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then' 'true; then'; then
+  expect_red "scrape test: encryption assertion ignores unencrypted sessions" sc_ssl "$tmp/mut/scrape.sh" 0/1; fi
+if m_scrape '    if ((broke == 0)); then' '    if true; then'; then
+  expect_red "scrape test: any failure counts as the revoke being detected" sc_mutate_broken_scrape "$tmp/mut/scrape.sh"; fi
 if m_scrape 'if ! sup_psql '"'"'REVOKE pg_monitor FROM app_monitor'"'"'; then' 'if false; then'; then
   expect_red "scrape test: --mutate no longer revokes" sc_mutate "$tmp/mut/scrape.sh"; fi
-if m_scrape '    if ((fail > 0)); then echo "RED as intended: --mutate $mutate was detected"; exit 1; fi' '    if true; then echo "RED as intended: --mutate $mutate was detected"; exit 1; fi'; then
+if m_scrape 'so the test is vacuous"; exit 4' 'so the test is vacuous"; exit 1'; then
   expect_red "scrape test: a surviving mutation reported as RED" sc_mutate_survivor "$tmp/mut/scrape.sh"; fi
 if m_scrape 'kill -KILL "$pid" 2>/dev/null' 'true'; then
   # the watchdog no longer kills: each hung call runs its full 4 s, three calls exceed the 8 s allowance
@@ -314,5 +414,24 @@ if pm 'if svc.get("ports"):' 'if False:'; then
   expect_red "port published by default: overlay ports check removed" pcase "$tmp/mut/parity-check.sh" "OVERLAY-PORTS" "$OV" $'    expose:\n      - "9187"' $'    expose:\n      - "9187"\n    ports:\n      - "9187:9187"'; fi
 if pm 'if not path.endswith("RUNBOOK.md") or not anchor or anchor not in anchors:' 'if False:'; then
   expect_red "parity runbook anchor check removed" pcase "$tmp/mut/parity-check.sh" "RUNBOOK-ANCHOR" "$RB" "## PostgresDown" "## Something else"; fi
+if pm '    if "__name__" in expr:' '    if False:'; then
+  expect_red "parity: __name__ refusal removed" pcase "$tmp/mut/parity-check.sh" "EXPR-NAME-MATCHER" "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or {__name__=\"pg_bogus\"} > 0'"; fi
+if pm 'if low in ("inf", "nan"):' 'if False:'; then
+  expect_red "parity: Inf/NaN read as metrics (false positive on the clean expression)" pcase "$tmp/mut/parity-check.sh" OK "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 and pg_up < Inf and pg_up != NaN and pg_up > -inf and pg_up < 1e9'"; fi
+if pm 'if not prev_metric:' 'if False:'; then
+  expect_red "parity: nameless selector accepted" pcase "$tmp/mut/parity-check.sh" "a selector with no metric name before" "$R" "expr: pg_up == 0" "expr: 'pg_up == 0 or {job=\"x\"} > 0'"; fi
+if pm 'bad = f"unknown function `{text}(`"' 'bad = None'; then
+  expect_red "parity: unknown function accepted" pcase "$tmp/mut/parity-check.sh" "unknown function" "$R" "expr: pg_up == 0" "expr: pg_fn(pg_up) == 0"; fi
+if pm 'if promtool:' 'if False:'; then
+  expect_red "parity: promtool check rules removed" px_fail "$tmp/mut/parity-check.sh" "PROMTOOL-CHECK" "" "" ""; fi
+if pm 'if isinstance(r, dict) and "record" in r:' 'if False:'; then
+  expect_red "parity: recording rules no longer refused" pcase "$tmp/mut/parity-check.sh" "recording rules are not checked yet" "$R" $'groups:\n' $'groups:\n  - name: rec\n    rules:\n      - record: job:pg_up:sum\n        expr: sum(pg_up)\n'; fi
+if pm 'if qs.get("sslmode") != ["verify-full"]:' 'if "sslmode=verify-full" not in uri:'; then
+  expect_red "parity: sslmode matched as a substring (verify-fullx passes)" pcase "$tmp/mut/parity-check.sh" "OVERLAY-TLS" "$EV" "sslmode=verify-full&" "sslmode=verify-fullx&"
+  expect_red "parity: sslmode matched as a substring (duplicate passes)" pcase "$tmp/mut/parity-check.sh" "OVERLAY-TLS" "$EV" "sslmode=verify-full&" "sslmode=verify-full&sslmode=require&"; fi
+if pm '    if not svc.get(k):' '    if False:'; then
+  expect_red "parity: resource limits rule removed" pcase "$tmp/mut/parity-check.sh" "OVERLAY-LIMITS" "$OV" $'    cpus: 0.5\n' ""; fi
+if pm 'if not tls_ro:' 'if False:'; then
+  expect_red "parity: read-only tls mount rule removed" pcase "$tmp/mut/parity-check.sh" "OVERLAY-TLS-MOUNT" "$OV" "dbtls:/tls:ro" "dbtls:/tls:rw"; fi
 if ((skipped > 0)); then echo "$ok ok, $bad failed, $skipped skipped"; else echo "$ok ok, $bad failed"; fi
 ((bad == 0))

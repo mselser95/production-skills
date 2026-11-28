@@ -57,7 +57,7 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   `docker compose -f compose.yml [-f compose.timescale.yml] -f compose.observability.yml up -d`.
 - `db/observability/required-metrics.txt` - the contract: names a scrape must contain, each with its reason.
   A name no alert uses must say `dashboard-only`.
-- `db/observability/alerts/postgres.rules.yml` + `postgres.rules.test.yml` - 12 alerts (availability, collector
+- `db/observability/alerts/postgres.rules.yml` + `postgres.rules.test.yml` - 13 alerts (availability, exporter absent, collector
   failure, connections, replication lag, xid wraparound x2, dead tuples, long transactions, deadlocks,
   checkpoints, temp files, WAL size), each with severity, summary, description and a `runbook` annotation that
   points at a heading of `db/observability/RUNBOOK.md`; each has a firing and a non-firing `promtool` case.
@@ -65,12 +65,20 @@ rules with tests, and a scrape test. All of it lives under `db/observability/` p
   an alert uses a metric outside the contract, a required metric is orphaned, an alert lacks a firing or a
   non-firing test, severity/summary/description/runbook, or a runbook anchor; and when the overlay is not
   digest-pinned (or differs from the lock), not read-only / `cap_drop: [ALL]` / `no-new-privileges` / non-root,
-  publishes a port, carries a password in the environment or URI, or lacks a healthcheck or a needed collector.
+  publishes a port, carries a password in the environment or URI, lacks a healthcheck, a needed collector or
+  resource limits, has anything but exactly one `sslmode=verify-full` and one `sslrootcert`, or mounts the
+  certificate read-write. It REFUSES (never guesses) a `__name__` matcher, a nameless selector, an unknown
+  function and any `record:` rule, and runs `promtool check rules` when promtool is on PATH. `make db-test`
+  runs it first. Thresholds marked TUNABLE (temp files, WAL size) are starting points; see the runbook.
 - `bash scripts/db-scrape-test.sh [--mutate revoke-monitor] [--promtool]` - NEEDS DOCKER, not run by the
   selftest. Starts `db` + `exporter` as project `dbscrape-<pid>` with a 60 s budget (`DB_SCRAPE_BUDGET_S`),
   scrapes from the db container, and asserts `pg_up 1`, no failing collector, every required metric present,
-  the port not on the host, and that `app_monitor` is not superuser and cannot create or insert.
-  `--mutate revoke-monitor` revokes `pg_monitor` first and exits 1 (RED, as intended); exit 4 means the mutation
+  the port not on the host, that `app_monitor` is not superuser and cannot create or insert, that the RUNNING
+  exporter's `DATA_SOURCE_URI` (docker inspect; only the `sslmode`/`sslrootcert` parameters are read) has
+  exactly one `sslmode=verify-full` and a `sslrootcert`, and that its session is encrypted (`pg_stat_ssl`).
+  Exit 0 pass, 1 a failed assertion, 2 nothing could be asserted, 3 and 4 only with `--mutate`.
+  `--mutate revoke-monitor` revokes `pg_monitor` first and exits 1 only when the failures are the ones the revoke
+  explains (wal/database collector, `pg_wal_size_bytes`); any other failure is exit 3; exit 4 means the mutation
   survived. `--promtool` also runs `promtool test rules` in the pinned Prometheus image (no network, read-only).
   Torn down with `down -v` of its own project on every exit path.
 - `bash scripts/tests/db-observability-selftest.sh` - hermetic selftest and mutation proof of all of the above

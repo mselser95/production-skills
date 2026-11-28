@@ -7,7 +7,7 @@
 # Names are the exporter's v0.21.1 names as documented; the ones marked UNVERIFIED
 # were not seen in a real scrape when this file was written. The first scrape test
 # in containers settles them: fix the name here AND in the alert, never drop it.
-pg_up                                                 # availability; alert PostgresDown
+pg_up                                                 # availability; alert PostgresDown; absent() of it drives PostgresExporterAbsent
 pg_scrape_collector_success                           # a collector that fails drops all its metrics (0.21.0); alert PostgresExporterCollectorFailing
 pg_settings_max_connections                           # denominator of the connection saturation alert
 pg_stat_database_numbackends                          # numerator of the connection saturation alert

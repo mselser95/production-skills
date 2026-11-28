@@ -22,6 +22,30 @@ tests:
               description: "pg_up has been 0 for 1m on db: the exporter cannot log in or the server is down."
               runbook: "db/observability/RUNBOOK.md#postgresdown"
 
+  # No pg_up series at all (the exporter is dead): promtool models an absent series by
+  # providing none for it.
+  - interval: 1m
+    input_series:
+      - series: 'pg_stat_database_numbackends{instance="db",datname="app"}'
+        values: '1x20'
+    alert_rule_test:
+      - {eval_time: 3m, alertname: PostgresExporterAbsent, exp_alerts: []}
+      - eval_time: 10m
+        alertname: PostgresExporterAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "The postgres_exporter is not being scraped"
+              description: "No pg_up series for 5m: the exporter is down or Prometheus cannot reach it, so every other database alert is blind."
+              runbook: "db/observability/RUNBOOK.md#postgresexporterabsent"
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{instance="db"}'
+        values: '1x20'
+    alert_rule_test:
+      - {eval_time: 10m, alertname: PostgresExporterAbsent, exp_alerts: []}
+
   - interval: 1m
     input_series:
       - series: 'pg_scrape_collector_success{instance="db",collector="wal"}'
@@ -199,7 +223,10 @@ tests:
   - interval: 1m
     input_series:
       - series: 'pg_stat_database_temp_bytes{instance="db",datname="app"}'
-        values: '0+1000x40'
+        values: '0+1000000x40'
+      # below the floor: 1.67 B/s of temp files never alerts
+      - series: 'pg_stat_database_temp_bytes{instance="db",datname="slow"}'
+        values: '0+100x40'
       - series: 'pg_stat_database_temp_bytes{instance="db",datname="postgres"}'
         values: '5000x40'
     alert_rule_test:
@@ -209,7 +236,7 @@ tests:
           - exp_labels: {severity: info, instance: db, datname: app}
             exp_annotations:
               summary: "Queries are spilling to temporary files"
-              description: "Database app on db wrote temp files for 15m (16.67B/s)."
+              description: "Database app on db wrote temp files for 15m (16.67kB/s)."
               runbook: "db/observability/RUNBOOK.md#postgrestempfilessustained"
       - {eval_time: 5m, alertname: PostgresTempFilesSustained, exp_alerts: []}
 
