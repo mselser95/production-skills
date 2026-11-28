@@ -528,6 +528,21 @@ fn repository_root(module: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
 }
 
+/// The directories a parent walk examines: the proper ancestors of `module`,
+/// nearest first, up to and INCLUDING `ceiling`. When `ceiling` is `module`
+/// itself, or is not an ancestor of it at all, nothing above the module is
+/// examined (a walk must never climb past the ceiling it was given).
+fn dirs_above_up_to<'a>(module: &'a Path, ceiling: &Path) -> Vec<&'a Path> {
+    let mut out = Vec::new();
+    for dir in module.ancestors().skip(1) {
+        out.push(dir);
+        if dir == ceiling {
+            return out;
+        }
+    }
+    Vec::new()
+}
+
 /// A release channel and nothing else: `stable`, `beta` or `nightly`, each
 /// optionally dated `-YYYY-MM-DD`, or a version `N.N` / `N.N.N`. No path
 /// separator, no leading `.` or `~`: rustup reads anything else as the name of
@@ -552,13 +567,17 @@ fn valid_channel(c: &str) -> bool {
     (parts.len() == 2 || parts.len() == 3) && parts.iter().all(|p| digits(p, None))
 }
 
-/// `"x"` with no quote, backslash or newline inside, the whole of `s`.
+/// `"x"` or the TOML literal string `'x'`, the whole of `s`, with no quote of
+/// either kind and no backslash inside.
 fn quoted(s: &str) -> Option<&str> {
-    let inner = s.trim().strip_prefix('"')?.strip_suffix('"')?;
-    (!inner.contains(['"', '\\'])).then_some(inner)
+    let s = s.trim();
+    let inner = ['"', '\'']
+        .iter()
+        .find_map(|q| s.strip_prefix(*q)?.strip_suffix(*q))?;
+    (!inner.contains(['"', '\'', '\\'])).then_some(inner)
 }
 
-/// Parses the rest of an array line: quoted strings separated by commas,
+/// Parses the rest of an array line: quoted (`"x"` or `'x'`) strings separated by commas,
 /// optionally closed by `]`. `Some(closed)`, or `None` for anything else.
 fn array_items(mut rest: &str) -> Option<bool> {
     loop {
@@ -569,8 +588,9 @@ fn array_items(mut rest: &str) -> Option<bool> {
         if let Some(after) = rest.strip_prefix(']') {
             return after.trim().is_empty().then_some(true);
         }
-        let body = rest.strip_prefix('"')?;
-        let end = body.find('"')?;
+        let q = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+        let body = &rest[1..];
+        let end = body.find(q)?;
         if body[..end].contains('\\') {
             return None;
         }
@@ -600,7 +620,8 @@ fn toolchain_text_violations(file: &str, text: &str) -> Vec<String> {
             continue;
         }
         if line.starts_with('[') && !line.contains('=') {
-            if line != "[toolchain]" {
+            let inner = line.strip_prefix('[').and_then(|l| l.strip_suffix(']'));
+            if inner.map(str::trim) != Some("toolchain") {
                 found.push(format!("{file}: the table {line} is not accepted"));
             }
             continue;
@@ -677,11 +698,8 @@ fn toolchain_files_in(dir: &Path) -> Vec<PathBuf> {
 fn refused_toolchain_files(module: &Path, ceiling: &Path) -> Vec<String> {
     let mut files = Vec::new();
     toolchain_files_below(module, &mut files);
-    for dir in module.ancestors().skip(1) {
+    for dir in dirs_above_up_to(module, ceiling) {
         files.extend(toolchain_files_in(dir));
-        if dir == ceiling {
-            break;
-        }
     }
     let allowed = module.join("rust-toolchain.toml");
     let mut found = Vec::new();
@@ -713,16 +731,13 @@ fn refused_toolchain_files(module: &Path, ceiling: &Path) -> Vec<String> {
 fn refused_cargo_config(module: &Path, ceiling: &Path) -> Vec<String> {
     let mut files = Vec::new();
     configs_below(module, &mut files);
-    for dir in module.ancestors().skip(1) {
+    for dir in dirs_above_up_to(module, ceiling) {
         // The user's own CARGO_HOME is their machine's, not the repository's.
         let home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
         if home.as_deref() != Some(dir.join(".cargo").as_path()) {
             files.extend(cargo_config_files(dir));
-        }
-        if dir == ceiling {
-            break;
         }
     }
     let mut found: Vec<String> = files
@@ -1438,6 +1453,14 @@ fn fixture_target() -> PathBuf {
         .join("arch-fixtures")
 }
 
+/// Where fixture SOURCE trees live: a fixed directory (so nested builds are
+/// reused) under the OS temp location (`TMPDIR` honoured), never inside the module, so the real module
+/// (and its `rust-toolchain.toml`) is never an ancestor of a fixture. Only the
+/// nested cargo's build output stays under `fixture_target()`.
+fn fixture_work() -> PathBuf {
+    std::env::temp_dir().join("svc-arch-fixtures")
+}
+
 fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for e in fs::read_dir(from).unwrap() {
@@ -1467,7 +1490,7 @@ fn append(file: &Path, text: &str) {
 /// A fixture workspace with a copy of the real domain crate; `attack` gets the
 /// crate directory. The path is fixed per case (so builds are reused).
 fn fixture(case: &str, attack: fn(&Path)) -> Tree {
-    let dir = fixture_target().join("work").join(case);
+    let dir = fixture_work().join("work").join(case);
     let _ = fs::remove_dir_all(&dir);
     let krate = dir.join("crates/domain");
     copy_dir(&root().join("crates/domain/src"), &krate.join("src"));
@@ -1693,7 +1716,7 @@ struct ConfigCase {
 }
 
 fn config_fixture(case: &ConfigCase) -> (Tree, PathBuf) {
-    let base = fixture_target().join("config-work").join(case.name);
+    let base = fixture_work().join("config-work").join(case.name);
     let _ = fs::remove_dir_all(&base);
     let module = if case.parent {
         base.join("mod")
@@ -1956,12 +1979,27 @@ fn rust_toolchain_files_may_only_carry_channel_components_targets_and_profile() 
     }
     let fine = "[toolchain]\nchannel = \"1.99.1\" # pinned\ncomponents = [\"clippy\"]\nprofile = \"minimal\"\ntargets = [\n  \"a=b\",\n]\n";
     assert!(toolchain_text_violations("rust-toolchain.toml", fine).is_empty());
+    // TOML literal (single-quoted) strings are the same value; `[ toolchain ]` too.
+    let literal = "[ toolchain ]\nchannel = '1.99.1'\ncomponents = ['clippy', \"rustfmt\"]\nprofile = 'minimal'\ntargets = [\n  'a=b',\n]\n";
+    assert!(toolchain_text_violations("rust-toolchain.toml", literal).is_empty());
+    // Mixed or unbalanced quotes, a quote inside, and a BOM stay refused.
+    for bad in [
+        "[toolchain]\nchannel = '1.99.1\"\n",
+        "[toolchain]\nchannel = 'a\"b'\n",
+        "[toolchain]\nchannel = '1.99.1'\ncomponents = ['x\"]\n",
+        "\u{feff}[toolchain]\nchannel = \"1.99.1\"\n",
+    ] {
+        assert!(
+            !toolchain_text_violations("rust-toolchain.toml", bad).is_empty(),
+            "{bad:?}"
+        );
+    }
 }
 
 /// Builds `rel` files under a scratch dir and returns the findings for the
 /// module at `<scratch>/mod` with the repository root at `<scratch>`.
 fn toolchain_case(name: &str, files: &[(&str, &str)]) -> Vec<String> {
-    let base = fixture_target().join("toolchain-work").join(name);
+    let base = fixture_work().join("toolchain-work").join(name);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(base.join("mod/crates/domain")).unwrap();
     for (rel, content) in files {
@@ -1972,6 +2010,60 @@ fn toolchain_case(name: &str, files: &[(&str, &str)]) -> Vec<String> {
     let found = refused_toolchain_files(&base.join("mod"), &base);
     let _ = fs::remove_dir_all(&base);
     found
+}
+
+/// Pure pin of the parent walks' bound (no cargo): files above the ceiling are
+/// never reported, a file between the module and the ceiling is, and with the
+/// ceiling at the module itself nothing above is examined. This is also what
+/// keeps the gate green whatever `CARGO_TARGET_DIR` is: a fixture's walk can
+/// never climb into the real module.
+#[test]
+fn the_parent_walks_stop_at_the_ceiling() {
+    let scratch = std::env::temp_dir().join("svc-arch-walk-bound");
+    let _ = fs::remove_dir_all(&scratch);
+    let top = scratch.join("root");
+    let module = top.join("a/module");
+    fs::create_dir_all(top.join(".git")).unwrap();
+    fs::create_dir_all(&module).unwrap();
+    fs::create_dir_all(scratch.join(".cargo")).unwrap();
+    fs::write(
+        scratch.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )
+    .unwrap();
+    fs::write(scratch.join(".cargo/config.toml"), "[build]\n").unwrap();
+    fs::write(top.join("rust-toolchain"), "1.99.1\n").unwrap();
+    fs::write(
+        module.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.1\"\n",
+    )
+    .unwrap();
+
+    let found = refused_cargo_config(&module, &top);
+    assert_eq!(
+        found.len(),
+        1,
+        "only the legacy file below the ceiling: {found:?}"
+    );
+    assert!(found[0].contains("root/rust-toolchain "), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|f| !f.contains("walk-bound/rust-toolchain.toml")
+                && !f.contains("walk-bound/.cargo")),
+        "nothing above the ceiling may be reported: {found:?}"
+    );
+    let dirs = dirs_above_up_to(&module, &top);
+    assert_eq!(dirs, vec![top.join("a"), top.clone()]);
+
+    // The ceiling is the module itself: nothing above is examined.
+    assert!(dirs_above_up_to(&module, &module).is_empty());
+    assert!(refused_toolchain_files(&module, &module).is_empty());
+    assert!(refused_cargo_config(&module, &module).is_empty());
+    // A ceiling that is not an ancestor at all: nothing above is examined.
+    assert!(dirs_above_up_to(&module, &scratch.join("elsewhere")).is_empty());
+    assert!(refused_cargo_config(&module, &scratch.join("elsewhere")).is_empty());
+    let _ = fs::remove_dir_all(&scratch);
 }
 
 #[test]
