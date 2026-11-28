@@ -3,7 +3,7 @@
 
 Usage:
   python3 -I -B scripts/assemble.py --dest DIR --layout single|monorepo \
-      --module ID [--module ID ...] --slot NAME=VALUE [--slot ...] \
+      [--module ID ...] [--unit MODULE:ID[,SLOT=VALUE...] ...] --slot NAME=VALUE [--slot ...] \
       [--modules-dir DIR] [--strict-tracked]
 
 A module is prod-new/modules/<id>/module.json: `source` (relative to the module
@@ -12,6 +12,38 @@ wins). Every source file must match a glob (no catch-all, so a dropped glob is
 an error, not a silent relocation). Layout `single`: root and unit are the repo
 root. Layout `monorepo`: unit is services/<SERVICE>, and a module that places
 anything as `unit` must declare (and be given) the SERVICE slot, else exit 2.
+
+UNIT INSTANCES (--unit). `--module M` is ONE instance of M with the global --slot values (its
+unit directory is services/<SERVICE>, exactly as before). `--unit M:ID[,K=V...]` (repeatable;
+`,` separates, and no value can contain `,` or `:`, so it parses without ambiguity) is one
+instance of M with its OWN slots: ID fills the module's unit slot (manifest key `unit_slot`,
+default `SERVICE`), global --slot values apply unless the instance overrides them (overriding
+the unit slot itself is exit 2, a K the module does not declare is exit 2). The same module may
+appear in several --unit with different ids; --module and --unit may be mixed. Every instance is
+built into the ONE temp tree and renamed once. Unit directory of an instance (layout monorepo):
+by manifest `unit.kind` (default service): service services/<id>, app apps/<id>, package
+packages/<id>, database db; layout single: the root. A unit instance is refused (exit 2, before
+anything is written) when its id repeats another --unit id (compared NFC + case-folded, so ids
+differing only by case are the same id) or its unit directory is equal to / nested in /
+containing another instance's (the check needs one side to be a --unit: several plain --module
+instances keep sharing one directory as before). Slot values, links, probes, `.git` rules apply
+per instance; the id obeys the value grammar and the module's max_len/charset. A link of a
+unit-placed file whose target resolves into ANOTHER instance's unit directory is refused (exit
+1: it couples two units). ROOT files are contributed once per instance: identical bytes are
+written once, root_merge (declared by every contributor) merges, anything else is exit 1 naming
+the path and both contributors (`module[unit-id]`); for two instances of ONE module the message
+says the module places a per-unit (slot-dependent) file at the root. Error messages name
+`module[unit-id]`.
+
+REPO INVENTORY. Layout monorepo, when a module contributes a root `repo.yaml`: the assembler
+fills the units list. Contract: the file holds EXACTLY ONE line `units: []` at column 0 (an
+exact line match, not a substring), else exit 2. That line becomes `units:` plus one flow-style
+line per instance that places unit files:
+`  - { id: "x", kind: "service", language: "go", path: "services/x" }`, every scalar json.dumps()
+quoted (JSON strings are YAML strings, so `true`, `123` or `null` stay strings), sorted by path;
+kind and language come from the module's `unit` {kind, language}, and an instance with unit
+files whose module declares none is exit 2. Two instances at one path: exit 1. No repo.yaml,
+nothing is generated.
 
 SLOT VALUES. ONE grammar for every value, checked before anything else:
   1 to 64 characters (the length cap), each in [A-Za-z0-9._-], the first in
@@ -99,6 +131,10 @@ MANIFEST KEYS (MANIFEST_KEYS below is the one list; unknown key -> exit 2):
   requires      [module ids] each must also be selected, else exit 1.
   conflicts     [module ids] none may also be selected, else exit 1.
   unit_kind     optional string (informational).
+  unit_slot     optional slot name (default SERVICE) that a --unit id fills; must be declared in
+                `slots` when given.
+  unit          optional {"kind": service|app|package|database, "language": str}: the inventory
+                entry (repo.yaml) and, for kind, the unit directory. Both keys required when present.
   exclude       [globs] never placed, never reported unplaced; a glob containing
                 `..` or starting with `/` is exit 2. When `source` is
                 the module dir itself, module.json at its root is always excluded.
@@ -162,7 +198,7 @@ VALUE_RX = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?")
 SLOT_NAME_RX = re.compile(r"[A-Z][A-Z0-9_]*")
 MODULE_ID_RX = re.compile(r"[a-z][a-z0-9-]*")
 MANIFEST_KEYS = ("id", "source", "placement", "requires", "conflicts", "unit_kind",
-                 "exclude", "root_merge", "strict_slots", "slot_allow", "slots")
+                 "exclude", "root_merge", "strict_slots", "slot_allow", "slots", "unit_slot", "unit")
 SLOT_KEYS = ("description", "literal", "max_len", "charset")
 CHARSETS = ("lower", "lower-digits-dash", "identifier")
 MAX_VALUE = 64
@@ -171,6 +207,8 @@ DIGITS = "0123456789"
 SPECIAL = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
 SIGNALS = tuple(getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT") if hasattr(signal, n))
 LAYOUTS = ("single", "monorepo")
+UNIT_DIRS = {"service": "services", "app": "apps", "package": "packages", "database": None}
+UNITS_LINE = b"units: []"
 STRATEGIES = ("union-lines",)
 TOKEN = re.compile(rb"<([A-Z][A-Z0-9_]*)>")
 WORD = re.compile(r"[A-Za-z0-9_]")
@@ -561,6 +599,20 @@ def load_manifest(mid, mdir):
         bad("key 'strict_slots' must be true or false")
     if "unit_kind" in m and not isinstance(m["unit_kind"], str):
         bad("key 'unit_kind' must be a string")
+    us = m.get("unit_slot", "SERVICE")
+    if not isinstance(us, str) or not SLOT_NAME_RX.fullmatch(us):
+        bad("key 'unit_slot' must be a slot name [A-Z][A-Z0-9_]*")
+    if "unit_slot" in m and isinstance(m.get("slots", {}), dict) and us not in m.get("slots", {}):
+        bad("key 'unit_slot' names slot %s, which the module does not declare" % us)
+    if "unit" in m:
+        u = m["unit"]
+        if not isinstance(u, dict) or set(u) != {"kind", "language"} \
+                or not all(isinstance(x, str) and x for x in u.values()):
+            bad("key 'unit' must be {\"kind\": ..., \"language\": ...}, both non-empty strings")
+        if u["kind"] not in UNIT_DIRS:
+            bad("unit kind %r is not one of %s" % (u["kind"], ", ".join(sorted(UNIT_DIRS))))
+        if not re.fullmatch(r"[a-z][a-z0-9]*", u["language"]):
+            bad("unit language %r must match [a-z][a-z0-9]*" % u["language"])
     rm = m.get("root_merge", {})
     if not isinstance(rm, dict):
         bad("key 'root_merge' must be an object")
@@ -634,6 +686,70 @@ def write_tree(plan, tmp, umask, dir_modes=None):
     os.chmod(tmp, (0o777 & ~umask) | stat.S_IWUSR)
 
 
+def dirs_clash(a, b):
+    """True when two unit directories (relative; "" is the repo root) are equal after NFC and case
+    folding, or one contains the other: the two units would share files."""
+    fa, fb = fold(a), fold(b)
+    return fa == fb or fa == "" or fb == "" or fa.startswith(fb + "/") or fb.startswith(fa + "/")
+
+
+def parse_unit(spec):
+    """`MODULE:ID[,K=V...]` -> (module, id, {K: V}). Values cannot hold `,` or `:` (the grammar),
+    so the split is unambiguous."""
+    parts = spec.split(",")
+    mid, sep, uid = parts[0].partition(":")
+    if not sep or not mid or not uid:
+        die(2, "bad --unit %r (want MODULE:ID[,SLOT=VALUE...])" % spec)
+    over = {}
+    for kv in parts[1:]:
+        k, sep, v = kv.partition("=")
+        if not sep or not SLOT_NAME_RX.fullmatch(k):
+            die(2, "bad --unit %r: %r is not SLOT=VALUE with SLOT matching [A-Z][A-Z0-9_]*" % (spec, kv))
+        if k in over:
+            die(2, "bad --unit %r: slot %s given twice" % (spec, k))
+        over[k] = v
+    return mid, uid, over
+
+
+def fill_inventory(plan, insts):
+    """Fill the `units: []` line of a contributed root repo.yaml with one entry per instance that
+    placed unit files. Returns nothing; exits 2/1 on a contract violation."""
+    e = plan.get("repo.yaml")
+    if e is None or e["kind"] != "file":
+        return
+    lines = e["data"].split(b"\n")
+    at = [n for n, ln in enumerate(lines) if ln == UNITS_LINE]
+    if len(at) != 1:
+        die(2, "repo.yaml (module %s) must hold exactly one line `units: []` at column 0 (found %d); "
+            "the assembler fills that line and parses no YAML" % (" + ".join(e["mods"]), len(at)))
+    ents = {}
+    for i in insts:
+        if not i["nunit"]:
+            continue
+        u = i["m"].get("unit")
+        if u is None:
+            die(2, "module %s (unit %s) places unit files but declares no `unit` {kind, language}; "
+                "repo.yaml needs both" % (i["mid"], i["uid"]))
+        uid = i["uid"] if i["uid"] is not None else i["slots"].get(i["m"].get("unit_slot", "SERVICE"))
+        if uid is None:
+            die(2, "module %s places unit files but has no unit id for repo.yaml: give it with --unit"
+                % i["mid"])
+        path = i["dir"]
+        if not path or escapes("/assemble-root", path) or any(reserved(c) for c in path.split("/")):
+            die(1, "unit %s (module %s): unit path %r is not a safe relative path" % (uid, i["mid"], path))
+        if fold(path) in ents:
+            die(1, "units %s and %s (modules %s and %s) share the path %s: repo.yaml lists one unit per path"
+                % (ents[fold(path)][0], uid, ents[fold(path)][1], i["mid"], path))
+        ents[fold(path)] = (uid, i["mid"], path, u)
+    rows = []
+    for uid, _, path, u in sorted(ents.values(), key=lambda t: (t[2], t[0])):
+        rows.append("  - { id: %s, kind: %s, language: %s, path: %s }" % (
+            json.dumps(uid), json.dumps(u["kind"]), json.dumps(u["language"]), json.dumps(path)))
+    if rows:
+        lines[at[0]:at[0] + 1] = [b"units:"] + [r.encode() for r in rows]
+        e["data"] = b"\n".join(lines)
+
+
 def run():
     ap = argparse.ArgumentParser(
         add_help=True, allow_abbrev=False, formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -643,7 +759,12 @@ def run():
                "(lower, lower-digits-dash, identifier)." % MAX_VALUE)
     ap.add_argument("--dest", required=True)
     ap.add_argument("--layout", required=True)
-    ap.add_argument("--module", action="append", default=[])
+    ap.add_argument("--module", action="append", default=[],
+                    help="one instance of MODULE with the global --slot values (repeatable)")
+    ap.add_argument("--unit", action="append", default=[], metavar="MODULE:ID[,SLOT=VALUE...]",
+                    help="one instance of MODULE whose unit id is ID (it fills the module's unit slot, "
+                         "default SERVICE) and whose own slots are the K=V after the commas; global "
+                         "--slot values apply unless overridden (repeatable, mixes with --module)")
     ap.add_argument("--slot", action="append", default=[])
     ap.add_argument("--modules-dir", default=None)
     ap.add_argument("--strict-tracked", action="store_true")
@@ -654,7 +775,7 @@ def run():
 
     if a.layout not in LAYOUTS:
         die(2, "unknown layout %r (known: %s)" % (a.layout, ", ".join(LAYOUTS)))
-    if not a.module:
+    if not a.module and not a.unit:
         die(2, "no --module given")
     if len(set(a.module)) != len(a.module):
         die(2, "a --module is given twice")
@@ -674,14 +795,38 @@ def run():
     for k, v in slots.items():
         check_value(k, v)
 
-    manifests = []
+    insts = []
     for mid in a.module:
-        m = load_manifest(mid, mdir)
-        m["_id"] = mid
-        manifests.append((os.path.join(mdir, mid), m))
+        insts.append({"mid": mid, "uid": None, "over": {}, "explicit": False})
+    for spec in a.unit:
+        mid, uid, over = parse_unit(spec)
+        check_value("unit id of module " + mid, uid)
+        for k, v in over.items():
+            check_value(k, v)
+        insts.append({"mid": mid, "uid": uid, "over": over, "explicit": True})
 
-    chosen = set(a.module)
-    for _, m in manifests:
+    mans = {}
+    for i in insts:
+        if i["mid"] not in mans:
+            mans[i["mid"]] = load_manifest(i["mid"], mdir)
+            mans[i["mid"]]["_id"] = i["mid"]
+        m = i["m"] = mans[i["mid"]]
+        us = m.get("unit_slot", "SERVICE")
+        i["label"] = "%s[%s]" % (i["mid"], i["uid"]) if i["explicit"] else i["mid"]
+        i["slots"] = dict(slots)
+        i["nunit"] = 0
+        if i["explicit"]:
+            for k in i["over"]:
+                if k == us:
+                    die(2, "unit %s: slot %s is the unit slot, the unit id fills it" % (i["label"], k))
+                if k not in m.get("slots", {}):
+                    die(2, "unit %s: module %s does not declare slot %s" % (i["label"], i["mid"], k))
+            if us in m.get("slots", {}):
+                i["slots"][us] = i["uid"]
+            i["slots"].update(i["over"])
+
+    chosen = set(mans)
+    for m in mans.values():
         for r in m.get("requires", []):
             if r not in chosen:
                 die(1, "module %s requires module %s, which is not selected" % (m["_id"], r))
@@ -690,26 +835,61 @@ def run():
                 die(1, "module %s conflicts with module %s, which is also selected" % (m["_id"], c))
 
     declared = set()
-    for _, m in manifests:
+    for i in insts:
+        m, sl = i["m"], i["slots"]
         declared.update(m.get("slots", {}))
         for k, n in m["_ml"].items():
-            if k in slots and len(slots[k]) > n:
+            if k in sl and len(sl[k]) > n:
                 die(2, "module %s: slot %s: value %r is longer than its max_len %d"
-                    % (m["_id"], k, slots[k], n))
+                    % (i["label"], k, sl[k], n))
         for k, cs in m["_cs"].items():
-            if k in slots and not charset_ok(cs, slots[k]):
+            if k in sl and not charset_ok(cs, sl[k]):
                 die(2, "module %s: slot %s: value %r is outside its charset %s"
-                    % (m["_id"], k, slots[k], cs))
+                    % (i["label"], k, sl[k], cs))
     for k in slots:
         if k not in declared:
             die(2, "unknown slot %r (declared: %s)" % (k, ", ".join(sorted(declared))))
-    for k in sorted(declared):
-        if k not in slots:
-            die(2, "slot %r declared by a module but not given" % k)
-    if a.layout == "monorepo" and "SERVICE" in slots:
-        prefix = "services/" + slots["SERVICE"]
-    else:
-        prefix = ""
+    for i in insts:
+        for k in sorted(i["m"].get("slots", {})):
+            if k not in i["slots"]:
+                if i["explicit"]:
+                    die(2, "unit %s: slot %r is declared by module %s but not given (global --slot or "
+                        "K=V after the id)" % (i["label"], k, i["mid"]))
+                die(2, "slot %r declared by a module but not given" % k)
+
+    # unit directories (None: the instance places nothing as `unit`)
+    for i in insts:
+        m = i["m"]
+        us = m.get("unit_slot", "SERVICE")
+        i["dir"], i["dir_err"] = None, None
+        if not any(t == "unit" for t in m["placement"].values()):
+            continue
+        if a.layout == "single":
+            i["dir"] = ""
+            continue
+        base = UNIT_DIRS[m.get("unit", {}).get("kind", "service")]
+        if base is None:
+            i["dir"] = "db"
+        elif us not in m.get("slots", {}):
+            i["dir_err"] = ("module %s places files as `unit` but does not declare the %s slot "
+                            "(required by layout monorepo)" % (i["mid"], us))
+        else:
+            i["dir"] = base + "/" + i["slots"][us]
+    seen = {}
+    for i in (x for x in insts if x["explicit"]):
+        k = fold(i["uid"])
+        if k in seen:
+            die(2, "unit id %r (module %s) and unit id %r (module %s) are the same id (ids are compared "
+                "NFC-normalised and case-insensitively); nothing written"
+                % (seen[k]["uid"], seen[k]["mid"], i["uid"], i["mid"]))
+        seen[k] = i
+    for n, x in enumerate(insts):
+        for y in insts[n + 1:]:
+            if (x["explicit"] or y["explicit"]) and x["dir"] is not None and y["dir"] is not None \
+                    and dirs_clash(x["dir"], y["dir"]):
+                die(2, "unit %s and unit %s would share the unit directory %r (equal or nested); "
+                    "nothing written" % (x["label"], y["label"], x["dir"] or ".") +
+                    ("" if x["dir"] == y["dir"] else " vs %r" % (y["dir"] or ".")))
 
     dest = a.dest
     if os.path.islink(dest):
@@ -724,8 +904,11 @@ def run():
     dir_modes = {}  # out dir -> mode (first contributor wins)
     dstat = {}
     bad_paths, bad_content, unplaced, bad_lit, bad_esc, bad_link = [], [], [], [], [], []
-    for mod_path, m in manifests:
-        mid = m["_id"]
+    cand_cache = {}
+    for i in insts:
+        m, mid, islots = i["m"], i["label"], i["slots"]
+        mod_path = os.path.join(mdir, i["mid"])
+        prefix = i["dir"] or ""
         src = os.path.normpath(os.path.join(mod_path, m["source"]))
         real_src = os.path.realpath(src)
         real_mod = os.path.realpath(mod_path)
@@ -737,21 +920,21 @@ def run():
                 % (mid, m["source"], real_mod))
         if not os.path.isdir(src):
             die(2, "module %s: source %s is not a directory" % (mid, src))
-        ph = {k: m["_ph"].get(k, "<%s>" % k) for k in slots}
+        ph = {k: m["_ph"].get(k, "<%s>" % k) for k in islots}
         if len(set(ph.values())) != len(ph):
             die(2, "module %s: two slots share one placeholder" % mid)
-        sub = Subst(ph, slots, set(m["_lit"]) & set(slots))
+        sub = Subst(ph, islots, set(m["_lit"]) & set(islots))
         rules = [(glob_re(g), t) for g, t in m["placement"].items()]
         excl = [glob_re(g) for g in m.get("exclude", [])]
         merge_rx = [glob_re(g) for g in m.get("root_merge", {})]
         allow = set(m.get("slot_allow", []))
         strict = m.get("strict_slots", False) is True
         self_dir = src == os.path.normpath(mod_path)
-        if a.layout == "monorepo" and "SERVICE" not in m.get("slots", {}) \
-                and any(t == "unit" for _, t in rules):
-            die(2, "module %s places files as `unit` but does not declare the SERVICE slot "
-                "(required by layout monorepo)" % mid)
-        cands = candidates(src, a.strict_tracked, mid)
+        if i["dir_err"]:
+            die(2, i["dir_err"])
+        if src not in cand_cache:
+            cand_cache[src] = candidates(src, a.strict_tracked, i["mid"])
+        cands = cand_cache[src]
         if not [r for r in cands if not (self_dir and r == "module.json")]:
             die(1, "module %s: source %s yields no files (an empty or unlistable source is an "
                 "error, never \"nothing to copy\")" % (mid, src))
@@ -792,7 +975,8 @@ def run():
                                     "any case, a trailing dot or space, git~1, a colon)"
                                     % (out, tgt, mid, rt))
                     continue
-                ent = {"kind": "link", "data": tgt, "mode": 0}
+                ent = {"kind": "link", "data": tgt, "mode": 0, "norm": norm,
+                       "udir": i["dir"] if target == "unit" else None}
             elif stat.S_ISREG(st.st_mode):
                 if st.st_mode & SPECIAL:
                     bad_link.append("%s has a setuid/setgid/sticky bit (%o) (module %s)"
@@ -803,7 +987,7 @@ def run():
                         data = sub.b(f.read())
                 except OSError as e:
                     unreadable(full, e)  # at PLAN time: nothing has been written yet
-                for k in slots:
+                for k in islots:
                     if ("<%s>" % k).encode() in data:
                         bad_content.append(out)
                         break
@@ -819,14 +1003,14 @@ def run():
                 continue
             rparts, oparts = rel.split("/")[:-1], out.split("/")[:-1]
             plen = len(oparts) - len(rparts)
-            for i in range(len(oparts)):
-                od = "/".join(oparts[:i + 1])
+            for n in range(len(oparts)):
+                od = "/".join(oparts[:n + 1])
                 if od in dir_modes:
                     continue
-                if i < plen:
+                if n < plen:
                     dir_modes[od] = (0o755 & ~umask) | stat.S_IWUSR
                     continue
-                sd = os.path.join(src, *rparts[:i - plen + 1])
+                sd = os.path.join(src, *rparts[:n - plen + 1])
                 if sd not in dstat:
                     try:
                         dstat[sd] = stat.S_IMODE(os.lstat(sd).st_mode) & 0o777
@@ -834,6 +1018,9 @@ def run():
                         dstat[sd] = 0o777
                 dir_modes[od] = (dstat[sd] & ~umask) | stat.S_IWUSR
             ent["mods"] = [mid]
+            ent["by"] = [i["mid"]]
+            if target == "unit":
+                i["nunit"] += 1
             ent["merge"] = any(rx.match(out) for rx in merge_rx)
             old = plan.get(out)
             if old is None:
@@ -841,6 +1028,7 @@ def run():
             elif (old["kind"], old["data"], old["mode"]) == (ent["kind"], ent["data"], ent["mode"]):
                 if mid not in old["mods"]:
                     old["mods"].append(mid)
+                    old["by"].append(i["mid"])
             elif ent["kind"] == "file" and old["kind"] == "file" and old["merge"] and ent["merge"]:
                 names = " + ".join(old["mods"]) + " and " + mid
                 if old["mode"] != ent["mode"]:
@@ -851,6 +1039,7 @@ def run():
                     die(1, "modules %s: root_merge union-lines of %s refused: %s" % (names, out, e))
                 if mid not in old["mods"]:
                     old["mods"].append(mid)
+                    old["by"].append(i["mid"])
             else:
                 if old["kind"] != ent["kind"]:
                     why = "link vs file"
@@ -862,11 +1051,16 @@ def run():
                     why = "different content"
                 if old["mods"] == [mid]:
                     die(1, "module %s places %s twice (%s)" % (mid, out, why))
+                if i["mid"] in old["by"]:
+                    die(1, "module %s places a per-unit file at the root: %s differs between %s and %s "
+                        "(%s); a root file must not depend on the unit's slots, so the module must place "
+                        "it per unit or the root must be owned by one module"
+                        % (i["mid"], out, " + ".join(old["mods"]), mid, why))
                 die(1, "modules %s and %s both place %s (%s); identical files are written once, "
                     "only root_merge union-lines merges text; for YAML/JSON a monorepo-root "
                     "module should own the file" % (" + ".join(old["mods"]), mid, out, why))
         for k in sorted(m["_lit"]):
-            if k in slots and k not in sub.hits:
+            if k in islots and k not in sub.hits:
                 bad_lit.append("module %s: literal %r of slot %s never occurs" % (mid, m["_lit"][k], k))
 
     links = {fold(o) for o, e in plan.items() if e["kind"] == "link"}
@@ -876,6 +1070,19 @@ def run():
         if via is not None:
             bad_link.append("%s -> %s (module %s): the target passes through planned link %s"
                             % (out, e["data"], " + ".join(e["mods"]), via))
+
+    for out in sorted(plan):
+        e = plan[out]
+        if e["kind"] != "link" or not e.get("udir"):
+            continue
+        for y in insts:
+            d = y["dir"]
+            if d and fold(d) != fold(e["udir"]) and (fold(e["norm"]) == fold(d)
+                                                      or fold(e["norm"]).startswith(fold(d) + "/")):
+                bad_link.append("%s -> %s (module %s): the target reaches the unit directory %s of "
+                                "unit %s; a link between units couples them"
+                                % (out, e["data"], " + ".join(e["mods"]), d, y["label"]))
+                break
 
     if unplaced or bad_paths or bad_content or bad_lit or bad_esc or bad_link:
         for label, items in (("literal", bad_lit), ("unplaced", unplaced), ("path", bad_paths),
@@ -887,6 +1094,8 @@ def run():
             % (len(unplaced), len(bad_paths), len(bad_content), len(bad_lit), len(bad_esc), len(bad_link)))
     if not plan:
         die(1, "nothing to assemble")
+    if a.layout == "monorepo":
+        fill_inventory(plan, insts)
 
     # two paths one file on a case-insensitive / normalising filesystem, and a planned file or
     # link may not also be a directory on the way to another entry (both on the folded path)

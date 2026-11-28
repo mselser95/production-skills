@@ -749,8 +749,8 @@ red strict-ignores-untracked '        stray = git_list(src, env, True)
         if stray:' '        stray = git_list(src, env, True)
         if False:' sc_strict
 red length-cap-off '    if len(v) > MAX_VALUE:' '    if False:' sc_cap
-red charset-off '            if k in slots and not charset_ok(cs, slots[k]):' '            if False:' sc_cset
-red max-len-off '            if k in slots and len(slots[k]) > n:' '            if False:' sc_mlen
+red charset-off '            if k in sl and not charset_ok(cs, sl[k]):' '            if False:' sc_cset
+red max-len-off '            if k in sl and len(sl[k]) > n:' '            if False:' sc_mlen
 red dupkeys-off '        if k in d:' '        if False:' sc_dup
 red source-rule-off '        if not (real_src == real_mod or' '        if False and not (real_src == real_mod or' sc_src
 red literal-slash-off '            if "/" in v["literal"] or "\0" in v["literal"]:' '            if False:' sc_litslash
