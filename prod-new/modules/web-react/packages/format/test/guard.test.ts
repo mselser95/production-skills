@@ -59,6 +59,8 @@ export interface Token {
   readonly line: number;
   /** The unblanked content of a string or a template text: only for the exact-name rule (`nf['format']`). */
   readonly raw?: string;
+  /** A template chunk that ENDS in `${`: code follows, so for the next token it is an opener like `(` or `=`, never a value. */
+  readonly opens?: boolean;
 }
 
 const PUNCT = ['>>>=', '**=', '...', '===', '!==', '<<=', '>>=', '>>>', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<', '>>', '**'];
@@ -72,12 +74,13 @@ export function lex(src: string): Token[] {
   let line = 1;
   // context stack: 'code' with its brace depth, or 'tpl' (inside template text)
   const stack: { mode: 'code' | 'tpl'; depth: number }[] = [{ mode: 'code', depth: 0 }];
-  const push = (kind: Token['kind'], text: string, raw?: string): void => void out.push(raw === undefined ? { kind, text, line } : { kind, text, line, raw });
+  const push = (kind: Token['kind'], text: string, raw?: string, opens?: boolean): void => void out.push({ kind, text, line, ...(raw === undefined ? {} : { raw }), ...(opens === true ? { opens } : {}) });
   const prevAllowsRegex = (): boolean => {
     const p = out[out.length - 1];
     if (p === undefined) return true;
     if (p.kind === 'punct') return ![')', ']', '}'].includes(p.text);
     if (p.kind === 'id') return KEYWORDS_BEFORE_REGEX.has(p.text);
+    if (p.kind === 'tpl') return p.opens === true;
     return false;
   };
   // Read template text from i (just after the opening backtick or a closing `}` of a substitution).
@@ -88,7 +91,7 @@ export function lex(src: string): Token[] {
       const c = src[i] ?? '';
       if (c === '\\') { raw += src.slice(i, i + 2); i += 2; continue; }
       if (c === '`') { i++; push('tpl', text, raw); stack.pop(); return; }
-      if (c === '$' && src[i + 1] === '{') { i += 2; push('tpl', text, raw); stack.push({ mode: 'code', depth: 0 }); return; }
+      if (c === '$' && src[i + 1] === '{') { i += 2; push('tpl', text, raw, true); stack.push({ mode: 'code', depth: 0 }); return; }
       if (c === '\n') line++;
       text += ' ';
       raw += c;
@@ -222,7 +225,7 @@ export function scan(source: string): Finding[] {
         }
         if (t[end + 1]?.text === '(') add('intl', chain + '(', tok.line);
         else if (chain === 'Intl') add('intl', 'Intl', tok.line);
-        else if (prev?.kind === 'punct' && ['=', '(', '?', '||', '??', '&&'].includes(prev.text) && t[i - 3]?.text !== 'type') add('intl', chain, tok.line); // `type P = Intl.X` is a type
+        else if ((prev?.kind === 'punct' && ['=', '(', '?', '||', '??', '&&'].includes(prev.text) && t[i - 3]?.text !== 'type') || prev?.opens === true) add('intl', chain, tok.line); // `type P = Intl.X` is a type
         else if (prev?.kind === 'id' && prev.text === 'return') add('intl', chain, tok.line);
       }
     } else if ((tok.kind === 'str' || tok.kind === 'tpl') && INTL_MEMBERS.has(tok.raw ?? '')) {
@@ -234,7 +237,7 @@ export function scan(source: string): Finding[] {
     } else if (tok.kind === 'punct') {
       // `function* gen`, `yield* x`, `export * from` and `import * as ns` are not multiplications
       const generator = prev?.kind === 'id' && ['function', 'yield', 'async', 'export', 'import'].includes(prev.text);
-      const binary = prev !== undefined && (prev.kind !== 'punct' || CLOSERS.has(prev.text)) && !(prev.kind === 'id' && KEYWORDS_BEFORE_REGEX.has(prev.text)) && !generator;
+      const binary = prev !== undefined && prev.opens !== true && (prev.kind !== 'punct' || CLOSERS.has(prev.text)) && !(prev.kind === 'id' && KEYWORDS_BEFORE_REGEX.has(prev.text)) && !generator;
       if ((tok.text === '+' || tok.text === '-') && !binary) {
         if (tok.text === '+' || next?.kind !== 'num') add('unary', tok.text + (next?.text ?? ''), tok.line);
       }
@@ -318,6 +321,20 @@ export function judge(file: string, source: string, allow: Allowed[]): { open: s
 // BARE_ALLOW, which is EMPTY: the package has no runtime dependency), `import-dynamic` (a non-literal `import(x)` or
 // `require(x)`; a template without `${}` counts as a literal). Type-only imports follow the same rule. Not caught: an
 // ambient `declare module 'x'`, `createRequire(...)`, `import.meta` tricks (mistakes, not an adversary, are the trust model).
+export const SHIPPED_SCRIPTS: Record<string, string> = { test: 'vitest run', typecheck: 'tsc -p tsconfig.json' };
+/** Differences between a package `scripts` value and the shipped one: a changed, missing or extra script. */
+export function scriptsProblems(scripts: unknown): string[] {
+  if (typeof scripts !== 'object' || scripts === null) return ['scripts is not an object'];
+  const have = scripts as Record<string, unknown>;
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(SHIPPED_SCRIPTS)) if (have[k] !== v) out.push(`script ${k} is not "${v}"`);
+  for (const k of Object.keys(have)) if (!(k in SHIPPED_SCRIPTS)) out.push(`extra script ${k}`);
+  return out;
+}
+/** The pinned test files absent from a directory listing. */
+export function missingRequired(have: readonly string[]): string[] {
+  return REQUIRED_TESTS.filter((n) => !have.includes(n));
+}
 export const REQUIRED_TESTS = ['readme.test.ts', 'ownoptions.test.ts', 'guard.test.ts', 'options.test.ts', 'mingrouping.test.ts', 'robust.test.ts', 'rtl.test.ts', 'contract.test.ts'];
 export const BARE_ALLOW: readonly string[] = [];
 
@@ -348,6 +365,10 @@ export function importFindings(file: string, source: string): { kind: string; te
   t.forEach((tok, i) => {
     const next = t[i + 1];
     if (tok.kind !== 'id') return;
+    // `loader.require('x')` / `obj.import(x)` is a method call, not the module function
+    const prevTok = t[i - 1];
+    const memberCall = prevTok?.kind === 'punct' && (prevTok.text === '.' || prevTok.text === '?.');
+    if (memberCall) return;
     if (tok.text === 'from' && next?.kind === 'str') spec(next.raw ?? '', next.line);
     else if (tok.text === 'import' && next?.kind === 'str') spec(next.raw ?? '', next.line);
     else if ((tok.text === 'import' || tok.text === 'require') && next?.text === '(' && next.kind === 'punct') {
@@ -526,6 +547,18 @@ describe('the source contains no float-based formatting or arithmetic on values,
     expect(kinds('const a = (+digits).toString();')).toEqual(['unary:+digits', 'member:.toString']);
     expect(kinds('const a = +digits;')).toEqual(['unary:+digits']);
     expect(kinds('const a = -digits;')).toEqual(['unary:-digits']);
+    // template substitutions: a chunk that ends in `${` is an opener (like `(` or `=`), not a value
+    expect(kinds('const a = `${+x}`;')).toEqual(['unary:+x']);
+    expect(kinds('const a = `v=${+x}`;')).toEqual(['unary:+x']);
+    expect(kinds('const a = `${-x}`;')).toEqual(['unary:-x']);
+    expect(kinds('const a = `${a}${+b}`;')).toEqual(['unary:+b']);
+    expect(kinds('const a = `${`${+x}`}`;')).toEqual(['unary:+x']);
+    expect(kinds('const a = `${a + b}`; const c = `${a - b}`;')).toEqual([]);
+    expect(kinds('const a = `${x * 1}`;')).toEqual(['arith:x * 1']);
+    expect(kinds('const a = `${ /a\\/b/.test(s) ? 1 : 2 }`;')).toEqual([]);
+    expect(kinds('const a = `plain ${name} text`;')).toEqual([]);
+    // a regex right after the head is a regex: lexed as code its body would show a unary `+q`
+    expect(kinds('const a = `${ /b(+q)/.test(s) }`;')).toEqual([]);
     expect(kinds('const a = x * 100; const b = y / 3; const c = z ** 2; d *= 2;')).toEqual(['arith:x * 100', 'arith:y / 3', 'arith:z ** 2', 'arith:d *= 2']);
     expect(kinds('const a = 0.1; const b = 1e5; const c = 1234567890123;')).toEqual(['literal:0.1', 'literal:1e5', 'literal:1234567890123']);
     expect(kinds('const a = Number.parseFloat(x);')).toEqual(['numparse:Number.parseFloat']);
@@ -661,6 +694,8 @@ describe('the package shape: imports stay in src/, scripts, tsconfig files and t
     expect(one('x.ts', "const r = require('../extra/x');")).toEqual(['import-outside-src "../extra/x"']);
     expect(one('x.ts', "import q = require('fast-check');")).toEqual(['import-bare "fast-check"']);
     expect(one('x.ts', 'const r = require(p);')).toEqual(['import-dynamic "require("']);
+    expect(one('x.ts', "const r = loader.require('../q'); const s = obj?.import(p);")).toEqual([]);
+    expect(one('x.ts', "const r = require('../q');")).toEqual(['import-outside-src "../q"']);
     expect(one('x.ts', "export * as ns from '../extra/fast.ts';")).toEqual(['import-outside-src "../extra/fast.ts"']);
     expect(one('x.ts', "export { x } from '../extra/fast.ts';")).toEqual(['import-outside-src "../extra/fast.ts"']);
     expect(one('x.ts', '/// <reference path="../extra/types.d.ts" />\nexport const z = 1;')).toEqual(['import-outside-src "../extra/types.d.ts"']);
@@ -680,11 +715,20 @@ describe('the package shape: imports stay in src/, scripts, tsconfig files and t
   });
   it('package.json scripts equal the shipped ones, and there is no other tsconfig*.json file in the package', () => {
     const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as { scripts?: unknown };
-    expect(pkg.scripts).toEqual({ test: 'vitest run', typecheck: 'tsc -p tsconfig.json' });
+    expect(scriptsProblems(pkg.scripts)).toEqual([]);
     expect(readdirSync(pkgDir).filter((n) => /^tsconfig.*\.json$/i.test(n))).toEqual(['tsconfig.json']);
   });
+  it('the scripts check refuses a changed or extra script (control)', () => {
+    expect(scriptsProblems({ test: 'vitest run', typecheck: 'tsc -p tsconfig.json' })).toEqual([]);
+    expect(scriptsProblems({ test: 'vitest run', typecheck: 'tsc -p tsconfig.build.json' })).toHaveLength(1);
+    expect(scriptsProblems({ test: 'vitest run', typecheck: 'tsc -p tsconfig.json', extra: 'x' })).toHaveLength(1);
+    expect(scriptsProblems(undefined)).toHaveLength(1);
+  });
   it('the test files that pin the contract exist (deleting one would otherwise pass `pnpm test` unnoticed)', () => {
-    const have = readdirSync(join(pkgDir, 'test'));
-    for (const n of REQUIRED_TESTS) expect(have, n).toContain(n);
+    expect(missingRequired(readdirSync(join(pkgDir, 'test')))).toEqual([]);
+  });
+  it('the required-files check names a missing file (control)', () => {
+    expect(missingRequired([...REQUIRED_TESTS])).toEqual([]);
+    expect(missingRequired(REQUIRED_TESTS.filter((n) => n !== 'readme.test.ts'))).toEqual(['readme.test.ts']);
   });
 });

@@ -346,8 +346,8 @@ import { parseDecimal } from './grammar.ts';"
       "tsc -p tsconfig.json" \
       "tsc -p tsconfig.build.json"
     mutate "a README count outside the owned line" README.md "test/readme.test.ts" "anywhere else a number" \
-      "the locales listed in \`test/percent.test.ts\` x displayed" \
-      "the 65 locales listed in \`test/percent.test.ts\` x displayed"
+      "the locales listed in \`test/percent.test.ts\` x integer" \
+      "the 65 locales listed in \`test/percent.test.ts\` x integer"
     mutate "a spelled-out README count outside the owned line" README.md "test/readme.test.ts" "anywhere else a number" \
       "money over the locales, currencies" \
       "money over sixty-five locales, currencies"
@@ -357,6 +357,37 @@ import { parseDecimal } from './grammar.ts';"
     mutate "the owned README line is gone" README.md "test/readme.test.ts" "owned line" \
       "Cross-check sizes: money" \
       "Sizes of the cross-check: money"
+    # ---- sixth review (T29b): template substitutions, the count rule, member calls, the two pins
+    mutate "guard: a unary + first inside a template substitution (money.ts)" src/money.ts "test/guard.test.ts" "every finding in src" \
+      "  return okText(applyTemplate(learnTemplates(options.locale, style), p.value, body, r.sign));" \
+      '  return okText(`${+amount}`);'
+    mutate "guard: a template head is a value again (the opener fix reverted)" test/guard.test.ts "test/guard.test.ts" "scanner finds each rule" \
+      "prev !== undefined && prev.opens !== true && " \
+      "prev !== undefined && "
+    mutate "guard: a template head allows a regex again" test/guard.test.ts "test/guard.test.ts" "scanner finds each rule" \
+      "if (p.kind === 'tpl') return p.opens === true;" \
+      "if (p.kind === 'tpl') return false;"
+    mutate "guard: x.require(...) is flagged as an import again" test/guard.test.ts "test/guard.test.ts" "specifiers: relative inside" \
+      "if (memberCall) return;" \
+      "void memberCall;"
+    mutate "guard: the scripts pin body emptied" test/guard.test.ts "test/guard.test.ts" "scripts check refuses" \
+      "for (const [k, v] of Object.entries(SHIPPED_SCRIPTS)) if (have[k] !== v) out.push" \
+      "for (const [k, v] of Object.entries(SHIPPED_SCRIPTS)) if (false) out.push"
+    mutate "guard: the extra-script pin removed" test/guard.test.ts "test/guard.test.ts" "scripts check refuses" \
+      "if (!(k in SHIPPED_SCRIPTS)) out.push" \
+      "if (false) out.push"
+    mutate "guard: the required-files check body emptied" test/guard.test.ts "test/guard.test.ts" "required-files check names" \
+      "return REQUIRED_TESTS.filter((n) => !have.includes(n));" \
+      "return [];"
+    mutate "README rule: the window narrowed to two words" test/readme.test.ts "test/readme.test.ts" "claim detector sees" \
+      "export const WINDOW = 4;" \
+      "export const WINDOW = 2;"
+    mutate "README rule: a version counts as a number again" test/readme.test.ts "test/readme.test.ts" "claim detector sees" \
+      "w.replace(/\\d+(?:\\.\\d+)+/g, '')" \
+      "w"
+    mutate "README rule: dozen removed from the number words" test/readme.test.ts "test/readme.test.ts" "claim detector sees" \
+      "'hundred', 'dozen', 'dozens', 'score'" \
+      "'hundred'"
     # addfile <name> <path under the package> <content>: a NEW source file, control GREEN first, removed afterwards
     addfile() {
       local name="$1" file="$pk/$2" content="$3" must="${4:-every finding in src}" c m

@@ -41,7 +41,7 @@ Rules (each is pinned by a test):
   separators and grouping sizes are learned from `Intl`'s percent style; the MINIMUM grouping is learned from percent
   samples whose DISPLAYED integer part has exactly 4 digits and then 5 (the samples 10 and 100, shown as 1000% and
   10000%), because `be`, `bg`, `es`, `et`, `hu` print a four-digit percent ungrouped (`1234 %`). Money and plain
-  decimals learn minimum grouping from samples whose displayed integer part has those two lengths, in their own style (1000, 10000).
+  decimals learn minimum grouping, in their own style, from samples whose displayed integer part has those two lengths.
 - **No ambient state.** `locale` is required (an unsupported tag is `bad-locale`, it does not fall back to the machine's
   default); `formatDate` requires `timeZone`. Results are identical under any `TZ`.
 - **Never throws.** Every exported function returns a result (or a string) for a value of any JS type in any
@@ -70,17 +70,23 @@ Rules (each is pinned by a test):
 - No compact notation: it rounds to significant digits, which hides digits.
 
 Tests (`pnpm test`): unit tables per function, fast-check properties (fixed seed) against an independent BigInt oracle,
-the TZ matrix, Intl cross-checks (money over the locales, currencies and displays listed in `test/money.test.ts`; percent over
-the locales listed in `test/percent.test.ts` x displayed integer parts of 1 to 9 digits; RTL locales for decimals), a never-throws fuzz over every parameter, option
+the TZ matrix, Intl cross-checks (RTL locales for decimals; money over the locales, currencies and displays listed in `test/money.test.ts`; percent over
+the locales listed in `test/percent.test.ts` x integer parts of 1 to 9 digits), a never-throws fuzz over every parameter, option
 read-once, own-key and unknown-key tests, and `test/guard.test.ts`. The sizes of those lists are stated in ONE line, which
 `test/readme.test.ts` regenerates from the lists and compares for equality:
 
 Cross-check sizes: money 33 locales x 5 currencies x 3 displays; percent 65 locales.
 
-Anywhere else in this file a digit sequence or a spelled-out number (one to twenty, the tens, hundred) within two words of
-`locale`, `currenc`, `display` or `language` fails that test. It catches a number on either side of those stems in any letter case, hyphenated (`N-locale`) or after a colon;
-it does not catch a count worded away from those stems (for example "the full set of N tags"), and it does not judge any
-other number.
+Anywhere else in this file a number next to certain stems fails that test. The rule, exactly. The window is four words
+on either side. A WORD is a run of letters and digits; hyphens or dots between such runs keep it a single word
+(`hand-picked`; a hyphenated number is a single word too), while any other character, a slash included, separates words. A NUMBER is a digit
+sequence, or a spelled-out number (the words from "one" to "twenty", the tens, `hundred`, `dozen`, `dozens`, `score`),
+as a whole word or as a hyphen part of a word (`sixty-five`); a version such as `78.3` is not a number. The STEMS are
+`locale`, `currenc`, `display` and `language`: a word is a stem word when any hyphen part of it begins with any of
+them. Fenced code, inline code and paths are NOT exempt: a digit in a path such as `data/65.json` beside a stem is a
+finding. The test catches a number on either side of a stem in any letter case, hyphenated (`N-locale`) or after a
+colon; it does not catch a count worded away from the stems (for example "the full set of N tags") or a vague quantity
+("several"), and it does not judge any other number.
 
 The guard walks every file under `src/` at any depth with a `.ts`, `.mts`, `.cts` or `.tsx` extension, refuses any import
 that leaves `src/` or names a package (every `import`, `export ... from`, `import()`, `require()` and `/// <reference>`
