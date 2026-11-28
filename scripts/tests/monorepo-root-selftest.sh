@@ -1212,7 +1212,7 @@ say(st_h == "error" and st_h2 == "error", "a unit on which the probe hangs is `e
 m.MAKE_TIMEOUT = 20.0; m.PROBE_TIMEOUT = 5.0
 # BEGIN list-pass block
 # The list pass (first question) judged on its own: (i) it times out with NO list, (ii) make cannot read the Makefile, (iii) the list
-# names something that is not a path, (b) it times out WITH a complete list (used), (c) it is not waited for once its list exists, and the
+# names something that is not a path, (b) it times out WITH a complete list (used), (c) it is waited for up to its limit, and the
 # limit a timeout finding prints is the one that applied. GNU make 3.81 and 4.3 alike except the one case guarded by the version.
 LPR = os.path.join(TMP, "lp"); os.makedirs(LPR)
 def lproot(name, text, extra=None):
@@ -1257,11 +1257,10 @@ FR2 = lproot("fake2", LPT); pathf = os.environ["PATH"]; os.environ["PATH"] = FB2
 def f2(mode):
     open(F2LOG, "w").close(); os.environ["F2"] = mode; t = time.time(); o = lpun(FR2); return o, time.time() - t, open(F2LOG).read().split()
 m.MAKE_TIMEOUT = 4.0; m.PROBE_TIMEOUT = 1.0
-m.PROBE_TIMEOUT = 5.0; out, el, ls = f2("lhang"); m.LIST_GRACE = 100.0; m.PROBE_TIMEOUT = 1.0
-out_b, el_b, ls_b = f2("lhang"); m.LIST_GRACE = 0.5
-say(out == [] and el < 3 and ls == ["list"] and out_b == [] and 1 <= el_b < 4 and ls_b == ["list"],
-    "a list pass that wrote its list and hangs: the list is used (judged from the later questions, no finding), once the list exists it is not waited for the 5 s limit (%.1fs) and, with that grace disabled, the pass hits the 1 s limit with a complete list and the list is still used (%.1fs)" % (el, el_b),
-    "%s %s %s | %s %s" % (out, el, ls, out_b, el_b))
+out, el, ls = f2("lhang")
+say(out == [] and 1 <= el < 4 and ls == ["list"],
+    "a list pass that wrote its list and then hangs: it is waited for up to its limit (1 s here, %.1fs), then ended, and the complete list is used (judged from the later questions, no finding)" % el,
+    "%s %s %s" % (out, el, ls))
 out, el, ls = f2("chang")
 say(len(out) == 2 and all("did not answer in 1 s" in l for l in out), "a control that hangs: the finding prints the limit that applied, 1 s (PROBE_TIMEOUT), not the 4 s question limit", "\n".join(out))
 out, el, ls = f2("qhang")
@@ -1270,14 +1269,29 @@ out, el, ls = f2("nhang")
 say(len(out) == 2 and all("timed out listing the unit's makefiles (no list after 1 s" in l for l in out), "a fake list pass that hangs before writing: the timed-out-listing finding, 1 s", "\n".join(out))
 os.environ["PATH"] = pathf; os.environ.pop("F2")
 m.MAKE_TIMEOUT = 20.0; m.PROBE_TIMEOUT = 5.0
-# 4.x only: a FORCE'd include whose recipe WRITES it makes make 4.x re-read its makefiles for up to the whole limit in the list pass; with a real verify the unit is present every time
+# 4.x only: a FORCE'd include whose recipe WRITES it makes make 4.x restart during the list pass; the pass runs to its 5 s limit and the complete list it wrote is used:
+# with a real verify the unit is present every time, at about 5 s per inspection (3 inspections here, each within 7 s, to keep the suite short)
 if "GNU Make 4" in mk_ver:
     FW = lproot("force", "-include version.mk\nversion.mk: FORCE\n\t@echo V=1 > version.mk\nFORCE:\n.PHONY: verify check-fast FORCE\nverify:\n\t@echo ok\ncheck-fast:\n\t@echo ok\n")
     n_ok, worst = 0, 0.0
-    for i in range(20):
+    for i in range(3):
         t = time.time(); o = lpun(FW); d = time.time() - t; worst = max(worst, d); n_ok += o == []
-        if d > 6: break
-    say(n_ok == i + 1 and i + 1 == 20, "make 4.x: a FORCE'd `-include version.mk` whose recipe writes it, with a real verify: present %d of %d inspections (slowest %.1fs)" % (n_ok, i + 1, worst), "%d ok of %d, slowest %.1fs" % (n_ok, i + 1, worst))
+    say(n_ok == 3 and worst <= 7, "make 4.x: a FORCE'd `-include version.mk` whose recipe writes it, with a real verify: present %d of 3 inspections (slowest %.1fs, limit 7 s)" % (n_ok, worst), "%d ok of 3, slowest %.1fs" % (n_ok, worst))
+# a GENERATED makefile (an include with a rule that writes it through a redirect, slower than a blink): the list pass waits for make, so on a fresh clone
+# the unit carrying the target is present, the generated file is complete and the user's own make still works; the generation ran under the list pass only
+GLOG = os.path.join(TMP, "gen.log"); open(GLOG, "w").close()
+GBASE = "check-fast:\n\t@echo cf\ninclude gen.mk\ngen.mk: gen.in\n"
+gen1 = lproot("gen1", GBASE + "\t@echo start $(MAKECMDGOALS) >> " + GLOG + "\n\tsh -c 'sleep 2; echo \"verify: ; @echo real\"' > $@\n\t@echo end $(MAKECMDGOALS) >> " + GLOG + "\n", {"gen.in": "x\n"})
+t0 = time.time(); out = lpun(gen1); el = time.time() - t0; gu = os.path.join(gen1, "services/x"); gtxt = open(os.path.join(gu, "gen.mk")).read() if os.path.exists(os.path.join(gu, "gen.mk")) else None
+rq = subprocess.run(["make", "-C", gu, "-q", "verify"], capture_output=True).returncode; rn = subprocess.run(["make", "-C", gu, "-n", "verify"], capture_output=True).returncode
+say(out == [] and gtxt == "verify: ; @echo real\n" and rq == 1 and rn == 0 and el < 6,
+    "a generated makefile (include gen.mk, gen.mk rebuilt through a 2 s redirect) that carries the target, fresh state: judged present (%.1fs), gen.mk complete, and the user's own make -q / make -n verify still work" % el, "%s | %r | -q %s -n %s" % (out, gtxt, rq, rn))
+glog = open(GLOG).read().split("\n")
+say(glog == ["start " + m.PROBE_NAME, "end " + m.PROBE_NAME, ""], "that generation ran once, under the list pass only (start and end under the random list name, nothing under the control or a later question)", "%s" % glog)
+gen2 = lproot("gen2", GBASE + "\tprintf 'verify:' > $@\n\tsleep 1; echo ' ; @echo real' >> $@\n", {"gen.in": "x\n"})
+out = lpun(gen2); gu2 = os.path.join(gen2, "services/x"); gtxt = open(os.path.join(gu2, "gen.mk")).read() if os.path.exists(os.path.join(gu2, "gen.mk")) else None
+rq = subprocess.run(["make", "-C", gu2, "-q", "verify"], capture_output=True).returncode
+say(out == [] and gtxt == "verify: ; @echo real\n" and rq == 1, "the two-step generation (printf > gen.mk, then >> gen.mk) is complete, not a partial file, and the unit is present", "%s | %r | -q %s" % (out, gtxt, rq))
 # END list-pass block
 # the -B question carries the unit's makefile and the makefiles it read (-o); a unit without a makefile is never asked -B
 CB3 = os.path.join(TMP, "countbin3"); os.makedirs(CB3); CLOG3 = os.path.join(TMP, "make-args3.log")
