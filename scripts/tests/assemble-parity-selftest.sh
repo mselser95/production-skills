@@ -525,17 +525,30 @@ mbad src-symlink "{\"id\":\"bm\",\"source\":\"lnk\",$P}" "outside the module"
 printf '%s\n' "{\"id\":\"bm\",\"source\":\"inside/../inside\",$P}" >"$sm/bm/module.json"; run bm_ok single bm --
 [[ $rc -eq 0 && -f "$tmp/bm_ok/deep/q" ]] && pass "source: a subdirectory of the module (via inside/../inside) is accepted" || fail "source subdir" "rc=$rc $(head -c 160 "$tmp/bm_ok.err")"
 
-# ---- W1: link targets are validated by their OUTPUT location, the target is never substituted
+# ---- W1: a link is judged by where it LANDS (its output location), its target text is never rewritten.
+# Rule (monorepo): a link whose output lies in a unit directory must target inside that same unit;
+# a link at the root must not target inside (or contain) a unit; a target leaving the repository is refused first.
 mkmod lk '{"id":"lk","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"unit"}}'; mkdir -p "$sm/lk/f"; ln -s ../../x "$sm/lk/f/L"
 run lk1 monorepo lk -- SERVICE=svc
-if [[ $rc -eq 0 && "$(readlink "$tmp/lk1/services/svc/L")" == ../../x ]]; then pass "link ../../x placed under services/svc stays inside dest: accepted, target not substituted"
-else fail "output-based link (inside)" "rc=$rc $(head -c 160 "$tmp/lk1.err")"; fi
+[[ $rc -eq 1 ]] && grep -q 'link: services/svc/L -> ../../x (module lk): the target x is outside the unit directory services/svc; a link of a unit must stay inside its own unit' "$tmp/lk1.err" && [[ ! -e "$tmp/lk1" ]] && pass "link ../../x under services/svc stays in the repo but leaves its unit: refused with the unit message" || fail "unit link (leaves unit)" "rc=$rc $(head -c 200 "$tmp/lk1.err")"
+rm "$sm/lk/f/L"; mkdir -p "$sm/lk/f/sub"; ln -s ../x "$sm/lk/f/sub/L"
+run lk1b monorepo lk -- SERVICE=svc
+if [[ $rc -eq 0 && "$(readlink "$tmp/lk1b/services/svc/sub/L")" == ../x ]]; then pass "link sub/L -> ../x lands at services/svc/sub/L, targets services/svc/x: inside its unit, accepted, target text kept"
+else fail "output-based link (inside unit)" "rc=$rc $(head -c 160 "$tmp/lk1b.err")"; fi
+rm "$sm/lk/f/sub/L"; rmdir "$sm/lk/f/sub"; ln -s ../../x "$sm/lk/f/L"
 rm "$sm/lk/f/L"; ln -s ../../../x "$sm/lk/f/L"
 run lk2 monorepo lk -- SERVICE=svc
 [[ $rc -eq 1 ]] && grep -q 'link: services/svc/L -> ../../../x' "$tmp/lk2.err" && [[ ! -e "$tmp/lk2" ]] && pass "link leaving dest from its OUTPUT location refused" || fail "output-based link (escape)" "rc=$rc $(head -c 160 "$tmp/lk2.err")"
 mkdir -p "$sm/lk/f/d"; rm "$sm/lk/f/L"; ln -s ../../x "$sm/lk/f/d/L"
 run lk3 single lk -- SERVICE=svc
 [[ $rc -eq 1 ]] && grep -q 'link: d/L' "$tmp/lk3.err" && pass "link d/L -> ../../x leaves dest in layout single: refused" || fail "link depth" "rc=$rc"
+rm "$sm/lk/f/d/L"; rmdir "$sm/lk/f/d"; echo y >"$sm/lk/f/y"
+mkmod lkr '{"id":"lkr","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/lkr/f"; ln -s services/svc/y "$sm/lkr/f/R"
+run lk4 monorepo lk lkr -- SERVICE=svc
+[[ $rc -eq 1 ]] && grep -q 'link: R -> services/svc/y (module lkr): a root link whose target services/svc/y lies inside or contains the unit directory services/svc' "$tmp/lk4.err" && pass "root link into a unit directory refused (a root link may not couple the root to a unit)" || fail "root link into unit" "rc=$rc $(head -c 200 "$tmp/lk4.err")"
+rm "$sm/lkr/f/R"; echo z >"$sm/lkr/f/z"; ln -s z "$sm/lkr/f/R"
+run lk5 monorepo lk lkr -- SERVICE=svc
+[[ $rc -eq 0 && "$(readlink "$tmp/lk5/R")" == z ]] && pass "root link to a root file accepted" || fail "root link inside root" "rc=$rc $(head -c 200 "$tmp/lk5.err")"
 
 # ---- W2: case / normalisation collisions are refused on every platform
 mkmod cfd '{"id":"cfd","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"root"}}'; mkdir -p "$sm/cfd/f"; echo one >"$sm/cfd/f/a.md"; echo two >"$sm/cfd/f/<SERVICE>.md"
@@ -732,7 +745,7 @@ sc_wexcl()  { local o; o="$(USE="$1" direct excl)"; [[ "$o" == REFUSED* ]]; }
 sc_sigterm(){ local d="$tmp/sg_m" r; rm -rf "$d"; mkdir -p "$d"; (ulimit -c 0; python3 -I -B "$tmp/direct.py" "$1" sig:SIGTERM "$d/dest" "$sm" >/dev/null 2>"$d/err"); r=$?
   [[ $r -eq 143 && "$(cat "$d/err")" == "assemble: interrupted -- nothing written" && "$(ls -A "$d")" == err ]]; }
 mkmod lc2x '{"id":"lc2x","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/lc2x/f"; ln -s /outside "$sm/lc2x/f/d2"
-mkmod lkm '{"id":"lkm","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"unit"}}'; mkdir -p "$sm/lkm/f"; ln -s ../../x "$sm/lkm/f/L"
+mkmod lkm '{"id":"lkm","source":"f","slots":{"SERVICE":"s"},"placement":{"**":"unit"}}'; mkdir -p "$sm/lkm/f"; mkdir -p "$sm/lkm/f/sub"; ln -s ../x "$sm/lkm/f/sub/L"
 mkmod sx '{"id":"sx","source":"f","slots":{},"placement":{"**":"root"}}'; mkdir -p "$sm/sx/f"; echo z >"$sm/sx/f/z"; chmod 4755 "$sm/sx/f/z"
 mkdir -p "$sm/bm/f"; echo x >"$sm/bm/f/a"
 red grammar-search 'VALUE_RX.fullmatch(v) is None' 'VALUE_RX.search(v) is None' sc_match
