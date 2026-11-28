@@ -38,6 +38,9 @@
     "Makefile": "unit",
     "crates/**": "unit"
   },
+  "root_merge": {
+    ".gitignore": "union-lines"
+  },
   "exclude": [
     "target/**"
   ]

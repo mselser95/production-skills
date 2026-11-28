@@ -7,8 +7,15 @@ packages/tokens   DTCG JSON sources, alias resolver, CSS + JSON + typed TS emitt
 packages/theme    typed theme contract over CSS variables, light and dark themes filled from the tokens
 ```
 
-Run: `pnpm install`, then `pnpm -r typecheck`, `pnpm -r test`, `pnpm -r build` (or the same per package).
-Requires Node >=24 <27 and pnpm 10.34.3 (pinned in `packageManager`).
+This module contributes PACKAGES, not a repository root. `module.json` places `packages/**` at the repository's
+`packages/` (placement `root`); the root `package.json`, `pnpm-workspace.yaml` (with the version catalog),
+lockfile, `tsconfig.base.json` and `.gitignore` belong to the monorepo-root module. Every third-party dependency here is
+`catalog:` and the sibling is `workspace:*`; the versions live in monorepo-root's `pnpm-workspace.yaml`.
+It is no longer a standalone workspace: assemble it with monorepo-root (`--layout monorepo --module monorepo-root
+--module design-system`), then in the assembled repo `pnpm install`, `pnpm -r typecheck`, `pnpm -r test`,
+`pnpm -r build` (or the same per package). Requires Node >=24 <27 and pnpm 10.34.3 (pinned there).
+
+Manifest summary: id `design-system`, unit kind package, lands at `packages/tokens` and `packages/theme`; this README is not placed.
 
 ## Token layers (`packages/tokens/src/json`)
 
@@ -45,7 +52,7 @@ Choice: a plain typed contract over CSS custom properties, not vanilla-extract.
 ## Slot
 
 `<SCOPE>` as a literal token cannot be a pnpm dependency name, so the module uses the literal `ds-scope`
-(`@ds-scope/tokens`, `@ds-scope/theme`) and `module.json` declares it as slot `SCOPE`. Assembly replaces the literal.
+(`@ds-scope/tokens`, `@ds-scope/theme`) and `module.json` declares it as slot `SCOPE` (npm scope without `@`, e.g. `acme`). Assembly replaces the literal.
 
 ## Stubs and limits
 
