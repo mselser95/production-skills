@@ -51,7 +51,7 @@ rootpkg = json.load(open(root + "/package.json"))
 say(d.get("engines") == rootpkg["engines"] or d.get("engines") == {"node": rootpkg["engines"]["node"]}, "engines match the root's node range")
 life = {"preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "preprepare", "postprepare"}
 say(not (set(d.get("scripts", {})) & life), "no lifecycle script")
-say(set(d.get("scripts", {})) == {"test", "typecheck"}, "scripts are exactly test and typecheck (the names the other TS packages use)")
+say(d.get("scripts") == {"test": "vitest run", "typecheck": "tsc -p tsconfig.json"}, "scripts equal the shipped texts exactly (test: vitest run, typecheck: tsc -p tsconfig.json)")
 say("dependencies" not in d and "peerDependencies" not in d and "optionalDependencies" not in d, "runtime-dependency-free: no dependencies / peerDependencies / optionalDependencies")
 dev = d.get("devDependencies", {})
 say(all(v == "catalog:" for v in dev.values()) and len(dev) > 0, "every devDependency is `catalog:` (no exact or range version in the manifest)")
@@ -126,6 +126,11 @@ for t in "$pkg"/test/*.test.ts; do
   first="$(head -n 1 "$t")"
   grep -qE '^// provenance: (candidate; ttl: [0-9]{4}-[0-9]{2}-[0-9]{2}|derived; clause: .+); subject: ' <<<"$first" && pass "$(basename "$t") has a provenance header" || fail "$(basename "$t") lacks a provenance header on line 1"
 done
+for t in readme ownoptions guard options mingrouping robust rtl contract; do
+  [[ -f "$pkg/test/$t.test.ts" ]] && pass "required test file test/$t.test.ts exists" || fail "required test file test/$t.test.ts is missing"
+done
+extra_cfg="$(find "$pkg" -maxdepth 1 -iname 'tsconfig*.json' ! -name tsconfig.json -print | head -n 1)"
+[[ -z "$extra_cfg" ]] && pass "no tsconfig*.json besides tsconfig.json in the package" || fail "an extra tsconfig file in the package" "$extra_cfg"
 grep -l 'fast-check' "$pkg"/test/properties.test.ts >/dev/null 2>&1 && grep -qE 'SEED = [0-9]+' "$pkg/test/properties.test.ts" && grep -q 'seed: SEED' "$pkg/test/properties.test.ts" && pass "properties.test.ts uses fast-check with a fixed seed" || fail "properties.test.ts: fast-check with a fixed seed not found"
 
 # ---- nothing generated is shipped or tracked
@@ -309,20 +314,80 @@ export const bound = (nf: Intl.NumberFormat): ((v: never) => string) => { const 
     mutate "an inherited option key is honoured again" src/types.ts "test/ownoptions.test.ts" "inherited maxFractionDigits" \
       "      if (v !== undefined && Object.prototype.hasOwnProperty.call(options, k)) out[k] = v;" \
       "      if (v !== undefined) out[k] = v;"
+    # ---- fifth review (T29b): an import that leaves src/, the pinned tsconfig/scripts, the owned README line
+    mutate "guard: money.ts imports ../extra/fast.ts" src/money.ts "test/guard.test.ts" "every finding in src" \
+      "import { parseDecimal } from './grammar.ts';" \
+      "import { fast } from '../extra/fast.ts';
+import { parseDecimal } from './grammar.ts';"
+    mutate "guard: index.ts re-exports from ../extra/fast.ts" src/index.ts "test/guard.test.ts" "every finding in src" \
+      "export { formatMoney } from './money.ts';" \
+      "export { formatMoney } from './money.ts';
+export { fast } from '../extra/fast.ts';"
+    mutate "guard: money.ts imports ../test/helper.ts" src/money.ts "test/guard.test.ts" "every finding in src" \
+      "import { parseDecimal } from './grammar.ts';" \
+      "import { helper } from '../test/helper.ts';
+import { parseDecimal } from './grammar.ts';"
+    mutate "guard: the specifier rule removed" test/guard.test.ts "test/guard.test.ts" "specifiers: relative inside|reviewer's patch" \
+      "if (kind !== null) out.push({ kind, text: s, line });" \
+      "void kind;"
+    mutate "guard: the bare-import rule removed" test/guard.test.ts "test/guard.test.ts" "specifiers: relative inside" \
+      "return BARE_ALLOW.includes(spec) ? null : 'import-bare';" \
+      "return null;"
+    mutate "guard: the export * fix reverted" test/guard.test.ts "test/guard.test.ts" "specifiers: relative inside" \
+      "['function', 'yield', 'async', 'export', 'import']" \
+      "['function', 'yield', 'async']"
+    mutate "guard: a climb above src/ is allowed when it re-enters" test/guard.test.ts "test/guard.test.ts" "specifiers: relative inside" \
+      "if (stack.length === 0) return 'import-outside-src';" \
+      "if (stack.length === 0) continue;"
+    mutate "guard: the tsconfig extends pin removed" test/guard.test.ts "test/guard.test.ts" "tsconfig check refuses" \
+      "if (t.extends !== TSCONFIG_EXTENDS) out.push" \
+      "if (false) out.push"
+    mutate "the package tsconfig extends another base" tsconfig.json "test/guard.test.ts" "tsconfig builds only" \
+      "../../tsconfig.base.json" \
+      "../../tsconfig.base"
+    mutate "the typecheck script text is widened" package.json "test/guard.test.ts" "scripts equal the shipped" \
+      "tsc -p tsconfig.json" \
+      "tsc -p tsconfig.build.json"
+    mutate "a README count outside the owned line" README.md "test/readme.test.ts" "anywhere else a number" \
+      "the locales listed in \`test/percent.test.ts\` x displayed" \
+      "the 65 locales listed in \`test/percent.test.ts\` x displayed"
+    mutate "a spelled-out README count outside the owned line" README.md "test/readme.test.ts" "anywhere else a number" \
+      "money over the locales, currencies" \
+      "money over sixty-five locales, currencies"
+    mutate "the owned README line is wrong" README.md "test/readme.test.ts" "owned line" \
+      "percent 65 locales." \
+      "percent 66 locales."
+    mutate "the owned README line is gone" README.md "test/readme.test.ts" "owned line" \
+      "Cross-check sizes: money" \
+      "Sizes of the cross-check: money"
     # addfile <name> <path under the package> <content>: a NEW source file, control GREEN first, removed afterwards
     addfile() {
-      local name="$1" file="$pk/$2" content="$3" c m
+      local name="$1" file="$pk/$2" content="$3" must="${4:-every finding in src}" c m
       c="$(pm vitest run test/guard.test.ts)"; crc=$?
       if [[ $crc -ne 0 ]]; then fail "mutant $name: control (unmutated) is not green" "$(grep -E 'FAIL' <<<"$c" | head -n 2 | head -c 200)"; return; fi
       mkdir -p "$(dirname "$file")"; printf '%s\n' "$content" > "$file"
       m="$(pm vitest run test/guard.test.ts)"; mrc=$?
       rm -f "$file"; rmdir "$(dirname "$file")" 2>/dev/null || true
       if [[ $mrc -eq 0 ]]; then fail "mutant $name: still GREEN (tests do not bite)"
-      elif ! grep -Eq -- "(FAIL|×).*every finding in src" <<<"$m"; then fail "mutant $name: RED, but not in the expected test" "$(grep -E 'FAIL|×' <<<"$m" | head -n 2 | head -c 240)"
-      else pass "mutant $name: control GREEN, mutant RED in /every finding in src/"; fi
+      elif ! grep -Eq -- "(FAIL|×).*($must)" <<<"$m"; then fail "mutant $name: RED, but not in the expected test" "$(grep -E 'FAIL|×' <<<"$m" | head -n 2 | head -c 240)"
+      else pass "mutant $name: control GREEN, mutant RED in /$must/"; fi
     }
     addfile "a nested src/sub/x.ts hands a value to Intl" src/sub/x.ts "export const viaIntl = (l: string, v: string): string => new Intl.NumberFormat(l).format(v);"
     addfile "a src/y.mts hands a value to Intl" src/y.mts "export const viaIntl = (l: string, v: string): string => new Intl.NumberFormat(l).format(v);"
+    addfile "an extra tsconfig.build.json beside tsconfig.json" tsconfig.build.json '{ "extends": "../../tsconfig.base.json", "include": ["src", "../other"] }' "scripts equal the shipped"
+    # dropfile <name> <test file>: a required test file deleted, control GREEN first, restored afterwards
+    dropfile() {
+      local name="$1" file="$pk/test/$2" c m
+      c="$(pm vitest run test/guard.test.ts)"; crc=$?
+      if [[ $crc -ne 0 ]]; then fail "mutant $name: control (unmutated) is not green" "$(grep -E 'FAIL' <<<"$c" | head -n 2 | head -c 200)"; return; fi
+      mv "$file" "$tmp/dropped.bak"
+      m="$(pm vitest run test/guard.test.ts)"; mrc=$?
+      mv "$tmp/dropped.bak" "$file"
+      if [[ $mrc -eq 0 ]]; then fail "mutant $name: still GREEN (tests do not bite)"
+      elif ! grep -Eq -- "(FAIL|×).*test files that pin" <<<"$m"; then fail "mutant $name: RED, but not in the expected test" "$(grep -E 'FAIL|×' <<<"$m" | head -n 2 | head -c 240)"
+      else pass "mutant $name: control GREEN, mutant RED in /test files that pin/"; fi
+    }
+    dropfile "test/readme.test.ts deleted" readme.test.ts
     # typecheck bites: a type error in src is RED, the clean tree was GREEN above
     printf "export const bad: number = 'a';\n" > "$pk/src/zz-type-error.ts"
     out="$(pm tsc -p tsconfig.json)" && fail "mutant type error: typecheck stayed GREEN" || pass "mutant type error in src: typecheck control GREEN, mutant RED"

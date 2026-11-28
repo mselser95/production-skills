@@ -232,8 +232,8 @@ export function scan(source: string): Finding[] {
       if (/[.eE]/.test(tok.text) && !/^0[xX]/.test(tok.text)) add('literal', tok.text, tok.line);
       else if (tok.text.replace(/_/g, '').length >= 10) add('literal', tok.text, tok.line);
     } else if (tok.kind === 'punct') {
-      // `function* gen` and `yield* x` are not multiplications
-      const generator = prev?.kind === 'id' && ['function', 'yield', 'async'].includes(prev.text);
+      // `function* gen`, `yield* x`, `export * from` and `import * as ns` are not multiplications
+      const generator = prev?.kind === 'id' && ['function', 'yield', 'async', 'export', 'import'].includes(prev.text);
       const binary = prev !== undefined && (prev.kind !== 'punct' || CLOSERS.has(prev.text)) && !(prev.kind === 'id' && KEYWORDS_BEFORE_REGEX.has(prev.text)) && !generator;
       if ((tok.text === '+' || tok.text === '-') && !binary) {
         if (tok.text === '+' || next?.kind !== 'num') add('unary', tok.text + (next?.text ?? ''), tok.line);
@@ -309,6 +309,62 @@ export function judge(file: string, source: string, allow: Allowed[]): { open: s
   return { open };
 }
 
+// Module specifiers. tsc compiles any file that is IMPORTED, whatever `include` says, so a file outside src/ reached from
+// src/ would format values unread by this guard. Rule, by allow-list: in every scanned file every module specifier (the
+// string after `from`, after a side-effect `import`, inside `import(`, `require(`, and in a `/// <reference path|types|lib>`)
+// is RELATIVE (`./` or `../`) and resolves, by path arithmetic from the importing file's directory, to a place inside src/.
+// A `..` that would pass above src/ at ANY point is a finding even if the path re-enters (`../src/a.ts`). Findings:
+// `import-outside-src` (climbs out, absolute, URL), `import-bare` (a package, `node:` builtin or `#imports` name, unless in
+// BARE_ALLOW, which is EMPTY: the package has no runtime dependency), `import-dynamic` (a non-literal `import(x)` or
+// `require(x)`; a template without `${}` counts as a literal). Type-only imports follow the same rule. Not caught: an
+// ambient `declare module 'x'`, `createRequire(...)`, `import.meta` tricks (mistakes, not an adversary, are the trust model).
+export const REQUIRED_TESTS = ['readme.test.ts', 'ownoptions.test.ts', 'guard.test.ts', 'options.test.ts', 'mingrouping.test.ts', 'robust.test.ts', 'rtl.test.ts', 'contract.test.ts'];
+export const BARE_ALLOW: readonly string[] = [];
+
+/** The finding kind of one module specifier written in `file` (path relative to src/, forward slashes), or null when it stays inside src/. */
+export function specifierKind(file: string, spec: string): 'import-outside-src' | 'import-bare' | null {
+  if (spec === '.' || spec === '..' || spec.startsWith('./') || spec.startsWith('../')) {
+    const stack = file.split('/').slice(0, -1);
+    for (const seg of spec.split('/')) {
+      if (seg === '' || seg === '.') continue;
+      if (seg === '..') {
+        if (stack.length === 0) return 'import-outside-src';
+        stack.pop();
+      } else stack.push(seg);
+    }
+    return null;
+  }
+  if (spec.startsWith('/') || spec.startsWith('\\') || /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(spec)) return 'import-outside-src';
+  return BARE_ALLOW.includes(spec) ? null : 'import-bare';
+}
+
+export function importFindings(file: string, source: string): { kind: string; text: string; line: number }[] {
+  const t = lex(source);
+  const out: { kind: string; text: string; line: number }[] = [];
+  const spec = (s: string, line: number): void => {
+    const kind = specifierKind(file, s);
+    if (kind !== null) out.push({ kind, text: s, line });
+  };
+  t.forEach((tok, i) => {
+    const next = t[i + 1];
+    if (tok.kind !== 'id') return;
+    if (tok.text === 'from' && next?.kind === 'str') spec(next.raw ?? '', next.line);
+    else if (tok.text === 'import' && next?.kind === 'str') spec(next.raw ?? '', next.line);
+    else if ((tok.text === 'import' || tok.text === 'require') && next?.text === '(' && next.kind === 'punct') {
+      const arg = t[i + 2];
+      const after = t[i + 3]?.text;
+      const literal = (arg?.kind === 'str' || arg?.kind === 'tpl') && (after === ')' || (after === ',' && tok.text === 'import'));
+      if (literal) spec(arg?.raw ?? '', arg?.line ?? tok.line);
+      else out.push({ kind: 'import-dynamic', text: tok.text + '(', line: tok.line });
+    }
+  });
+  source.split('\n').forEach((l, n) => {
+    const m = /^\s*\/\/\/\s*<reference\s+(?:path|types|lib)\s*=\s*(["'])(.*?)\1/.exec(l);
+    if (m?.[2] !== undefined) spec(m[2], n + 1);
+  });
+  return out;
+}
+
 const kinds = (s: string): string[] => scan(s).map((f) => `${f.kind}:${f.text}`);
 
 // The set of files the guard scans is the set the compiler builds: EVERY file under src/, at any depth, with a TypeScript
@@ -340,16 +396,22 @@ export function walkSources(root: string): { files: string[]; refused: string[] 
 export function auditTree(root: string, allow: Allowed[]): { files: string[]; open: string[] } {
   const { files, refused } = walkSources(root);
   const open = [...refused];
-  for (const f of files) open.push(...judge(f, readFileSync(join(root, f), 'utf8'), allow).open);
+  for (const f of files) {
+    const source = readFileSync(join(root, f), 'utf8');
+    open.push(...judge(f, source, allow).open);
+    for (const x of importFindings(f, source)) open.push(`${f}:${x.line} ${x.kind} ${JSON.stringify(x.text)}`);
+  }
   return { files, open };
 }
 
 /** The package tsconfig must build only src/ (plus tests): every `include` entry is `src...` or `test...`, there is no `files`
  * list, and no `compilerOptions` (so `allowJs` can only come from the base, which the repo selftest checks). */
+export const TSCONFIG_EXTENDS = '../../tsconfig.base.json';
 export function tsconfigProblems(tsconfig: unknown): string[] {
-  const t = tsconfig as { include?: unknown; files?: unknown; compilerOptions?: unknown };
+  const t = tsconfig as { extends?: unknown; include?: unknown; files?: unknown; compilerOptions?: unknown };
   const out: string[] = [];
-  if (!Array.isArray(t.include) || t.include.length === 0) return ['include is not a non-empty array'];
+  if (t.extends !== TSCONFIG_EXTENDS) out.push(`extends is ${JSON.stringify(t.extends)}, not ${JSON.stringify(TSCONFIG_EXTENDS)}`);
+  if (!Array.isArray(t.include) || t.include.length === 0) return [...out, 'include is not a non-empty array'];
   const normalize = (e: unknown): string => (typeof e === 'string' ? e.replace(/^\.\//, '').replace(/\/+$/, '') : '');
   for (const e of t.include) {
     const norm = normalize(e);
@@ -413,15 +475,18 @@ describe('the source contains no float-based formatting or arithmetic on values,
       rmSync(base, { recursive: true, force: true });
     }
   });
-  it('the tsconfig check refuses a source outside src/, a files list and compilerOptions (control)', () => {
-    expect(tsconfigProblems({ include: ['src', 'test'] })).toEqual([]);
-    expect(tsconfigProblems({ include: ['./src/', 'test/**/*'] })).toEqual([]);
-    expect(tsconfigProblems({ include: ['src', 'test', 'lib'] })).toHaveLength(1);
-    expect(tsconfigProblems({ include: ['src', '../other/src'] })).toHaveLength(1);
-    expect(tsconfigProblems({ include: ['test'] })).toHaveLength(1);
-    expect(tsconfigProblems({ include: ['src'], files: ['x.ts'] })).toHaveLength(1);
-    expect(tsconfigProblems({ include: ['src'], compilerOptions: { allowJs: true } })).toHaveLength(1);
-    expect(tsconfigProblems({})).toHaveLength(1);
+  it('the tsconfig check refuses a source outside src/, a files list, compilerOptions and another extends (control)', () => {
+    const x = { extends: TSCONFIG_EXTENDS };
+    expect(tsconfigProblems({ ...x, include: ['src', 'test'] })).toEqual([]);
+    expect(tsconfigProblems({ ...x, include: ['./src/', 'test/**/*'] })).toEqual([]);
+    expect(tsconfigProblems({ ...x, include: ['src', 'test', 'lib'] })).toHaveLength(1);
+    expect(tsconfigProblems({ ...x, include: ['src', '../other/src'] })).toHaveLength(1);
+    expect(tsconfigProblems({ ...x, include: ['test'] })).toHaveLength(1);
+    expect(tsconfigProblems({ ...x, include: ['src'], files: ['x.ts'] })).toHaveLength(1);
+    expect(tsconfigProblems({ ...x, include: ['src'], compilerOptions: { allowJs: true } })).toHaveLength(1);
+    expect(tsconfigProblems(x)).toHaveLength(1);
+    expect(tsconfigProblems({ include: ['src'] })).toHaveLength(1);
+    expect(tsconfigProblems({ extends: '../../tsconfig.loose.json', include: ['src'] })).toHaveLength(1);
   });
   it('ALLOW has exactly the expected number of entries (a new exemption must bump this, visibly)', () => {
     expect(ALLOW.length).toBe(ALLOW_COUNT);
@@ -539,5 +604,87 @@ describe('the source contains no float-based formatting or arithmetic on values,
     const moved = [entry];
     expect(judge('f.ts', 'const q = 0;\nconst a2 = x.toString();', moved).open).toHaveLength(1);
     expect(moved).toHaveLength(1);
+  });
+});
+
+describe('the package shape: imports stay in src/, scripts, tsconfig files and the test files are pinned', () => {
+  const pkgDir = fileURLToPath(new URL('../', import.meta.url));
+  const root = join(pkgDir, 'src');
+  const run = (put: Record<string, string>): string[] => {
+    const base = mkdtempSync(join(tmpdir(), 'format-imports-'));
+    try {
+      const r = join(base, 'src');
+      mkdirSync(r, { recursive: true });
+      for (const [rel, text] of Object.entries(put)) {
+        mkdirSync(join(r, rel.split('/').slice(0, -1).join('/')), { recursive: true });
+        writeFileSync(join(r, rel), text);
+      }
+      return auditTree(r, []).open.filter((o) => / import-/.test(o)).map((o) => o.replace(/^[^ ]+ /, ''));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  };
+  const one = (file: string, text: string): string[] => run({ [file]: text });
+  it('today src/ imports only siblings inside src/, and BARE_ALLOW is empty (no runtime dependency)', () => {
+    expect(BARE_ALLOW).toEqual([]);
+    const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as Record<string, unknown>;
+    for (const k of ['dependencies', 'peerDependencies', 'optionalDependencies']) expect(pkg[k], k).toBeUndefined();
+    let seen = 0;
+    for (const f of walkSources(root).files) {
+      const src = readFileSync(join(root, f), 'utf8');
+      expect(importFindings(f, src), f).toEqual([]);
+      seen += (src.match(/from '\.\/[a-z]+\.ts'/g) ?? []).length;
+    }
+    expect(seen).toBeGreaterThan(10);
+  });
+  it('specifiers: relative inside src/ pass; leaving src/, absolute, URL, bare, node: and #imports are findings (control)', () => {
+    expect(one('x.ts', "import { a } from './a.ts';")).toEqual([]);
+    expect(one('x.ts', "import { b } from './sub/b.ts';")).toEqual([]);
+    expect(one('sub/x.ts', "import { a } from '../a.ts';")).toEqual([]);
+    expect(one('x.ts', "import type { T } from './a.ts'; import './side.ts'; export { y } from './a.ts';")).toEqual([]);
+    expect(one('x.ts', "export * from './a.ts';")).toEqual([]);
+    // `export *` and `import * as` are not multiplications: the whole file audit (scan + imports) is clean
+    expect(kinds("export * from './a.ts';\nimport * as ns from './a.ts';\nexport const k = ns;")).toEqual([]);
+    expect(kinds('const m = a\n  * b;')).toEqual(['arith:a * b']);
+    expect(one('x.ts', "import * as ns from './a.ts'; export const k = ns;")).toEqual([]);
+    expect(one('x.ts', "import('./a.ts'); import(`./a.ts`); import('./a.ts', { with: { type: 'json' } });")).toEqual([]);
+    expect(one('x.ts', "import { a } from '../src/a.ts';")).toEqual(['import-outside-src "../src/a.ts"']);
+    expect(one('sub/x.ts', "import { f } from '../../extra/fast.ts';")).toEqual(['import-outside-src "../../extra/fast.ts"']);
+    expect(one('x.ts', "import { h } from '../test/helper.ts';")).toEqual(['import-outside-src "../test/helper.ts"']);
+    expect(one('x.ts', "import { h } from '/abs/path.ts';")).toEqual(['import-outside-src "/abs/path.ts"']);
+    expect(one('x.ts', "import a from 'file:///etc/x.js'; import b from 'https://h/x.js';")).toEqual(['import-outside-src "file:///etc/x.js"', 'import-outside-src "https://h/x.js"']);
+    expect(one('x.ts', "import { i } from '#internal';")).toEqual(['import-bare "#internal"']);
+    expect(one('x.ts', "import c from 'fast-check'; import d from 'node:intl'; import e from '@scope/x'; import 'left-pad';")).toEqual(['import-bare "fast-check"', 'import-bare "node:intl"', 'import-bare "@scope/x"', 'import-bare "left-pad"']);
+    expect(one('x.ts', 'import(name);')).toEqual(['import-dynamic "import("']);
+    expect(one('x.ts', 'import(`./${name}.ts`);')).toEqual(['import-dynamic "import("']);
+    expect(one('x.ts', "import('./a' + b);")).toEqual(['import-dynamic "import("']);
+    expect(one('x.ts', "const r = require('../extra/x');")).toEqual(['import-outside-src "../extra/x"']);
+    expect(one('x.ts', "import q = require('fast-check');")).toEqual(['import-bare "fast-check"']);
+    expect(one('x.ts', 'const r = require(p);')).toEqual(['import-dynamic "require("']);
+    expect(one('x.ts', "export * as ns from '../extra/fast.ts';")).toEqual(['import-outside-src "../extra/fast.ts"']);
+    expect(one('x.ts', "export { x } from '../extra/fast.ts';")).toEqual(['import-outside-src "../extra/fast.ts"']);
+    expect(one('x.ts', '/// <reference path="../extra/types.d.ts" />\nexport const z = 1;')).toEqual(['import-outside-src "../extra/types.d.ts"']);
+    expect(one('x.ts', '/// <reference path="./types.d.ts" />\nexport const z = 1;')).toEqual([]);
+  });
+  it('a specifier in a comment or inside a longer string is not one (control)', () => {
+    expect(one('x.ts', "// import { a } from '../extra/x.ts'\n/* import('fast-check') */\nexport const s = \"import { a } from '../extra/x.ts'\";")).toEqual([]);
+    expect(one('x.ts', "export const t = `from '../extra/x.ts' import('y')`;")).toEqual([]);
+  });
+  it("the reviewer's patch: an import of ../extra/fast.ts from money.ts or index.ts, or of ../test/helper.ts, is caught in a real tree", () => {
+    const money = readFileSync(join(root, 'money.ts'), 'utf8');
+    const index = readFileSync(join(root, 'index.ts'), 'utf8');
+    expect(run({ 'money.ts': money, 'index.ts': index })).toEqual([]);
+    expect(run({ 'money.ts': "import { fast } from '../extra/fast.ts';\n" + money })).toEqual(['import-outside-src "../extra/fast.ts"']);
+    expect(run({ 'index.ts': index + "export { x } from '../extra/fast.ts';\n" })).toEqual(['import-outside-src "../extra/fast.ts"']);
+    expect(run({ 'money.ts': "import { helper } from '../test/helper.ts';\n" + money })).toEqual(['import-outside-src "../test/helper.ts"']);
+  });
+  it('package.json scripts equal the shipped ones, and there is no other tsconfig*.json file in the package', () => {
+    const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as { scripts?: unknown };
+    expect(pkg.scripts).toEqual({ test: 'vitest run', typecheck: 'tsc -p tsconfig.json' });
+    expect(readdirSync(pkgDir).filter((n) => /^tsconfig.*\.json$/i.test(n))).toEqual(['tsconfig.json']);
+  });
+  it('the test files that pin the contract exist (deleting one would otherwise pass `pnpm test` unnoticed)', () => {
+    const have = readdirSync(join(pkgDir, 'test'));
+    for (const n of REQUIRED_TESTS) expect(have, n).toContain(n);
   });
 });

@@ -41,7 +41,7 @@ Rules (each is pinned by a test):
   separators and grouping sizes are learned from `Intl`'s percent style; the MINIMUM grouping is learned from percent
   samples whose DISPLAYED integer part has exactly 4 digits and then 5 (the samples 10 and 100, shown as 1000% and
   10000%), because `be`, `bg`, `es`, `et`, `hu` print a four-digit percent ungrouped (`1234 %`). Money and plain
-  decimals learn minimum grouping from a displayed 4-digit and 5-digit sample in their own style (1000, 10000).
+  decimals learn minimum grouping from samples whose displayed integer part has those two lengths, in their own style (1000, 10000).
 - **No ambient state.** `locale` is required (an unsupported tag is `bad-locale`, it does not fall back to the machine's
   default); `formatDate` requires `timeZone`. Results are identical under any `TZ`.
 - **Never throws.** Every exported function returns a result (or a string) for a value of any JS type in any
@@ -55,7 +55,8 @@ Rules (each is pinned by a test):
   ignored. Options are a plain record: a known name is read only when it is an OWN property (enumerable or not, so
   `Object.create(null)` works); an inherited (prototype) key is ignored as absent, and an inherited or non-enumerable
   UNKNOWN key is not checked (it has no effect). `formatNum(1, undefined)` is `bad-options` like the other
-  five.
+  five. A settings CLASS whose fields are prototype getters (`get locale()`) is therefore ignored and yields
+  `bad-locale`: pass a plain object or own fields.
 - **Counts.** `formatNum` accepts an integer string, a bigint, or a number that is a safe integer.
 - **Negative money** uses the locale's own minus pattern; there is no accounting-parentheses style.
 - **Instants.** `formatDate` accepts RFC 3339 `YYYY-MM-DDThh:mm:ss[.f{1,9}](Z|+hh:mm|-hh:mm)`; fractional seconds ARE
@@ -69,13 +70,22 @@ Rules (each is pinned by a test):
 - No compact notation: it rounds to significant digits, which hides digits.
 
 Tests (`pnpm test`): unit tables per function, fast-check properties (fixed seed) against an independent BigInt oracle,
-the TZ matrix, Intl cross-checks (33 locales x 5 currencies x 3 displays for money, listed in `test/money.test.ts`; for percent
-the locales listed in `test/percent.test.ts` (65 today) x displayed integer parts of 1 to 9 digits; RTL locales for decimals), a never-throws fuzz over every parameter, option
-read-once, own-key and unknown-key tests, and `test/guard.test.ts`. `test/readme.test.ts` fails when a number stated here
-about those lists no longer equals the lists.
+the TZ matrix, Intl cross-checks (money over the locales, currencies and displays listed in `test/money.test.ts`; percent over
+the locales listed in `test/percent.test.ts` x displayed integer parts of 1 to 9 digits; RTL locales for decimals), a never-throws fuzz over every parameter, option
+read-once, own-key and unknown-key tests, and `test/guard.test.ts`. The sizes of those lists are stated in ONE line, which
+`test/readme.test.ts` regenerates from the lists and compares for equality:
 
-The guard walks every file under `src/` at any depth with a `.ts`, `.mts`, `.cts` or `.tsx` extension (the set the
-compiler builds), refuses a JavaScript source or a symbolic link as a finding, asserts that the tsconfig builds only `src`
+Cross-check sizes: money 33 locales x 5 currencies x 3 displays; percent 65 locales.
+
+Anywhere else in this file a digit sequence or a spelled-out number (one to twenty, the tens, hundred) within two words of
+`locale`, `currenc`, `display` or `language` fails that test. It catches a number on either side of those stems in any letter case, hyphenated (`N-locale`) or after a colon;
+it does not catch a count worded away from those stems (for example "the full set of N tags"), and it does not judge any
+other number.
+
+The guard walks every file under `src/` at any depth with a `.ts`, `.mts`, `.cts` or `.tsx` extension, refuses any import
+that leaves `src/` or names a package (every `import`, `export ... from`, `import()`, `require()` and `/// <reference>`
+specifier must be relative and stay inside `src/`; the allow-list of packages is empty), so no compiled code that formats a
+value lies outside what it reads; `test/` is not scanned and cannot be imported from `src/`. It also refuses a JavaScript source or a symbolic link as a finding, asserts that the tsconfig builds only `src`
 and `test`, and keys ALLOW entries on the path relative to `src/`. It lexes each file (comments, strings, template code
 and regex literals handled by state, no per-line escape
 marker). It flags: `.toFixed` / `.toPrecision` / `.toExponential` / `.toLocaleString` / `.toString` / `.valueOf`;
