@@ -528,35 +528,181 @@ fn repository_root(module: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
 }
 
-/// `Err`-style findings for a `rust-toolchain(.toml)` text: a table other than
-/// `[toolchain]`, or a key outside `TOOLCHAIN_KEYS`.
+/// A release channel and nothing else: `stable`, `beta` or `nightly`, each
+/// optionally dated `-YYYY-MM-DD`, or a version `N.N` / `N.N.N`. No path
+/// separator, no leading `.` or `~`: rustup reads anything else as the name of
+/// a toolchain it may resolve to a directory.
+fn valid_channel(c: &str) -> bool {
+    let digits = |s: &str, n: Option<usize>| {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && n.is_none_or(|n| s.len() == n)
+    };
+    for name in ["stable", "beta", "nightly"] {
+        if let Some(rest) = c.strip_prefix(name) {
+            if rest.is_empty() {
+                return true;
+            }
+            let parts: Vec<&str> = rest.strip_prefix('-').unwrap_or("!").split('-').collect();
+            return parts.len() == 3
+                && digits(parts[0], Some(4))
+                && digits(parts[1], Some(2))
+                && digits(parts[2], Some(2));
+        }
+    }
+    let parts: Vec<&str> = c.split('.').collect();
+    (parts.len() == 2 || parts.len() == 3) && parts.iter().all(|p| digits(p, None))
+}
+
+/// `"x"` with no quote, backslash or newline inside, the whole of `s`.
+fn quoted(s: &str) -> Option<&str> {
+    let inner = s.trim().strip_prefix('"')?.strip_suffix('"')?;
+    (!inner.contains(['"', '\\'])).then_some(inner)
+}
+
+/// Parses the rest of an array line: quoted strings separated by commas,
+/// optionally closed by `]`. `Some(closed)`, or `None` for anything else.
+fn array_items(mut rest: &str) -> Option<bool> {
+    loop {
+        rest = rest.trim_start_matches([' ', '\t', ',']);
+        if rest.is_empty() {
+            return Some(false);
+        }
+        if let Some(after) = rest.strip_prefix(']') {
+            return after.trim().is_empty().then_some(true);
+        }
+        let body = rest.strip_prefix('"')?;
+        let end = body.find('"')?;
+        if body[..end].contains('\\') {
+            return None;
+        }
+        rest = &body[end + 1..];
+    }
+}
+
+/// Findings for the text of the module's `rust-toolchain.toml`, by allow-list:
+/// every non-empty, non-comment line is the `[toolchain]` header, a line of an
+/// open `components` / `targets` array, or an accepted `key = value` line
+/// (`TOOLCHAIN_KEYS`); a `channel` is required and must be a release channel
+/// (`valid_channel`). Anything else is a finding, never skipped.
 fn toolchain_text_violations(file: &str, text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut in_array = false;
+    let mut channel = false;
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
         if in_array {
-            in_array = !line.contains(']');
+            match array_items(line) {
+                Some(closed) => in_array = !closed,
+                None => found.push(format!("{file}: `{line}` is not a quoted array element")),
+            }
             continue;
         }
-        if line.starts_with('[') {
+        if line.starts_with('[') && !line.contains('=') {
             if line != "[toolchain]" {
                 found.push(format!("{file}: the table {line} is not accepted"));
             }
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().trim_matches(['"', '\'']);
-            if !TOOLCHAIN_KEYS.contains(&key) {
-                found.push(format!(
-                    "{file}: the key `{key}` is not accepted (accepted: {})",
-                    TOOLCHAIN_KEYS.join(", ")
-                ));
+        let Some((key, value)) = line.split_once('=') else {
+            found.push(format!("{file}: the line `{line}` is not `key = value`"));
+            continue;
+        };
+        let key = key.trim().trim_matches(['"', '\'']);
+        let value = value.trim();
+        if !TOOLCHAIN_KEYS.contains(&key) {
+            found.push(format!(
+                "{file}: the key `{key}` is not accepted (accepted: {})",
+                TOOLCHAIN_KEYS.join(", ")
+            ));
+            continue;
+        }
+        match key {
+            "channel" => {
+                channel = true;
+                if !quoted(value).is_some_and(valid_channel) {
+                    found.push(format!(
+                        "{file}: channel {value} is not a release channel (stable|beta|nightly[-YYYY-MM-DD] or N.N[.N])"
+                    ));
+                }
             }
-            in_array = value.contains('[') && !value.contains(']');
+            "profile" => {
+                if !quoted(value).is_some_and(|p| p.bytes().all(|b| b.is_ascii_lowercase())) {
+                    found.push(format!("{file}: profile {value} is not a plain name"));
+                }
+            }
+            _ => match value.strip_prefix('[').and_then(array_items) {
+                Some(closed) => in_array = !closed,
+                None => found.push(format!("{file}: `{key} = {value}` is not a string array")),
+            },
+        }
+    }
+    if in_array {
+        found.push(format!("{file}: an array is never closed"));
+    }
+    if !channel {
+        found.push(format!("{file}: no `channel` key (it is required)"));
+    }
+    found
+}
+
+fn toolchain_files_below(dir: &Path, out: &mut Vec<PathBuf>) {
+    out.extend(toolchain_files_in(dir));
+    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for e in entries {
+        let name = e.file_name();
+        if name == "target" || name == ".git" || !e.file_type().unwrap().is_dir() {
+            continue;
+        }
+        toolchain_files_below(&e.path(), out);
+    }
+}
+
+fn toolchain_files_in(dir: &Path) -> Vec<PathBuf> {
+    ["rust-toolchain", "rust-toolchain.toml"]
+        .iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.symlink_metadata().is_ok())
+        .collect()
+}
+
+/// rustup honours a plain-text `rust-toolchain` (its one line may be a
+/// directory) and, nearest to the compile's working directory, any
+/// `rust-toolchain.toml`. The only toolchain file accepted is the module
+/// root's `rust-toolchain.toml`, and its text is checked by allow-list; every
+/// other toolchain file, in the module tree or in a directory above it up to
+/// `ceiling`, is refused by its presence.
+fn refused_toolchain_files(module: &Path, ceiling: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    toolchain_files_below(module, &mut files);
+    for dir in module.ancestors().skip(1) {
+        files.extend(toolchain_files_in(dir));
+        if dir == ceiling {
+            break;
+        }
+    }
+    let allowed = module.join("rust-toolchain.toml");
+    let mut found = Vec::new();
+    for f in &files {
+        if *f != allowed {
+            found.push(format!(
+                "toolchain file {} (only the module root's rust-toolchain.toml is accepted: rustup may read this one as a toolchain directory or prefer it)",
+                f.display()
+            ));
+        }
+    }
+    if files.contains(&allowed) {
+        match fs::read_to_string(&allowed) {
+            Ok(text) => found.extend(toolchain_text_violations(
+                &allowed.display().to_string(),
+                &text,
+            )),
+            Err(e) => found.push(format!(
+                "toolchain file {} is unreadable: {e}",
+                allowed.display()
+            )),
         }
     }
     found
@@ -588,11 +734,7 @@ fn refused_cargo_config(module: &Path, ceiling: &Path) -> Vec<String> {
             )
         })
         .collect();
-    for name in ["rust-toolchain.toml", "rust-toolchain"] {
-        if let Ok(text) = fs::read_to_string(module.join(name)) {
-            found.extend(toolchain_text_violations(name, &text));
-        }
-    }
+    found.extend(refused_toolchain_files(module, ceiling));
     found
 }
 
@@ -1814,4 +1956,148 @@ fn rust_toolchain_files_may_only_carry_channel_components_targets_and_profile() 
     }
     let fine = "[toolchain]\nchannel = \"1.99.1\" # pinned\ncomponents = [\"clippy\"]\nprofile = \"minimal\"\ntargets = [\n  \"a=b\",\n]\n";
     assert!(toolchain_text_violations("rust-toolchain.toml", fine).is_empty());
+}
+
+/// Builds `rel` files under a scratch dir and returns the findings for the
+/// module at `<scratch>/mod` with the repository root at `<scratch>`.
+fn toolchain_case(name: &str, files: &[(&str, &str)]) -> Vec<String> {
+    let base = fixture_target().join("toolchain-work").join(name);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("mod/crates/domain")).unwrap();
+    for (rel, content) in files {
+        let f = base.join(rel);
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(&f, content).unwrap();
+    }
+    let found = refused_toolchain_files(&base.join("mod"), &base);
+    let _ = fs::remove_dir_all(&base);
+    found
+}
+
+#[test]
+fn only_the_module_roots_rust_toolchain_toml_is_accepted_and_it_names_a_release_channel() {
+    let real = fs::read_to_string(root().join("rust-toolchain.toml")).unwrap();
+    let green: [(&str, Vec<(&str, &str)>); 2] = [
+        ("shipped", vec![("mod/rust-toolchain.toml", &real)]),
+        (
+            "multiline_components",
+            vec![(
+                "mod/rust-toolchain.toml",
+                "[toolchain]\nchannel = \"nightly-2026-01-02\"\ncomponents = [\n  \"clippy\",\n  \"rustfmt\"\n]\n",
+            )],
+        ),
+    ];
+    for (name, files) in green {
+        let found = toolchain_case(name, &files);
+        assert!(found.is_empty(), "{name}: refused {found:?}");
+    }
+    let good = "[toolchain]\nchannel = \"1.99.1\"\n";
+    let with = |channel: &str| format!("[toolchain]\nchannel = \"{channel}\"\n");
+    type RedCase<'a> = (&'a str, Vec<(&'a str, String)>, &'a str);
+    let red: Vec<RedCase> = vec![
+        (
+            "legacy_root",
+            vec![("mod/rust-toolchain", "stable\n".into())],
+            "mod/rust-toolchain",
+        ),
+        (
+            "legacy_path",
+            vec![("mod/rust-toolchain", "/opt/custom\n".into())],
+            "mod/rust-toolchain",
+        ),
+        (
+            "legacy_parent",
+            vec![("rust-toolchain", "stable\n".into())],
+            "rust-toolchain",
+        ),
+        (
+            "legacy_beside_toml",
+            vec![
+                ("mod/rust-toolchain", "stable\n".into()),
+                ("mod/rust-toolchain.toml", good.into()),
+            ],
+            "mod/rust-toolchain",
+        ),
+        (
+            "toml_in_subdir",
+            vec![
+                ("mod/rust-toolchain.toml", good.into()),
+                ("mod/crates/domain/rust-toolchain.toml", good.into()),
+            ],
+            "crates/domain/rust-toolchain.toml",
+        ),
+        (
+            "toml_in_parent",
+            vec![
+                ("mod/rust-toolchain.toml", good.into()),
+                ("rust-toolchain.toml", good.into()),
+            ],
+            "rust-toolchain.toml",
+        ),
+        (
+            "path_key",
+            vec![("mod/rust-toolchain.toml", format!("{good}path = \"x\"\n"))],
+            "path",
+        ),
+        (
+            "channel_dot_slash",
+            vec![("mod/rust-toolchain.toml", with("./tc"))],
+            "channel",
+        ),
+        (
+            "channel_absolute",
+            vec![("mod/rust-toolchain.toml", with("/abs"))],
+            "channel",
+        ),
+        (
+            "channel_tilde",
+            vec![("mod/rust-toolchain.toml", with("~/x"))],
+            "channel",
+        ),
+        (
+            "channel_dotdot",
+            vec![("mod/rust-toolchain.toml", with("stable/../x"))],
+            "channel",
+        ),
+        (
+            "channel_backslash",
+            vec![("mod/rust-toolchain.toml", with("stable\\\\x"))],
+            "channel",
+        ),
+        (
+            "bare_line",
+            vec![("mod/rust-toolchain.toml", format!("{good}./tc\n"))],
+            "./tc",
+        ),
+        (
+            "other_table",
+            vec![("mod/rust-toolchain.toml", format!("{good}[other]\n"))],
+            "[other]",
+        ),
+        (
+            "no_channel",
+            vec![(
+                "mod/rust-toolchain.toml",
+                "[toolchain]\nprofile = \"minimal\"\n".into(),
+            )],
+            "channel",
+        ),
+        (
+            "bare_line_in_array",
+            vec![(
+                "mod/rust-toolchain.toml",
+                format!("{good}components = [\n  ./tc\n]\n"),
+            )],
+            "./tc",
+        ),
+    ];
+    for (name, files, names) in red {
+        let files: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let found = toolchain_case(name, &files);
+        assert!(!found.is_empty(), "{name}: accepted");
+        assert!(
+            found.iter().any(|f| f.contains(names)),
+            "{name}: the finding must name `{names}`: {found:?}"
+        );
+    }
 }
