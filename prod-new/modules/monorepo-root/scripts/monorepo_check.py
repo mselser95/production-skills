@@ -7,13 +7,16 @@
 
 Exit: 0 clean - 1 findings - 2 cannot run (PyYAML missing, repo.yaml unreadable for `units`).
 Reads text/JSON/YAML and asks `git ls-files` for a tracked node_modules/. No network, no pnpm.
-"Unit has target T" (service, database) is make's own verdict by EXIT STATUS: `make -C <unit> -q -- T` with
-output discarded (1 = make would run something for T = present; 0 = nothing to do; 2 = no rule or an error;
-a timeout or signal = unanswered; one extra question for a name nobody defines catches a match-anything rule).
-What runs during that inspection (measured on GNU make 3.81): make parses the unit's Makefile (a parse-time
-`$(shell ...)` runs, and an included file that has a rule may be remade) and, as GNU make does in question mode,
-executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe
-at most up to its first line that is neither; no other recipe line runs. The units are the repository's own code,
+"Unit has target T" (service, database) is make's own verdict by EXIT STATUS, nothing printed is read. First question: `make -C <unit> -q -- T` with
+output discarded (1 = make would run something for T = present; 0 = nothing to do = missing; a timeout or signal = unanswered). Only when that answers 2
+a SECOND question: `make -C <unit> -n -- T` in the
+same scrubbed environment (0 = make can plan T = present; 2 = missing). One extra pair of questions for a name nobody defines catches a match-anything rule.
+What runs during that inspection: make parses the unit's Makefile (a parse-time `$(shell ...)` runs; an included
+file that has a rule may be remade, its recipe IN FULL, plain lines too). Under -q make executes the recipe lines marked `+` or containing `$(MAKE)` of
+the target and of its prerequisites, each recipe at most up to its first line that is neither (an upper bound: it stops at the first out-of-date
+prerequisite whose recipe starts with a plain line; a file target that a `+` line just created may be deleted again). Under -n (asked only after a -q
+answer of 2) make walks the WHOLE recipe, so every `+` / `$(MAKE)` line of the target and of all its out-of-date prerequisites runs (a sub-make in
+dry-run mode runs its `+` lines and not its plain lines). Apart from that remake, no plain recipe line runs under either question. GNU make 4 answers 1 where 3.81 answers 2 to `-q` for a recipe that starts with a `$(MAKE)` or `+` line, and the judgment is the same (`verify: $(MAKE) check-fast` is present on both); `verify: +false` differs (3.81: `-q` 2 and `-n` 2 = missing; 4.3: `-q` 1 = present) and on both the root `make verify` ends non-zero. What runs during the inspection was measured on GNU make 3.81 and 4.3. The units are the repository's own code,
 trusted as `make check-fast` trusts them. The root Makefile and the check read the SAME function.
 """
 import json
@@ -254,14 +257,14 @@ _rc_cache = {}
 PROBE_NAME = "__monorepo_probe_" + secrets.token_hex(8)  # a name no unit can have as a real target
 
 
-def make_rc(unitdir, target):
-    """make's exit status for `make -q -- target` in unitdir, or None when make could not be run, was killed
-    by a signal or did not answer within MAKE_TIMEOUT. One call per (unitdir, target) per process."""
-    key = (unitdir, target)
+def make_ask(unitdir, target, flag):
+    """make's exit status for `make <flag> -- target` in unitdir (flag -q or -n), or None when make could not be
+    run, was killed by a signal or did not answer within MAKE_TIMEOUT. One call per (unitdir, target, flag)."""
+    key = (unitdir, target, flag)
     if key not in _rc_cache:
         rc = None
         try:
-            r = subprocess.run(["make", "-C", unitdir, "-q", "--", target], stdin=subprocess.DEVNULL,
+            r = subprocess.run(["make", "-C", unitdir, flag, "--", target], stdin=subprocess.DEVNULL,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=make_env(),
                                timeout=MAKE_TIMEOUT)
             rc = r.returncode if r.returncode >= 0 else None
@@ -271,25 +274,50 @@ def make_rc(unitdir, target):
     return _rc_cache[key]
 
 
+def make_rc(unitdir, target):
+    """The first question, `make -q -- target`: 1 = would run something, 0 = nothing to do, 2 = no rule / error /
+    (GNU make 3.81 only) a recipe whose first line, `+` or `$(MAKE)`, make executes in question mode and that answered 1; 4.3 answers 1."""
+    return make_ask(unitdir, target, "-q")
+
+
+def make_rc_dry(unitdir, target):
+    """The second question, asked ONLY when the first answered 2: `make -n -- target`. 0 = make has a rule graph for
+    the target and could plan it (on 3.81 the -q error came from an executed `$(MAKE)`/`+` line), 2 = no rule, a missing
+    prerequisite, a syntax error, no Makefile, or a `+`/`$(MAKE)` line that fails under -n too."""
+    return make_ask(unitdir, target, "-n")
+
+
+def make_answer(unitdir, target):
+    """(first answer, second answer or None): the second is asked only when the first is 2."""
+    q = make_rc(unitdir, target)
+    return q, (make_rc_dry(unitdir, target) if q == 2 else None)
+
+
 def unit_catch_all(unitdir):
     """True when the unit answers for a name nobody can have defined (a match-anything rule or `.DEFAULT`): an
-    explicit rule cannot be told apart from it by exit status, so such a unit is refused."""
-    return make_rc(unitdir, PROBE_NAME) in (0, 1)
+    explicit rule cannot be told apart from it by exit status, so such a unit is refused. The probe name goes
+    through the same two questions as a target (a catch-all whose recipe starts with `$(MAKE)` answers -q 2, -n 0 on 3.81 and -q 1 on 4.3)."""
+    q, n = make_answer(unitdir, PROBE_NAME)
+    return q in (0, 1) or (q == 2 and n == 0)
 
 
 def make_target_state(unitdir, target):
-    """'present' | 'idle' | 'norule' | 'error' | 'catch-all'. present = make would run something for T (exit 1).
+    """'present' | 'idle' | 'norule' | 'error' | 'catch-all'. present = make would run something for T (-q exit 1),
+    or -q exit 2 and `make -n` exit 0 (a recipe that starts with `$(MAKE)`/`+`: see make_rc_dry).
     idle = make has nothing to do for T (exit 0: no recipe, or a file named T without `.PHONY`).
-    norule = exit 2 (no rule for T, no Makefile, an error in the Makefile). error = make could not be run, was
+    norule = -q exit 2 and -n exit 2 (no rule for T, no Makefile, an error in the Makefile, a recipe that fails
+    already under `make -n`). error = make could not be run, was
     killed or timed out. catch-all = the unit answers for any name (unit_catch_all)."""
     if unit_catch_all(unitdir):
         return "catch-all"
-    rc = make_rc(unitdir, target)
-    if rc == 1:
+    q, n = make_answer(unitdir, target)
+    if q == 1 or (q == 2 and n == 0):
         return "present"
-    if rc == 0:
+    if q == 0:
         return "idle"
-    return "norule" if rc == 2 else "error"
+    if q == 2:
+        return "norule" if n == 2 else "error"
+    return "error"
 
 
 def has_make_target(unitdir, target):
@@ -602,17 +630,20 @@ def check(root):
             st = make_target_state(p, t)
             if st == "present":
                 continue
-            rc = make_rc(p, t)
+            rc, rn = make_answer(p, t)
             if st == "idle" and os.path.lexists(os.path.join(p, t)):
                 what = ("make has nothing to do for %s (exit status 0): a file named %s beside a rule that is not "
                         ".PHONY makes make say \"up to date\"; declare `.PHONY: %s`" % (t, t, t))
             elif st == "idle":
                 what = ("make has nothing to do for %s (exit status 0): no recipe, or a name only in .PHONY" % t)
             elif st == "norule":
-                what = "make has no rule for %s, or the Makefile has an error (exit status 2)" % t
+                what = ("make has no rule for %s, the Makefile has an error, or the recipe fails already under "
+                        "`make -n` (make -q: 2, make -n: 2)" % t)
             else:
                 what = "make could not answer for %s (%s)" % (t, "timed out, was killed or could not be run"
-                                                              if rc is None else "exit status %d" % rc)
+                                                              if rc is None or (rc == 2 and rn is None)
+                                                              else "exit status %d" % rc if rc != 2 else
+                                                              "make -q: 2, make -n: %d" % rn)
             f.append((mk, 1, "unit-target", "unit %s: Makefile has no %s target: %s" % (u["id"], t, what)))
     if not err and not [1 for _, _, r, _ in f if r == "repo-yaml"]:
         for top in ("apps", "packages", "services"):

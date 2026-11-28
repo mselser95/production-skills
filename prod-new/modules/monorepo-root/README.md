@@ -85,39 +85,48 @@ target: `env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOVERRIDES -u GNUMAKEFLAG
 with stdout and stderr discarded (the caller's make flags are scrubbed, so a root `make -n`, `-i`, `-k`, `-B` or `-s`
 does not change the answer; a call that takes over 20 s is unanswered). GNU make's question mode answers 1 when it
 would run something for the target (PRESENT), 0 when it has nothing to do, 2 on an error (no rule for the target, no
-Makefile, a syntax error). Exit 0 is reported missing: `verify: ;`, a name only in `.PHONY`, `verify: other` where
+Makefile, a syntax error). A recipe whose first line is marked `+` or contains `$(MAKE)` (e.g. `verify:` whose first line is
+`$(MAKE) check-fast`) is executed by question mode: GNU make 3.81 then answers 2 (the sub-make's 1 ("work to do") becomes a
+failed line), 4.3 answers 1; the judgment is the same. So an answer of 2 asks a SECOND question, the same
+command with `-n` in place of `-q` (same scrubbed environment, output discarded): `-n` exit 0 means make has a rule
+graph for the target and can plan it, so it is PRESENT; `-n` exit 2 (no rule, a missing prerequisite, a syntax error, no
+Makefile, or a `+` / `$(MAKE)` line that fails already under `make -n`) means missing. Exit 0 is reported missing: `verify: ;`, a name only in `.PHONY`, `verify: other` where
 `other` has no recipe, and a target whose name is also a FILE in the unit directory without `.PHONY` ("up to date";
-the message adds the hint `.PHONY: <target>`). Exit 2, any other status, a signal or a timeout is missing too, and the
-message carries the exit status. Prerequisite-only targets (`verify: check-fast lint`, the shape of the service
+the message adds the hint `.PHONY: <target>`). Exit 2 followed by `-n` exit 2, any other status, a signal or a timeout (of either question) is missing too, and the
+message carries the exit status (`make -q: 2, make -n: 2` for the pair). Prerequisite-only targets (`verify: check-fast lint`, the shape of the service
 modules), pattern rules, static pattern rules, included files and double-colon rules are answered by make itself.
-One more question per unit asks for a random name no unit can define (`__monorepo_probe_<16 hex>`): an answer of 0 or 1
-means the unit answers for ANY name (a `%:` rule or `.DEFAULT:`), and the unit is refused (`unit-target`, "answers for
+One more question per unit asks for a random name no unit can define (`__monorepo_probe_<16 hex>`) and goes through the
+same two steps (a catch-all whose recipe starts with `$(MAKE)` answers `-q` 2 and `-n` 0 on 3.81, `-q` 1 on 4.3; for every ordinary unit the probe
+answers 2 and 2, so each unit costs one extra `make -n` for the probe name, never for a real target): a `-q` answer of 0
+or 1, or of 2 followed by `-n` 0, means the unit answers for ANY name (a `%:` rule or `.DEFAULT:`), and the unit is refused (`unit-target`, "answers for
 any target name ... targets cannot be verified") by the check and by the runner, whatever its targets are: an explicit
 rule cannot be told apart from a catch-all by exit status. Answers are cached per (unit, target) within one run. For an
 app or package the function reads `package.json` `scripts`. A unit that lacks a mandatory target makes the runner
-FAIL before any unit target is run, and `make check-fast` / `make verify` stop at the settings check first. The inspection is `make -C <unit> -q <target>`: make parses the unit's Makefile (a parse-time `$(shell ...)` runs, and an included file that has a rule may be remade) and, as GNU make does in question mode, executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither; no other recipe line runs (measured on GNU make 3.81).
+FAIL before any unit target is run, and `make check-fast` / `make verify` stop at the settings check first. The inspection asks `make -C <unit> -q <target>` and, only if that answers 2, `make -C <unit> -n <target>` (exit status only; output discarded). First question: make parses the unit's Makefile (a parse-time `$(shell ...)` runs; an included file that has a rule may be remade, its recipe IN FULL, plain lines too). Under `-q` make executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither (an upper bound: it stops at the first out-of-date prerequisite whose recipe starts with a plain line; a file target that a `+` line just created may be deleted again). Only when that answers 2 does it ask the SECOND question, `make -C <unit> -n <target>`, same scrubbed environment, output discarded: 0 = present, 2 = missing. Under `-n` make walks the WHOLE recipe, so every `+` / `$(MAKE)` line of the target and of all its out-of-date prerequisites runs (a sub-make in dry-run mode runs its `+` lines and not its plain lines). Apart from that remake, no plain recipe line runs under either question. GNU make 4 answers 1 where 3.81 answers 2 to `-q` for a recipe that starts with a `$(MAKE)` or `+` line, and the judgment is the same (`verify: $(MAKE) check-fast` is present on both); `verify: +false` differs (3.81: `-q` 2 and `-n` 2 = missing; 4.3: `-q` 1 = present) and on both the root `make verify` ends non-zero. What runs during the inspection was measured on GNU make 3.81 and 4.3.
 The runner runs each unit with stdin from `/dev/null`, reads the whole unit list before running any, refuses a
 unit path that is a symlink or resolves outside the repository, announces how many units it will run and
 asserts it ran that many.
 
 ## Limits
 
-The inspection is `make -C <unit> -q <target>`: make parses the unit's Makefile (a parse-time `$(shell ...)` runs, and an included file that has a rule may be remade) and, as GNU make does in question mode, executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither; no other recipe line runs (measured on GNU make 3.81). Under `-q` a recipe whose first line is `+`/`$(MAKE)` answers with
-that sub-make's status. The root does not sandbox make: the units are the repository's own code and are trusted to the
+The inspection asks `make -C <unit> -q <target>` and, only if that answers 2, `make -C <unit> -n <target>` (exit status only; output discarded). First question: make parses the unit's Makefile (a parse-time `$(shell ...)` runs; an included file that has a rule may be remade, its recipe IN FULL, plain lines too). Under `-q` make executes the recipe lines marked `+` or containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither (an upper bound: it stops at the first out-of-date prerequisite whose recipe starts with a plain line; a file target that a `+` line just created may be deleted again). Only when that answers 2 does it ask the SECOND question, `make -C <unit> -n <target>`, same scrubbed environment, output discarded: 0 = present, 2 = missing. Under `-n` make walks the WHOLE recipe, so every `+` / `$(MAKE)` line of the target and of all its out-of-date prerequisites runs (a sub-make in dry-run mode runs its `+` lines and not its plain lines). Apart from that remake, no plain recipe line runs under either question. GNU make 4 answers 1 where 3.81 answers 2 to `-q` for a recipe that starts with a `$(MAKE)` or `+` line, and the judgment is the same (`verify: $(MAKE) check-fast` is present on both); `verify: +false` differs (3.81: `-q` 2 and `-n` 2 = missing; 4.3: `-q` 1 = present) and on both the root `make verify` ends non-zero. What runs during the inspection was measured on GNU make 3.81 and 4.3. The root does not sandbox make: the units are the repository's own code and are trusted to the
 degree `make check-fast` trusts them. No unit TARGET RECIPE is run for `check-fast`, `verify` or `test` when a mandatory
 target is missing.
 
 Scope boundary: the root can tell that make WOULD run something for a target; it cannot tell what a recipe does. A unit
 whose `verify` recipe is `@:` or `@true`, or whose Makefile defines the rule only under a condition on `MAKEFLAGS` /
 `MAKECMDGOALS`, has an owner who wrote a no-op on purpose; that is a review matter, not something this check claims to
-catch.
+catch. One boundary of the same class: the inspection sees a unit as plain `make <target>` would, without the caller's
+command-line variables (the scrub removes `MAKEFLAGS`, so `make verify MODE=fast` at the root reaches the inspection as an
+environment variable at most, which a `MODE := strict` assignment in the unit overrides, while the real run gets it as a
+command-line override); a conditional on such a variable that selects an empty recipe is not seen.
 
 Install scripts: `strictDepBuilds` and `onlyBuiltDependencies: []` govern DEPENDENCIES only. A workspace package's own
 `preinstall` / `postinstall` / `prepare` scripts are the repository's own code and DO run on a plain `pnpm install`.
 This module's root Makefile and root `package.json` have no install target (they only delegate to `monorepo-run.sh`);
 a human or CI that installs should pass `--ignore-scripts` (`pnpm install --frozen-lockfile --ignore-scripts`), as the
 live selftest does for its network installs.
-Not proven: GNU make 4.x on a real Linux host (the execution facts above were measured on 3.81 only; GNU documents that lines marked `+` or containing `$(MAKE)` run even under `-q`).
+Measured on GNU make 3.81 (macOS) and 4.3 (Debian bookworm): the judgments above, except one known divergence of 4.3: a recipe whose `+` / `$(MAKE)` first lines SUCCEED with nothing to do (`verify:` with `+true`, or `$(MAKE) check-fast` where `check-fast: ;`) answers `-q` 0 there, so it is judged idle = missing (RED, fail closed), where 3.81 judges it present. Not proven: other GNU make versions.
 
 ## Adding a unit
 
