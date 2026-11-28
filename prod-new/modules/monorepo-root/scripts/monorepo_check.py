@@ -8,24 +8,7 @@
 Exit: 0 clean - 1 findings - 2 cannot run (PyYAML missing, repo.yaml unreadable for `units`).
 Reads text/JSON/YAML and asks `git ls-files` for a tracked node_modules/. No network, no pnpm.
 "Unit has target T" (service, database) is make's own verdict by EXIT STATUS, nothing printed is read.
-The inspection asks `make -C <unit> -q <target>`; only if that answers 0 does it ask `make -C <unit> -q -B <target>` (the same question with every file considered out of date, so the verdict does not depend on whether the
-unit's outputs are fresh, and with every makefile make read named by -o (--assume-old: no makefile is remade and no rule is added to the unit's rule base; GNU make 3.81 remakes an included makefile that has a rule under -B and answers 1 for it, 4.3 does not; the names come from one list pass, asked first: make -C <unit> -q -f <unit makefile> -f <list makefile> <random name>, whose module-owned makefile writes $(MAKEFILE_LIST) into a file in the private temp dir by a parse-time $(shell printf ...), the exit status of the pass is not used, and a list that is empty or names something that is not a file beside the unit leaves the unit unanswerable: fail closed); only if the last question asked
-answered 2 does it ask `make -C <unit> -n <target>` (exit status only; output discarded). Verdict: -q 1 = present; -q 0 and -q -B 1 =
-present (the target was only up to date), unless a file or directory named like the target sits beside the Makefile and the rule is not
-`.PHONY` (the real run says up to date: idle, with a `.PHONY` hint); -q -B 0 = idle (nothing to run even with everything out of date); an
-answer of 2 asks -n: 0 = present, 2 = missing. First question: make parses the unit's Makefile (a parse-time `$(shell ...)` runs; an
-included file that has a rule may be remade, its recipe IN FULL, plain lines too). Under `-q` make executes the recipe lines marked `+` or
-containing `$(MAKE)` of the target and of its prerequisites, each recipe at most up to its first line that is neither (an upper bound: it
-stops at the first out-of-date prerequisite whose recipe starts with a plain line; a file target that a `+` line just created may be deleted
-again). The `-B` question executes the same classes of lines, passed on to sub-makes in question mode as well, but MORE of them, since
-nothing counts as up to date: the `+` / `$(MAKE)` lines of prerequisites and sub-make targets that were up to date run too, and no makefile is remade (-o). Under `-n` make walks the WHOLE recipe, so every `+` / `$(MAKE)` line of the
-target and of all its out-of-date prerequisites runs (a sub-make in dry-run mode runs its `+` lines and not its plain lines). Apart from that remake under the first question, the list pass and -n, no plain recipe line runs under any question; the list pass asks for a name no unit has, so it executes the unit's parse-time $(shell ...), the remake of included makefiles (as the first question does) and the module's one printf that writes the makefile names, nothing else. On GNU make 3.81 and 4.3 the judgment is the same, and the same before and after a real run, for every shape
-measured (an included makefile that has a rule, with no rule that runs anything for the target, is idle, and
-so is verify: gen.mk with gen.mk such an included makefile; the same unit with verify: build or a $(MAKE)
-build line is present), except a recipe made only of `+` / `$(MAKE)` lines that run nothing (`verify:` with `+true`, `+@echo
-ok`, or `$(MAKE) check-fast` with `check-fast: ;`): 3.81 answers 1 to `-q` (present), 4.3 answers 0 to `-q` and to `-q -B` (idle,
-fail-closed: such a recipe verifies nothing); `verify: +false` differs too (3.81: `-q` 2 and `-n` 2 = missing; 4.3: `-q` 1 = present) and on
-both the root `make verify` ends non-zero. What runs during the inspection was measured on GNU make 3.81 and 4.3. The units are the repository's own code,
+The inspection asks make about a unit in a fixed order, by EXIT STATUS only (nothing printed is read), and every question after the first carries -o <each makefile make read> (--assume-old: no makefile is remade by it, so a makefile being remade can never be the thing that answers). 1) The list pass, always first: make -C <unit> -q -f <unit makefile> -f <list makefile> <random name>; the module-owned list makefile, written into a private temp dir, records $(MAKEFILE_LIST) in a file by a parse-time $(shell printf ...) and declares .PHONY: <random control name> with no rule; the exit status of the pass is not used, and a list that is empty, or names something that does not exist as a path from the unit directory (a name with a space or a newline splits into words that do not), leaves the unit unanswerable: error, fail closed (a name that does exist is accepted, for example ../common.mk, which is also what -o names). The list pass is the one place where an included makefile that has a rule may be remade (a parse-time $(shell ...) runs there too). 2) The control question: make -C <unit> -q -f <unit makefile> -f <list makefile> -o <each listed makefile> <control name>; it answers 0 only when every makefile make read has settled; non-zero or a timeout (a makefile that make still wants to remake and cannot pin: an included makefile that is missing and whose rule does not create it, or a makefile rule that never converges) is state error, fail closed: the unit's makefiles do not settle. 3) make -C <unit> -q -o ... <target>; only if that answers 0 does it ask make -C <unit> -q -B -o ... <target> (the same question with every file considered out of date, so the verdict does not depend on whether the unit's outputs are fresh); only if the last question asked answered 2 does it ask make -C <unit> -n -o ... <target>. The random-name probe for a catch-all (a %: rule or .DEFAULT:) is asked as question 3 too, with -o. Verdict: -q 1 = present; -q 0 and -q -B 1 = present (the target was only up to date), unless a file or directory named like the target sits beside the Makefile and the rule is not .PHONY (the real run says up to date: idle, with a .PHONY hint); -q -B 0 = idle (nothing to run even with everything out of date); an answer of 2 asks -n: 0 = present, 2 = missing. A question that times out is state error (the finding says: timed out), and once one question for a unit timed out nothing more is asked for that unit in this run: a unit costs at most 5 s for the list pass plus one timeout (5 s for the control, 20 s for another question). Under -q make executes the recipe lines marked + or containing $(MAKE) of the target and of its prerequisites, each recipe at most up to its first line that is neither (an upper bound: it stops at the first out-of-date prerequisite whose recipe starts with a plain line; a file target that a + line just created may be deleted again). The -B question executes the same classes of lines, passed on to sub-makes in question mode as well, but MORE of them, since nothing counts as up to date. Under -n make walks the WHOLE recipe, so every + / $(MAKE) line of the target and of all its out-of-date prerequisites runs (a sub-make in dry-run mode runs its + lines and not its plain lines). Apart from the remake in the list pass and from -n, no plain recipe line runs under any question. The judgment is the same on GNU make 3.81 and 4.3 for every shape measured, and the same before and after a real run (an included makefile that has a rule, with no rule that runs anything for the target, is idle, and so is verify: gen.mk with gen.mk such an included makefile; the same unit with verify: build or a $(MAKE) build line is present; an included makefile that a rule creates, or a generated makefile that carries the target, is judged like a plain one), except: a recipe made only of + / $(MAKE) lines that run nothing (verify: with +true, +@echo ok, or $(MAKE) check-fast with check-fast: ;): 3.81 answers 1 to -q (present), 4.3 answers 0 to -q and to -q -B (idle, fail-closed: such a recipe verifies nothing); verify: +false differs too (3.81: -q 2 and -n 2 = missing; 4.3: -q 1 = present) and on both the root make verify ends non-zero; an included makefile that is missing and whose rule does not create it (-include gen.mk with gen.mk: ; @true) is error on 3.81 for every target (the control does not settle) and, on 4.3, judged by the target alone (idle without a recipe, present with one). What runs during the inspection was measured on GNU make 3.81 and 4.3. The units are the repository's own code,
 trusted as `make check-fast` trusts them. The root Makefile and the check read the SAME function.
 """
 import atexit
@@ -288,7 +271,11 @@ PROBE_NAME = "__monorepo_probe_" + secrets.token_hex(8)  # a name no unit can ha
 # `make -q -f <unit makefile> -f <list.mk> -- <random name>`, whose module-owned makefile writes $(MAKEFILE_LIST) into a
 # file of the private directory (a parse-time $(shell printf ...)); that file, not make's output, is what is read.
 LIST_MK = ("__monorepo_sq = $(subst ','\\'',$(1))\n"
-           "$(shell printf '%%s\\n' $(foreach f,$(MAKEFILE_LIST),'$(call __monorepo_sq,$(f))') > '%s')\n")
+           "$(shell printf '%%s\\n' $(foreach f,$(MAKEFILE_LIST),'$(call __monorepo_sq,$(f))') > '%s')\n"
+           ".PHONY: %s\n")
+CONTROL_NAME = "__monorepo_control_" + secrets.token_hex(8)  # .PHONY in list.mk, no rule: nothing to do on a unit that has settled
+# per-unit state lives in _rc_cache too, so clearing the cache clears it: ("timeout", unit) = a question for the unit timed out (nothing more is
+# asked for it in this run); ("why", unit) = "timeout" | "unsettled" | "nolist", set when makefile_names answers None
 _private = {}
 _defer = {"on": False, "sig": None}
 
@@ -363,16 +350,18 @@ def makefile_names(unitdir):
         return _rc_cache[("names", unitdir)]
     names = None
     mk = unit_makefile(unitdir)
-    if mk is not None:
+    if mk is None:
+        names = []  # no makefile: nothing to name, nothing to remake; make answers 2 to every question
+    else:
         d = private_dir()
         out, lm = os.path.join(d, "list.out"), os.path.join(d, "list.mk")
         with open(lm, "w", encoding="utf-8") as fh:
-            fh.write(LIST_MK % out.replace("'", "'\\''"))
+            fh.write(LIST_MK % (out.replace("'", "'\\''"), CONTROL_NAME))
         try:
             os.unlink(out)
         except OSError:
             pass
-        make_ask(unitdir, PROBE_NAME, "-q", "-f", mk, "-f", lm, cache=False)
+        make_ask(unitdir, PROBE_NAME, "-q", "-f", mk, "-f", lm, cache=False, assume_old=False)
         try:
             with open(out, encoding="utf-8", errors="replace") as fh:
                 names = [n for n in fh.read().split("\n") if n and n != lm]
@@ -380,6 +369,16 @@ def makefile_names(unitdir):
             names = None
         if names is not None and (not names or any(not os.path.lexists(os.path.join(unitdir, n)) for n in names)):
             names = None
+        if names is None:
+            _rc_cache[("why", unitdir)] = "nolist"
+        if names is not None:  # the control question: -o every listed makefile; a phony name with no rule answers 0 only
+            o = []         # when every makefile make read has settled (none left that it wants to remake and cannot pin)
+            for n in names:
+                o += ["-o", n]
+            rc = make_ask(unitdir, CONTROL_NAME, "-q", "-f", mk, "-f", lm, *o, cache=False, assume_old=False)
+            if rc != 0:
+                names = None
+                _rc_cache[("why", unitdir)] = "timeout" if rc is None and _rc_cache.get(("timeout", unitdir)) else "unsettled"
     _rc_cache[("names", unitdir)] = names
     return names
 
@@ -396,7 +395,7 @@ def unit_makefile(unitdir):
     return None
 
 
-def make_ask(unitdir, target, *flags, cache=True):
+def make_ask(unitdir, target, *flags, cache=True, assume_old=True):
     """make's exit status for `make -C unitdir <flags> -- target` (flags: -q, -q -B -o NAME..., -n, or the list pass's
     -q -f NAME -f list.mk), or None when make could not be run, was killed by a signal or did not answer in time.
     One call per (unitdir, target, flags) unless cache=False. The question runs in its own session; whatever is left
@@ -406,7 +405,16 @@ def make_ask(unitdir, target, *flags, cache=True):
     key = (unitdir, target, flags)
     if cache and key in _rc_cache:
         return _rc_cache[key]
-    cmd = ["make", "-C", unitdir, *flags, "--", target]
+    if _rc_cache.get(("timeout", unitdir)):
+        return None  # one timeout per unit per run
+    o = []
+    if assume_old:  # every question but the list pass: -o <each makefile make read>, so none is remade and none answers
+        names = makefile_names(unitdir)
+        if names is None:
+            return None  # fail closed: the names cannot be had, or the control did not settle
+        for n in names:
+            o += ["-o", n]
+    cmd = ["make", "-C", unitdir, *flags, *o, "--", target]
     log = os.environ.get("MONOREPO_QUESTION_LOG")
     if log:
         try:
@@ -415,7 +423,7 @@ def make_ask(unitdir, target, *flags, cache=True):
         except OSError:
             pass
     rc = None
-    timeout = PROBE_TIMEOUT if target == PROBE_NAME else MAKE_TIMEOUT
+    timeout = PROBE_TIMEOUT if target in (PROBE_NAME, CONTROL_NAME) else MAKE_TIMEOUT
     proc = None
     try:
         _defer["on"], _defer["sig"] = True, None
@@ -431,6 +439,8 @@ def make_ask(unitdir, target, *flags, cache=True):
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _timed_out.add(key)
+            if assume_old or target == CONTROL_NAME:
+                _rc_cache[("timeout", unitdir)] = True
     except (OSError, subprocess.SubprocessError):
         pass
     finally:
@@ -460,13 +470,7 @@ def make_rc_always(unitdir, target):
     names from makefile_names (one list pass). 1 (or 2, then the -n question) = make has work for the target when
     nothing is up to date, so the rule graph is real and the target was merely up to date; 0 = nothing to run even
     then. None (fail closed: 'error') when the makefile names cannot be had."""
-    names = makefile_names(unitdir)
-    if names is None:
-        return None
-    o = []
-    for n in names:
-        o += ["-o", n]
-    return make_ask(unitdir, target, "-q", "-B", *o)
+    return make_ask(unitdir, target, "-q", "-B")
 
 
 def make_rc_dry(unitdir, target):
@@ -497,9 +501,14 @@ def unit_catch_all(unitdir):
     through the first question and the -n question, never -B (a catch-all whose recipe starts with `$(MAKE)` answers
     -q 2, -n 0 on 3.81 and -q 1 on 4.3; an ordinary unit answers 2 and 2)."""
     q, n = make_answer(unitdir, PROBE_NAME)
-    if q is None and (unitdir, PROBE_NAME, ("-q",)) in _timed_out:
-        return True  # a name nobody has hangs make (a forwarding `%: ; +$(MAKE) $@`): nothing else is asked
-    return q in (0, 1) or (q == 2 and n == 0)
+    return q in (0, 1) or (q == 2 and n == 0)  # a timeout is not a catch-all: the state is 'error' (unit_why: timeout)
+
+
+def unit_why(unitdir):
+    """'timeout' | 'unsettled' | None: why the unit could not be asked (state 'error')."""
+    if _rc_cache.get(("timeout", unitdir)):
+        return "timeout"
+    return _rc_cache.get(("why", unitdir))
 
 
 def make_target_state(unitdir, target):
@@ -843,6 +852,20 @@ def check(root):
         for t in MANDATORY[u["kind"]]:
             st = make_target_state(p, t)
             if st == "present":
+                continue
+            why = unit_why(p) if st == "error" else None
+            if why == "timeout":
+                f.append((mk, 1, "unit-target", "unit %s: timed out asking make about the %s target (a question did not answer in %g s; "
+                          "nothing more is asked for this unit in this run)" % (u["id"], t, MAKE_TIMEOUT)))
+                continue
+            if why == "nolist":
+                f.append((mk, 1, "unit-target", "unit %s: Makefile has no %s target: make could not answer for %s (the makefiles make read "
+                          "could not be listed: a name with a space or newline, a file that is not beside the unit, or no list "
+                          "written)" % (u["id"], t, t)))
+                continue
+            if why == "unsettled":
+                f.append((mk, 1, "unit-target", "unit %s: the unit's makefiles do not settle: make still wants to remake one of them "
+                          "(an included makefile that is missing and whose rule does not create it?)" % u["id"]))
                 continue
             rc, rb, rn = make_look(p, t)
             if st == "idle" and rb != 0 and os.path.lexists(os.path.join(p, t)):

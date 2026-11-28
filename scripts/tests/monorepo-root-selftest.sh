@@ -598,7 +598,7 @@ T6="$(mk2 default '.DEFAULT:\n\t@echo "fwd $@" >> "$(LOG)"\n')"
 [[ $rc -eq 2 && "$out" == *"answers for any target name"* && ! -s "$LOG" ]] && pass "the runner alone refuses a catch-all unit, no recipe ran" || fail "runner catch-all" "rc=$rc $(head -c 200 <<<"$out")"
 # the probe runs FIRST and a catch-all unit is asked nothing else (test hook MONOREPO_QUESTION_LOG: one line per question actually asked)
 QL="$tmp/questions.log"; : > "$QL"; MONOREPO_QUESTION_LOG="$QL" bash "$T5/scripts/monorepo-run.sh" verify >/dev/null 2>&1
-[[ -s "$QL" ]] && ! grep -qv "__monorepo_probe_" "$QL" && pass "a catch-all unit is asked only about the random probe name (every logged question names it), never about verify" \
+[[ -s "$QL" ]] && ! grep -qvE "__monorepo_(probe|control)_" "$QL" && pass "a catch-all unit is asked only about the random probe name and the control name (every logged question names one), never about verify" \
   || fail "probe first" "$(head -c 300 "$QL")"
 # a question that times out leaves nothing running: every question is its own process group, killed on timeout and afterwards.
 # MONOREPO_QUESTION_TIMEOUT=2 is the test hook (default 20 s). Markers: `sleep 3737.<pid>` / `sleep 3738.<pid>` / `MARK=storm<pid>`.
@@ -606,7 +606,7 @@ leftover() { pgrep -f -- "$1" > /dev/null 2>&1; }
 LKM="3737.$$"; BGM="3738.$$"
 TLK="$(mk2 leak "$CFR"'verify: build\nbuild:\n\t+$(MAKE) -f sub.mk t\n')"; printf 't:\n\t+sleep %s\n' "$LKM" > "$TLK/services/x/sub.mk"; : > "$TLK/services/x/build"
 SECONDS=0; : > "$LOG"; out="$(MONOREPO_QUESTION_TIMEOUT=2 make -s -C "$TLK" verify 2>&1)"; rc=$?; el=$SECONDS
-if [[ $rc -ne 0 && "$out" == *"svc-x: Makefile has no verify target: make could not answer for verify (timed out"* ]] && ! leftover "sleep $LKM" && ((el < 15)); then
+if [[ $rc -ne 0 && "$out" == *"unit svc-x: timed out asking make about the verify target"* ]] && ! leftover "sleep $LKM" && ((el < 15)); then
   pass "a question that times out (a sub-make of a + line sleeping) is judged missing and no process of that tree is left (${el}s)"
 else fail "timeout leaves processes" "rc=$rc el=$el left=$(pgrep -f -- "sleep $LKM" | tr '\n' ' ') $(head -c 300 <<<"$out")"; fi
 leftover "sleep $LKM" && pkill -f -- "sleep $LKM"
@@ -703,7 +703,7 @@ if [[ -n "${MONOREPO_STORM:-}" ]]; then # a forwarding catch-all forks without b
   SECONDS=0; : > "$LOG"; out="$(make -s -C "$TST" verify 2>&1)"; rc=$?; el=$SECONDS
   # the verdict is RED either way and that is what is asserted: where forks are allowed the probe times out (5 s) and the unit is
   # a catch-all; under a pids limit the storm hits the cap, make's forks fail and answer 2 / 2, so the unit is "no verify target"
-  if [[ $rc -ne 0 && ( "$out" == *"answers for any target name"* || "$out" == *"svc-x: Makefile has no verify target"* ) ]] && ! leftover "MARK=storm$$" && ((el < 20)); then
+  if [[ $rc -ne 0 && ( "$out" == *"timed out asking make about"* || "$out" == *"svc-x: Makefile has no verify target"* ) ]] && ! leftover "MARK=storm$$" && ((el < 20)); then
     pass "a forwarding catch-all (%: +\$(MAKE) \$@) is refused (RED: $([[ "$out" == *"answers for any target name"* ]] && echo catch-all || echo "no verify target, forks capped")) and nothing is left (${el}s)"
   else fail "forwarding catch-all" "rc=$rc el=$el left=$(pgrep -f -- "MARK=storm$$" | wc -l) $(head -c 300 <<<"$out")"; fi
   leftover "MARK=storm$$" && pkill -f -- "MARK=storm$$"
@@ -721,12 +721,18 @@ cat > "$FB/make" <<'E'
 #!/usr/bin/env bash
 # the list pass is `make -C <dir> -q -f <makefile> -f <dir>/list.mk -- <name>`: note it as `-qL <name>`, write the makefile's name where the
 # module's list.mk would (list.out beside it), answer 2
+if [[ "${*: -1}" == __monorepo_control_* ]]; then  # the control question: 0 (settled) unless FAKE_MAKE_MODE=unsettled
+  [[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "-qC ${*: -1}" >> "$FAKE_MAKE_LOG"
+  [[ "${FAKE_MAKE_MODE:-}" == unsettled ]] && exit 1; [[ "${FAKE_MAKE_MODE:-}" == ctlsleep ]] && exec sleep 5; exit 0
+fi
 if [[ "${*: -3:1}" == */list.mk ]]; then
   [[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "-qL ${*: -1}${FAKE_MAKE_ENVLOG:+ env=[${MAKEFLAGS-}${MFLAGS-}${MAKELEVEL-}${MAKEOVERRIDES-}${GNUMAKEFLAGS-}${MAKEFILES-}]}" >> "$FAKE_MAKE_LOG"
   lm="${*: -3:1}"; [[ "${FAKE_MAKE_MODE:-}" == nolist ]] || printf '%s\n' "${*: -5:1}" > "${lm%list.mk}list.out"; exit 2
 fi
 # the -B look is `make -C <dir> -q -B -o <makefile>... -- <target>`: note it in the log as `-qB <target>`, then answer as if it were `-q -- <target>`
-B=""; if [[ "${4:-}" == -B ]]; then B=1; set -- "$1" "$2" "$3" "${@: -2}"; fi  # the -B look also carries `-o <makefile>` before the `--`
+# every other question carries `-o <makefile>` before the `--`: strip them, then the form is `-C <dir> -q|-n [-B] -- <target>`
+args=(); skip=""; for a in "$@"; do if [[ -n "$skip" ]]; then skip=""; elif [[ "$a" == -o ]]; then skip=1; else args+=("$a"); fi; done; set -- "${args[@]}"
+B=""; if [[ "${4:-}" == -B ]]; then B=1; set -- "$1" "$2" "$3" "${@: -2}"; fi
 [[ -n "${FAKE_MAKE_LOG:-}" ]] && echo "$3${B:+B} $5" >> "$FAKE_MAKE_LOG"
 echo "make: Entering directory '$2'"; echo "# Make data base, printed on Thu Jan  1 00:00:00 2026"; echo "# Files"; echo "verify:"
 echo "#  commands to execute (from \`Makefile', line 1):"; printf '\t@evil\n'; echo "make: 'verify' is up to date."
@@ -853,7 +859,7 @@ SCEN = [
     ("an explicit rule beside a catch-all: the unit is still refused (an explicit rule cannot be told apart)", RV + "%:\n\t@echo fwd\n", (), None, 1, "catch-all"),
     ("a unit that defines exactly the probe name is not a catch-all (the probe name is random)", "__monorepo_probe_0000000000000000:\n\t@echo p\n" + RV, (), None, 1, "present"),
     ("no Makefile", None, (), None, 2, "norule"),
-    ("a Makefile with a syntax error", "this is not a makefile\n", (), None, 2, "norule"),
+    ("a Makefile with a syntax error (the list pass cannot list it: error, fail closed)", "this is not a makefile\n", (), None, None, "error"),
     # ---- the second question (`make -n`, asked only when -q answered 2). GNU make 3.81 and 4.3 both execute, under -q, the first
     # recipe line when it is `+` or has $(MAKE); the exit status then differs (3.81: 2, 4.3: 1) and the judged state is the same.
     ("a $(MAKE) first line: verify: $(MAKE) check-fast, $(MAKE) lint (the review's blocker)", CF + "lint:\n\t@echo l\nverify:\n\t$(MAKE) check-fast\n\t$(MAKE) lint\n", (), None, None, "present"),
@@ -865,7 +871,7 @@ SCEN = [
     ("verify: $(MAKE) -f nosuch.mk", "verify:\n\t$(MAKE) -f nosuch.mk\n", (), None, 2, "norule", 2),
     ("no rule for verify at all", CF, (), None, 2, "norule", 2),
     ("a missing-file prerequisite (verify: nofile)", "verify: nofile\n\t@echo v\n", (), None, 2, "norule", 2),
-    ("a Makefile with a syntax error: both questions answer 2", "this is not a makefile\n", (), None, 2, "norule", 2),
+    ("a Makefile with a syntax error: nothing is listed, no question is asked: error", "this is not a makefile\n", (), None, None, "error", None),
     ("no Makefile: both questions answer 2", None, (), None, 2, "norule", 2),
     ("verify: FORCE with an empty FORCE rule and no recipe", "verify: FORCE\nFORCE:\n", (), None, 0, "idle", None),
     ("verify: dep with a double-colon dep:: that has no recipe", "verify: dep\ndep::\n", (), None, 0, "idle", None),
@@ -904,6 +910,8 @@ for mode, want, name in (("rc1", None, "fake make exit 1 (would run something) f
                          ("sig", "timed out, was killed", "fake make killed by a signal: both missing")):
     os.environ["FAKE_MAKE_MODE"] = mode; out = run(T2)
     if want is None: okk = out == []
+    elif want == "timed out": okk = (has(out, "unit svc-x: timed out asking make about the check-fast target") and has(out, "unit svc-x: timed out asking make about the verify target")
+                                     and not has(out, "no check-fast target") and not has(out, "catch|answers for any target name"))
     else: okk = has(out, "no check-fast target.*" + want) and has(out, "no verify target.*" + want)
     say(okk, name, "\n".join(out))
 os.environ["FAKE_MAKE_MODE"] = "all1"; out = run(T2)
@@ -941,9 +949,9 @@ for mode, want_b, want_n in (("rc1", False, False), ("q0b1", True, False), ("q0b
 os.environ["FAKE_MAKE_MODE"] = "q0benv"; os.environ["MAKEFLAGS"] = "n"; os.environ["MFLAGS"] = "-n"; os.environ["GNUMAKEFLAGS"] = "-k"; out = run(T2)
 for v in ("MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS"): os.environ.pop(v)
 say(out == [], "the -B look is asked with MAKEFLAGS / MFLAGS / GNUMAKEFLAGS scrubbed (fake q0benv: -q -B 1 only when they are absent): present, clean", "\n".join(out))
-# the list pass: asked once per unit, only after a first answer of 0, never for a unit whose first answer is 1 or 2, scrubbed like every question; the -B look
+# the list pass: asked once per unit, FIRST, whatever the first question answers, scrubbed like every question; the -B look
 # carries -o for what the pass wrote; a pass that writes nothing fails closed (error, `-qB` never asked)
-for mode, want_l, want_b in (("rc1", False, False), ("rc2", False, False), ("q0b1", True, True), ("q0b0", True, True)):
+for mode, want_l, want_b in (("rc1", True, False), ("rc2", True, False), ("q0b1", True, True), ("q0b0", True, True)):
     open(FLOG, "w").close(); os.environ["FAKE_MAKE_MODE"] = mode; os.environ["FAKE_MAKE_ENVLOG"] = "1"
     os.environ["MAKEFLAGS"] = "n"; os.environ["MFLAGS"] = "-n"; os.environ["GNUMAKEFLAGS"] = "-k"; os.environ["MAKEFILES"] = "/nonexistent.mk"
     out = run(T2)
@@ -1071,7 +1079,7 @@ marker_b("a parse-time $(shell) runs", "X := $(shell touch PARSE)\nverify:\n\t@e
 # their check-fast and verify) a counting make on PATH sees no `-n` for any real target; the only -n is the probe's
 CB = os.path.join(TMP, "countbin"); os.makedirs(CB); CLOG = os.path.join(TMP, "make-calls.log")
 real_make = shutil.which("make")
-open(os.path.join(CB, "make"), "w").write('#!/usr/bin/env bash\necho "$3 $5" >> "%s"\nexec "%s" "$@"\n' % (CLOG, real_make))
+open(os.path.join(CB, "make"), "w").write('#!/usr/bin/env bash\necho "$3 ${@: -1}" >> "%s"\nexec "%s" "$@"\n' % (CLOG, real_make))
 os.chmod(os.path.join(CB, "make"), 0o755)
 repo = os.environ["REPO_HERE"]; path1 = os.environ["PATH"]; os.environ["PATH"] = CB + os.pathsep + path1
 units3 = ("prod-new/template", "prod-new/modules/service-rust", "prod-new/modules/service-python/template")
@@ -1083,7 +1091,7 @@ calls = open(CLOG).read().split("\n")[:-1] if os.path.exists(CLOG) else []
 dry = [c for c in calls if c.startswith("-n ")]
 os.environ["PATH"] = path1
 say(states == ["present"] * 6 and len(calls) > 0 and all(c.split(" ", 1)[1] == m.PROBE_NAME for c in dry) and 0 < len(dry) <= len(units3)
-    and sum(c.startswith("-q ") and not c.endswith(m.PROBE_NAME) for c in calls) == 6,
+    and sum(c.startswith("-q ") and not c.endswith((m.PROBE_NAME, m.CONTROL_NAME)) for c in calls) == 6,
     "the three shipped service Makefiles (check-fast, verify): present on -q alone, `make -n` asked only for the probe name (at most once per unit)", "states %s calls %s" % (states, calls))
 # ... and no `-B` look is ever asked for them (it is asked only when -q answers 0): a make on PATH that logs ALL its arguments
 CB2 = os.path.join(TMP, "countbin2"); os.makedirs(CB2); CLOG2 = os.path.join(TMP, "make-args.log")
@@ -1155,15 +1163,53 @@ five("pattern rule + a real verify (verify: x.out, %.out: %.in)", ".PHONY: verif
 five("deferred MAKEFILE_LIST + .SECONDEXPANSION + a real verify", ".SECONDEXPANSION:\nROOT = $(dir $(lastword $(MAKEFILE_LIST)))\n.PHONY: verify\nverify: $$(ROOT)build\nbuild: src.c\n\tcp src.c build\n", "present", SRC)
 five("build recipe starts with $(MAKE) (-q 0 when up to date, -q -B 2, -n 0): present", ".PHONY: verify\nverify: build\nbuild: src.c\n\t$(MAKE) -f Makefile copy\ncopy:\n\tcp src.c build\n", "present", SRC)
 # PINNED LIMIT: a makefile rule whose recipe leaves its prerequisite NEWER than the makefile (here `Makefile:: Makefile.in` with `@true`, Makefile.in newer)
-# never converges. GNU make 3.81 answers 2 to every question (missing); 4.3 answers the first question 0 and loops forever on `-q -B -o Makefile` (the -o file is
-# remade and re-executed each time): the question times out, 'error'. Both are RED for the unit, present or not; asserted: not present, nothing left, quick.
+# never converges. Under `-o Makefile` the control question loops on GNU make 3.81 and on 4.3 alike (measured on both): it times out, the state is `error`
+# with the reason `timeout` (the finding says "timed out"), one timeout per unit (nothing more is asked after it). Asserted: error/timeout, quick, on any make.
 d = os.path.join(UD, "never-converges"); os.makedirs(d)
 open(os.path.join(d, "Makefile"), "w").write(".PHONY: verify\nMakefile:: Makefile.in\n\t@true\nverify: build\nbuild: src.c\n\tcp src.c build\n")
 for f in ("src.c", "Makefile.in", "build"): open(os.path.join(d, f), "w").write("x")
 os.utime(os.path.join(d, "Makefile"), (946684800, 946684800)); os.utime(os.path.join(d, "src.c"), (946684800, 946684800))
 os.utime(os.path.join(d, "Makefile.in"), (946684900, 946684900)); os.utime(os.path.join(d, "build"), (946685000, 946685000))
-m.MAKE_TIMEOUT = 2.0; m._rc_cache.clear(); t0 = time.time(); st_nc = m.make_target_state(d, "verify"); el_nc = time.time() - t0; m.MAKE_TIMEOUT = 20.0
-say(st_nc in ("norule", "error") and el_nc < 15, "pinned limit: a makefile rule whose prerequisite stays newer than the makefile is judged missing/error (not present), quickly", "state %s after %.1fs" % (st_nc, el_nc))
+def fresh_state(): m._rc_cache.clear(); m._timed_out.clear()
+m.MAKE_TIMEOUT = 2.0; m.PROBE_TIMEOUT = 2.0; fresh_state(); t0 = time.time(); st_nc = m.make_target_state(d, "verify"); st_nc2 = m.make_target_state(d, "check-fast"); el_nc = time.time() - t0
+why_nc = m.unit_why(d); m.MAKE_TIMEOUT = 20.0; m.PROBE_TIMEOUT = 5.0
+say(st_nc == "error" and st_nc2 == "error" and why_nc == "timeout" and el_nc < 8, "pinned limit: a makefile rule whose prerequisite stays newer than the makefile is error / timed out (not present, not catch-all), one timeout for two targets, quickly", "state %s %s why %s after %.1fs" % (st_nc, st_nc2, why_nc, el_nc))
+# the review's shapes: an included makefile that make REMAKES (a FORCE'd `-include version.mk`) or that is MISSING and whose rule does not create it. Before the
+# list-first order GNU make 3.81 answered `-q` 1 to every target for them: `.PHONY: verify` or `verify: ;` was judged present with nothing to run.
+mk_ver = subprocess.run(["make", "--version"], capture_output=True, text=True).stdout.split("\n")[0]; is381 = "3.81" in mk_ver
+m.MAKE_TIMEOUT = 3.0; m.PROBE_TIMEOUT = 3.0
+def shape(tag, inc, verify, extra=None):
+    d = os.path.join(UD, "inc-" + tag); os.makedirs(d); open(os.path.join(d, "Makefile"), "w").write(inc + verify)
+    for f, body in (extra or {}).items(): open(os.path.join(d, f), "w").write(body)
+    fresh_state(); return m.make_target_state(d, "verify")
+VF = {"no rule": "", ".PHONY only": ".PHONY: verify\n", "verify: ;": "verify: ;\n"}; REAL = "verify:\n\t@echo v\n"
+FORCEW = "-include version.mk\nversion.mk: FORCE\n\t@echo V=1 > version.mk\nFORCE:\n"
+FORCEN = "-include version.mk\nversion.mk: FORCE\n\t@true\nFORCE:\n"
+NOCREATE = "-include gen.mk\ngen.mk:\n\t@true\n"
+CREATES = "include gen.mk\ngen.mk:\n\t@echo '# g' > gen.mk\n"
+for nm, inc, ok_idle in (("FORCE'd -include version.mk (recipe writes it)", FORCEW, True), ("FORCE'd -include version.mk (recipe writes nothing)", FORCEN, False),
+                         ("-include gen.mk whose rule does not create it", NOCREATE, False)):
+    for vn, vt in VF.items():
+        st = shape("%s-%s" % (len(os.listdir(UD)), vn[:3]), inc, vt)
+        # safety direction, both makes: never present. 3.81: the unsettled makefile is error (control), except the FORCE'd one that WRITES its file (judged on the target)
+        want_ok = st != "present" and ((not is381) or ok_idle or st == "error")
+        say(want_ok, "%s + %s: not judged present (here: %s)%s" % (nm, vn, st, "; on 3.81 an unsettled makefile is error" if is381 and not ok_idle else ""), "state %s on %s" % (st, mk_ver))
+    if not (is381 is False and ok_idle):  # 4.3 re-executes a FORCE'd include forever on the real run too: its real-verify judgment is flaky there, not asserted
+        st = shape("%s-real" % len(os.listdir(UD)), inc, REAL)
+        want = "present" if (ok_idle or not is381) else "error"
+        say(st == want, "%s + a real verify: %s on %s" % (nm, want, "3.81" if is381 else "4.3"), "state %s on %s" % (st, mk_ver))
+for vn, vt, want in (("no rule", "", "norule"), (".PHONY only", ".PHONY: verify\n", "idle"), ("verify: ;", "verify: ;\n", "idle"), ("a real verify", REAL, "present")):
+    st = shape("cr-%s" % len(os.listdir(UD)), CREATES, vt)
+    say(st == want, "`include gen.mk` whose rule creates it + %s: %s (both makes)" % (vn, want), "state %s" % st)
+for ik in ("include", "-include"):
+    st = shape("carry-%s" % len(os.listdir(UD)), ik + " gen.mk\ngen.mk:\n\t@printf 'verify:\\n\\t@echo v\\n' > gen.mk\n", "")
+    say(st == "present", "a generated makefile that carries the target (%s gen.mk): present (the list pass generates it first)" % ik, "state %s" % st)
+# a unit on which the random-name probe HANGS (a forwarding catch-all, here `%:` with a `+@sleep 5` recipe): state error / timed out, never a catch-all, and the
+# unit's 2nd target asks nothing more (one timeout per unit)
+m.MAKE_TIMEOUT = 1.0; m.PROBE_TIMEOUT = 1.0
+st_h = shape("hang-%s" % len(os.listdir(UD)), "%:\n\t+@sleep 5\n", ""); st_h2 = m.make_target_state(os.path.join(UD, "inc-" + [n for n in os.listdir(UD) if n.startswith("inc-hang-")][0][4:]), "check-fast")
+say(st_h == "error" and st_h2 == "error", "a unit on which the probe hangs is `error` (timed out), not a catch-all, for both targets", "states %s %s" % (st_h, st_h2))
+m.MAKE_TIMEOUT = 20.0; m.PROBE_TIMEOUT = 5.0
 # the -B question carries the unit's makefile and the makefiles it read (-o); a unit without a makefile is never asked -B
 CB3 = os.path.join(TMP, "countbin3"); os.makedirs(CB3); CLOG3 = os.path.join(TMP, "make-args3.log")
 open(os.path.join(CB3, "make"), "w").write('#!/usr/bin/env bash\necho "$*" >> "%s"\nexec "%s" "$@"\n' % (CLOG3, real_make)); os.chmod(os.path.join(CB3, "make"), 0o755)
@@ -1171,12 +1217,16 @@ d3 = os.path.join(UD, "five-pinargs"); os.makedirs(d3); open(os.path.join(d3, "M
 os.environ["PATH"] = CB3 + os.pathsep + path1; m._rc_cache.clear(); m.make_target_state(d3, "verify"); os.environ["PATH"] = path1
 calls3 = [a for a in open(CLOG3).read().split("\n") if a]
 bl = [a for a in calls3 if " -B " in a]
-ll = [a for a in calls3 if "list.mk" in a]
+ll = [a for a in calls3 if "list.mk" in a and " -o " not in a]
+cl = [a for a in calls3 if "list.mk" in a and " -o " in a]
 say(len(bl) == 1 and re.search(r"-q -B -o Makefile -- verify$", bl[0]) is not None and " -f " not in bl[0], "the -B look names every makefile make read with -o and adds no -f (nothing enters the unit's rule base)", "calls %s" % bl)
 say(len(ll) == 1 and re.search(r"-q -f Makefile -f \S*list\.mk -- __monorepo_probe_[0-9a-f]+$", ll[0]) is not None and " -o " not in ll[0] and " -B" not in ll[0],
     "the list pass is `-q -f <makefile> -f list.mk -- <random name>`: no -o, no -B", "calls %s" % ll)
-iq = [i for i, a in enumerate(calls3) if a.endswith("-q -- verify")]
-say(len(iq) == 1 and len(ll) == 1 and len(bl) == 1 and iq[0] < calls3.index(ll[0]) < calls3.index(bl[0]), "order: the first question, then the list pass, then the -B look", "calls %s" % calls3)
+say(len(cl) == 1 and re.search(r"-q -f Makefile -f \S*list\.mk -o Makefile -- __monorepo_control_[0-9a-f]+$", cl[0]) is not None and " -B" not in cl[0],
+    "the control question is `-q -f <makefile> -f list.mk -o <each listed makefile> -- <control name>`", "calls %s" % cl)
+iq = [i for i, a in enumerate(calls3) if a.endswith("-q -o Makefile -- verify")]
+say(len(iq) == 1 and len(ll) == 1 and len(cl) == 1 and len(bl) == 1 and calls3.index(ll[0]) < calls3.index(cl[0]) < iq[0] < calls3.index(bl[0]),
+    "order: the list pass, then the control, then the first question (with -o), then the -B look", "calls %s" % calls3)
 # MAKEFLAGS=r (no built-in rules) in the caller's environment: `verify: tool` with tool.sh (the built-in `.sh` rule) stays present
 d4 = os.path.join(UD, "flags-r"); os.makedirs(d4); open(os.path.join(d4, "Makefile"), "w").write("verify: tool\n"); open(os.path.join(d4, "tool.sh"), "w").write("echo x\n")
 ctl = subprocess.run(["make", "-C", d4, "-q", "--", "verify"], capture_output=True, env=dict(os.environ, MAKEFLAGS="r")).returncode
