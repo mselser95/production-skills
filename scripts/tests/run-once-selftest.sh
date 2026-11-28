@@ -27,9 +27,12 @@ CASES=0; FAILED=0
 check() { CASES=$((CASES+1)); if [ "$2" = "$3" ]; then printf '  ok   %-70s %s\n' "$1" "$3"
   else printf '  FAIL %-70s expected=%s actual=%s\n' "$1" "$2" "$3"; FAILED=$((FAILED+1)); fi; }
 ro()  { (cd "$S" && EVIDENCE_RESULTS="$RES" EVIDENCE_RUN_ID="${RUN:-r1}" bash scripts/run-once.sh "$@"); }
-res() { ro resolve "$1" "$2" | cut -f1,2 | tr '\t' ' '; }       # kind + (rc | reason)
+# rr: the read-only subcommands (resolve / counts / canon / tree-id) from an ALREADY CLEAN environment, so the runner's clean start
+# (one more exec per call) is not paid ~100 times; the clean start has its own cases below
+rr()  { (cd "$S" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" EVIDENCE_RESULTS="$RES" EVIDENCE_RUN_ID="${RUN:-r1}" bash scripts/run-once.sh "$@"); }
+res() { rr resolve "$1" "$2" | cut -f1,2 | tr '\t' ' '; }       # kind + (rc | reason)
 res2() { res "$1" "$2" | awk '{print $1 " " $2}'; }            # kind + first word of the reason
-kind() { ro resolve "$1" "$2" | cut -f1; }
+kind() { rr resolve "$1" "$2" | cut -f1; }
 fresh() { RES="$T/res-$1.tsv"; RUN=r1; rm -f "$RES"; }
 commit() { git -C "$S" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "$1"; }
 present() { [ -e "$1" ] && echo present || echo absent; }
@@ -70,7 +73,7 @@ ro e3 -- bash -c 'for d in /nonexistent/*; do :; done; echo hi' >/dev/null 2>&1
 check "canon: a bash -c loop is the quoted argv, in full" 'bash -c for\ d\ in\ /nonexistent/\*\;\ do\ :\;\ done\;\ echo\ hi' "$(awk -F'\t' '$2=="e3"{print $3}' "$RES")"
 check "canon: ...and that string is attested" "attested" "$(kind e3 'bash -c for\ d\ in\ /nonexistent/\*\;\ do\ :\;\ done\;\ echo\ hi')"
 check "canon: the unquoted spelling of the same argv is NOT what is recorded" "miss" "$(kind e3 "bash -c for d in /nonexistent/*; do :; done; echo hi")"
-check "canon: the subcommand quotes an argv the same way" "printf %s a\\ b it\\'s \\\$HOME \\* x\\;y" "$(ro canon printf '%s' 'a b' "it's" '$HOME' '*' 'x;y')"
+check "canon: the subcommand quotes an argv the same way" "printf %s a\\ b it\\'s \\\$HOME \\* x\\;y" "$(rr canon printf '%s' 'a b' "it's" '$HOME' '*' 'x;y')"
 mkdir -p "$S/globd"; : > "$S/globd/one.txt"; : > "$S/globd/two.txt"; git -C "$S" add -A globd 2>/dev/null; commit globd
 (cd "$S" && EVIDENCE_RESULTS="$RES" EVIDENCE_RUN_ID=r1 bash scripts/run-once.sh e4 -- true globd/*.txt >/dev/null 2>&1)
 check "canon: a glob is recorded AFTER the shell expanded it (what ran)" "true globd/one.txt globd/two.txt" "$(awk -F'\t' '$2=="e4"{print $3}' "$RES")"
@@ -117,8 +120,8 @@ fresh att
 ro a1 -- bash -c 'echo summary-one' >/dev/null 2>&1
 CMD='bash -c echo\ summary-one'
 check "resolve: same id + command + tree + run -> attested rc 0" "attested 0" "$(res a1 "$CMD")"
-check "resolve: the attested line carries the evidence" "summary-one" "$(ro resolve a1 "$CMD" | cut -f7)"
-check "resolve: the attested line names its line number" 1 "$(ro resolve a1 "$CMD" | cut -f3)"
+check "resolve: the attested line carries the evidence" "summary-one" "$(rr resolve a1 "$CMD" | cut -f7)"
+check "resolve: the attested line names its line number" 1 "$(rr resolve a1 "$CMD" | cut -f3)"
 check "resolve: another id -> miss" "miss" "$(kind a2 "$CMD")"
 check "resolve: command string differs -> miss" "miss" "$(kind a1 "$CMD x")"
 RUN=r2; check "resolve: another run id -> miss" "miss" "$(kind a1 "$CMD")"; RUN=r1
@@ -183,7 +186,7 @@ check "resolve: an epoch a little ahead (within +300 s of skew) is still atteste
 printf '%s\n' "$good" > "$RES"
 check "resolve: the unmodified line is attested (the mutations above were real)" "attested" "$(kind a1 "$CMD")"
 printf '%s\n' "$good" | awk -F'\t' -v OFS='\t' '{ $4="00"; print }' > "$RES"
-check "counts: a hand-written exit field 00 voids the file for counts too" 0 "$(ro counts | wc -l | tr -d ' ')"
+check "counts: a hand-written exit field 00 voids the file for counts too" 0 "$(rr counts | wc -l | tr -d ' ')"
 
 # ---- attest: failures and duplicates --------------------------------------------------------
 fresh dup
@@ -194,7 +197,7 @@ check "resolve: conflicting outcomes for one id -> miss" "miss conflicting-lines
 fresh dup2
 ro a1 -- bash gates/x.sh >/dev/null 2>&1; ro a1 -- bash gates/x.sh >/dev/null 2>&1
 check "resolve: a duplicate with the SAME outcome is attested" "attested" "$(kind a1 "bash gates/x.sh")"
-check "resolve: ...and names the last line" 2 "$(ro resolve a1 "bash gates/x.sh" | cut -f3)"
+check "resolve: ...and names the last line" 2 "$(rr resolve a1 "bash gates/x.sh" | cut -f3)"
 ro a1 -- bash gates/y.sh >/dev/null 2>&1
 check "resolve: a failing line under ANOTHER command string does not conflict" "attested 0" "$(res a1 "bash gates/x.sh")"
 
@@ -223,23 +226,23 @@ fresh cnt
 printf '#!/usr/bin/env bash\necho "fake suite"; echo "17 case(s) passed"\n' > "$T/fake-selftest.sh"
 ro --quiet --count "selftest:fake-selftest.sh" -- bash "$T/fake-selftest.sh" >/dev/null 2>&1
 direct=$(mbcount "$(bash "$T/fake-selftest.sh")")
-check "counts: the count from the single pass equals the count from running the suite" "$direct" "$(ro counts | cut -f3)"
-check "counts: the recorded command string is carried for the reader to compare" "bash $T/fake-selftest.sh" "$(ro counts | cut -f2)"
+check "counts: the count from the single pass equals the count from running the suite" "$direct" "$(rr counts | cut -f3)"
+check "counts: the recorded command string is carried for the reader to compare" "bash $T/fake-selftest.sh" "$(rr counts | cut -f2)"
 ro --count "selftest:fail-selftest.sh" -- bash -c 'echo "9 ok"; exit 1' >/dev/null 2>&1
-check "counts: a FAILING suite's count is not offered" 1 "$(ro counts | wc -l | tr -d ' ')"
+check "counts: a FAILING suite's count is not offered" 1 "$(rr counts | wc -l | tr -d ' ')"
 cp "$RES" "$T/res-cnt.good"
 awk -F'\t' -v OFS='\t' '{$9="0000000000000000000000000000000000000000+clean"; print}' "$T/res-cnt.good" > "$RES"
-check "counts: a line with a tampered tree identity (well-formed, other HEAD) is not trusted" 0 "$(ro counts | wc -l | tr -d ' ')"
+check "counts: a line with a tampered tree identity (well-formed, other HEAD) is not trusted" 0 "$(rr counts | wc -l | tr -d ' ')"
 cp "$T/res-cnt.good" "$RES"; RUN=r9
-check "counts: a line from another run is not trusted" 0 "$(ro counts | wc -l | tr -d ' ')"; RUN=r1
-check "counts: the untampered file offers the suite (the cases above were real)" 1 "$(ro counts | grep -c 'fake-selftest.sh')"
+check "counts: a line from another run is not trusted" 0 "$(rr counts | wc -l | tr -d ' ')"; RUN=r1
+check "counts: the untampered file offers the suite (the cases above were real)" 1 "$(rr counts | grep -c 'fake-selftest.sh')"
 fresh cnt2
 echo 17 > "$S/gates/cnt.n"; ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1; ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1
-check "counts: the same count twice is offered once" 1 "$(ro counts | wc -l | tr -d ' ')"
+check "counts: the same count twice is offered once" 1 "$(rr counts | wc -l | tr -d ' ')"
 echo 18 > "$S/gates/cnt.n"; ro --quiet --count s1 -- bash gates/cnt.sh >/dev/null 2>&1
-check "counts: two different counts for one suite and command -> not offered" 0 "$(ro counts | wc -l | tr -d ' ')"
+check "counts: two different counts for one suite and command -> not offered" 0 "$(rr counts | wc -l | tr -d ' ')"
 printf 'garbage\n' >> "$RES"
-check "counts: a malformed file offers nothing" 0 "$(ro counts | wc -l | tr -d ' ')"
+check "counts: a malformed file offers nothing" 0 "$(rr counts | wc -l | tr -d ' ')"
 
 # ---- THE CLEAN ENVIRONMENT: nothing a caller or a Makefile exported reaches the command ---------
 # provenance: candidate; ttl: 2027-02-27; pinning: true
@@ -282,9 +285,24 @@ cp "$root/scripts/run-once.sh" "$RG/scripts-run-once.sh" 2>/dev/null; mkdir -p "
 (cd "$RG" && REGISTRIES_DIR="$T/cleanreg" bash scripts/run-once.sh reg -- bash _shared/probes/check-registries.sh >/dev/null 2>&1); r_run=$?
 check "env: control, the real gate fails on an expired waiver (1) and the variable WOULD weaken it (0)" "1 0" "$r_plain $r_weak"
 check "env: REGISTRIES_DIR set by the caller does not reach the real gate run through the runner (still 1)" 1 "$r_run"
-# clean-exec: what evidence-record.sh uses to clean itself
-ce=$(cd "$S" && SKIP=1 BASH_ENV="$T/be.sh" bash scripts/run-once.sh clean-exec env); check "clean-exec: the same environment, plus the marker evidence-record.sh looks for" "0 1" "$(grep -c '^SKIP=' <<<"$ce") $(grep -c '^EVIDENCE_CLEAN_ENV=1$' <<<"$ce")"
-(cd "$S" && MAKEFLAGS=n bash scripts/run-once.sh clean-exec true >/dev/null 2>&1); check "clean-exec: refuses under make -n (2)" 2 "$?"
+# the clean START of the runner itself (a direct run): a BASH_ENV, exported functions or aliases leaked by accident must not
+# stand in for a command the runner uses, and the gate must still be run under the allowlist
+cat > "$T/bf.sh" <<'BF'
+export SKIP=1
+env() { /usr/bin/env SKIP=1 "$@"; }
+unset() { return 0; }
+exec() { return 0; }
+printf() { return 0; }
+git() { return 1; }
+BF
+printf 'shopt -s expand_aliases\nalias unset=true exec=true env="env SKIP=1" printf=true\nexport SKIP=1\n' > "$T/ba2.sh"
+dump BASH_ENV="$T/bf.sh";            check "clean start: BASH_ENV defining functions env/unset/exec/printf/git does not reach the gate (SKIP unseen, env is a file)" "0 file" "$(seen SKIP) $(sed -n 's/^TYPE_GREP=//p' "$D" | sed 's/.*/file/')"
+dump BASH_ENV="$T/ba2.sh";           check "clean start: BASH_ENV aliasing unset/exec/env/printf does not reach the gate" 0 "$(seen SKIP)"
+dump EVIDENCE_CLEAN_ENV=1 SKIP=1;    check "clean start: the old EVIDENCE_CLEAN_ENV marker is not trusted and not passed" "0 0" "$(seen SKIP) $(seen EVIDENCE_CLEAN_ENV)"
+(cd "$S" && rm -f "$D" && bash -c 'env() { /usr/bin/env SKIP=1 "$@"; }; unset() { return 0; }; export -f env unset; bash scripts/run-once.sh d -- bash gates/dump.sh "$0"' "$D" >/dev/null 2>&1)
+check "clean start: exported functions env/unset from a bash parent do not reach the gate" 0 "$(seen SKIP)"
+dump SHELLOPTS=xtrace 'PS4=$(touch '"$T"'/pwned)'; check "clean start: SHELLOPTS=xtrace with a command substitution in PS4 expands nothing" "absent 0" "$(present "$T/pwned") $(seen SHELLOPTS)"
+(cd "$S" && MAKEFLAGS=n bash scripts/run-once.sh d -- true >/dev/null 2>&1); check "clean start: refuses under make -n (2) before the environment is cleaned" 2 "$?"
 check "tree-id: a GIT_DIR in the caller's environment cannot redirect the identity" "$(cd "$S" && bash scripts/run-once.sh tree-id)" "$(cd "$S" && GIT_DIR=/nonexistent bash scripts/run-once.sh tree-id)"
 
 # ---- the line states which contract it ran under, and a reader trusts only its own ---------------
@@ -298,7 +316,7 @@ printf '%s\n' "$good" | awk -F'\t' -v OFS='\t' '{ $13="aaaaaaaaaaaa"; print }' >
 check "resolve: a well-formed line under ANOTHER allowlist hash is never attested" "miss" "$(kind h1 'bash -c echo\ hello')"
 printf '%s\n' "$good" | awk -F'\t' -v OFS='\t' '{ $14="aaaaaaaaaaaaaaaa"; print }' > "$RES"
 check "resolve: a well-formed line under ANOTHER runner hash is never attested" "miss" "$(kind h1 'bash -c echo\ hello')"
-check "counts: ...nor offered by counts" 0 "$(ro counts | wc -l | tr -d ' ')"
+check "counts: ...nor offered by counts" 0 "$(rr counts | wc -l | tr -d ' ')"
 printf '%s\n' "$good" > "$RES"
 check "resolve: the unmodified line is attested (control)" "attested" "$(kind h1 'bash -c echo\ hello')"
 # editing the runner voids earlier lines even when git cannot see the edit (the file is IGNORED)
@@ -362,7 +380,8 @@ rm -f "$RES"; MAKEFLAGS='-Otarget' ro dr -- true >/dev/null 2>&1; rc=$?
 check "dry run: MAKEFLAGS='-Otarget' is NOT a dry run end to end (no false refusal) -> recorded" "0 present" "$rc $(present "$RES")"
 
 # ---- the trust model is stated in the header -----------------------------------------------------
-check "header: the trust-model paragraph is present in run-once.sh" 1 "$(grep -c '^# TRUST MODEL (three sentences' "$root/scripts/run-once.sh")"
+check "header: the trust model says this is an accident guard, not a tamper guard (run-once.sh)" 1 "$(grep -c 'It is an accident guard, not a tamper guard' "$root/scripts/run-once.sh")"
+check "header: ...and no claim of resistance to a hostile Makefile or caller is left" 0 "$(grep -ciE 'whatever Makefile|out of the trust path|same-job tampering|whoever calls this script' "$root/scripts/run-once.sh")"
 
-if (( FAILED > 0 )); then echo "run-once selftest: $FAILED of $CASES case(s) FAILED"; exit 1; fi
-echo "run-once selftest: $CASES case(s) passed"
+echo "$((CASES-FAILED)) ok, $FAILED failed"
+(( FAILED == 0 ))

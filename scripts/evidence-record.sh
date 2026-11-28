@@ -31,8 +31,8 @@
 # The Makefile then ran each gate through scripts/run-once.sh and THIS script read the Makefile
 # as text to prove the recipes were what it thought. A hand-written recogniser of a rich format
 # lost that fight (an extra rule, a target-specific export, `$(eval ...)`, a GNUmakefile each forged
-# an attested PASS), so the Makefile is out of the trust path. The property to keep is: AN ATTESTED
-# PASS EXISTS ONLY IF THAT EXACT GATE COMMAND REALLY RAN, ON THIS TREE, IN THIS RUN, AND EXITED 0.
+# an attested PASS), so nothing here parses a Makefile. The property to keep is: AN ATTESTED
+# PASS EXISTS ONLY FOR A LINE WRITTEN BY AN EXECUTION OF THAT EXACT GATE COMMAND, ON THIS TREE, IN THIS RUN.
 #
 #   evidence-record.sh --run gates       every `main` gate of GATES, in order, stop at the first failure
 #   evidence-record.sh --run selftests   every suite of the ONE suite list below, stop at the first failure
@@ -40,20 +40,19 @@
 #   evidence-record.sh --run <id>...     named gates, in the order given (unknown id: exit 2, nothing run)
 #
 # A Makefile target is one line calling this. Each gate runs as its argv through
-# `scripts/run-once.sh`, which executes it in a CLEAN ENVIRONMENT and writes its one line from the
-# exit status of that very execution. The set `--run gates` executes IS the GATES array and the
-# set `--attest` reports IS the GATES array: nothing here is compared with anything, so nothing can
-# drift. `make gates` stopped at the first failing recipe line before and still does (so do the others).
+# `scripts/run-once.sh`, which executes it under `/usr/bin/env -i <allowlisted names>` and writes its one line from
+# the exit status of that very execution. The set `--run gates` executes IS the GATES array and the set `--attest`
+# reports IS the GATES array: nothing here is compared with anything, so nothing can drift. `make gates` stopped at
+# the first failing recipe line before and still does (so do the others).
 #
-# TRUST MODEL (three sentences, repeated in scripts/run-once.sh). The results file protects against
-# a stale line, a line of another run, a line of another tree, a dry run, and a gate renamed or
-# weakened through its ENVIRONMENT (every gate runs under `env -i` with a fixed allowlist of names,
-# and so does this script itself, re-executed through the same mechanism at its first line). It does
-# NOT protect against a step of the same job that writes the results file by hand or edits a tracked
-# script (the same power as editing any gate), nor against a changed PATH that substitutes a tool (PATH
-# is trusted and passed as is; pre-existing). A Makefile edit can therefore only stop calling this
-# script (no line exists, `--attest` EXECUTES everything: slow, true) or call something that forges
-# lines (the same-job tampering above).
+# TRUST MODEL (the same paragraph stands in run-once.sh and evidence-record.sh; a selftest pins that). A result line proves that this exact
+# argv was executed by this runner, on this tree, in this run, under the allowlisted environment, and exited with the
+# recorded status. It guards against ACCIDENTS: a stale line, a line of another run, tree, runner version or allowlist,
+# a dry run, a relabelled command, and a gate weakened because something LEAKED from the caller's environment
+# (a developer's or CI image's BASH_ENV, exported functions, aliases, SHELLOPTS, IFS, CDPATH, GLOBIGNORE, a gate switch
+# such as SKIP=1). It is an accident guard, not a tamper guard: it does NOT guard against a tracked file or a job step
+# that deliberately writes the results file or redefines the shell (the same trust as editing a gate; review catches
+# it), nor against a substituted tool on PATH (PATH is trusted and passed as is).
 #
 # ATTEST MODE (`--attest`, what `make evidence` passes)
 #
@@ -78,36 +77,52 @@
 # install.sh step comes after check-fast); probe-selftests is derived from the suite lines. They are
 # executed at attest time when no line vouches for them, as before this redesign.
 #
-# Usage: evidence-record.sh [--attest | --run <gates|selftests|check-fast|id>...]
+# `--list <main|pre|post|agg|all>` prints the ids of that group, one per line, exactly as this script resolves them at
+# run time (the function `--run gates` itself uses); it executes no gate, writes nothing and needs no run id. A selftest
+# that asks "is gate X in `make gates`?" asks this, never the text of this file.
+#
+# Usage: evidence-record.sh [--attest | --run <gates|selftests|check-fast|id>... | --list <group>]
 # Exit: 0 every gate passed · 1 a gate failed (recorded, then reported) · 2 refused
+# ---- end of header ----------------------------------------------------------------------------------------
+# CLEAN START: the first executable lines, identical in scripts/run-once.sh and scripts/evidence-record.sh (a selftest
+# pins that). A BASH_ENV, exported function, alias or SHELLOPTS leaked from the caller by accident is already in this
+# shell before the first line runs, so nothing below may be a command that a function or an alias can stand in for.
+# shellcheck disable=SC2188  # the redirection-only command IS the point (see its comment)
+>/dev/null"${_:$((PS4=0)):0}"  # a redirection-only command is never traced; its arithmetic offset assigns PS4=0 BEFORE any traced command, so a leaked SHELLOPTS=xtrace with PS4='$(cmd)' expands nothing
+POSIXLY_CORRECT=1  # an assignment: no command lookup. In POSIX mode the special builtins (exec, unset, set, export, eval, trap, :, .) are found BEFORE functions
+\unset -f alias unalias declare typeset compgen command builtin type echo printf shopt local  # `\` defeats alias expansion (POSIX mode expands aliases in scripts); -f drops a function named like a non-special builtin used below
+_cs_dirt=${_cs_dirt-}  # what is already known to be unclean; a sourcing script has recorded its own, never reset it here
+_cs_al=$(\alias)  # an assignment (no alias can apply); the aliases are read BEFORE they are removed
+\unalias -a  # from the next line on, no alias can stand in for a word
+_cs_fn=$(\declare -F)  # every function defined at this point (an exported one is imported before the first line)
+[[ -z "$_cs_al" ]] || _cs_dirt="$_cs_dirt alias"
+[[ -z "$_cs_fn" ]] || _cs_dirt="$_cs_dirt function"
+[[ "${IFS-x}" == $' \t\n' ]] || _cs_dirt="$_cs_dirt IFS"
+IFS=$' \t\n'
+\unset -v _cs_al _cs_fn
+# The allowlist, build_env, make_dry_run, canon, summary_of, resolve_set and clean_start: ONE implementation, in run-once.sh
+# (sourcing runs nothing). The path is taken from $0 as given: nothing has changed directory yet.
+_cs_d=.; [[ "$0" == */* ]] && _cs_d=${0%/*}
+# shellcheck source=run-once.sh
+\. "$_cs_d/run-once.sh"
+_cs_att=0
+if [[ "${1-}" == --clean-attempt=* ]]; then _cs_att=${1#--clean-attempt=}; \shift; fi
+clean_start "$_cs_att" "$@"
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.." || exit 2
 
-# CLEAN SELF. The first thing this script does is replace itself with the same script under the
-# allowlisted environment (run-once.sh `clean-exec`, which also refuses a make dry run while the
-# caller's MAKEFLAGS is still visible). Shell options, exported functions, GLOBIGNORE, BASHOPTS
-# and the rest therefore cannot change how GATES globs expand or which suites resolve.
-if [[ -z "${EVIDENCE_CLEAN_ENV:-}" ]]; then
-  exec bash scripts/run-once.sh clean-exec bash scripts/evidence-record.sh "$@"
-fi
-unset EVIDENCE_CLEAN_ENV
-# canon, summary_of, resolve_set, make_dry_run: ONE implementation, in run-once.sh (sourcing runs nothing)
-# shellcheck source=run-once.sh
-source scripts/run-once.sh
-if make_dry_run; then
-  echo "evidence-record: refusing to run or write under a make dry run / question / touch (MAKEFLAGS='${MAKEFLAGS:-}' MFLAGS='${MFLAGS:-}')" >&2
-  exit 2
-fi
-
-attest=0; run_mode=0; TARGETS=()
+attest=0; run_mode=0; TARGETS=(); list_group=""
 while (( $# > 0 )); do
   case "$1" in
     --attest) attest=1 ;;
+    --list)
+      case "${2:-}" in main|pre|post|agg|all) list_group="$2"; shift ;; *) echo "evidence-record: --list needs one of main, pre, post, agg, all" >&2; exit 2 ;; esac ;;
     --run) run_mode=1; shift; TARGETS=("$@"); break ;;
     *) echo "evidence-record: unknown argument '$1'" >&2; exit 2 ;;
   esac
   shift
 done
+if [[ -n "$list_group" ]] && (( run_mode || attest )); then echo "evidence-record: --list is exclusive" >&2; exit 2; fi
 if (( run_mode && attest )); then echo "evidence-record: --run and --attest are exclusive" >&2; exit 2; fi
 if (( run_mode && ${#TARGETS[@]} == 0 )); then echo "evidence-record: --run needs gates, selftests, check-fast or gate ids" >&2; exit 2; fi
 
@@ -260,7 +275,8 @@ run_suites() {
   done
   echo "selftests: $n passed"
 }
-ids_of_group() { local e; for e in "${GATES[@]}"; do [[ "$(gate_group "${e%%|*}")" == "$1" ]] && printf '%s\n' "${e%%|*}"; done; return 0; }
+ids_of_group() { local e; for e in "${GATES[@]}"; do [[ "$1" == all || "$(gate_group "${e%%|*}")" == "$1" ]] && printf '%s\n' "${e%%|*}"; done; return 0; }
+if [[ -n "$list_group" ]]; then ids_of_group "$list_group"; exit 0; fi
 if (( run_mode )); then
   PLAN=()
   for a in "${TARGETS[@]}"; do
