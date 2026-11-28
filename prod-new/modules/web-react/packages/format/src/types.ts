@@ -44,7 +44,9 @@ export function orPlaceholder(result: FormatResult, placeholder: string = PLACEH
 /**
  * A snapshot of the options a formatter reads: each key is read ONCE, inside a try, so a getter that throws (or a
  * revoked Proxy) makes the call `bad-options` instead of throwing at render time. A key the function does not know
- * (a typo such as `maximumFractionDigit`) is `bad-options` too, so a mistyped own enumerable option can never be ignored silently (an inherited key has no effect: options are read by name).
+ * (a typo such as `maximumFractionDigit`) is `bad-options` too, so a mistyped own enumerable option can never be ignored silently.
+ * Options are a plain record: a known name is read ONLY when it is an OWN property (enumerable or not); an inherited one
+ * is treated as absent.
  * `undefined` = not a plain options object (null, a primitive, an array), unreadable, or carrying an unknown key.
  */
 export function readOptions<T>(options: unknown, keys: readonly string[]): T | undefined {
@@ -53,8 +55,8 @@ export function readOptions<T>(options: unknown, keys: readonly string[]): T | u
     if (Object.keys(options).some((k) => !keys.includes(k))) return undefined;
     const out: Record<string, unknown> = {};
     for (const k of keys) {
-      const v = (options as Record<string, unknown>)[k];
-      if (v !== undefined) out[k] = v;
+      const v = (options as Record<string, unknown>)[k]; // read first: a hostile accessor or Proxy `get` is `bad-options`
+      if (v !== undefined && Object.prototype.hasOwnProperty.call(options, k)) out[k] = v;
     }
     return out as T;
   } catch {

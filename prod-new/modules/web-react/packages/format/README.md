@@ -52,8 +52,9 @@ Rules (each is pinned by a test):
   argument falls back to the dash. An options object without `locale` is `bad-locale`.
 - **Unknown option keys are refused.** A key the function does not know (a typo such as `maximumFractionDigits` for
   `maxFractionDigits`, or another formatter's key) is `bad-options`: an unknown OWN ENUMERABLE key is never silently
-  ignored. A non-enumerable own key or an inherited (prototype) key is not checked; that is harmless, because options
-  are read by known name only, so such a key has no effect. `formatNum(1, undefined)` is `bad-options` like the other
+  ignored. Options are a plain record: a known name is read only when it is an OWN property (enumerable or not, so
+  `Object.create(null)` works); an inherited (prototype) key is ignored as absent, and an inherited or non-enumerable
+  UNKNOWN key is not checked (it has no effect). `formatNum(1, undefined)` is `bad-options` like the other
   five.
 - **Counts.** `formatNum` accepts an integer string, a bigint, or a number that is a safe integer.
 - **Negative money** uses the locale's own minus pattern; there is no accounting-parentheses style.
@@ -68,11 +69,15 @@ Rules (each is pinned by a test):
 - No compact notation: it rounds to significant digits, which hides digits.
 
 Tests (`pnpm test`): unit tables per function, fast-check properties (fixed seed) against an independent BigInt oracle,
-the TZ matrix, Intl cross-checks (33 locales x 5 currencies x 3 displays for money, 67 locales x displayed integer
-parts of 1 to 9 digits for percent, RTL locales for decimals), a never-throws fuzz over every parameter, option
-read-once and unknown-key tests, and `test/guard.test.ts`.
+the TZ matrix, Intl cross-checks (33 locales x 5 currencies x 3 displays for money, listed in `test/money.test.ts`; for percent
+the locales listed in `test/percent.test.ts` (65 today) x displayed integer parts of 1 to 9 digits; RTL locales for decimals), a never-throws fuzz over every parameter, option
+read-once, own-key and unknown-key tests, and `test/guard.test.ts`. `test/readme.test.ts` fails when a number stated here
+about those lists no longer equals the lists.
 
-The guard lexes `src/` (comments, strings, template code and regex literals handled by state, no per-line escape
+The guard walks every file under `src/` at any depth with a `.ts`, `.mts`, `.cts` or `.tsx` extension (the set the
+compiler builds), refuses a JavaScript source or a symbolic link as a finding, asserts that the tsconfig builds only `src`
+and `test`, and keys ALLOW entries on the path relative to `src/`. It lexes each file (comments, strings, template code
+and regex literals handled by state, no per-line escape
 marker). It flags: `.toFixed` / `.toPrecision` / `.toExponential` / `.toLocaleString` / `.toString` / `.valueOf`;
 `parseFloat(` / `parseInt(` / `Number(` / `String(` / `isFinite(` / `isNaN(`; `Math.*`; unary `+` and non-literal unary
 `-`; `* / % **` (and compound forms; a generator's `function*` is not one); bitwise `~ ^ & << >> >>>` (and compound

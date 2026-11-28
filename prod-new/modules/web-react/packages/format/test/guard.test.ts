@@ -1,5 +1,8 @@
 // provenance: candidate; ttl: 2027-06-30; subject: the package source contains no float-based number formatting or arithmetic on values
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 // The package owns this guard for its OWN src/. The app-wide rule (no toFixed / toLocaleString / ad-hoc money outside
@@ -308,18 +311,117 @@ export function judge(file: string, source: string, allow: Allowed[]): { open: s
 
 const kinds = (s: string): string[] => scan(s).map((f) => `${f.kind}:${f.text}`);
 
+// The set of files the guard scans is the set the compiler builds: EVERY file under src/, at any depth, with a TypeScript
+// extension (`.d.ts` and `.d.mts` end in one). The package tsconfig includes the whole `src` directory, so a file the
+// guard skipped would still be compiled and imported. Refused as a finding, never skipped: a JavaScript source (outside
+// the lexer's contract; with `allowJs` off, which the repo selftest asserts on the base config, it cannot be imported
+// anyway, so refusing it is cheap) and a symbolic link (never followed). An ALLOW entry's `file` is the path RELATIVE to
+// src/ with forward slashes (`sub/x.ts`), so a nested file is unambiguous.
+export const SOURCE_EXT = ['.ts', '.mts', '.cts', '.tsx'];
+export const REFUSED_EXT = ['.js', '.mjs', '.cjs', '.jsx'];
+
+export function walkSources(root: string): { files: string[]; refused: string[] } {
+  const files: string[] = [];
+  const refused: string[] = [];
+  const visit = (rel: string): void => {
+    for (const e of readdirSync(join(root, rel), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const key = rel === '' ? e.name : rel + '/' + e.name;
+      if (e.isSymbolicLink()) refused.push(`${key} is a symbolic link (not followed)`);
+      else if (e.isDirectory()) visit(key);
+      else if (e.isFile() && SOURCE_EXT.some((x) => e.name.endsWith(x))) files.push(key);
+      else if (e.isFile() && REFUSED_EXT.some((x) => e.name.toLowerCase().endsWith(x))) refused.push(`${key} is a JavaScript source (outside the guard's contract)`);
+    }
+  };
+  visit('');
+  return { files, refused };
+}
+
+/** Every open finding of a source tree: refusals, then each scanned file judged against `allow` (consumed). */
+export function auditTree(root: string, allow: Allowed[]): { files: string[]; open: string[] } {
+  const { files, refused } = walkSources(root);
+  const open = [...refused];
+  for (const f of files) open.push(...judge(f, readFileSync(join(root, f), 'utf8'), allow).open);
+  return { files, open };
+}
+
+/** The package tsconfig must build only src/ (plus tests): every `include` entry is `src...` or `test...`, there is no `files`
+ * list, and no `compilerOptions` (so `allowJs` can only come from the base, which the repo selftest checks). */
+export function tsconfigProblems(tsconfig: unknown): string[] {
+  const t = tsconfig as { include?: unknown; files?: unknown; compilerOptions?: unknown };
+  const out: string[] = [];
+  if (!Array.isArray(t.include) || t.include.length === 0) return ['include is not a non-empty array'];
+  const normalize = (e: unknown): string => (typeof e === 'string' ? e.replace(/^\.\//, '').replace(/\/+$/, '') : '');
+  for (const e of t.include) {
+    const norm = normalize(e);
+    if (!/^(src|test)(\/[^*]*|\/\*\*(\/\*)?)?$/.test(norm) || norm.includes('..')) out.push(`include entry ${JSON.stringify(e)} is not under src/ or test/`);
+  }
+  if (!t.include.some((e) => normalize(e) === 'src')) out.push('include has no "src" entry: the compiler would not build all of src/');
+  if (t.files !== undefined) out.push('a "files" list can add a source outside src/');
+  if (t.compilerOptions !== undefined) out.push('compilerOptions in the package could turn on allowJs');
+  return out;
+}
+
 describe('the source contains no float-based formatting or arithmetic on values, and no value reaches Intl', () => {
-  const dir = new URL('../src/', import.meta.url);
-  const files = readdirSync(dir).filter((f) => f.endsWith('.ts'));
+  const root = fileURLToPath(new URL('../src/', import.meta.url));
+  const { files } = walkSources(root);
   it('there are source files to scan (control)', () => {
     expect(files.length).toBeGreaterThanOrEqual(8);
   });
-  it('every finding in src/ is covered by ALLOW, and every ALLOW entry is used', () => {
+  it('every finding in src/ (every depth, every TypeScript extension) is covered by ALLOW, and every ALLOW entry is used', () => {
     const left = ALLOW.slice();
-    const open: string[] = [];
-    for (const f of files) open.push(...judge(f, readFileSync(new URL(f, dir), 'utf8'), left).open);
+    const { open } = auditTree(root, left);
     expect(open).toEqual([]);
     expect(left.map((a) => `${a.file} ${a.kind} ${a.text} | ${a.line}`)).toEqual([]);
+  });
+  it('the tsconfig builds only src/ and test/ (so the walk of src/ covers what the compiler builds)', () => {
+    const t: unknown = JSON.parse(readFileSync(fileURLToPath(new URL('../tsconfig.json', import.meta.url)), 'utf8'));
+    expect(tsconfigProblems(t)).toEqual([]);
+  });
+  it('the tree walk: nested, .mts, deep, JavaScript and symlink are findings; a clean nested file is not (control)', () => {
+    const base = mkdtempSync(join(tmpdir(), 'format-guard-'));
+    try {
+      const bad = 'export const a = (v: string) => new Intl.NumberFormat("en").format(v);\n';
+      const tree = (name: string, put: (r: string) => void): { files: string[]; open: string[] } => {
+        const r = join(base, name);
+        mkdirSync(r, { recursive: true });
+        writeFileSync(join(r, 'top.ts'), 'export const ok = 1;\n');
+        put(r);
+        return auditTree(r, []);
+      };
+      expect(tree('clean', (r) => { mkdirSync(join(r, 'sub')); writeFileSync(join(r, 'sub/clean.ts'), 'export const b = 2;\n'); })).toEqual({ files: ['sub/clean.ts', 'top.ts'], open: [] });
+      const nested = tree('nested', (r) => { mkdirSync(join(r, 'sub')); writeFileSync(join(r, 'sub/x.ts'), bad); });
+      expect(nested.files).toContain('sub/x.ts');
+      expect(nested.open.length).toBeGreaterThan(0);
+      expect(nested.open.every((o) => o.startsWith('sub/x.ts:'))).toBe(true);
+      const mts = tree('mts', (r) => writeFileSync(join(r, 'y.mts'), bad));
+      expect(mts.files).toContain('y.mts');
+      expect(mts.open.some((o) => o.startsWith('y.mts:'))).toBe(true);
+      const deep = tree('deep', (r) => { mkdirSync(join(r, 'deep/a/b'), { recursive: true }); writeFileSync(join(r, 'deep/a/b/c.ts'), bad); });
+      expect(deep.open.some((o) => o.startsWith('deep/a/b/c.ts:'))).toBe(true);
+      for (const ext of ['.cts', '.tsx', '.d.ts']) {
+        const other = tree('ext' + ext, (r) => writeFileSync(join(r, 'z' + ext), bad));
+        expect(other.open.some((o) => o.startsWith('z' + ext + ':')), ext).toBe(true);
+      }
+      for (const ext of ['.js', '.mjs', '.cjs', '.jsx']) {
+        const js = tree('js' + ext, (r) => { mkdirSync(join(r, 'sub')); writeFileSync(join(r, 'sub/w' + ext), 'export const c = 1;\n'); });
+        expect(js.open, ext).toEqual([`sub/w${ext} is a JavaScript source (outside the guard's contract)`]);
+      }
+      const link = tree('link', (r) => { writeFileSync(join(base, 'outside.ts'), 'export const d = 1;\n'); symlinkSync(join(base, 'outside.ts'), join(r, 'l.ts')); });
+      expect(link.open).toEqual(['l.ts is a symbolic link (not followed)']);
+      expect(link.files).toEqual(['top.ts']);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  it('the tsconfig check refuses a source outside src/, a files list and compilerOptions (control)', () => {
+    expect(tsconfigProblems({ include: ['src', 'test'] })).toEqual([]);
+    expect(tsconfigProblems({ include: ['./src/', 'test/**/*'] })).toEqual([]);
+    expect(tsconfigProblems({ include: ['src', 'test', 'lib'] })).toHaveLength(1);
+    expect(tsconfigProblems({ include: ['src', '../other/src'] })).toHaveLength(1);
+    expect(tsconfigProblems({ include: ['test'] })).toHaveLength(1);
+    expect(tsconfigProblems({ include: ['src'], files: ['x.ts'] })).toHaveLength(1);
+    expect(tsconfigProblems({ include: ['src'], compilerOptions: { allowJs: true } })).toHaveLength(1);
+    expect(tsconfigProblems({})).toHaveLength(1);
   });
   it('ALLOW has exactly the expected number of entries (a new exemption must bump this, visibly)', () => {
     expect(ALLOW.length).toBe(ALLOW_COUNT);
@@ -344,7 +446,7 @@ describe('the source contains no float-based formatting or arithmetic on values,
     for (const a of ALLOW) if (['number.ts', 'percent.ts', 'round.ts', 'grammar.ts', 'types.ts', 'index.ts'].includes(a.file)) expect(['intl', 'intlcall'], `${a.file} ${a.text}`).not.toContain(a.kind);
   });
   it('no source line carries an escape marker', () => {
-    for (const f of files) expect(readFileSync(new URL(f, dir), 'utf8'), f).not.toMatch(/format-guard-allow/);
+    for (const f of files) expect(readFileSync(join(root, f), 'utf8'), f).not.toMatch(/format-guard-allow/);
   });
 
   it('the scanner finds each rule, wherever the code sits (control)', () => {

@@ -82,6 +82,7 @@ t = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))["compilerOpti
 assert t.get("extends") == "../../tsconfig.base.json", t.get("extends")
 assert "compilerOptions" not in t, "package tsconfig must not override compilerOptions"
 assert set(t.get("include", [])) == {"src", "test"}, t.get("include")
+assert not b.get("allowJs") and not b.get("checkJs"), "the base must not build JavaScript sources"
 for k in ("strict", "noUncheckedIndexedAccess", "exactOptionalPropertyTypes", "noImplicitOverride", "noFallthroughCasesInSwitch", "verbatimModuleSyntax", "isolatedModules", "noImplicitReturns"):
     assert b.get(k) is True, k
 PY
@@ -91,10 +92,10 @@ PY
 # allow-list as data), which runs in the live section and in `pnpm test`. This grep has no escape marker at all.
 forbidden_rx='\.toFixed\(|\.toPrecision\(|\.toExponential\(|\.toLocaleString\(|\bparseFloat\(|\bparseInt\(|\bNumber\(|\bMath\.round\('
 forbidden_hits() { # <dir>: offending lines that do not start with a comment opener (no per-line exemption exists)
-  grep -nE -- "$forbidden_rx" "$1"/*.ts 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*(//|/\*)'
+  find "$1" -type f \( -name '*.ts' -o -name '*.mts' -o -name '*.cts' -o -name '*.tsx' \) -exec grep -nE -- "$forbidden_rx" /dev/null {} + 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*(//|/\*)'
 }
 if hits="$(forbidden_hits "$pkg/src")"; then fail "src/ holds a forbidden float-based call" "$(head -c 240 <<<"$hits")"; else pass "src/ holds no toFixed / toPrecision / toExponential / toLocaleString / parseFloat / parseInt / Number( / Math.round("; fi
-n_src="$(find "$pkg/src" -name '*.ts' | wc -l | tr -d ' ')"
+n_src="$(find "$pkg/src" -type f \( -name '*.ts' -o -name '*.mts' -o -name '*.cts' -o -name '*.tsx' \) | wc -l | tr -d ' ')"
 [[ "$n_src" -ge 8 ]] && pass "src/ has $n_src source files (the grep scans something)" || fail "src/ has only $n_src source files"
 # the grep bites: a copy with one forbidden line is caught, the clean copy is not
 cp -R "$pkg/src" "$tmp/src-ctl"; cp -R "$pkg/src" "$tmp/src-mut"
@@ -103,6 +104,15 @@ forbidden_hits "$tmp/src-ctl" >/dev/null && fail "grep control: the unmutated co
 forbidden_hits "$tmp/src-mut" >/dev/null && pass "grep mutant: a toFixed line appended to src is caught" || fail "grep mutant: a toFixed line went unnoticed"
 printf 'export const ok2 = (x: string): string => x.concat("a").toFixed(2); // format-guard-allow: test\n' > "$tmp/src-mut/types.ts"
 forbidden_hits "$tmp/src-mut" >/dev/null && pass "grep: a line carrying the old allow marker is STILL flagged (no escape marker exists)" || fail "grep: an allow-marked line was exempt"
+# the grep reaches nested directories and every TypeScript extension, like the guard test and the compiler
+mkdir -p "$tmp/src-mut/sub/deep"; cp "$pkg/src/types.ts" "$tmp/src-mut/types.ts"
+forbidden_hits "$tmp/src-mut" >/dev/null && fail "grep control: the restored copy is flagged" || pass "grep control: the restored copy (no nested file) is clean"
+printf 'export const leak = (x: string): string => (0.1).toFixed(2) + x;\n' > "$tmp/src-mut/sub/deep/x.ts"
+forbidden_hits "$tmp/src-mut" >/dev/null && pass "grep mutant: a toFixed in src/sub/deep/x.ts (nested) is caught" || fail "grep: a nested file went unscanned"
+rm -f "$tmp/src-mut/sub/deep/x.ts"
+printf 'export const leak = (x: string): string => (0.1).toFixed(2) + x;\n' > "$tmp/src-mut/y.mts"
+forbidden_hits "$tmp/src-mut" >/dev/null && pass "grep mutant: a toFixed in src/y.mts is caught" || fail "grep: a .mts file went unscanned"
+rm -f "$tmp/src-mut/y.mts"
 grep -rq 'format-guard-allow' "$pkg/src" && fail "an escape marker is present in src/" || pass "src/ carries no format-guard-allow marker"
 
 # ---- every exported function has a test file and a re-export; every test file has a provenance header
@@ -249,8 +259,8 @@ export const leak = (nf: Intl.NumberFormat, v: string): Intl.NumberFormatPart[] 
       "export const PLACEHOLDER = '\u2014';
 export const leak = (n: number): number => n | 0;"
     mutate "an option is read twice" src/types.ts "test/options.test.ts" "reads every option once" \
-      "      if (v !== undefined) out[k] = v;" \
-      "      if (v !== undefined) out[k] = (options as Record<string, unknown>)[k];"
+      "      if (v !== undefined && Object.prototype.hasOwnProperty.call(options, k)) out[k] = v;" \
+      "      if (v !== undefined && Object.prototype.hasOwnProperty.call(options, k)) out[k] = (options as Record<string, unknown>)[k];"
     mutate "an unknown option key is ignored" src/types.ts "test/options.test.ts" "unknown option key|typo or a foreign key" \
       "    if (Object.keys(options).some((k) => !keys.includes(k))) return undefined;" \
       "    void keys;"
@@ -277,6 +287,42 @@ export const bound = (nf: Intl.NumberFormat): ((v: never) => string) => { const 
 }" \
       "  return 2;
 }"
+    # ---- fourth review (T29b): the guard scans what the compiler builds; the README counts; own-only options
+    mutate "guard: the walk back to the top level of src only" test/guard.test.ts "test/guard.test.ts" "tree walk" \
+      "else if (e.isDirectory()) visit(key);" \
+      "else if (e.isDirectory()) void key;"
+    mutate "guard: .mts dropped from the extension set" test/guard.test.ts "test/guard.test.ts" "tree walk" \
+      "['.ts', '.mts', '.cts', '.tsx']" \
+      "['.ts', '.cts', '.tsx']"
+    mutate "guard: JavaScript sources no longer refused" test/guard.test.ts "test/guard.test.ts" "tree walk" \
+      "REFUSED_EXT.some((x) => e.name.toLowerCase().endsWith(x))" \
+      "false"
+    mutate "guard: symlinks followed instead of refused" test/guard.test.ts "test/guard.test.ts" "tree walk" \
+      "if (e.isSymbolicLink()) refused.push" \
+      "if (false) refused.push"
+    mutate "the README percent count is wrong" README.md "test/readme.test.ts" "percent list" \
+      "(65 today)" \
+      "(67 today)"
+    mutate "the README money matrix is wrong" README.md "test/readme.test.ts" "money matrix" \
+      "33 locales x 5 currencies" \
+      "34 locales x 5 currencies"
+    mutate "an inherited option key is honoured again" src/types.ts "test/ownoptions.test.ts" "inherited maxFractionDigits" \
+      "      if (v !== undefined && Object.prototype.hasOwnProperty.call(options, k)) out[k] = v;" \
+      "      if (v !== undefined) out[k] = v;"
+    # addfile <name> <path under the package> <content>: a NEW source file, control GREEN first, removed afterwards
+    addfile() {
+      local name="$1" file="$pk/$2" content="$3" c m
+      c="$(pm vitest run test/guard.test.ts)"; crc=$?
+      if [[ $crc -ne 0 ]]; then fail "mutant $name: control (unmutated) is not green" "$(grep -E 'FAIL' <<<"$c" | head -n 2 | head -c 200)"; return; fi
+      mkdir -p "$(dirname "$file")"; printf '%s\n' "$content" > "$file"
+      m="$(pm vitest run test/guard.test.ts)"; mrc=$?
+      rm -f "$file"; rmdir "$(dirname "$file")" 2>/dev/null || true
+      if [[ $mrc -eq 0 ]]; then fail "mutant $name: still GREEN (tests do not bite)"
+      elif ! grep -Eq -- "(FAIL|×).*every finding in src" <<<"$m"; then fail "mutant $name: RED, but not in the expected test" "$(grep -E 'FAIL|×' <<<"$m" | head -n 2 | head -c 240)"
+      else pass "mutant $name: control GREEN, mutant RED in /every finding in src/"; fi
+    }
+    addfile "a nested src/sub/x.ts hands a value to Intl" src/sub/x.ts "export const viaIntl = (l: string, v: string): string => new Intl.NumberFormat(l).format(v);"
+    addfile "a src/y.mts hands a value to Intl" src/y.mts "export const viaIntl = (l: string, v: string): string => new Intl.NumberFormat(l).format(v);"
     # typecheck bites: a type error in src is RED, the clean tree was GREEN above
     printf "export const bad: number = 'a';\n" > "$pk/src/zz-type-error.ts"
     out="$(pm tsc -p tsconfig.json)" && fail "mutant type error: typecheck stayed GREEN" || pass "mutant type error in src: typecheck control GREEN, mutant RED"
