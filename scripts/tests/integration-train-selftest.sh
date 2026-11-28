@@ -189,11 +189,23 @@ snap() {
         echo "$(<base.txt)$(<scratch.txt)"
     ) 2>&1
 }
+# Each case that asserts "no itrain-* left" must see only what ITS run left: a real leftover is
+# moved out of TMPDIR before the next run, so it fails one case, not every later one.
+quarantine() {
+    local d
+    [ -n "${KEEP_LEFT:-}" ] && return 0
+    for d in "$S"/tmp/itrain-*; do
+        [ -e "$d" ] || continue
+        mkdir -p "$S/leftovers"
+        mv -- "$d" "$S/leftovers/$RANDOM-${d##*/}"
+    done
+}
 BEFORE=
 begin() { BEFORE=$(snap); }
 BR=
 trn() { # args to the train; sets OUT RC JSON BR. A hung run is killed after CASE_TIMEOUT s.
     local p=$PATH
+    quarantine
     [ -n "${WRAP:-}" ] && p=$S/bin:$PATH
     [ -n "${WRAPDIR:-}" ] && p=$WRAPDIR:$PATH
     local ra=()
@@ -1262,6 +1274,9 @@ def main():
             left = [x for x in os.listdir(tmpdir) if x.startswith("itrain-")]
             if left:
                 probs.append("left %s" % left)
+                os.makedirs(os.path.join(tmpdir, "..", "leftovers"), exist_ok=True)
+                for x in left:  # one leftover fails one signal, not every later one
+                    os.rename(os.path.join(tmpdir, x), os.path.join(tmpdir, "..", "leftovers", "%d-%s" % (i, x)))
             brs = [x for x in git(caller, "for-each-ref", "--format=%(refname:short) %(objectname)",
                                   "refs/heads/train-*").split("\n") if x]
             if len(brs) > 1:
@@ -1795,7 +1810,7 @@ KLEFT=$(cd "$S/tmp" && printf '%s ' itrain-*)
 check "SIGKILL: exactly ONE itrain-* directory is left, nothing else in TMPDIR" eq "$(count_of "$KLEFT" itrain-)$(ls "$S/tmp" | wc -l | tr -d ' ')" "11"
 KDIR=$(ls "$S/tmp" | head -n 1)
 touch -t 202001010000 "$S/tmp/$KDIR"
-REPOARG=$AC trn hg
+KEEP_LEFT=1 REPOARG=$AC trn hg
 check "SIGKILL: the next start prints ONE notice line about the stale directory" eq "$(count_of "$OUT" 'notice: 1 stale itrain-')" 1
 check "SIGKILL: the notice does not delete it" test -d "$S/tmp/$KDIR"
 mv "$S/tmp/$KDIR" "$S/killed-root"
@@ -1989,11 +2004,52 @@ PYEOF
 for sg in HUP TERM INT; do
     case $sg in HUP) want=129 ;; TERM) want=143 ;; INT) want=130 ;; esac
     rm -f "$S/ready"
+    quarantine
     ident_begin "$NC"
     check "early $sg: a normal exit $want (handler installed before the ready file)" eq "$(python3 -I -B "$S/early.py" "$SCRIPT" "$NC" "$S/ready" "$sg" "$want" "$WT")" ok
     check "early $sg: no itrain-* created" eq "$(ls "$S/tmp" | wc -l | tr -d ' ')" 0
     BR=
     ident_end "early $sg" "$NC"
+done
+
+# (f2) a signal INSIDE Popen/just after it, deterministic: the tool pauses right after it started its first
+# WRITING git child (`git init`; the hook makes that child write into the private root 0.8 s later, as a
+# slow git child does after an early cleanup) and before the child
+# is registered; the signal must end in exit 128+n, kill that child, and leave no itrain-* (settled 1.3 s).
+cat >"$S/hold.py" <<'PYEOF'
+import os, signal, subprocess, sys, time
+
+script, repo, hold, sig, tmpdir, wt = sys.argv[1:7]
+env = dict(os.environ, TRAIN_SELFTEST="1", TRAIN_TEST_HOLD_FILE=hold, TMPDIR=tmpdir)
+p = subprocess.Popen([sys.executable, "-I", "-B", script, "--base", "main", "--repo", repo, "--verify", "true",
+                      "--log-dir", os.path.join(os.path.dirname(hold), "logs"), "n1", "n2"], cwd=wt,
+                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
+for _ in range(400):
+    if os.path.exists(hold):
+        break
+    time.sleep(0.025)
+else:
+    p.kill()
+    print("no hold file")
+    sys.exit(0)
+p.send_signal(getattr(signal, "SIG" + sig))
+try:
+    rc = p.wait(timeout=20)
+except subprocess.TimeoutExpired:
+    p.kill()
+    rc = "hang"
+time.sleep(1.3)
+print("rc=%s left=%d" % (rc, len([x for x in os.listdir(tmpdir) if x.startswith("itrain-")])))
+PYEOF
+for sg in HUP TERM; do
+    case $sg in HUP) want=129 ;; TERM) want=143 ;; esac
+    rm -f "$S/hold"
+    mkdir -p "$S/holdtmp"
+    ident_begin "$NC"
+    check "signal $sg inside spawn: exit $want and no itrain-* left once the delayed child would have written" eq "$(python3 -I -B "$S/hold.py" "$SCRIPT" "$NC" "$S/hold" "$sg" "$S/holdtmp" "$WT")" "rc=$want left=0"
+    rm -rf -- "$S"/holdtmp/itrain-*
+    BR=
+    ident_end "signal $sg inside spawn" "$NC"
 done
 
 # (g) item 0: a member red ALONE is retried once against the final landed set
